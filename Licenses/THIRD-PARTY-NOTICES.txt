@@ -1,0 +1,55 @@
+eMule AI Third-Party Licenses
+
+This project contains and uses the following third-party libraries. 
+Their respective licenses are included in this directory.
+
+(Note: The tool 'TranslationCompiler' is an internal component of the eMule project and is covered under the main eMule GPL license. It is not a third-party library.)
+
+1. zlib
+   License: zlib License
+   File: license-zlib.txt
+   Copyright notice: (C) 1995-2026 Jean-loup Gailly and Mark Adler
+
+2. ZenLib
+   License: zlib License
+   File: license-ZenLib.txt
+   Copyright (c) 2002-2020 MediaArea.net SARL
+
+3. libutp
+   License: MIT License
+   File: license-libutp.txt
+   Copyright (c) 2010-2013 BitTorrent, Inc.
+
+4. miniupnpc
+   License: BSD 3-Clause License
+   File: license-miniupnpc.txt
+   Copyright (c) 2005-2020, Thomas BERNARD
+
+5. MediaInfoLib
+   License: BSD 2-Clause License
+   File: license-MediaInfoLib.txt
+   Copyright (c) 2002-2025, MediaArea.net SARL
+
+6. cryptopp
+   License file: license-cryptopp.txt
+   Includes Boost Software License 1.0 text and additional notices for included third-party code such as CRYPTOGAMS.
+   Copyright (c) 1995-2019 by Wei Dai
+
+7. id3lib
+   License: GNU Library General Public License Version 2
+   File: license-id3lib.txt
+   Copyright (C) 1999, 2000 Scott Thomas Haug
+
+8. mbedtls
+   License: Apache License 2.0 OR GNU General Public License v2.0 or later
+   File: license-mbedtls.txt
+
+9. libmaxminddb
+   License: Apache License 2.0
+   File: license-libmaxminddb.txt
+
+10. ResizableLib
+    License: Artistic License 2.0
+    File: license-ResizableLib.txt
+    Copyright (C) 2000-2024 by Paolo Messina
+

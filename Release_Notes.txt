@@ -1,0 +1,362 @@
+NEW FEATURES / IMPROVEMENTS / BUG FIXES
+
+================================================================
+1) NEW FEATURES
+================================================================
+
+1. Protection Panel
+A dedicated Options page that centralizes safety/anti-leecher controls with clear explanations, timed punishments, and friend exemptions. Choose actions (ban, score reduce, log only) per detection category to keep the swarm clean with minimal false positives.
+
+2. Dark Mode
+A full dark theme for windows, tabs, menus, list headers, and progress bars. It preserves readability, supports hover/pressed states, and can be toggled without restarting.
+
+3. Virtual Lists
+Large views (e.g., Downloads, Search) use lightweight/owner-data techniques for smooth scrolling and quick updates even with thousands of rows.
+
+4. IPv6 Support
+End-to-end IPv6 handling for peers, friends, and sockets alongside IPv4; addresses display and copy correctly across dialogs and tooltips. Currently in a very early alpha stage. It doesn’t provide much benefit for end users yet, but it will be expanded and improved in future releases. (Enhanced version of David Xanatos’s reference implementation)
+
+5. NAT Traversal & Extended Source Exchange
+LowID ↔ LowID is now supported with two different paths:
+Kad Buddy path (classic): Kad rendezvous flow. In this path, uploader side needs a Kad buddy.
+eServer Buddy path (new in eMule AI): Same-server relay flow between LowID peers.
+This eServer Buddy mechanism is an eMule AI client-side innovation and does not require server NAT extension support (no dependency on Lugdunum NAT opcodes).
+If target is not connected yet, buddy can try classic OP_CALLBACKREQUEST, then relay continues after target reconnects.
+Additional improvements include external UDP port discovery, stronger hole-punch + uTP retries, and clearer [NatTraversal]/[eServerBuddy] diagnostics.
+Extended Source Exchange complements this with richer peer metadata for faster source discovery and more stable transfers.
+
+6. Multiple Serving Buddies:
+A serving buddy (HighID) can now be buddy of multiple served buddies (LowID). This is user configurable between a minimum of 3 and a maximum of 100 clients, with 3 as the default.
+This includes active keep-alive maintenance and request rate limiting for safer long-running relay usage.
+The feature helps LowID-to-LowID connectivity propagate faster in real NAT conditions while keeping relay traffic control-only.
+In short: buddy nodes forward signaling only; file data still flows directly between peers.
+
+7. Spam/Blacklist System
+A Spam Rating column (0–100), a customizable spam threshold, logging of rating results, and a Blacklist Panel with “recheck now” combine to surface quality results and hide junk.
+
+8. Client History
+Lightweight history of clients you met (with retention control) to enable once-per-client automation like first-time shared-files queries.
+
+9. Threaded Shared-Files Reload
+Refreshing shared files runs in a worker thread and updates the UI progressively, avoiding stalls while scanning disks.
+
+10. Shared Files Watcher
+Background watcher keeps the Shared view in sync with filesystem changes without manual reloads.
+
+11. Automatically Share Subdirectories
+When enabled, subfolders under your shared roots are included automatically—both existing and newly created ones.
+
+13. Download Checker
+Before adding a file, checks duplicates/near-duplicates across downloads/history/shared and can warn, reject, or auto-blacklist by your preference.
+
+14. Recursive Directory Sharing
+When enabled, all files in subfolders of a shared directory are automatically shared.
+
+15. Real-Time Shared File Detection:
+Additions, removals, and renames in shared folders are detected via OS APIs, avoiding the slow “full reload” used by older eMule builds.
+
+16. Bundled MediaInfo: The latest MediaInfo library is embedded, so MediaInfo.dll is no longer required.
+
+17. Built-In Language Resources: Language support is embedded, eliminating the need for external language DLLs. (Currently 116 languages are supported)
+Supported language codes (116):
+en, af, am, ar, ast, az, be, bg, bn, bs, ca, ca-VAL, ceb, co, cs, cy, da, de, el, eo, es, es-AR, et, eu, fa, fi, fr, fy, ga, gd, gl, gu, ha, haw, he, hi, hmw, hr, ht, hu, hy, id, ig, is, it, iw, ja, jw, ka, kk, km, kn, ko, ku, ky, la, lb, lo, lt, lv, mg, mi, mk, ml, mn, mr, ms, mt, my, nb, ne, nl, nn, no, ny, or, pa, pl, ps, pt, pt-BR, ro, ru, rw, sd, si, sk, sl, sm, sn, so, sq, sr, st, su, sv, sw, ta, te, tg, th, tk, tl, tr, tt, ug, uk, ur, uz, vi, xh, yi, yo, zh-CN, zh-TW, zu
+
+18. Connection Checker
+One-click background connectivity test with clear start/stop log lines; helps diagnose DNS/routing hiccups without interrupting transfers.
+
+19. Emulate Clients & Communities
+Optional compatibility/emulation toggles for certain clients/communities to improve interoperability and prioritization.
+
+20. New Toolbar Buttons
+Quick actions for Save State, Reload Config (no restart), and threaded Backup. Numbered Preview buttons (1–10) launch your chosen preview apps directly; right-click can jump to the next previewable file.
+
+21. Read PeerGuardian Lists Automatically
+At startup, all *.p2p files in the config folder are merged into the active IP filter—just drop lists in and they apply.
+
+22. Kad Search Limit Option
+You can limit how many answers a Kad keyword search collects before auto-stopping.
+
+23. Search / Transfer Window Filters
+Fast, on-view filters to narrow lists to what you care about (e.g., active/paused).
+
+24. Friend / User Hash / ID Type / Client Version Columns
+New columns in client lists show Friend status, User Hash, ID Type (High/LowID), and Client Version for quick grouping and sorting.
+
+25. IP:Port Column
+Shows each peer’s current endpoint in a sortable column.
+
+26. See Own Credits
+Displays how your credit ratio appears to the remote side for clearer give-and-take diagnostics.
+
+27. Cancel Download from Context Menus
+Right-click in Search/Download/Shared lists to cancel downloads; an option lets you cancel without marking as “canceled” in history.
+
+28. Remote Client’s Shared Files — Status Columns
+New columns indicate query status, last queried time, and number of files received for a client’s shared list.
+
+29. Client Note
+Attach a short note to any client; optionally show it in the tab title when viewing that client’s files.
+
+30. Copy List Text with CTRL+C / CTRL+X
+Copy selected list rows as neat plain text for pasting into notes/spreadsheets.
+
+31. Clean Up Search Results
+A command to quickly purge obsolete/blacklisted items from active search tabs.
+
+32. Disable “Find As You Type”
+This option turns off type-to-search in heavy lists to avoid accidental scans.
+
+33. Don’t Mark As Canceled
+You can cancel a download without adding it to the “canceled” history.
+
+34. Friend Link Recognition
+Understands ed2k “friend” links from clipboard to add friends quickly.
+
+35. Source Cache
+Temporarily caches discovered sources so paused/resumed files can reuse them without re-querying.
+
+36. GeoLite2 (Country/City & Flags)
+Shows country (and city when known) and a flag icon for peers/servers; can be disabled or limited to country only.
+
+37. Client Version in Tooltips
+Download-list tooltips include full client software/version lines.
+
+38. Webservices Enhancements
+Wide-character support and a “filename_untouched” placeholder in webservices.dat; multi-selection webservice actions.
+
+39. SpeedMeter
+Built-in live up/down graphs in the Connection page and main window for a lightweight visual of throughput.
+
+40. Auto Query Remote Client’s Shared Files (First Connect)
+Optionally auto-query a client’s shared files after first connection, paced by configurable per-period limits.
+
+41. Save Application State Button
+One-click save of list layouts, column orders, and preferences for easy layout “bookmarks”.
+
+42. Set Executable Directory as Default (First-Run Behavior)
+If no choice exists yet, uses the app’s folder as the base location for a portable-style setup.
+
+43. Migration Wizard
+Adds a built-in Migration Wizard that can run automatically on first launch after language selection or be scheduled later from Tools > Migration Wizard.
+It helps restore supported legacy eMule configuration files into eMule AI with directory detection, copy results, and clear follow-up guidance.
+
+44. Don’t Filter Private IPs
+This option allows local/private addresses even when an IP filter is active—useful on home/lab networks.
+
+================================================================
+2) IMPROVEMENTS
+================================================================
+
+1. Long Path Support
+File operations (hash/preview/move/backup) work reliably beyond classic 260-char Windows limits by using long-path-safe APIs and formats.
+
+2. Virtual-List Performance & List Engine
+Compact backing stores, batched refresh, selection/scroll restore, and combined/heap sorting make giant lists smooth and responsive.
+
+3. Search Results Load Faster
+Only the active tab refreshes immediately; others update counters without full redraws. Virtualized storage accelerates inserts and sorting.
+
+4. Safer, Faster Part-File Writing
+File allocation, metadata flushing, and buffer moves occur inside the writer thread under scoped locks, with periodic disk-space checks—reducing contention and stutters.
+
+5. Faster Pause/Stop/Remove/Complete & Sorting
+Bulk operations coalesce UI work, and large lists use a single combined sort pass for steady ordering during heavy updates.
+
+6. Reconnect & Notify After IP Change (Kad/eD2k)
+On public IP changes, Kad reconnects gracefully; peers are informed and sources re-asked to minimize stalls.
+
+7. Safe Configuration File Saving
+Writes sensitive data to a temp file and atomically replaces the original, keeping files intact if something fails mid-write.
+
+8. Search Parameter Restoration & Tab Titles
+Complex Boolean expressions are preserved and appear as tab titles; restored searches match your original filters and fields.
+
+9. KAD Bootstrap UX
+Autocomplete/history for IP:port and URL fields, Enter-to-bootstrap, Delete to remove suggestions; remembers your last choice.
+
+10. IP Filter Improvements
+Static IP filter file, separate whitelist, better loader/merger behavior, and corrected save logic (no truncation).
+
+11. GeoLite2 Clarity/Performance
+Efficient flag handling and optional long vs. short country names; single-click enable/disable.
+
+12. Auto-Refreshing Network Info
+Keeps ports/IDs/Kad status current while open, with tidy formatting and consistent refresh.
+
+13. Owner-Draw Polish (Dark Mode)
+Menus/tabs get theme-aware drawing, clear submenu indicators, and crisp text rendering.
+
+14. UI Tweaks & Multisort
+Cleaner menus, better icons/spacing, and improved multi-level sorting for predictable results.
+
+15. Better Passive Source Finding & UDP Reask Handling
+Gentler retry logic and more realistic counters reduce misleading stats and improve source discovery.
+
+16. Spread Requests & Timers
+Request bursts are smoothed and reask timers clarified to keep queues fresh without spamming.
+
+17. Extended Clean Up (Memory Footprint)
+Idle clients and stale entries are cleaned more aggressively to keep long sessions lean.
+
+18. Publish File List Faster
+More compact server-publish packets and fewer unnecessary sorts make “publish to server” snappier.
+
+19. Merge Search Results
+Compatible results are merged while respecting spam heuristics to reduce duplicates and clutter.
+
+20. Windows 11 Detection
+Accurate OS detection helps choose safe defaults/paths on modern systems.
+
+21. Better WINE Desktop Integration
+Opens files/links via GNOME/KDE helpers and translates paths properly under WINE.
+
+22. Webservice Selection for Multiple Items
+Apply web actions to multiple selections at once for faster lookups.
+
+23. Don’t Save Part Files on Every Server Reconnect
+Skips redundant disk writes on reconnects, trimming stutter on large libraries.
+
+24. Touch Default-Apps File Only When Needed
+Checks the preview-apps map only when opening the menu to avoid periodic disk I/O.
+
+25. Save/Load Path for Known Files
+Stores full paths with known files for accurate restoration and display.
+
+26. DST Tolerance for known.met
+Accepts small timestamp shifts due to daylight saving, preventing needless re-hashing.
+
+27. Advanced Preferences Page
+Collects power-user toggles (Search/Server/File handling, etc.) with concise on-screen explanations.
+
+28. Right-Click “Preview Next”
+Quickly step through previewable items from the toolbar without changing selection.
+
+29. Move/Resize Search Filter Box
+Cleaner header layout reduces accidental clicks while preserving functionality.
+
+30. Use File Type Tag Only If Needed
+Search entries derive type from filename first, falling back to the tag only when necessary for accuracy.
+
+31. Thread Names in Release Builds
+Improves crash-report readability without impacting performance.
+
+32. Optimization: Debug Trace Hygiene
+Suppresses noisy traces by default and clarifies “missing icon resource” diagnostics for easier skin/theme troubleshooting.
+
+33. Repeat Server List
+Automatically loops the server list on failures to improve connection reliability.
+
+34. SafeHash Behavior
+Waits for full initialization before auto-connect and stops hashing immediately on exit for faster, cleaner shutdowns.
+
+35. “Save Search File Type”
+Remembers your preferred search category (Any/Audio/Video, etc.) between sessions.
+
+36. Prevent Default Double-Click on Toolbar
+Avoids accidental command executions from toolbar double-clicks.
+
+37. Set Category Only If Changed
+Skips redundant saves/re-sorts when a category remains the same.
+
+================================================================
+3) BUG FIXES
+================================================================
+
+1. 0.70b: File-Request Handling
+Correctly decides when to answer “no such file,” checks shared then downloading files, and honors large-file support—reducing bad retries.
+
+2. Archive Recovery on Exit
+Safely aborts recovery threads and frees temporary data to prevent shutdown crashes.
+
+3. “Encountered an improper argument” (Scrolling)
+Guards progress-bar drawing to avoid invalid GDI calls during fast scrolling in the Download list.
+
+4. AICH Hashset Save
+Waits properly for internal locks and stops hashing on exit to eliminate “Failed to save HashSet” after hashing.
+
+5. Stored Searches Load Timing
+Loads stored searches early to prevent creation of empty placeholder files at startup.
+
+6. Race on Write Completion
+Skips late completions for just-deleted files to avoid a rare crash during heavy cleanup/shutdown.
+
+7. Sockets Leak on “Too Many Connections”
+Releases sockets correctly when entering the “too many connections” state under load.
+
+8. Null Current-File Guard
+Prevents crashes by safely refusing source requests when the current file pointer is missing.
+
+9. “View Shared Files” Folder Persistence
+Restores the last used folder for that mode in stored searches.
+
+10. Preview Backup Eligibility
+No longer requires previewability checks; relies on free-space threshold to avoid false negatives.
+
+11. Faster Startup: Part Files
+Defers redraws during initial load to reduce repaint cycles and speed up UI bring-up.
+
+12. UPnP/ATLTRACE Format Mismatch
+Fixes a debug-build crash due to a wrong trace format string.
+
+13. IP Filter: Save Truncation
+Writes complete addresses without truncation when saving filter files.
+
+14. IP Filter: 128-bit Range Merge Boundary
+Keeps boundaries correct when merging ranges by comparing with computed “end+1”.
+
+15. “Wrong Connecting” Log
+Logs “Connecting …” only when a connection is actually pending.
+
+16. Delete Completed Downloads Crash
+Guards against null dereferences when removing multiple finished items.
+
+17. Part-File Gap Handling
+Removes empty gaps immediately and clamps boundaries correctly; progress/availability remain accurate.
+
+18. Hashing Progress Denominator
+Percentages use the actual hashed size as denominator to avoid misleading jumps and rare divide-by-zero.
+
+19. MediaInfo Exception Handling
+Clears buffers and closes gracefully when media details cannot be read instead of throwing.
+
+20. Shared Files Sorting
+Locale-aware, case-insensitive sort by “File Type” behaves predictably with neat sub-sorting.
+
+21. Menu/GDI Leaks
+Deletes custom brushes, detaches/destroys header image lists, and tightens ownership to close small GDI leaks.
+
+22. RemoveAnchor vs ASSERT
+Removes invalid anchors safely during layout changes to eliminate resize assertions.
+
+23. Null CString Pointer
+Defensive checks prevent crashes when an error string is unexpectedly null.
+
+24. OP_MULTIPACKETANSWER_EXT2
+Fixes extended multi-packet response handling for better peer compatibility.
+
+25. ntohl Not Needed
+Removes unnecessary byte-order conversions that could mislead logging/handling.
+
+26. Splash Screen vs Clipboard Prompt
+Ensures the ED2K clipboard prompt isn’t hidden behind the splash screen on startup.
+
+27. Delete Duplicate Search Results
+Removes duplicates reliably without orphaning children; child items are also deleted correctly.
+
+28. Skip Freed Items in Menus
+Ignores just-deleted downloads when building context-menu state to prevent rare crashes.
+
+29. Auto-Promote to 64-bit Tag
+Promotes values exceeding 32-bit safely, preventing corrupted metadata and parsing errors.
+
+30. Kademlia Fast-Refresh Logic
+More conservative logic reduces stalls and prevents missed updates.
+
+31. TLS/mBedTLS & v0.70a
+Corrects certificate/key path handling and links against proper crypto provider for strong entropy.
+
+32. Always Log Assert to File (Stability)
+ASSERTs are logged to file rather than popping intrusive dialogs in enabled mode, aiding diagnostics without interrupting transfers.
+
+33. Wrong Percentage Sign in Log
+Literal “%” characters in log messages print correctly (no accidental format parsing). 

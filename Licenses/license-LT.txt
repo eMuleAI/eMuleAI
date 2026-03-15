@@ -1,0 +1,182 @@
+GNU BENDROJI VIEŠOJI LICENZIJA
+1991 metų birželis. Versijos numeris 2. 
+
+Copyright (C) 1989, 1991 Free Software Foundation, Inc.  
+59 Temple Place - Suite 330, Boston, MA  02111-1307, USA
+
+Kiekvienas gali kopijuoti ir platinti šio dokumento (angliškos originalios versijos) tikslias kopijas, bet keisti jį (originalą) draudžiama. 
+Pratarmė 
+Daugumos programinių produktų licencijos yra parašytos, kad neleistų jums tų produktų platinti ir keisti. GNU Bendroji viešoji licencija, priešingai, yra skirta garantuoti Jūsų laisvę platinti ir keisti šiuo dokumentu apsaugotus produktus. Tuo siekiama, kad programinė įranga būtų laisvai prieinama visiems jos vartotojams. Ši Bendroji viešoji licencija (General Public License ) tinka daugumai Free Software Foundation produktų (dalis yra apsaugota GNU Library General Public License - GNU Bibliotekine Bendrąja viešąja licencija) ir bet kokiai kitai programai, kurios autoriai įsipareigoja ją naudoti. Jūs taip pat galite šia licenciją taikyti savo programoms. 
+
+Kalbėdami apie laisvas programas, mes turim omeny laisvę, o ne kainą. Mūsų Bendroji viešoji licencija yra sukurta užtikrinti Jūsų laisvę platinti laisvų programų kopijas (ir imti mokestį už tai, jei norite). Taip pat ji skirta užtikrinti, kad Jūs kartu su programa gautumėte jos išeities tekstus arba galėtumėte juos gauti, jei tik jums prireiktų. Ši licencija garantuoja, kad ja apsaugotus produktus Jūs galite keisti arba naudoti jų dalis naujose atvirose programose ir skirta Jums pasakyti, kad tikrai turite teisę atlikti aukščiau minėtus veiksmus. 
+
+Norėdami apsaugoti Jūsų teises, mes turime įvesti apribojimus, kurie uždraudžia bet kam varžyti aukščiau minėtas teises ar prašyti Jūsų šių teisių atsisakyti. Šie suvaržymai suprantami kaip tam tikra Jūsų atsakomybė, jei Jūs modifikuojate ar platinate laisvų programų kopijas. 
+
+Pavyzdžiui, jeigu Jūs platinate tokią programą (nesvarbu už dyką ar už pinigus), Jūs privalote gavėjui suteikti visas teises, kurias Jūs pats turite. Jūs taip pat privalote užtikrinti, kad ir gavėjas gautų ar galėtų gauti išeities tekstus. Be to, Jūs privalote jam parodyti šias sąlygas, kad ir gavėjas žinotų savo teises. 
+
+Mes Jūsų teises apsaugome dviem žingsniais: (1) Programinio produkto autorinėmis teisėmis ir (2) siūlome Jums šią licenciją, kuri suteikia teisę kopijuoti, platinti ir/arba modifikuoti programinį produktą. 
+
+Kiekvieno autoriaus ir savo apsaugai mes norime užtikrinti, kad kiekvienas suprastų, jog šiai laisvai programinei įrangai nesuteikiama jokia garantija. Jei produktas yra kažkieno modifikuotas ir platinamas, mes norime, kad gavėjas žinotų, jog gauna pakeistą, o ne originalią programą. Šitaip siekiama užtikrinti, kad kažkieno įveltos klaidos ir jų sukeltos problemos neterštų pradinio produkto autoriaus reputacijos. 
+
+Pagaliau, bet kokiai laisvai programai nuolatos gresia programinių produktų patentai. Mes norime išvengti pavojaus, kai laisvų programų platintojai individualiai įsigyja patentų licencijas ir taip padaro programas nuosavybinėmis. Kad taip neatsitiktų, mes nustatėme, jog bet kokie patentai privalo būti licencijuoti kiekvieno laisvam naudojimui arba iš viso nelicencijuoti. 
+
+Tikslūs kopijavimo, platinimo ir modifikavimo terminai bei sąlygos pateiktos žemiau. 
+
+KOPIJAVIMO, PLATINIMO IR MODIFIKAVIMO SĄLYGOS 
+0. Ši licencija taikoma visoms programoms ar kitokiems produktams, kuriuose yra autoriaus pranešimas, sakantis, kad produktas yra platinamas pagal šios Bendrosios viešosios licencijos sąlygas. „Programa“ tolimesniam tekste ir reiškia tokią programą ar kitą produktą, o „darbas pagrįstas ta Programa“ reiškia Programą ar bet kokį išvestinį produktą pagal autorinių teisių įstatymą, t.y. produktą, į kurį įtraukta Programa ar jos dalis, originali ar pakeista ir/arba išversta į kitą kalbą. (Toliau Programos vertimas yra be apribojimų įtrauktas į sąvoką „modifikacija“). Į kiekvieną licencijos turėtoją tekste kreipiamasi „Jūs“. 
+
+Kitokia veikla nei kopijavimas, platinimas ir modifikavimas šia licencija nėra numatoma ir išeina už jos ribų. Programos vykdymas nėra varžomas ir jos vykdymo rezultatai yra ginami šios licencijos tik tuo atveju, jeigu jų turinys sudarytas iš darbo pagrįsto Programa (rezultatai ginami licencijos tada, jei jie - modifikuota Programa ir nepriklausomai nuo to ar darbas atliktas Programa). Ar tai tiesa priklauso nuo to, ką Programa daro. 
+
+1. Jūs galite kopijuoti ir platinti originalius Programos išeities tekstus bet kokiose laikmenose, kuriose Jūs juos gavote ar patys patalpinote, aiškiai ir kaip priklauso kiekvienoje kopijoje įtraukdami atitinkamus garantijos nebuvimo ir autorinių teisių įspėjimus. Nekeiskite jokių įspėjimų susijusių su šia licencija bei garantijos nebuvimu ir visiems Programos gavėjams pateikite šios licencijos (originalios angliškos versijos) kopiją kartu su Programa. 
+
+Jūs galite imti mokestį už fizinį kopijos perdavimą ir taip pat galite savo nuožiūra siūlyti garantinį aptarnavimą mainais į pinigus. 
+
+2. Jūs galite modifikuoti savo Programos kopiją (ar kopijas) ar bet kurią jos dalį tuo būdu sukurdami Programa paremtą produktą, kurį Jūs galite kopijuoti, platinti arba dirbti su juo pagal 1-ame skyriuje paminėtas sąlygas, jei Jūs taip pat laikysitės šių, žemiau išvardintų, sąlygų: 
+
+Jūs privalote pakeistuose failuose įterpti pastabas, kad Jūs pakeitėte failus ir nurodyti pakeitimų datas. 
+Jūsų platinamas produktas, kurį sudaro dalis ar visa Programa arba kurio dalis ar visas yra sukurtas pagal Programą, turi būti licencijuotas pagal šios licencijos sąlygas be jokių mokesčių trečiosioms šalims. 
+Jeigu modifikuota Programa ją vykdant interaktyviai nuskaito komandas, ji privalo kiekvieną kartą paleista tokiam interaktyviam naudojimui atspausdinti pranešimą, kuriame nurodomos atitinkamos autorinės teisės ir įspėjimas, kad nesuteikiama jokia garantija (arba kitu atveju, kad Jūs suteikiate garantiją) ir kad vartotojai gali Programą platinti pagal šias sąlygas. Taip pat reikia vartotojui pranešti, kaip jis galėtų perskaityti šios licencijos (originalios angliškos) kopiją. Išimtis galioja tuo atveju, jei pati Programa yra interaktyvi (t.y. sąveikaujanti, dialoginė) ir paprastai nespausdina tokio pranešimo, tai ir Jūsų darbas pagrįstas Programa neprivalo spausdinti pranešimo. 
+Šie reikalavimai taikomi modifikuotam darbui kaip visumai. Jeigu aiškios, atskiriamos darbo dalys nėra sukurtos naudojantis Programos išeities tekstais ir gali būti pagrįstai vadinamos nepriklausomais bei atskirais darbais, tai ši licencija ir jos sąlygos netaikomos toms dalims, kai Jūs jas platinate kaip atskirus produktus. Tuo atveju, kai šias savo sukurtas nepriklausomas dalis Jūs platinate kaip pagrįsto Programa produkto dalį, platinamas produktas privalo būti ginamas šios licencijos sąlygų. Tokiu atveju ši licencija gina visumą ir kiekvieną jos dalį nepriklausomai nuo to, kas ją parašė. 
+
+Taigi, šio skyriaus tikslas nėra reikšti pretenzijas į visiškai Jūsų parašytų darbų teises. Priešingai, siekiama įgyvendinti teises, kuriomis būtų kontroliuojamas Programa paremtų išvestinių ar kolektyvinių darbų platinimas. 
+
+Be to, vien tik darbo, nepagrįsto Programa, sudėjimas į vieną rinkinį su Programa ar darbu pagrįstu Programa saugojimui ar platinimui nepadaro šio darbo licenzijos objektu. 
+
+3. Jūs galite Programą (ar darbą pagrįsta ja, žr. 2 skyrių) kopijuoti ir platinti objektiniu kodu ar vykdoma forma laikydamiesi 1 ir 2 skyriuje minimų sąlygų, jei Jūs taip pat: 
+
+Kartu su Programa pateiksite pilnus ir perskaitomus išeities tekstus elektroniniu pavidalu kurie turi būti platinami pagal 1 bei 2 skyriaus sąlygas ir esantys laikmenose paprastai naudojamose programinių produktų keitimuisi, arba 
+kartu su Programa pateiksite pasiūlymą (galiojantį mažiausiai tris metus) suteikti pilnus perskaitomus atitinkamus išeities tekstus elektroniniu pavidalu bet kuriai trečiajai šaliai už mokestį nedidesnį nei kainuoja fizinis duomenų perdavimas ir tie išeities tekstai bus platinami pagal 1 ir 2 skyriuose minėtas sąlygas laikmenose, paprastai naudojamose programinių produktų keitimuisi, arba 
+kartu su Programa pateiksite informaciją, kurią Jūs gavote dėl pasiūlymo platinti atitinkamus išeities tekstus. (Ši alternatyva leidžiama tik nekomerciniam platinimui ir tik tada, jei Jūs gavote Programą objektiniu kodu ar vykdomąja forma su tokiu pat pasiūlymu sutinkamai su 3 skyriaus b) dalim.) 
+Darbo išeities tekstai tai pageidaujama darbo forma norint jį modifikuoti. Prie vykdomos programos esantys išeities tekstai - tai pilni programos išeities tekstai su visais moduliais, bet kokie programos sąsajos aprašai ir skriptai naudojami programos kompiliavimui ir įdiegimui. Kaip speciali išimtis, platinami išeities tekstai neprivalo turėti nieko, kas paprastai yra platinama (išeities tekstais ar vykdomąja forma) su pagrindiniais operacinės sistemos, kurioje minima programa veikia, komponentais (kompiliatoriumi, branduoliu ir pan.), nebent tie komponentai įeina į platinamą programos vykdomąją formą. 
+
+Jei Programos vykdomoji forma ar objektinis kodas platinami siūlant kopijuoti iš tam tikros vietos, tai siūlymas ekvivalenčios galimybės kopijuoti išeities tekstus iš tos pačios vietos laikomas išeities tekstų platinimu net ir tuo atveju, kai trečiosios šalys neverčiamos kopijuoti išeitinio kodo kartu su objektiniu kodu. 
+
+4. Jūs negalite kopijuoti, modifikuoti, licencijuoti ar platinti Programos kitaip nei aiškiai numatyta šios licencijos. Bet kokie bandymai kitaip kopijuoti, modifikuoti, licencijuoti ar platinti Programą yra negaliojantys ir automatiškai panaikina Jūsų teises suteiktas šios licencijos. Tokiu atveju asmenų, gavusių iš Jūsų kopijas ar teises remiantis šia licencija, teisės (licencijos) nebus panaikintos, jei šie asmenys nepažeidė licencijos. 
+
+5. Jūsų nereikalaujama šios licencijos priimti, nes Jūs jos nepasirašėte. Vis dėlto, niekas kitas Jums negarantuoja teisės modifikuoti ir platinti Programą ar ja paremtus darbus. Be to, minėti veiksmai yra draudžiami įstatymo, jei Jūs nepriimate šios licencijos sąlygų. Taigi, modifikuodami ar platindami Programą (ar bet kokį darbą paremtą Programa), Jūs parodote, kad priimate šią licenciją ir visas jos sąlygas susijusias su Programos (ar bet kokio Programa paremto darbo) kopijavimu, platinimu ar modifikavimu. 
+
+6. Kiekvieną kartą, kai Jūs platinate Programą (ar bet kokį Programa paremtą darbą), Programos gavėjas automatiškai gauna licenciją iš pirmojo Programos autoriaus, suteikiančią teisę kopijuoti, platinti ar modifikuoti Programą remiantis šiomis sąlygomis. Jūs negalite gavėjui primesti jokių papildomų apribojimų nesančių šioje licencijoje. Jūs nesate atsakingas už trečiųjų šalių vertimą laikytis šios licencijos sąlygų. 
+
+7. Jeigu (kaip teismo nuosprendis ar įtarimas patentų pažeidimu ar bet kokiais kitais atvejais) Jums yra primetamos sąlygos (teismo potvarkiu, pagal susitarimą ar kitaip), kurios prieštarauja šios licencijos sąlygoms, tai primetamos sąlygos neatleidžia Jūsų nuo šios licencijos sąlygų. Jeigu Jūs negalite platinti Programos taip, kad įvykdytumėte savo įsipareigojimus šiai licencijai ir kitus susijusius įsipareigojimus tuo pat metu, tai negalite platinti Programos iš viso. Pavyzdžiui, jeigu patentas neleis Programos platinti be autorinių honorarų tiems žmonėms, kurie gaus kopijas tiesiogiai ar netiesiogiai iš Jūsų, tai vienintelis kelias patenkinti abi (Programos ir GNU Bendrąją viešąją) licencijas yra iš viso neplatinti Programos. 
+
+Jeigu bet kuri šio skyriaus dalis yra laikoma negaliojančia (neturinčia juridinės galios) ar neįvykdoma esant tam tikroms konkrečioms aplinkybėms, tai likusi skyriaus dalis lieka galioti. Visais kitais atvejais galioja visas skyrius. 
+
+Šio skyriaus tikslas nėra skatinti pažeisti kokius nors patentus, nuosavybės teises ar užginčyti tokių teisių pagrįstumą. Šis skyrius siekia tiktai užtikrinti nemokamos programinės įrangos platinimo sistemos vientisumą, įgyvendinamą viešąja licencija. Daug žmonių įvairiai prisidėjo prie programinės įrangos platinimo per šią sistemą vildamiesi, kad ta sistema bus nuolat taikoma. Tik nuo autoriaus (autorės) priklauso, ar jis (ji) norės platinti savo programas per kokią nors kitą sistemą ar ne ir šios licencijos turėtojas negali primesti sprendimo. 
+
+Šis skyrius turėtų detaliai paaiškinti, kokios turėtų būti likusios licencijos dalies pasekmės. 
+
+8. Jeigu Programos platinimas ir/arba naudojimas tam tikrose šalyse yra ribojamas patentais ar autorinėmis teisėmis, pirminis autorinių teisių turėtojas, kurio Programa yra išleista pagal šią licenciją, turėtų pridėti aiškius geografinius platinimo apribojimus pašalinančius tas šalis ir taip informuodamas, kad platinimas yra leidžiamas tik nepaminėtose šalyse. Tokiu atveju apribojimai tampa licencijos dalimi. 
+
+9. Free Software Foundation (angl. - Laisvosos Programinės Įrangos fondas) gali periodiškai paskelbti ištaisytas ir/arba naujas Bendrosios viešosios licencijos (GPL) versijas. Naujos versijos savo dvasia bus panašios į dabartinę versiją, bet siekiant išspręsti naujai iškilusias problemas gali skirtis kai kurios detalės. 
+
+Kiekvienai licencijos versijai suteikiamas unikalus numeris. Jeigu Programa nurodo numerį licencijos versijos, kuri taikoma Programai ir ?bet kuriai vėlesnei jos versijai?, tai Jūs galite sekti arba nurodyta versija, arba bet kuria vėlesne Free Software Foundation paskelbta licencijos versija. Tuo atveju, kai Programa nenurodo licencijos versijos numerio, Jūs galite pasirinkti bet kurią Free Software Fundation išleistos šios licencijos versiją. 
+
+10. Jeigu Jūs norite Programos dalis įtraukti į kitas laisvas programas, kurių platinimo sąlygos skiriasi, parašykite autoriui ir paprašykite leidimo. Free Software Foundation programinės įrangos atveju rašykite Free Software Foundation organizacijai; mes kartais tokiu atveju padarome išimtis. Mūsų sprendimas remsis dviem tikslais: visų programų, sukurtų mūsų laisvų Programų pagrindu, laisvos programinės įrangos statuso išsaugojimu ir bendru skatinimu dalintis ir naudoti programinę įrangą laisvai. 
+
+GARANTIJOS NEBUVIMAS
+
+11. KADANGI PROGRAMA LICENZIJUOJAMA NEMOKAMAI, TAI JOKIOS GARANTIJOS PROGRAMAI GALIOJANČIŲ ĮSTATYMŲ LEISTU MĄSTU NESUTEIKIAMA. AUTORINIŲ TEISIŲ SAVININKAI IR/ARBA KITOS ŠALYS PATEIKIA PROGRAMĄ „TAIP KAIP YRA“ BE JOKIŲ GARANTIJŲ, IŠREIKŠTŲ AR NUMANOMŲ, ĮSKAITANT, BET NEAPSIRIBOJANT, NUMANOMOM PERKAMUMO BEI TINKAMUMO KONKREČIAI UŽDUOČIAI GARANTIJOM, NEBENT KITAIP NURODYTA RAŠTU. JŪS PRISIIMATE VISĄ RIZIKĄ, SUSIJUSIĄ SU PROGRAMOS KOKYBE IR VEIKIMU. JEIGU PROGAMA PASIRODYS TURINTI DEFEKTŲ, JŪS PRISIIMATE VISAS BŪTINAS TECHNINĖS PRIEŽIŪROS, SUTVARKYMO AR KOREGAVIMO IŠLAIDAS. 
+
+12. JOKIU KITU ATVEJU, NEBENT REIKALAUJAMA PAGAL GALIOJANČIUS ĮSTATYMUS ARBA SUSITARTA RAŠTU, AUTORINIŲ TEISIŲ SAVININKAI ARBA BET KURI KITA ŠALIS, KURI GALI KEISTI IR/ARBA PLATINTI PROGRAMĄ KAIP AUKŠČIAU NURODYTA, NEBUS JUMS ATSAKINGA UŽ VISUS, ĮTRAUKIANT BET KOKIUS BENDRUS, IŠSKIRTINIUS, ATSITIKTINIUS AR IŠPLAUKIANČIUS IŠ PROGRAMOS NAUDOJIMO ARBA NESUGEBĖJIMO NAUDOTI PROGRAMĄ NUOSTOLIUS (APIMANT BET NEAPSIRIBOJANT DUOMENŲ PRARADIMU, DUOMENŲ SUGADINIMU, PROGRAMOS NESUDERINAMUMĄ SU KITOMIS PROGRAMOMIS AR BET KOKIUS KITUS NUOSTOLIUS, PATIRTUS JŪSŲ AR TREČIŲJŲ PUSIŲ), NET IR TUO ATVEJU, KAI AUTORINIŲ TEISIŲ SAVINIKAS AR KITI ASMENYS ŽINOJO APIE TOKIŲ NUOSTOLIŲ GALIMYBĘ. 
+
+
+KOPIJAVIMO, PLATINIMO IR MODIFIKAVIMO SĄLYGŲ PABAIGA
+Kaip taikyti šias sąlygas savo naujoms programoms 
+Jeigu Jūs sukūrėte naują programą ir norite, kad ji būtų kuo naudingesnė isuomenei, geriausias būdas šiam tikslui pasiekti yra padaryti ją laisva programa, kurią kiekvienas gali platinti ir keisti pagal minėtas sąlygas. 
+
+Norėdami pasiekti šį tikslą, prie programos prijunkite žemiau esančius įspėjimus. Saugiausia informuojant apie garantijos nebuvimą įspėjimus įdėti kiekvieno išeities tekstų failo pradžioje. Kiekvienas failas turi pranešimą. 
+
+    Viena eilutė pranešti programos autoriaus vardui ir ką ta programa daro
+
+    Copyright (C) metai  autoriaus vardas
+
+    This program is free software; you can redistribute it and/or
+    modify it under the terms of the GNU General Public License
+    as published by the Free Software Foundation; either version 2
+    of the License, or (at your option) any later version.
+
+    This program is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    GNU General Public License for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with this program; if not, write to the Free Software
+    Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
+
+Aukščiau esančių angliškų pranešimų vertimai (vertimai tik pažintiniai. Savo programoms taikykite angliškas versijas): 
+
+    Ši programa yra laisva. Jūs galite ją platinti ir/arba modifikuoti
+    remdamiesi Free Software Foundation paskelbtomis GNU Bendrosios
+    Viešosios licencijos sąlygomis: 2 licencijos versija, arba (savo
+    nuožiūra) bet kuria vėlesne versija.
+
+    Ši programa platinama su viltimi, kad ji bus naudinga, bet BE JOKIOS
+    GARANTIJOS; be jokios numanomos PERKAMUMO ar TINKAMUMO KONKRETIEMS
+    TIKSLAMS garantijos. Žiūrėkite GNU Bendrąją Viešąją licenciją norėdami
+    sužinoti smulkmenas.
+
+    Jūs turėjote kartu su šia programa gauti ir GNU Bendrosios Viešosios
+    licencjos kopija; jei ne - rašykite Free Software Foundation, Inc., 59
+    Temple Place - Suite 330, Boston, MA 02111-1307, USA.
+
+Taip pat pateikite informaciją, kaip su jumis susisiekti elektroniniu ar paprastu paštu. 
+
+Jeigu programa interaktyvi (bendrauja su vartotoju), padarykite, kad startuodama interaktyviu režimu ji išvestų panašų į šį pranešimą: 
+
+    Gnomovision version 69, Copyright (C) year name of author
+    Gnomovision comes with ABSOLUTELY NO WARRANTY; for details
+    type `show w'.  This is free software, and you are welcome
+    to redistribute it under certain conditions; type `show c' 
+    for details.
+
+Vertimas: 
+
+    Gnomovizijos 69 versija, Copyright (C) metai  autoriaus vardas
+    Gnomovizija pateikiama VISIŠKAI BE JOKIOS GARANTIJOS; smulkmenoms
+    surinkite 'show w'. Ši programa yra laisva programinė įranga ir 
+    jos platinimas yra sveikintinas laikantis tam tikrų sąlygų; surinkite
+    'show c' parodyti smulkmenoms.
+
+Hipotetinės komandos 'show w' ir 'show c' turėtų parodyti atitinkamas Bendrosios viešosios licencijos dalis. Žinoma, Jūsų komandos gali vadintis kitaip nei 'show w' ir 'show c'. Jos netgi gali būti pelės spragtelėjimai ar meniu punktai - kas labiau tinka Jūsų programai. 
+
+Jei būtina, Jūs taip pat turėtumėte gauti savo darbdavio (jei dirbate programuotoju) ar savo mokyklos (jei mokotės) „autorinių teisių į programą atsisakymą“. Čia pavyzdys; pakeiskite tik vardus: 
+
+    Yoyodyne, Inc., hereby disclaims all copyright interest in the program
+    `Gnomovision' (which makes passes at compilers) written by James Hacker.
+
+    signature of Ty Coon, 1 April 1989
+    Ty Coon, President of Vice
+
+Vertimas: 
+
+    AB "Netvarka" atsisako visų autorinių teisių į programą 'Gnomovizija',
+    parašytą Jono Programišiaus.
+
+    M.A. Gnato parašas, 1989 m. balandžio 1 d.
+    M.A. Gnatas, vycė prezidentas
+
+
+Ši Bendroji Viešoji licenzija nedraudžia įtraukti Jūsų programą į privačias, patentuotas programas. Jeigu Jūsų programa yra paprograminė biblioteka, Jūs galite manyti, kad bus naudingiau uždrausti patentuotas programas susieti su Jūsų biblioteka. Jei tai yra kaip tik tai, ką Jūs norite padaryti, tai naudokite GNU Library General Public License (GNU Bibliotekinę Bendrąją Viešąją licenziją) vietoj šios licenzijos. 
+
+
+--------------------------------------------------------------------------------
+
+This is an unofficial translation of the GNU General Public License into Lithuanian. It was not published by the Free Software Foundation, and does not legally state the distribution terms for software that uses the GNU GPL--only the original English text of the GNU GPL does that. However, we hope that this translation will help Lithuanian language speakers understand the GNU GPL better. 
+
+Šis dokumentas yra neoficialus GNU General Public License vertimas į lietuvių kalbą. Jis nėra platinamas Free Software Foundation organizacijos ir neturi jokios juridinės galios - tik originalus anglų kalba parašytas tekstas yra teisinis dokumentas, nusakantis GNU GPL sąlygas. Mes viliamės, kad šis vertimas padės lietuviškai kalbantiems žmonėms geriau suprasti GNU GPL. 
+
+
+--------------------------------------------------------------------------------
+
+Išvertė VU MIF studentas VDD (Vytautas Dvaronaitis). 
+
+Taisė Aistė Kesminaitė. 
+
+
+--------------------------------------------------------------------------------
+GNU antraštinis puslapis. 
+Klausimus FSF ir GNU siųsti gnu@gnu.org. Kiti būdai susisiekti su FSF. 
+
+Copyright (C) 1989, 1991 Free Software Foundation, Inc.  
+59 Temple Place - Suite 330, Boston, MA  02111-1307, USA

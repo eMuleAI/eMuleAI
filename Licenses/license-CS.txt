@@ -1,0 +1,326 @@
+This is an unofficial translation of the GNU General Public License into Czech. 
+It was not published by the Free Software Foundation, and does not legally state 
+the distribution terms for software that uses the GNU GPL - only the original 
+English text of the GNU GPL v.2 does that. However, we hope that this 
+translation will help Czech speakers understand the GNU GPL better.
+
+Tento text je neoficiálním českým překladem GNU General Public License (Obecné 
+veřejné licence GNU). Nebyl vydán nadací Free Software Foundation a tak právně 
+neupravuje distribuční podmínky softwaru, který je licencován pod GNU GPL. 
+Právně závazný je pouze anglický originál GNU GPL v.2. Doufáme ale, že překlad 
+pomůže českým čtenářům lépe porozumět GNU GPL.
+
+
+Obecná veřejná licence GNU v.2
+(GNU GPL v.2)
+2. verze, Červen 1991
+
+Copyright © 1989, 1991 Free Software Foundation, Inc., 51 Franklin Street, Fifth 
+Floor, Boston, MA 02110-1301, USA
+
+Kopírování a distribuce doslovných kopií tohoto licenčního dokumentu jsou 
+povoleny, ale jeho úpravy jsou zakázány.
+
+
+Preambule
+
+Většina softwarových licencí je navržena tak, aby omezovaly svobodu jeho sdílení 
+a úprav. Naproti tomu, smyslem Obecné veřejné licence GNU je zaručit svobodu 
+sdílení a úprav svobodného softwaru – pro zajištění svobodného přístupu k tomuto 
+softwaru pro všechny jeho uživatele. Tato Obecná veřejná licence GNU se vztahuje 
+na většinu softwaru nadace Free Software Foundation a na jakýkoli jiný program, 
+jehož autor jí příjme. (Některý jiný software od Free Software Foundation je 
+namísto toho licencován pod GNU Lesser General Public Licence.) Můžete ji rovněž 
+použít pro své programy.
+
+Pokud mluvíme o svobodném softwaru, myslíme tím svobodu používání, nikoliv cenu. 
+Naše Obecné veřejné licence jsou navrženy tak, abyste mohli volně šířit kopie 
+svobodného softwaru (a pokud chcete, nechat si za to i zaplatit), abyste 
+obdrželi zdrojový kód, nebo jej měli možnost získat, abyste mohli tento software 
+měnit nebo jeho části použít v nových programech a abyste věděli, že tyto věci 
+smíte dělat.
+
+Abychom mohli vaše práva chránit, musíme zabránit tomu, aby vám kdokoliv tato 
+práva odepíral, nebo vás žádal, abyste se těchto práv vzdali. Tato omezení se 
+promítají do jistých povinností, které musíte dodržet, pokud šíříte nebo 
+upravujete takový software.
+
+Například, šíříte-li kopie takového programu, ať již zdarma nebo za poplatek, 
+musíte poskytnout příjemcům všechna práva, která máte sám. Musíte zaručit, že 
+příjemci rovněž dostanou, anebo mohou získat zdrojový kód. A musíte je upozornit 
+na tyto podmínky, aby i oni znali svá práva.
+
+Vaše práva chráníme ve dvou krocích: (1) zabezpečením autorských práv k 
+softwaru, a (2) nabídkou této licence, která vám dává právoplatné svolení k jeho 
+kopírování, šíření a/nebo jeho úpravě.
+
+Kvůli ochraně každého autora i nás samotných chceme zajistit, aby každý chápal 
+skutečnost, že pro tento svobodný software neexistuje žádná záruka. Je-li 
+software někým jiným upraven a šířen dále, chceme, aby příjemci věděli, že to, 
+co mají, není originál, takže jakékoliv problémy vnesené jinými se neodrazí na 
+reputaci původních autorů.
+
+Závěrem, každý svobodný program je neustále ohrožen softwarovými patenty. 
+Přejeme si zamezit nebezpečí, že distributoři svobodného programu obdrží 
+samostatná patentová osvědčení a tím učiní program vázaným. Abychom tomu 
+zamezili, deklarujeme, že každý patent vztahující se na svobodný program musí 
+umožňovat svobodné užití, anebo nesmí být vydán vůbec.
+
+Přesná ustanovení a podmínky pro kopírování, šíření a úpravu jsou uvedeny níže.
+
+
+USTANOVENÍ a PODMÍNKY pro KOPÍROVÁNÍ, ŠÍŘENÍ a ÚPRAVU
+
+0. Tato Licence se vztahuje na kterýkoliv program či jiné dílo, které obsahuje 
+autorem umístěnou zmínku o tom, že může být šířeno podle ustanovení Obecné 
+veřejné licence GNU. V dalším textu znamená “Program” každý takový program nebo 
+dílo a “dílo založené na Programu” znamená buď program samotný anebo každé jiné 
+dílo z něj odvozené dle autorského zákona: tím se míní dílo obsahující Program 
+nebo jeho část, buď doslovně anebo s úpravami, popřípadě v překladu do jiného 
+jazyka. (Dále je překlad zahrnován bez omezení pod pojem “úprava”.) Uživatel 
+Licence je označován jako “Vy”.
+
+Jiné činnosti než kopírování, šíření a úpravy Programu nejsou pokryty Licencí, 
+sahají mimo její rámec. Akt spuštění Programu není omezen a výstup z Programu je 
+pokryt Licencí pouze tehdy, jestliže obsah výstupu vytvoří dílo založené na 
+Programu (nezávisle na tom, zda bylo vytvořeno činností Programu). Posouzení 
+platnosti předchozí věty závisí na tom, co Program dělá.
+
+1. Můžete kopírovat a šířit doslovné kopie zdrojového kódu Programu tak, jak 
+jste jej obdržel, a na libovolném médiu, za předpokladu, že na každé kopii 
+viditelně a náležitě zveřejníte zmínku o autorských právech a absenci záruky; 
+ponecháte nedotčené všechny zmínky vztahující se k této Licenci a k absenci 
+záruky; a dáte každému příjemci spolu s Programem kopii této licence.
+
+Za fyzický akt přenesení kopie můžete žádat poplatek a podle vlastního uvážení 
+můžete nabídnout za poplatek i záruční ochranu.
+
+2. Můžete upravovat vaši kopii, či kopie Programu, anebo kterékoliv jeho části a 
+tak vytvořit dílo založené na Programu, a kopírovat a šířit takové úpravy, či 
+dílo, podle podmínek odstavce 1 výše, za předpokladu, že splníte všechny tyto 
+podmínky:
+
+a) Upravené soubory musíte opatřit zřetelnou zmínkou uvádějící, že jste soubory 
+změnily s datem každé změny.
+b) Musíte umožnit, aby jakékoliv vámi zveřejněné či šířené dílo, které jako 
+celek nebo zčásti obsahuje Program nebo jakoukoli jeho část, popřípadě je z 
+Programu nebo jeho části odvozeno, mohlo být jako celek bezplatně poskytnuto 
+každé třetí osobě v souladu s ustanoveními této Licence.
+c) Pokud upravený Program interaktivně čte povely, musíte zajistit, že při 
+nejběžnějším způsobu jeho spuštění vytiskne nebo zobrazí hlášení zahrnující 
+příslušnou zmínku o autorském právu a zmínku o tom, že neexistuje žádná záruka 
+(nebo případně, že záruku poskytujete vy), a že uživatelé mohou za těchto 
+podmínek Program šířit dále, a musí uživateli sdělit, jakým způsobem může 
+nahlédnout do textu této Licence. (Výjimka: v případě, že sám Program je 
+interaktivní, avšak žádné takové hlášení nevypisuje, nepožaduje se, aby vaše 
+dílo založené na Programu takové hlášení vypisovalo.)
+
+Tyto požadavky se vztahují k upravenému dílu jako celku. Pokud identifikovatelné 
+části díla nejsou odvozeny z Programu a mohou být samy o sobě považovány za 
+nezávislá a samostatná díla, pak se tato Licence a její ustanovení nevztahují na 
+tyto části, jsou-li šířeny jako nezávislá díla. Avšak jakmile tytéž části šíříte 
+jako části celku, jímž je dílo založené na Programu, musí být rozšiřování tohoto 
+celku podřízeno ustanovením této Licence tak, že povolení poskytnutá dalším 
+uživatelům se rozšíří na celé dílo, tedy na všechny jeho části bez ohledu na to, 
+kdo kterou část napsal.
+
+Smyslem tohoto odstavce tedy není získání práv na dílo zcela napsané vámi ani 
+popírání vašich práv vůči němu; skutečným smyslem je výkon práva na řízení 
+distribuce odvozených nebo kolektivních děl založených na Programu.
+
+Pouhé spojení jiného díla, jež není na Programu založeno, s Programem (anebo 
+dílem založeným na Programu) na paměťovém nebo distribučním médiu neuvazuje toto 
+jiné dílo do působnosti této licence.
+
+3. Můžete kopírovat a šířit Program (nebo dílo na něm založené, viz odstavec 2) 
+pomocí strojového kódu anebo ve spustitelné podobě podle ustanovení odstavců 1 a 
+2 výše, pokud splníte některou z následujících náležitostí:
+
+a) Doprovodíte jej strojově čitelným zdrojovým kódem, který musí být šířen podle 
+ustanovení odstavců 1 a 2 výše, a to na médiu běžně používaném pro výměnu 
+softwaru.
+b) Doprovodíte jej písemnou nabídkou s platností nejméně tři roky, podle níž 
+poskytnete jakékoli třetí straně kompletní strojově čitelnou kopii 
+odpovídajícího zdrojového kódu, jenž musí být šířen podle ustanovení odstavců 1 
+a 2 výše, na médiu běžně používaném pro výměnu softwaru a za poplatek 
+nepřevyšující vaše výdaje vynaložené na fyzickou výrobu kopie zdroje.
+c) Doprovodíte jej informacemi, které jste dostal ohledně nabídky na poskytnutí 
+příslušného zdrojového kódu. (Tato alternativa je povolena jen pro nekomerční 
+šíření a jenom tehdy, pokud jste obdržel Program za pomocí strojového kódu nebo 
+ve spustitelné podobě spolu s takovou nabídkou, v souladu s podmínkou b) výše.)
+
+Zdrojový kód k dílu je nejvhodnější formou díla pro jeho případné úpravy. Pro 
+spustitelné dílo úplný zdrojový kód znamená veškerý zdrojový kód pro všechny 
+moduly, které obsahuje, včetně jakýchkoli dalších souborů pro definici rozhraní 
+a dávkových souborů potřebných pro kompilaci a instalaci spustitelného díla. 
+Zvláštní výjimkou jsou části, které jsou běžně šířeny (ve zdrojové nebo binární 
+formě) s hlavními součástmi (kompilátor, jádro, apod.) operačního systému, na 
+němž spustitelné dílo běží, pokud ovšem taková část sama nedoprovází spustitelné 
+dílo.
+
+Je-li šíření strojového kódu nebo spustitelného díla činěno nabídkou přístupu ke 
+kopírování z určitého místa, potom se za šíření zdrojového kódu počítá i 
+nabídnutí ekvivalentního přístupu ke kopírování zdrojového kódu ze stejného 
+místa, byť přitom nejsou třetí strany nuceny ke zkopírování zdrojového kódu 
+spolu se strojovým.
+
+4. Nesmíte kopírovat, upravovat, poskytovat sublicence anebo šířit program jiným 
+způsobem než výslovně uvedeným v této Licenci. Jakýkoli jiný pokus o kopírování, 
+upravování, poskytnutí sublicence anebo šíření Programu je neplatný a 
+automaticky ukončí vaše práva daná touto Licencí. Strany, které od vás obdržely 
+kopie anebo práva v souladu s touto Licencí, však nemají své práva dané touto 
+Licencí ukončeny, dokud se jim plně podřizují.
+
+5. Jelikož jste tuto Licenci nepodepsali, není vaší poviností ji přijmout. Nic 
+jiného vám však nedává možnost kopírovat nebo šířit Program nebo odvozená díla. 
+V případě, že tuto Licenci nepřijmete, jsou tyto činnosti zákonem zakázány. Tím 
+pádem úpravou anebo šířením programu (anebo každého díla založeného na Programu) 
+vyjadřujete souhlas s Licencí a všem jejím ustanovením a podmínkám pro 
+kopírovaní, upravování a šíření Programu a děl na něm založených.
+
+6. Pokaždé, když dále šíříte Program (nebo dílo založené na Programu), získává 
+příjemce od původního držitele Licence právo kopírovat, upravovat a šířit 
+Program v souladu s těmito ustanoveními a podmínkami. Nesmíte klást žádné další 
+překážky výkonu zde zaručených příjemcových práv. Nejste odpovědný za vymáhání 
+dodržování této Licence třetími stranami.
+
+7. Jsou-li vám z rozhodnutí soudu, obviněním z porušení patentu, nebo z 
+jakéhokoli jiného důvodu (nejen v souvislosti s patenty) uloženy takové podmínky 
+(ať již příkazem soudu, smlouvou nebo jinak), které se vylučují s podmínkami 
+této Licence, nejste tím osvobozeni od podmínek této Licence. Pokud nemůžete 
+Program šířit tak, abyste vyhověl zároveň svým závazkům vyplývajícím z této 
+Licence a jiným platným závazkům, nesmíte jej v důsledku toho šířit vůbec. Pokud 
+by například patentové osvědčení nepovolovalo bezplatné šíření Programu všemi, 
+kdo vaším přičiněním získají přímo nebo nepřímo jeho kopie, pak by jediný možný 
+způsob, jak vyhovět zároveň patentovému osvědčení i této Licenci, spočíval v 
+úplném ukončení šíření Programu.
+
+Pokud by se za jistých okolností jevila některá část tohoto odstavce jako 
+neplatná nebo nevynutitelná, ostává krom této části v platnosti celý zbytek 
+tohoto odstavce a za všech jiných jako těchto okolností ostává platný odstavec 
+jako celek.
+
+Smyslem tohoto odstavce není navádět vás k porušování patentů či jiných 
+vlastnických práv, anebo tato ustanovení zpochybňovat. Jediným jeho smyslem je 
+ochrana integrity systému šíření svobodného softwaru, který je používán 
+veřejnými licencemi. Mnozí lidé příspěli do velkého množstva softwaru šířeného 
+tímto systémem, spolehnuvše se na jeho důsledné uplatňování. Záleží na 
+autorovi/dárci, aby rozhodl, zda si přeje šířit software pomocí nějakého jiného 
+systému a žádný uživatel Licence nemůže takové rozhodnutí zpochybňovat.
+
+Smyslem tohoto odstavce je zevrubně osvětlit to, co je považováno za důsledek 
+plynoucí ze zbytku této Licence.
+
+8. Pokud je šíření či použití Programu v některých zemích omezeno, buď patenty, 
+anebo autorským zákonem, může držitel původních autorských práv, který svěřuje 
+Program do působnosti této Licence, přidat výslovné omezení pro geografické 
+šíření vylučující takové země, takže šíření je povoleno jen v těch zemích nebo 
+mezi těmi zeměmi, které nejsou tímto způsobem vyloučeny. Potom se takové 
+geografické omezení stávají součástí této Licence.
+
+9. Free Software Foundation může čas od času vydávat upravené nebo nové verze 
+Obecné veřejné licence. Takové nové verze se budou svým duchem podobat současné 
+verzi, mohou se však v řešení nových problémů či zájmů lišit v některých 
+detailech.
+
+Každé verzi je přiděleno rozlišující číslo verze. Pokud Program určí číslo 
+verze, vztahuje se na něj daná verze nebo “všechny následující verze”, a můžete 
+se podle uvážení řídit ustanoveními a podmínkami buďto oné konkrétní verze anebo 
+kterékoliv následující verze, kterou vydala Free Software Foundation. Jestliže 
+Program nespecifikuje číslo verze této Licence, můžete si vybrat libovolnou 
+verzi, kterou kdy Free Software Foundation vydala.
+
+10. Pokud si přejete zahrnout části Programu do jiných svobodných programů, 
+jejichž distribuční podmínky jsou odlišné, zašlete autorovi žádost o povolení. V 
+případě softwaru, k němuž vlastní autorská práva Free Software Foundation, 
+napište Free Software Foundation; někdy činíme výjimky ze zde uvedených 
+ustanovení. Naše rozhodnutí bude vedeno dvěma cíli – zachováním volného šíření 
+všech odvozenin našeho svobodného softwaru a podporou sdílení a opětovného 
+využití softwaru obecně.
+
+
+Bez záruky
+
+11. VZHLEDEM K BEZPLATNÉMU POSKYTNUTÍ LICENCE K PROGRAMU SE NA PROGRAM 
+NEVZTAHUJE ŽÁDNÁ ZÁRUKA, V MÍŘE POVOLENÉ ZÁKONEM. POKUD NENÍ PÍSEMNĚ STANOVENO 
+JINAK, DRŽITELÉ AUTORSKÝCH PRÁV POPŘÍPADĚ JINÉ STRANY POSKYTUJÍ PROGRAM “TAK, 
+JAK JE”, BEZ ZÁRUKY JAKÉHOKOLI DRUHU, AŤ VÝSLOVNÉ NEBO VYPLÝVAJÍCÍ, VČETNĚ, ALE 
+NIKOLI JEN, ZÁRUK OBCHODOVATELNOSTI A VHODNOSTI PRO URČITÝ ÚČEL. POKUD JDE O 
+KVALITU A VÝKONNOST PROGRAMU, JE VEŠKERÉ RIZIKO NA VÁS. POKUD BY SE U PROGRAMU 
+PROJEVILY ZÁVADY, NÁKLADY NA POTŘEBNOU ÚDRŽBU, OPRAVU ČI NÁPRAVU PADAJÍ NA VÁŠ 
+VRUB.
+
+12. V ŽÁDNÉM PŘÍPADĚ, S VÝJIMKOU TOHO, KDYŽ TO VYŽADUJE PLATNÝ ZÁKON, ANEBO KDYŽ 
+TO BYLO PÍSEMNĚ ODSOUHLASENO, VÁM NEBUDE ŽÁDNÝ Z DRŽITELŮ AUTORSKÝCH PRÁV ANI 
+ŽÁDNÁ JINÁ STRANA, KTERÁ SMÍ UPRAVOVAT NEBO ŠÍŘIT PROGRAM V SOULADU S 
+PŘEDCHOZÍMI USTANOVENÍMI, ODPOVĚDNA ZA ŠKODY, VČETNĚ VŠECH OBECNÝCH, 
+SPECIÁLNÍCH, NAHODILÝCH NEBO NÁSLEDNÝCH ŠKOD VYPLÝVAJÍCÍCH Z UŽÍVÁNÍ ANEBO 
+NESCHOPNOSTI UŽÍVAT PROGRAMU (VČETNĚ, ALE NIKOLI JEN, ZTRÁTY NEBO ZKRESLENÍ DAT, 
+NEBO TRVALÝCH ŠKOD ZPŮSOBENÝCH VÁM NEBO TŘETÍM STRANÁM, NEBO SELHÁNÍ FUNKCE 
+PROGRAMU V SOUČINNOSTI S JINÝMI PROGRAMY), A TO I V PŘÍPADĚ, ŽE TAKOVÝ DRŽITEL 
+AUTORSKÝCH PRÁV NEBO JINÁ STRANA BYLI UPOZORNĚNI NA MOŽNOST TAKOVÝCH ŠKOD.
+
+KONEC USTANOVENÍ A PODMÍNEK
+
+
+Jak uplatnit tato ustanovení na vaše nové programy
+
+Pokud vyvinete nový program a chcete, aby byl veřejnosti co nejvíce k užitku, 
+nejlépe toho dosáhnete tím, že jej prohlásíte za svobodný software, který může 
+kdokoliv šířit a měnit za zde uvedených podmínek.
+
+Pokud se tak rozhodnete, stačí k programu připojit následující údaje. 
+Nejbezpečnější cestou je jejich připojení na začátek každého zdrojového souboru, 
+čímž se nejúčinněji sdělí vyloučení záruky. V každém souboru by pak měla být 
+přinejmenším řádka s podpisem autora a odkaz na místo, kde lze nalézt ostatní 
+úplné údaje.
+
+<řádka se jménem programu a nástinem toho, co dělá>
+
+Copyright (C) <rok> <jméno autora>
+
+Tento program je svobodný software: můžete jej šířit a upravovat podle 
+ustanovení Obecné veřejné licence GNU (GNU General Public Licence), vydávané 
+nadací Free Software Foundation, a to buď podle 2. verze této Licence anebo 
+(podle vašeho uvážení) kterékoli pozdější verze.
+
+Tento program je šířen v naději, že bude užitečný, avšak BEZ JAKÉKOLI ZÁRUKY. 
+Neposkytují se ani odvozené záruky OBCHODOVATELNOSTI anebo VHODNOSTI PRO URČITÝ 
+ÚČEL. Další podrobnosti hledejte v Obecné veřejné licenci GNU.
+
+Kopii Obecné veřejné licence GNU jste měli obdržet spolu s tímto programem. 
+Pokud se tak nestalo, napište o ni na: Free Software Foundation, Inc., 51 
+Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
+
+Připojte rovněž informaci o tom, jak je možné se s vámi spojit – elektronickou 
+poštou nebo dopisem.
+
+Pokud je program interaktivní, zařiďte, aby se při startu v interaktivním módu 
+vypsalo hlášení podobné tomuto:
+
+<program> Copyright (C) <rok> <jméno autora>
+<program> je ABSOLUTNĚ BEZ ZÁRUKY; podrobnosti se dozvíte zadáním ’show w’.
+Jde o svobodný software a jeho šíření je za jistých podmínek vítáno; podrobnosti 
+získáte zadáním ’show c’.
+
+Hypotetické povely ’show w’ a ’show c’ by měly zobrazit příslušné pasáže Obecné 
+veřejné licence. Odpovídající povely ovšem nemusí být právě tyto, mohou to být 
+dokonce kliknutí na myši nebo položky v menu – cokoliv, co se do vašeho programu 
+hodí.
+
+Pokud je to nutné, měl byste také přimět svého zaměstnavatele (jestliže 
+pracujete jako programátor) nebo představitele vaší školy (jestliže nějakou 
+navštěvujete) k tomu, aby podepsal “zřeknutí se autorských práv” k Programu. Zde 
+je vzor:
+
+<Název firmy s.r.o.> se tímto zříká veškerého zájmu o autorská práva k programu 
+<program> (který dělá to a to) napsanému <autorem>.
+
+(podpis <autora>), <datum> v <městě>
+<autor>, <pozice ve firmě>
+
+Tato Obecná veřejná licence neumožňuje zahrnutí vašeho programu do vázaných 
+programů. Je-li váš program knihovnou podprogramů, můžete zvážit, zda je 
+užitečné umožnit sestavování i vázaných aplikačních programů s vaší knihovnou. 
+V takovém případě použijte Obecnou veřejnou licenci GNU Lesser namísto této 
+Licence.

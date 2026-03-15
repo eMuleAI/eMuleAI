@@ -1,0 +1,69 @@
+# Instructions: What is the `translations.map` file and how should it be edited?
+
+## 1) Purpose of the file
+- This file contains the translations of all user interface texts in the application.
+- Each block starts with a specific key (keyword) and is followed by lines which hold the English text and its translations in other languages.
+- In this way, the application provides multi‑language support from a single source.
+
+## 2) File format
+1. Key definition:
+   IDS_SOME_KEY
+
+2. Translation lines:
+   <TAB><language-code><TAB>Text
+
+   Example:
+   	en	Details
+   	tr	Ayrıntılar
+   	de	Details
+
+   - <language-code> must follow ISO codes (e.g., en, tr, de, zh-CN, pt-BR).
+   - “Text” is the translation for that language.
+
+3. Continuation line (for long texts):
+   <TAB><TAB>remaining text
+
+   - This continues the previous translation.
+   - Use it to wrap long sentences across multiple lines.
+
+4. Blank line:
+   - Leave one blank line at the end of each key block.
+
+5. Comment lines:
+   # MISSING:tr -> using EN
+
+   - These are notes added by automated processes or by humans.
+   - Do not delete them while editing; they are not to be translated into UI text.
+
+## 3) Editing guidelines
+1. Key names (IDS_…) must not be changed.
+2. The English (en) line is always the reference.
+3. Placeholders must be preserved:
+   - Do not remove or alter format specifiers like %s, %i, %u, %%.
+   - Example: “Downloading %s...” → “%s indiriliyor...” in Turkish.
+4. Escape sequences must be preserved:
+   - Keep \n (newline), \r, and \\ as is.
+   - Example: “Line1\nLine2” → “Satır1\nSatır2” in Turkish.
+5. Menu accelerator markers (&) must be preserved:
+   - In menu texts, “&File” → “&Dosya”
+   - “&” denotes the keyboard accelerator and must not be removed.
+6. Length constraints:
+   - Translations should not be much longer than the English source.
+   - Overly long strings may overflow in narrow UI areas.
+   - Aim for a comparable length whenever possible.
+7. Missing translations:
+   - For missing languages, at minimum keep the English fallback line.
+   - Keep markers like “# MISSING:<lang> -> using EN”.
+
+## 4) Example
+IDS_HELLO
+	en	Hello!
+	tr	Merhaba!
+	de	Hallo!
+	fr	Bonjour!
+
+IDS_DOWNLOAD
+	en	Downloading %s...
+	tr	%s indiriliyor...
+	de	%s wird heruntergeladen...
+	fr	Téléchargement de %s...

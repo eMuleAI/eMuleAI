@@ -1,0 +1,336 @@
+GPL 
+
+Introduction 
+This is an unofficial translation of the GNU General Public License into French. 
+It was not published by the Free Software Foundation, and does not legally state 
+the distribution terms for software that uses the GNU GPL--only the original 
+English text of the GNU GPL does that. However, we hope that this translation 
+will help French speakers understand the GNU GPL better. 
+
+Voici (http://www.linux-france.org/article/these/gpl.html) une adaptation non 
+officielle de la Licence Publique Gˆnˆrale du projet GNU. Elle n'a pas ˆtˆ 
+publiˆe par la Free Software Foundation et son contenu n'a aucune portˆe lˆgale 
+car seule la version anglaise de ce document dˆtaille le mode de distribution 
+des logiciels sous GNU GPL. Nous espˆrons cependant qu'elle permettra aux 
+francophones de mieux comprendre la GPL. 
+
+Licence Publique Gˆnˆrale GNU Version 2, Juin 1991 
+Copyright Ô Free Software Foundation, Inc.
+59 Temple Place, Suite 330, Boston, MA 02111-1307
+¨tats-Unis, 1989, 1991.
+La copie et la distribution de copies exactes de ce document sont autorisˆes, 
+mais aucune modification n'est permise. 
+
+Prˆambule 
+Les licences d'utilisation de la plupart des programmes sont dˆfinies pour 
+limiter ou supprimer toute libertˆ ž l'utilisateur. î l'inverse, la Licence 
+Publique Gˆnˆrale (General Public License) est destinˆe ž vous garantir la 
+libertˆ de partager et de modifier les logiciels libres, et de s'assurer que ces 
+logiciels sont effectivement accessibles ž tout utilisateur.
+
+Cette Licence Publique Gˆnˆrale s'applique ž la plupart des programmes de la 
+Free Software Foundation, comme ž tout autre programme dont l'auteur l'aura 
+dˆcidˆ (d'autres logiciels de la FSF sont couverts pour leur part par la Licence 
+Publique Gˆnˆrale pour Biblioth•ques GNU (LGPL)). Vous pouvez aussi appliquer 
+les termes de cette Licence ž vos propres programmes, si vous le dˆsirez.
+
+Libertˆ des logiciels ne signifie pas nˆcessairement gratuitˆ. Notre Licence est 
+conƒue pour vous assurer la libertˆ de distribuer des copies des programmes, 
+gratuitement ou non, de recevoir le code source ou de pouvoir l'obtenir, de 
+modifier les programmes ou d'en utiliser des ˆlˆments dans de nouveaux 
+programmes libres, en sachant que vous y ‰tes autorisˆ.
+
+Afin de garantir ces droits, nous avons d˜ introduire des restrictions 
+interdisant ž quiconque de vous les refuser ou de vous demander d'y renoncer. 
+Ces restrictions vous imposent en retour certaines obligations si vous 
+distribuez ou modifiez des copies de programmes protˆgˆs par la Licence. En d'autre 
+termes, il vous incombera en ce cas de : 
+
+transmettre aux destinataires tous les droits que vous possˆdez, 
+
+expˆdier aux destinataires le code source ou bien tenir celui-ci ž leur 
+disposition, 
+
+leur remettre cette Licence afin qu'ils prennent connaissance de leurs droits. 
+
+Nous protˆgeons vos droits de deux faƒons : d'abord par le copyright du logiciel, 
+ensuite par la remise de cette Licence qui vous autorise lˆgalement ž copier, 
+distribuer et/ou modifier le logiciel.
+
+En outre, pour protˆger chaque auteur ainsi que la FSF, nous affirmons 
+solennellement que le programme concernˆ ne fait l'objet d'aucune garantie. Si 
+un tiers le modifie puis le redistribue, tous ceux qui en recevront une copie 
+doivent savoir qu'il ne s'agit pas de l'original afin qu'une copie dˆfectueuse n'entache 
+pas la rˆputation de l'auteur du logiciel.
+
+Enfin, tout programme libre est sans cesse menacˆ par des dˆp’ts de brevets. 
+Nous souhaitons ž tout prix ˆviter que des distributeurs puissent dˆposer des 
+brevets sur les Logiciels Libres pour leur propre compte. Pour ˆviter cela, nous 
+stipulons bien que tout dˆp’t ˆventuel de brevet doit accorder expressˆment ž 
+tout un chacun le libre usage du produit.
+
+Les dispositions prˆcises et les conditions de copie, de distribution et de 
+modification de nos logiciels sont les suivantes : 
+
+Stipulations et conditions relatives ž la copie, la distribution et la 
+modification 
+
+Article 0
+La prˆsente Licence s'applique ž tout Programme (ou autre travail) o› figure une 
+note, placˆe par le dˆtenteur des droits, stipulant que ledit Programme ou 
+travail peut ‰tre distribuˆ selon les termes de la prˆsente Licence. Le terme 
+Programme dˆsigne aussi bien le Programme lui-m‰me que tout travail qui en est 
+dˆrivˆ selon la loi, c'est-ž-dire tout ouvrage reproduisant le Programme ou une 
+partie de celui-ci, ž l'identique ou bien modifiˆ, et/ou traduit dans une autre 
+langue (la traduction est considˆrˆe comme une modification). Chaque personne 
+concernˆe par la Licence Publique Gˆnˆrale sera dˆsignˆe par le terme Vous.
+
+Les activitˆs autres que copie, distribution et modification ne sont pas 
+couvertes par la prˆsente Licence et sortent de son cadre. Rien ne restreint l'utilisation 
+du Programme et les donnˆes issues de celui-ci ne sont couvertes que si leur 
+contenu constitue un travail basˆ sur le logiciel (indˆpendemment du fait d'avoir 
+ˆtˆ rˆalisˆ en lanƒant le Programme). Tout dˆpend de ce que le Programme est 
+censˆ produire.
+
+Article 1.
+Vous pouvez copier et distribuer des copies conformes du code source du 
+Programme, tel que Vous l'avez reƒu, sur n'importe quel support, ž condition de 
+placer sur chaque copie un copyright appropriˆ et une restriction de garantie, 
+de ne pas modifier ou omettre toutes les stipulations se rˆfˆrant ž la prˆsente 
+Licence et ž la limitation de garantie, et de fournir avec toute copie du 
+Programme un exemplaire de la Licence.
+
+Vous pouvez demander une rˆtribution financi•re pour la rˆalisation de la copie 
+et demeurez libre de proposer une garantie assurˆe par vos soins, moyennant 
+finances.
+
+Article 2.
+Vous pouvez modifier votre copie ou vos copies du Programme ou partie de celui-ci, 
+ou d'un travail basˆ sur ce Programme, et copier et distribuer ces modifications 
+selon les termes de l'article 1, ž condition de Vous conformer ˆgalement aux 
+conditions suivantes : 
+
+a) Ajouter aux fichiers modifiˆs l'indication tr•s claire des modifications 
+effectuˆes, ainsi que la date de chaque changement. 
+
+b) Distribuer sous les termes de la Licence Publique Gˆnˆrale l'ensemble de 
+toute rˆalisation contenant tout ou partie du Programme, avec ou sans 
+modifications. 
+
+c) Si le Programme modifiˆ lit des commandes de mani•re interactive lors de son 
+exˆcution, faire en sorte qu'il affiche, lors d'une invocation ordinaire, le 
+copyright appropriˆ en indiquant clairement la limitation de garantie (ou la 
+garantie que Vous Vous engagez ž fournir Vous-m‰me), qu'il stipule que tout 
+utilisateur peut librement redistribuer le Programme selon les conditions de la 
+Licence Publique Gˆnˆrale GNU, et qu'il montre ž tout utilisateur comment lire 
+une copie de celle-ci (exception : si le Programme original est interactif mais 
+n'affiche pas un tel message en temps normal, tout travail dˆrivˆ de ce 
+Programme ne sera pas non plus contraint de l'afficher). 
+
+Toutes ces conditions s'appliquent ž l'ensemble des modifications. Si des 
+ˆlˆments identifiables de ce travail ne sont pas dˆrivˆs du Programme et peuvent 
+‰tre raisonnablement considˆrˆs comme indˆpendants, la prˆsente Licence ne s'applique 
+pas ž ces ˆlˆments lorsque Vous les distribuez seuls. Mais, si Vous distribuez 
+ces m‰mes ˆlˆments comme partie d'un ensemble cohˆrent dont le reste est basˆ 
+sur un Programme soumis ž la Licence, ils lui sont ˆgalement soumis, et la 
+Licence s'ˆtend ainsi ž l'ensemble du produit, quel qu'en soit l'auteur.
+
+Cet article n'a pas pour but de s'approprier ou de contester vos droits sur un 
+travail enti•rement rˆalisˆ par Vous, mais plut’t d'ouvrir droit ž un contr’le 
+de la libre distribution de tout travail dˆrivˆ ou collectif basˆ sur le 
+Programme.
+
+En outre, toute fusion d'un autre travail, non basˆ sur le Programme, avec le 
+Programme (ou avec un travail dˆrivˆ de ce dernier), effectuˆe sur un support de 
+stockage ou de distribution, ne fait pas tomber cet autre travail sous le 
+contr’le de la Licence.
+
+Article 3.
+Vous pouvez copier et distribuer le Programme (ou tout travail dˆrivˆ selon les 
+conditions ˆnoncˆes dans l'article 1) sous forme de code objet ou exˆcutable, 
+selon les termes des articles 0 et 1, ž condition de respecter les clauses 
+suivantes : 
+
+a) Fournir le code source complet du Programme, sous une forme lisible par un 
+ordinateur et selon les termes des articles 0 et 1, sur un support 
+habituellement utilisˆ pour l'ˆchange de donnˆes ; ou, 
+
+b) Faire une offre ˆcrite, valable pendant au moins trois ans, prˆvoyant de 
+donner ž tout tiers qui en fera la demande une copie, sous forme lisible par un 
+ordinateur, du code source correspondant, pour un tarif n'excˆdant pas le co˜t 
+de la copie, selon les termes des articles 0 et 1, sur un support couramment 
+utilisˆ pour l'ˆchange de donnˆes informatiques ; ou, 
+
+c) Informer le destinataire de l'endroit o› le code source peut ‰tre obtenu (cette 
+solution n'est recevable que dans le cas d'une distribution non commerciale, et 
+uniquement si Vous avez reƒu le Programme sous forme de code objet ou exˆcutable 
+avec l'offre prˆvue ž l'alinˆa b ci-dessus). 
+
+Le code source d'un travail dˆsigne la forme de cet ouvrage sous laquelle les 
+modifications sont les plus aisˆes. Sont ainsi dˆsignˆs la totalitˆ du code 
+source de tous les modules composant un Programme exˆcutable, de m‰me que tout 
+fichier de dˆfinition associˆ, ainsi que les scripts utilisˆs pour effectuer la 
+compilation et l'installation du Programme exˆcutable. Toutefois, l'environnement 
+standard de dˆveloppement du syst•me d'exploitation mis en oeuvre (source ou 
+binaire) -- compilateurs, biblioth•ques, noyau, etc. -- constitue une exception, 
+sauf si ces ˆlˆments sont diffusˆs en m‰me temps que le Programme exˆcutable.
+
+Si la distribution de l'exˆcutable ou du code objet consiste ž offrir un acc•s 
+permettant de copier le Programme depuis un endroit particulier, l'offre d'un 
+acc•s ˆquivalent pour se procurer le code source au m‰me endroit est considˆrˆ 
+comme une distribution de ce code source, m‰me si l'utilisateur choisit de ne 
+pas profiter de cette offre.
+
+Article 4.
+Vous ne pouvez pas copier, modifier, cˆder, dˆposer ou distribuer le Programme d'une 
+autre mani•re que l'autorise la Licence Publique Gˆnˆrale. Toute tentative de ce 
+type annule immˆdiatement vos droits d'utilisation du Programme sous cette 
+Licence. Toutefois, les tiers ayant reƒu de Vous des copies du Programme ou le 
+droit d'utiliser ces copies continueront ž bˆnˆficier de leur droit d'utilisation 
+tant qu'ils respecteront pleinement les conditions de la Licence.
+
+Article 5.
+Ne l'ayant pas signˆe, Vous n'‰tes pas obligˆ d'accepter cette Licence. 
+Cependant, rien d'autre ne Vous autorise ž modifier ou distribuer le Programme 
+ou quelque travaux dˆrivˆs : la loi l'interdit tant que Vous n'acceptez pas les 
+termes de cette Licence. En consˆquence, en modifiant ou en distribuant le 
+Programme (ou tout travail basˆ sur lui), Vous acceptez implicitement tous les 
+termes et conditions de cette Licence.
+
+Article 6.
+La diffusion d'un Programme (ou de tout travail dˆrivˆ) suppose l'envoi 
+simultanˆ d'une licence autorisant la copie, la distribution ou la modification 
+du Programme, aux termes et conditions de la Licence. Vous n'avez pas le droit d'imposer 
+de restrictions supplˆmentaires aux droits transmis au destinataire. Vous n'‰tes 
+pas responsable du respect de la Licence par un tiers.
+
+Article 7.
+Si, ž la suite d'une dˆcision de Justice, d'une plainte en contrefaƒon ou pour 
+toute autre raison (liˆe ou non ž la contrefaƒon), des conditions Vous sont 
+imposˆes (que ce soit par ordonnance, accord amiable ou autre) qui se rˆv•lent 
+incompatibles avec les termes de la prˆsente Licence, Vous n'‰tes pas pour 
+autant dˆgagˆ des obligations liˆes ž celle-ci : si Vous ne pouvez concilier vos 
+obligations lˆgales ou autres avec les conditions de cette Licence, Vous ne 
+devez pas distribuer le Programme.
+
+Si une partie quelconque de cet article est invalidˆe ou inapplicable pour 
+quelque raison que ce soit, le reste de l'article continue de s'appliquer et l'intˆgralitˆ 
+de l'article s'appliquera en toute autre circonstance.
+
+Le prˆsent article n'a pas pour but de Vous pousser ž enfreindre des droits ou 
+des dispositions lˆgales ni en contester la validitˆ ; son seul objectif est de 
+protˆger l'intˆgritˆ du syst•me de distribution du Logiciel Libre. De nombreuses 
+personnes ont gˆnˆreusement contribuˆ ž la large gamme de Programmes distribuˆe 
+de cette faƒon en toute confiance ; il appartient ž chaque auteur/donateur de 
+dˆcider de diffuser ses Programmes selon les crit•res de son choix.
+
+Article 8.
+Si la distribution et/ou l'utilisation du Programme est limitˆe dans certains 
+pays par des brevets ou des droits sur des interfaces, le dˆtenteur original des 
+droits qui place le Programme sous la Licence Publique Gˆnˆrale peut ajouter 
+explicitement une clause de limitation gˆographique excluant ces pays. Dans ce 
+cas, cette clause devient une partie intˆgrante de la Licence.
+
+Article 9.
+La Free Software Foundation se rˆserve le droit de publier pˆriodiquement des 
+mises ž jour ou de nouvelles versions de la Licence. Rˆdigˆes dans le m‰me 
+esprit que la prˆsente version, elles seront cependant susceptibles d'en 
+modifier certains dˆtails ž mesure que de nouveaux probl•mes se font jour.
+
+Chaque version poss•de un numˆro distinct. Si le Programme prˆcise un numˆro de 
+version de cette Licence et È toute version ultˆrieure Ê, Vous avez le choix de 
+suivre les termes et conditions de cette version ou de toute autre version plus 
+rˆcente publiˆe par la Free Software Foundation. Si le Programme ne spˆcifie 
+aucun numˆro de version, Vous pouvez alors choisir l'une quelconque des versions 
+publiˆes par la Free Software Foundation.
+
+Article 10.
+Si Vous dˆsirez incorporer des ˆlˆments du Programme dans d'autres Programmes 
+libres dont les conditions de distribution diff•rent, Vous devez ˆcrire ž l'auteur 
+pour lui en demander la permission. Pour ce qui est des Programmes directement 
+dˆposˆs par la Free Software Foundation, ˆcrivez-nous : une exception est 
+toujours envisageable. Notre dˆcision sera basˆe sur notre volontˆ de prˆserver 
+la libertˆ de notre Programme ou de ses dˆrivˆs et celle de promouvoir le 
+partage et la rˆutilisation du logiciel en gˆnˆral.
+
+LIMITATION DE GARANTIE 
+
+Article 11.
+Parce que l'utilisation de ce Programme est libre et gratuite, aucune garantie n'est 
+fournie, comme le permet la loi. Sauf mention ˆcrite, les dˆtenteurs du 
+copyright et/ou les tiers fournissent le Programme en l'ˆtat, sans aucune sorte 
+de garantie explicite ou implicite, y compris les garanties de commercialisation 
+ou d'adaptation dans un but particulier. Vous assumez tous les risques quant ž 
+la qualitˆ et aux effets du Programme. Si le Programme est dˆfectueux, Vous 
+assumez le co˜t de tous les services, corrections ou rˆparations nˆcessaires.
+
+Article 12.
+Sauf lorsqu'explicitement prˆvu par la Loi ou acceptˆ par ˆcrit, ni le dˆtenteur 
+des droits, ni quiconque autorisˆ ž modifier et/ou redistribuer le Programme 
+comme il est permis ci-dessus ne pourra ‰tre tenu pour responsable de tout 
+dommage direct, indirect, secondaire ou accessoire (pertes financi•res dues au 
+manque ž gagner, ž l'interruption d'activitˆs ou ž la perte de donnˆes, etc., 
+dˆcoulant de l'utilisation du Programme ou de l'impossibilitˆ d'utiliser celui-ci). 
+
+FIN DES TERMES ET CONDITIONS 
+
+Comment appliquer ces directives ž vos nouveaux programmes 
+Si vous dˆveloppez un nouveau programme et dˆsirez en faire bˆnˆficier tout un 
+chacun, la meilleure mˆthode est d'en faire un Logiciel Libre que tout le monde 
+pourra redistribuer et modifier selon les termes de la Licence Publique Gˆnˆrale.
+
+Pour cela, insˆrez les indications suivantes dans votre programme (il est 
+prˆfˆrable et plus s˜r de les faire figurer au dˆbut de chaque fichier source ; 
+dans tous les cas, chaque module source devra comporter au minimum la ligne de È 
+copyright Ê et indiquer o› rˆsident toutes les autres indications) : 
+
+((une ligne pour donner le nom du programme et donner une idˆe de sa finalitˆ))
+Copyright (C) 19xx ((nom de l'auteur))
+
+Ce programme est libre, vous pouvez le redistribuer et/ou le modifier selon les 
+termes de la Licence Publique Gˆnˆrale GNU publiˆe par la Free Software 
+Foundation (version 2 ou bien toute autre version ultˆrieure choisie par vous).
+
+Ce programme est distribuˆ car potentiellement utile, mais SANS AUCUNE GARANTIE, 
+ni explicite ni implicite, y compris les garanties de commercialisation ou d'adaptation 
+dans un but spˆcifique. Reportez-vous ž la Licence Publique Gˆnˆrale GNU pour 
+plus de dˆtails.
+
+Vous devez avoir reƒu une copie de la Licence Publique Gˆnˆrale GNU en m‰me 
+temps que ce programme ; si ce n'est pas le cas, ˆcrivez ž la Free Software 
+Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307, ¨tats-Unis. 
+
+Ajoutez ˆgalement votre adresse ˆlectronique, le cas ˆchˆant, ainsi que votre 
+adresse postale.
+
+Si le programme est interactif, faites-lui afficher un court avertissement du 
+type de celui-ci ž chaque invocation : 
+
+...(nom du programme) version 69, Copyright (C) 19aa nom de l'auteur
+
+...(nom du programme) est fourni sans AUCUNE GARANTIE.
+Pour plus de dˆtails, tapez `g'.
+
+Ce programme est libre et vous ‰tes encouragˆ ž le redistribuer sous certaines 
+conditions ; tapez `c' pour plus de dˆtails. 
+
+Les commandes hypothˆtiques `g' et `c' doivent afficher les sections appropriˆes 
+de la Licence Publique Gˆnˆrale GNU. Bien entendu, vous pouvez implanter ces 
+commandes comme bon vous semble : options dans un menu, ou bien accessibles d'un 
+clic de souris, etc., tout dˆpend de votre programme.
+
+Si vous officiez en tant que programmeur, n'omettez pas de demander ž votre 
+employeur, votre ˆtablissement scolaire ou autres de signer une dˆcharge 
+stipulant leur renoncement aux droits qu'ils pourraient avoir sur le programme : 
+
+...((employeur, ˆcole...)) dˆclare par la prˆsente ne pas revendiquer de droits 
+sur le programme È (nom du programme) Ê rˆalisˆ par ...((nom de l'auteur)).
+((signature du responsable)), ...((date)), ...((nom et qualitˆ du responsable)). 
+
+La Licence Publique Gˆnˆrale ne permet pas d'inclure votre programme dans des 
+logiciels sous licence commerciale spˆcifique. Si votre programme est une 
+fonction de biblioth•que, vous jugerez probablement plus judicieux de le faire 
+relever de la Licence Gˆnˆrale de Biblioth•que GNU (LGPL) plut’t que de la 
+prˆsente. 
+
+Last modified: Tue Sep 29 22:41:45 MET DST 1998 
