@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://emuleai.github.io/eMuleAI_banner_640x320.png" alt="eMule AI banner" />
+  <img src="https://emuleai.github.io/eMuleAI_banner.png" alt="eMule AI banner" />
 </p>
 
 # eMule AI
