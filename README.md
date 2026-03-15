@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="https://emuleai.github.io/eMuleAI_banner_640x320.png" alt="eMule AI banner" />
+</p>
+
 # eMule AI
 
 A modern fork of the classic open-source eMule P2P file sharing client.
