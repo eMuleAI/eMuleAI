@@ -3,6 +3,7 @@ VERSION HISTORY
 
 v1.2
 Fixed the “Shared eD2K | Kad” column in the Files window.
+Fixed an issue where the download list didn’t refresh immediately after applying a category filter.
 Fixed some Spanish and Galician localizations (PR by PepinoGz and Aokromes).
 Updated eD2K link dialog title
 

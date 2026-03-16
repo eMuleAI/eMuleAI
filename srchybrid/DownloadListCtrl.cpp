@@ -2704,7 +2704,7 @@ const bool CDownloadListCtrl::IsFilteredOut(CPartFile* pFile)
 
 void CDownloadListCtrl::UpdateCurrentCategoryView()
 {
-	ChangeCategory(curTab);
+	ReloadList(false, kDownloadListViewState);
 }
 
 void CDownloadListCtrl::UpdateCurrentCategoryView(CPartFile *thisfile)
