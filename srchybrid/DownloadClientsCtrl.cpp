@@ -362,10 +362,14 @@ void CDownloadClientsCtrl::OnLvnGetDispInfo(LPNMHDR pNMHDR, LRESULT *pResult)
 		// Vista: That callback is used to get the strings for the label tips for the sub(!)-items.
 		//
 		const LVITEMW &rItem = reinterpret_cast<NMLVDISPINFO*>(pNMHDR)->item;
-		if (rItem.mask & LVIF_TEXT) {
-			CUpDownClient *pClient = reinterpret_cast<CUpDownClient*>(rItem.lParam);
-			if (pClient != NULL)
+		if ((rItem.mask & LVIF_TEXT) && rItem.pszText && rItem.cchTextMax > 0) {
+			CUpDownClient *pClient = NULL;
+			if (rItem.iItem >= 0)
+				pClient = reinterpret_cast<CUpDownClient*>(GetItemData(rItem.iItem));
+			if (pClient != NULL && m_ListItemsMap.find(pClient) != m_ListItemsMap.end())
 				_tcsncpy_s(rItem.pszText, rItem.cchTextMax, GetItemDisplayText(pClient, rItem.iSubItem), _TRUNCATE);
+			else
+				rItem.pszText[0] = _T('\0');
 		}
 	}
 	*pResult = 0;
