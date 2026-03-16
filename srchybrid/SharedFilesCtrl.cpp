@@ -356,8 +356,23 @@ void CSharedFilesCtrl::OnSysColorChange()
 void CSharedFilesCtrl::SetAllIcons()
 {
 	ApplyImageList(NULL);
-	theApp.GetFileTypeSystemImageIdx(thePrefs.GetMuleDirectory(EMULE_INCOMINGDIR)); //This is just a dummy call to force it to set m_hSystemImageList
-	VERIFY(ApplyImageList(theApp.GetSystemImageList()) == NULL);
+	m_ImageList.DeleteImageList();
+	m_ImageList.Create(16, 16, theApp.m_iDfltImageListColorFlags | ILC_MASK, 0, 1);
+	m_ImageList.Add(CTempIconLoader(_T("EMPTY"))); //0
+	m_ImageList.Add(CTempIconLoader(_T("FileSharedServer"))); //1
+	m_ImageList.Add(CTempIconLoader(_T("FileSharedKad"))); //2
+	m_ImageList.Add(CTempIconLoader(_T("Rating_NotRated"))); //3
+	m_ImageList.Add(CTempIconLoader(_T("Rating_Fake"))); //4
+	m_ImageList.Add(CTempIconLoader(_T("Rating_Poor"))); //5
+	m_ImageList.Add(CTempIconLoader(_T("Rating_Fair"))); //6
+	m_ImageList.Add(CTempIconLoader(_T("Rating_Good"))); //7
+	m_ImageList.Add(CTempIconLoader(_T("Rating_Excellent"))); //8
+	m_ImageList.Add(CTempIconLoader(_T("Collection_Search"))); //9 rating for comments are searched on kad
+	m_ImageList.SetOverlayImage(m_ImageList.Add(CTempIconLoader(_T("FileCommentsOvl"))), 1);
+	// Apply the image list also to the listview control, even if we use our own 'DrawItem'.
+	// This is needed to give the listview control a chance to initialize the row height.
+	VERIFY(ApplyImageList(m_ImageList) == NULL);
+	theApp.GetFileTypeSystemImageIdx(thePrefs.GetMuleDirectory(EMULE_INCOMINGDIR)); // This is just a dummy call to force it to set m_hSystemImageList.
 }
 
 void CSharedFilesCtrl::Localize()
