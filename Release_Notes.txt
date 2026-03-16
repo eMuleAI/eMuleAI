@@ -3,6 +3,7 @@ VERSION HISTORY
 
 v1.1
 Added the "Ratio" and "Session Ratio" columns to the Upload, Queue, and Files lists.
+Fixed the “Enter an integer between 1 and 2147483647.” validation error that could appear only in certain languages (e.g., Chinese/Korean) when leaving the eMule AI options page.
 
 v1.0
 Initial public release. See the "New Features / Improvements / Bug Fixes" section below for details.

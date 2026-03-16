@@ -18,10 +18,10 @@
 #pragma once
 
 #define MOD_NAME		_T("AI") 
-#define MOD_VERSION		_T("AI v1.0") 
+#define MOD_VERSION		_T("AI v1.1") 
 #define MOD_MAIN_VER	1
-#define MOD_MIN_VER		0
-#define MOD_FLOAT_VER	1.0
+#define MOD_MIN_VER		1
+#define MOD_FLOAT_VER	1.1
 #define MOD_REPO_BASE_URL _T("https://github.com/eMuleAI/eMuleAI")
 #define MOD_PAGES_BASE_URL _T("https://eMuleAI.github.io")
 
