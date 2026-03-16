@@ -1912,12 +1912,20 @@ void CDarkMode::SubclassFolderDialogChildren(HWND hWnd)
 
 int CDarkMode::MessageBox(LPCTSTR lpszText, UINT nType, UINT nHelpId)
 {
-	// if system in light mode, use original
-	if (!IsDarkModeEnabled())
-		return AfxMessageBox(lpszText, nType);
+	return MessageBoxWithCaption(lpszText, NULL, nType, nHelpId);
+}
+
+int CDarkMode::MessageBoxWithCaption(LPCTSTR lpszText, LPCTSTR lpszCaption, UINT nType, UINT nHelpId)
+{
+	// if system in light mode, use standard MessageBox with custom caption
+	if (!IsDarkModeEnabled()) {
+		CWnd* pMainWnd = AfxGetMainWnd();
+		CString caption((lpszCaption != NULL && lpszCaption[0] != _T('\0')) ? lpszCaption : AfxGetAppName());
+		return ::MessageBox(pMainWnd ? pMainWnd->GetSafeHwnd() : NULL, lpszText, caption, nType);
+	}
 
 	// dark mode
-	CDarkModeMessageBoxDlg dlg(lpszText, nType);
+	CDarkModeMessageBoxDlg dlg(lpszText, nType, lpszCaption);
 	return dlg.DoModal();
 }
 
@@ -1933,7 +1941,7 @@ int CDarkMode::MessageBox(UINT nResID, UINT nType, UINT /*nHelpId*/)
 	if (!ok)
 		return AfxMessageBox(nResID, nType);
 
-	CDarkModeMessageBoxDlg dlg(text, nType);
+	CDarkModeMessageBoxDlg dlg(text, nType, NULL);
 	return dlg.DoModal();
 }
 
@@ -1969,9 +1977,10 @@ static const BtnDef g_btns[] = {
 	{ MB_CANCELTRYCONTINUE, IDCONTINUE,  _T("MB_CONTINUE") }
 };
 
-CDarkModeMessageBoxDlg::CDarkModeMessageBoxDlg(LPCTSTR text, UINT type, CWnd* pParent)
+CDarkModeMessageBoxDlg::CDarkModeMessageBoxDlg(LPCTSTR text, UINT type, LPCTSTR caption, CWnd* pParent)
 	: CDialog(IDD, pParent)
 	, m_text(text)
+	, m_caption(caption != NULL ? caption : _T(""))
 	, m_type(type)
 	, m_hIcon(nullptr)
 {
@@ -1990,7 +1999,7 @@ BOOL CDarkModeMessageBoxDlg::OnInitDialog()
 
 	// Set static control text before layout
 	SetDlgItemText(IDC_DARKMODE_TEXT, m_text);
-	SetWindowText(AfxGetAppName());
+	SetWindowText(m_caption.IsEmpty() ? AfxGetAppName() : m_caption);
 	HICON hIcon = CDarkMode::GetCustomSysIcon(m_type & MB_ICONMASK);
 
 	if (HICON hIcon = CDarkMode::GetCustomSysIcon(m_type & MB_ICONMASK))

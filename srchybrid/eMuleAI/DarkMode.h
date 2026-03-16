@@ -78,8 +78,9 @@ public:
     static void OnDestroy(); // clean up brush resources
 
     static HICON GetCustomSysIcon(UINT iconMask); // load appropriate icon
-    // Dark mode aware replacement for AfxMessageBox
+	// Dark mode aware replacement for AfxMessageBox
 	static int MessageBox(LPCTSTR lpszText, UINT nType = MB_OK, UINT nHelpId = 0);
+	static int MessageBoxWithCaption(LPCTSTR lpszText, LPCTSTR lpszCaption, UINT nType = MB_OK, UINT nHelpId = 0);
     static int MessageBox(UINT nPromptId, UINT nType = MB_OK, UINT nHelpId = 0);
 
     // Shows the folder picker with optional dark-mode styling
@@ -119,11 +120,12 @@ private:
 class CDarkModeMessageBoxDlg : public CDialog
 {
 public:
-    CDarkModeMessageBoxDlg(LPCTSTR text, UINT type, CWnd* pParent = nullptr);
+	CDarkModeMessageBoxDlg(LPCTSTR text, UINT type, LPCTSTR caption, CWnd* pParent = nullptr);
     enum { IDD = IDD_DARKMODE_MSGBOX };
 
 private:
     CString m_text;
+	CString m_caption;
     UINT    m_type;
     HICON   m_hIcon;
     bool   m_bTrackingMouse;    // have we set up mouse leave tracking?

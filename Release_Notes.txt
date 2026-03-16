@@ -3,6 +3,8 @@ VERSION HISTORY
 
 v1.2
 Fixed the “Shared eD2K | Kad” column in the Files window.
+Fixed some Spanish and Galician localizations (PR by PepinoGz and Aokromes).
+Updated eD2K link dialog title
 
 v1.1
 Added the "Ratio" and "Session Ratio" columns to the Upload, Queue, and Files lists.

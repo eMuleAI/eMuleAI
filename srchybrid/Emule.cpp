@@ -2186,7 +2186,8 @@ void CemuleApp::SearchClipboard()
 			strLinksDisplay.AppendFormat(_T("\r\n%s..."), (LPCTSTR)strLinks.Left(509));
 		else
 			strLinksDisplay.AppendFormat(_T("\r\n%s"), (LPCTSTR)strLinks);
-		if (CDarkMode::MessageBox(strLinksDisplay, MB_YESNO | MB_TOPMOST) == IDYES)
+		const CString strCaption(GetResString(_T("PW_MOD")));
+		if (CDarkMode::MessageBoxWithCaption(strLinksDisplay, strCaption, MB_YESNO | MB_TOPMOST) == IDYES)
 			AddEd2kLinksToDownload(pszTrimmedLinks, 0);
 	}
 	m_strLastClipboardContents = strLinks; // Save the unmodified(!) clipboard contents
