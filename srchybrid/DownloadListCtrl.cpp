@@ -193,7 +193,7 @@ void CDownloadListCtrl::Init()
 	InsertColumn(6,		EMPTY,	LVCFMT_RIGHT,	60);							//DL_SOURCES
 	InsertColumn(7,		EMPTY,	LVCFMT_LEFT,	DFLT_PRIORITY_COL_WIDTH);		//PRIORITY
 	InsertColumn(8,		EMPTY,	LVCFMT_LEFT,	70);							//STATUS
-	InsertColumn(9,		EMPTY,	LVCFMT_LEFT,	110);							//DL_REMAINS
+	InsertColumn(9,		EMPTY,	LVCFMT_RIGHT,	110);							//DL_REMAINS
 	InsertColumn(10,	EMPTY,	LVCFMT_LEFT,	150, -1, true);					//LASTSEENCOMPL
 	InsertColumn(11,	EMPTY,	LVCFMT_LEFT,	120, -1, true);					//FD_LASTCHANGE
 	InsertColumn(12,	EMPTY,	LVCFMT_LEFT,	100, -1, true);					//CAT
