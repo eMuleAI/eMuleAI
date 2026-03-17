@@ -2,6 +2,7 @@ VERSION HISTORY
 ================================================================
 
 v1.2
+Fixed an issue where obfuscated server logins could require multiple attempts even on fully obfuscation-capable server lists.
 Fixed the “Shared eD2K | Kad” column in the Files window.
 Fixed an issue where the download list didn’t refresh immediately after applying a category filter.
 Fixed a crash caused the Download Clients list.

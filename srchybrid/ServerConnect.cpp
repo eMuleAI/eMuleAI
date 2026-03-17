@@ -45,8 +45,12 @@ static char THIS_FILE[] = __FILE__;
 
 void CServerConnect::TryAnotherConnectionRequest()
 {
-		if (connectionattempts.GetCount() < 2 - static_cast<INT_PTR>(thePrefs.IsSafeServerConnectEnabled())) {
-		CServer* next_server = theApp.serverlist->GetNextServerInLoop();
+	if (connectionattempts.GetCount() < 2 - static_cast<INT_PTR>(thePrefs.IsSafeServerConnectEnabled())) {
+		CServer* next_server = theApp.serverlist->GetNextServer(m_bTryObfuscated);
+		if (next_server == NULL && thePrefs.GetRepeatServerList()) {
+			theApp.serverlist->SetServerPosition(0);
+			next_server = theApp.serverlist->GetNextServer(m_bTryObfuscated);
+		}
 		if (next_server == NULL) {
 			if (connectionattempts.IsEmpty()) {
 				if (m_bTryObfuscated && !thePrefs.IsCryptLayerRequired()) {
