@@ -5465,7 +5465,8 @@ void CemuleDlg::ShowSpeedGraph(bool bShow)
 
 void CemuleDlg::SetSpeedGraphLimits()
 {
-	m_UpSpeedGraph.Set_TrafficValue(theApp.uploadqueue->GetDatarate());
+	const uint32 uUploadRate = theApp.uploadqueue->HasActiveUploads() ? theApp.uploadqueue->GetDatarate() : 0;
+	m_UpSpeedGraph.Set_TrafficValue(uUploadRate);
 	m_DownSpeedGraph.Set_TrafficValue(theApp.downloadqueue->GetDatarate());
 }
 
