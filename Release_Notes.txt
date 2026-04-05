@@ -40,7 +40,6 @@ Fixed an issue where the Restore last main window option could reopen Transfers 
 Fixed an issue where the Transfers window could show an extra horizontal scrollbar at smaller window sizes.
 Fixed the Shared Files details panel so the Statistics and Content tabs keep the correct height on affected systems.
 Fixed an issue where the search tab scroll arrows could render black in dark mode until hovered.
-Fixed blurry rendering in the Obtained Parts columns in the Transfers window while preserving the 3D bar style.
 Replaced legacy ID3Lib integration with MediaInfoLib for cleaner media metadata handling and simpler maintenance.
 Improved list view responsiveness during bulk operations by batching expensive selection and scroll state restores.
 Improved shutdown safety by skipping part metadata saves on low temporary disk space and updating backup metadata atomically.
