@@ -55,14 +55,15 @@ void CKadSearchListCtrl::Init()
 	SetPrefsKey(_T("KadSearchListCtrl"));
 	SetExtendedStyle(LVS_EX_FULLROWSELECT | LVS_EX_INFOTIP);
 
-	InsertColumn(colNum,			EMPTY,	LVCFMT_LEFT,	60);						//NUMBER
+	// Alignment rule: left for text, dates, and status labels; right for sizes, rates, counts, durations, and percentages.
+	InsertColumn(colNum,			EMPTY,	LVCFMT_RIGHT,	60);						//NUMBER
 	InsertColumn(colKey,			EMPTY,	LVCFMT_LEFT,	DFLT_HASH_COL_WIDTH);		//KEY
 	InsertColumn(colType,			EMPTY,	LVCFMT_LEFT,	100);						//TYPE
 	InsertColumn(colName,			EMPTY,	LVCFMT_LEFT,	DFLT_FILENAME_COL_WIDTH);	//SW_NAME
 	InsertColumn(colStop,			EMPTY,	LVCFMT_LEFT,	100);						//STATUS
-	InsertColumn(colLoad,			EMPTY,	LVCFMT_LEFT,	100);						//THELOAD
-	InsertColumn(colPacketsSent,	EMPTY,	LVCFMT_LEFT,	100);						//(PACKSENT
-	InsertColumn(colResponses,		EMPTY,	LVCFMT_LEFT,	100);						//RESPONSES
+	InsertColumn(colLoad,			EMPTY,	LVCFMT_RIGHT,	100);						//THELOAD
+	InsertColumn(colPacketsSent,	EMPTY,	LVCFMT_RIGHT,	100);						//(PACKSENT
+	InsertColumn(colResponses,		EMPTY,	LVCFMT_RIGHT,	100);						//RESPONSES
 
 	SetAllIcons();
 	Localize();

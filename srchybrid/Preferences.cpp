@@ -494,6 +494,7 @@ bool	CPreferences::m_bMoviePreviewBackup;
 int		CPreferences::m_iPreviewSmallBlocks;
 bool	CPreferences::m_bPreviewCopiedArchives;
 bool	CPreferences::m_bPreviewOnIconDblClk;
+bool	CPreferences::m_bPreviewOnFileNameDblClk;
 bool	CPreferences::m_bCheckFileOpen;
 bool	CPreferences::indicateratings;
 bool	CPreferences::watchclipboard;
@@ -682,16 +683,16 @@ bool	CPreferences::m_bDownloadCheckerSkipIncompleteFileConfirmation;
 bool	CPreferences::m_bDownloadCheckerMarkAsBlacklisted;
 bool	CPreferences::m_bDownloadCheckerAutoMarkAsBlacklisted;
 
-int		CPreferences::m_iFileInspector;
-bool	CPreferences::m_bFileInspectorFake;
-bool	CPreferences::m_bFileInspectorDRM;
-bool	CPreferences::m_bFileInspectorInvalidExt;
-int		CPreferences::m_iFileInspectorCheckPeriod;
-int		CPreferences::m_iFileInspectorCompletedThreshold;
-int		CPreferences::m_iFileInspectorZeroPercentageThreshold;
-int		CPreferences::m_iFileInspectorCompressionThreshold;
-bool	CPreferences::m_bFileInspectorBypassZeroPercentage;
-int		CPreferences::m_iFileInspectorCompressionThresholdToBypassZero;
+int		CPreferences::m_iDownloadInspector;
+bool	CPreferences::m_bDownloadInspectorFake;
+bool	CPreferences::m_bDownloadInspectorDRM;
+bool	CPreferences::m_bDownloadInspectorInvalidExt;
+int		CPreferences::m_iDownloadInspectorCheckPeriod;
+int		CPreferences::m_iDownloadInspectorCompletedThreshold;
+int		CPreferences::m_iDownloadInspectorZeroPercentageThreshold;
+int		CPreferences::m_iDownloadInspectorCompressionThreshold;
+bool	CPreferences::m_bDownloadInspectorBypassZeroPercentage;
+int		CPreferences::m_iDownloadInspectorCompressionThresholdToBypassZero;
 
 bool	 CPreferences::m_bGroupKnownAtTheBottom;
 int		 CPreferences::m_iSpamThreshold;
@@ -707,6 +708,8 @@ bool	CPreferences::m_bFileHistoryShowShared;
 bool	CPreferences::m_bFileHistoryShowDuplicate;
 std::atomic_bool CPreferences::m_bAutoShareSubdirs{ false };
 std::atomic_bool CPreferences::m_bDontShareExtensions{ true };
+CCriticalSection CPreferences::m_mutPreferences;
+CCriticalSection CPreferences::m_csSharedDirList;
 CCriticalSection CPreferences::m_csDontShareExtList;
 CString CPreferences::m_sDontShareExtensionsList;
 bool	CPreferences::m_bAdjustNTFSDaylightFileTime = false; // Official preference: 'true' causes rehashing in XP and above when DST switches on/off
@@ -867,6 +870,49 @@ bool	 CPreferences::m_bBlacklistAutoRemoveFromManual;
 bool	 CPreferences::m_bBlacklistLog;
 CStringList CPreferences::blacklist_list;
 
+void CPreferences::CopySharedDirectoryList(CStringList& out)
+{
+	if (&out == &shareddir_list)
+		return;
+
+	out.RemoveAll();
+	CSingleLock lock(&m_csSharedDirList, TRUE);
+	for (POSITION pos = shareddir_list.GetHeadPosition(); pos != NULL;)
+		out.AddTail(shareddir_list.GetNext(pos));
+}
+
+void CPreferences::ReplaceSharedDirectoryList(const CStringList& in)
+{
+	if (&in == &shareddir_list)
+		return;
+
+	CSingleLock lock(&m_csSharedDirList, TRUE);
+	shareddir_list.RemoveAll();
+	for (POSITION pos = in.GetHeadPosition(); pos != NULL;)
+		shareddir_list.AddTail(in.GetNext(pos));
+}
+
+bool CPreferences::AddSharedDirectoryIfAbsent(const CString& dir)
+{
+	if (dir.IsEmpty())
+		return false;
+
+	CSingleLock lock(&m_csSharedDirList, TRUE);
+	for (POSITION pos = shareddir_list.GetHeadPosition(); pos != NULL;) {
+		if (EqualPaths(shareddir_list.GetNext(pos), dir))
+			return false;
+	}
+
+	shareddir_list.AddTail(dir);
+	return true;
+}
+
+INT_PTR CPreferences::GetSharedDirectoryCount()
+{
+	CSingleLock lock(&m_csSharedDirList, TRUE);
+	return shareddir_list.GetCount();
+}
+
 CPreferences::CPreferences()
 {
 #ifdef _DEBUG
@@ -885,7 +931,10 @@ void CPreferences::ReleaseExtStruct() noexcept
 {
 	delete prefsExt;
 	prefsExt = NULL;
-	shareddir_list.RemoveAll();
+	{
+		CSingleLock lock(&m_csSharedDirList, TRUE);
+		shareddir_list.RemoveAll();
+	}
 	addresses_list.RemoveAll();
 	blacklist_list.RemoveAll();
 	tempdir.RemoveAll();
@@ -953,6 +1002,7 @@ void CPreferences::Init()
 
 		// shared directories
 		strFullPath.Format(_T("%s") SHAREDDIRS, (LPCTSTR)sConfDir);
+		CStringList loadedSharedDirs;
 	bool bIsUnicodeFile = IsUnicodeFile(strFullPath); // check for BOM
 	// open the text file either as ANSI (text) or Unicode (binary),
 	// this way we can read old and new files with almost the same code.
@@ -970,7 +1020,7 @@ void CPreferences::Init()
 					// skip non-shareable directories
 					// maybe skip non-existing directories on fixed disks only
 					if (IsShareableDirectory(toadd) && (m_bKeepUnavailableFixedSharedDirs || DirAccsess(toadd)))
-						shareddir_list.AddTail(toadd);
+						loadedSharedDirs.AddTail(toadd);
 				}
 			}
 		}
@@ -978,10 +1028,12 @@ void CPreferences::Init()
 			ASSERT(0);
 			ex->Delete();
 		}
-			sdirfile.Close();
-		}
+		sdirfile.Close();
+	}
 
-			// Do not expand shareddir_list at runtime; recursion is handled by search logic and tree builder.
+	ReplaceSharedDirectoryList(loadedSharedDirs);
+
+	// Do not expand shareddir_list at runtime; recursion is handled by search logic and tree builder.
 
 	// server list addresses
 	strFullPath.Format(_T("%s") _T("addresses.dat"), (LPCTSTR)sConfDir);
@@ -1193,7 +1245,10 @@ void CPreferences::Uninit()
 	sInternetSecurityZone.Empty();
 	ForceReleaseCString(m_strInformBadClientsText);
 	m_sDontShareExtensionsList.Empty();
-	shareddir_list.RemoveAll();
+	{
+		CSingleLock lock(&m_csSharedDirList, TRUE);
+		shareddir_list.RemoveAll();
+	}
 	addresses_list.RemoveAll();
 	blacklist_list.RemoveAll();
 	thePrefs.m_CommunityTagCounterMap.RemoveAll();
@@ -1494,9 +1549,16 @@ bool CPreferences::SaveSharedFolders()
 	const CString& strSharesPath(sConfDir + SHAREDDIRS);
 	static LPCTSTR const stmp = _T(".tmp");
 	bool bError = false;
+	CStringList sharedDirs;
 
-	// Collapse into minimal roots before persisting
-	CollapseSharedDirsToRoots();
+	CopySharedDirectoryList(sharedDirs);
+	if (thePrefs.GetAutoShareSubdirs())
+	{
+		CStringList excludedSharedDirs;
+		if (theApp.sharedfiles != NULL)
+			theApp.sharedfiles->CopyExcludedSharedDirectories(excludedSharedDirs);
+		CollapseSharedDirsToRoots(sharedDirs, excludedSharedDirs.IsEmpty() ? NULL : &excludedSharedDirs);
+	}
 
 	CStdioFile file;
 	if (file.Open(strSharesPath + stmp, CFile::modeCreate | CFile::modeWrite | CFile::shareDenyWrite | CFile::typeBinary)) {
@@ -1504,8 +1566,8 @@ bool CPreferences::SaveSharedFolders()
 			// write UTF-16LE byte order mark 0xFEFF
 			static const WORD wBOM = u'\xFEFF';
 			file.Write(&wBOM, sizeof wBOM);
-			for (POSITION pos = shareddir_list.GetHeadPosition(); pos != NULL;) {
-				file.WriteString(shareddir_list.GetNext(pos));
+			for (POSITION pos = sharedDirs.GetHeadPosition(); pos != NULL;) {
+				file.WriteString(sharedDirs.GetNext(pos));
 				file.Write(_T("\r\n"), 2 * sizeof(TCHAR));
 			}
 			file.Close();
@@ -1521,33 +1583,63 @@ bool CPreferences::SaveSharedFolders()
 	return bError;
 }
 
-// Build a minimal set of roots by removing entries which are subdirectories of others (in-memory only).
-void CPreferences::CollapseSharedDirsToRoots()
+// Build a minimal set of roots by removing entries which are redundant when recursive sharing is enabled.
+void CPreferences::CollapseSharedDirsToRoots(CStringList& sharedDirs)
 {
+	CollapseSharedDirsToRoots(sharedDirs, NULL);
+}
+
+void CPreferences::CollapseSharedDirsToRoots(CStringList& sharedDirs, const CStringList* pExcludedSharedDirs)
+{
+	if (sharedDirs.IsEmpty() || !thePrefs.GetAutoShareSubdirs())
+		return;
+
 	CStringList collapsed;
-	for (POSITION p = shareddir_list.GetHeadPosition(); p != NULL;) {
-		const CString cur = shareddir_list.GetNext(p);
+	for (POSITION p = sharedDirs.GetHeadPosition(); p != NULL;) {
+		const CString cur = sharedDirs.GetNext(p);
 		bool isChild = false;
-		for (POSITION q = shareddir_list.GetHeadPosition(); q != NULL;) {
-			const CString other = shareddir_list.GetNext(q);
-			if (!EqualPaths(cur, other) && IsSubDirectoryOf(cur, other)) { isChild = true; break; }
+		for (POSITION q = sharedDirs.GetHeadPosition(); q != NULL;) {
+			const CString other = sharedDirs.GetNext(q);
+			if (EqualPaths(cur, other) || !IsSubDirectoryOf(cur, other))
+				continue;
+
+			bool bNeedsOwnRule = false;
+			if (pExcludedSharedDirs != NULL) {
+				for (POSITION ex = pExcludedSharedDirs->GetHeadPosition(); ex != NULL;) {
+					const CString excluded = pExcludedSharedDirs->GetNext(ex);
+					if ((EqualPaths(excluded, other) || IsSubDirectoryOf(excluded, other)) && (EqualPaths(cur, excluded) || IsSubDirectoryOf(cur, excluded))) {
+						bNeedsOwnRule = true;
+						break;
+					}
+				}
+			}
+
+			if (!bNeedsOwnRule) {
+				isChild = true;
+				break;
+			}
 		}
 		if (!isChild)
 			collapsed.AddTail(cur);
 	}
-	shareddir_list.RemoveAll();
-	shareddir_list.AddTail(&collapsed);
+
+	sharedDirs.RemoveAll();
+	sharedDirs.AddTail(&collapsed);
 }
 
 // Long-path aware recursive expansion of shared roots for UI usage (in-memory only, not persisted).
 void CPreferences::ExpandSharedDirsForUI()
 {
-	if (shareddir_list.IsEmpty())
+	CStringList sharedDirs;
+	CopySharedDirectoryList(sharedDirs);
+	if (sharedDirs.IsEmpty())
 		return;
 
+	CStringList expanded;
+	expanded.AddTail(&sharedDirs);
 	CStringList addList;
-	for (POSITION pos = shareddir_list.GetHeadPosition(); pos != NULL;) {
-		CString root = shareddir_list.GetNext(pos);
+	for (POSITION pos = sharedDirs.GetHeadPosition(); pos != NULL;) {
+		CString root = sharedDirs.GetNext(pos);
 		MakeFoldername(root);
 		CList<CString, const CString&> stack;
 		stack.AddTail(root);
@@ -1567,8 +1659,8 @@ void CPreferences::ExpandSharedDirsForUI()
 						MakeFoldername(sub);
 						if (IsShareableDirectory(sub)) {
 							bool exists = false;
-							for (POSITION chk = shareddir_list.GetHeadPosition(); chk != NULL; )
-								if (EqualPaths(shareddir_list.GetNext(chk), sub)) { exists = true; break; }
+							for (POSITION chk = expanded.GetHeadPosition(); chk != NULL; )
+								if (EqualPaths(expanded.GetNext(chk), sub)) { exists = true; break; }
 							if (!exists)
 								addList.AddTail(sub);
 							stack.AddTail(sub);
@@ -1580,7 +1672,8 @@ void CPreferences::ExpandSharedDirsForUI()
 		}
 	}
 	if (!addList.IsEmpty())
-		shareddir_list.AddTail(&addList);
+		expanded.AddTail(&addList);
+	ReplaceSharedDirectoryList(expanded);
 }
 
 void CPreferences::SetRecordStructMembers()
@@ -2167,7 +2260,7 @@ void CPreferences::ReloadStartupStateAfterMigration()
 	}
 	CreateUserHash();
 
-	shareddir_list.RemoveAll();
+	CStringList loadedSharedDirs;
 	addresses_list.RemoveAll();
 
 	CStdioFile sdirfile;
@@ -2184,7 +2277,7 @@ void CPreferences::ReloadStartupStateAfterMigration()
 				if (!toadd.IsEmpty()) {
 					MakeFoldername(toadd);
 					if (IsShareableDirectory(toadd) && (m_bKeepUnavailableFixedSharedDirs || DirAccsess(toadd)))
-						shareddir_list.AddTail(toadd);
+						loadedSharedDirs.AddTail(toadd);
 				}
 			}
 		}
@@ -2194,6 +2287,9 @@ void CPreferences::ReloadStartupStateAfterMigration()
 		}
 		sdirfile.Close();
 	}
+
+	ReplaceSharedDirectoryList(loadedSharedDirs);
+	ReloadCats();
 
 	strFullPath.Format(_T("%s") _T("addresses.dat"), (LPCTSTR)sConfDir);
 	bIsUnicodeFile = IsUnicodeFile(strFullPath);
@@ -2402,6 +2498,7 @@ void CPreferences::SavePreferences()
 	ini.WriteBool(_T("SparsePartFiles"), m_bSparsePartFiles);
 	ini.WriteBool(_T("ResolveSharedShellLinks"), m_bResolveSharedShellLinks);
 	ini.WriteString(_T("YourHostname"), m_strYourHostname);
+	ini.WriteBool(_T("ImportParts"), m_bImportParts);
 	ini.WriteBool(_T("CheckFileOpen"), m_bCheckFileOpen);
 	ini.WriteBool(_T("ShowWin7TaskbarGoodies"), m_bShowWin7TaskbarGoodies);
 
@@ -2678,17 +2775,17 @@ void CPreferences::SavePreferences()
 	ini.WriteBool(L"DownloadCheckerSkipIncompleteFileConfirmation", m_bDownloadCheckerSkipIncompleteFileConfirmation);
 	ini.WriteBool(L"DownloadCheckerMarkAsBlacklisted", m_bDownloadCheckerMarkAsBlacklisted);
 	ini.WriteBool(L"DownloadCheckerAutoMarkAsBlacklisted", m_bDownloadCheckerAutoMarkAsBlacklisted);
-	m_iFileInspector = (m_bFileInspectorFake || m_bFileInspectorFake) ? m_iFileInspector : 0; // If none of these checkboxes selected, force 0;
-	ini.WriteInt(L"FileInspector", m_iFileInspector);
-	ini.WriteBool(L"FileInspectorFake", m_bFileInspectorFake);
-	ini.WriteBool(L"FileInspectorDRM", m_bFileInspectorDRM);
-	ini.WriteBool(L"FileInspectorInvalidExt", m_bFileInspectorInvalidExt);
-	ini.WriteInt(L"FileInspectorCheckPeriod", m_iFileInspectorCheckPeriod);
-	ini.WriteInt(L"FileInspectorCompletedThreshold", m_iFileInspectorCompletedThreshold);
-	ini.WriteInt(L"FileInspectorZeroPercentageThreshold", m_iFileInspectorZeroPercentageThreshold);
-	ini.WriteInt(L"FileInspectorCompressionThreshold", m_iFileInspectorCompressionThreshold);
-	ini.WriteBool(L"FileInspectorBypassZeroPercentage", m_bFileInspectorBypassZeroPercentage);
-	ini.WriteInt(L"FileInspectorCompressionThresholdToBypassZero", m_iFileInspectorCompressionThresholdToBypassZero);
+	m_iDownloadInspector = (m_bDownloadInspectorFake || m_bDownloadInspectorFake) ? m_iDownloadInspector : 0; // If none of these checkboxes selected, force 0;
+	ini.WriteInt(L"DownloadInspector", m_iDownloadInspector);
+	ini.WriteBool(L"DownloadInspectorFake", m_bDownloadInspectorFake);
+	ini.WriteBool(L"DownloadInspectorDRM", m_bDownloadInspectorDRM);
+	ini.WriteBool(L"DownloadInspectorInvalidExt", m_bDownloadInspectorInvalidExt);
+	ini.WriteInt(L"DownloadInspectorCheckPeriod", m_iDownloadInspectorCheckPeriod);
+	ini.WriteInt(L"DownloadInspectorCompletedThreshold", m_iDownloadInspectorCompletedThreshold);
+	ini.WriteInt(L"DownloadInspectorZeroPercentageThreshold", m_iDownloadInspectorZeroPercentageThreshold);
+	ini.WriteInt(L"DownloadInspectorCompressionThreshold", m_iDownloadInspectorCompressionThreshold);
+	ini.WriteBool(L"DownloadInspectorBypassZeroPercentage", m_bDownloadInspectorBypassZeroPercentage);
+	ini.WriteInt(L"DownloadInspectorCompressionThresholdToBypassZero", m_iDownloadInspectorCompressionThresholdToBypassZero);
 	ini.WriteBool(L"GroupKnownAtTheBottom", m_bGroupKnownAtTheBottom);
 	ini.WriteInt(L"SpamThreshold", m_iSpamThreshold);
 	ini.WriteInt(L"KadSearchKeywordTotal", m_iKadSearchKeywordTotal);
@@ -2792,6 +2889,7 @@ void CPreferences::SavePreferences()
 	ini.WriteBool(L"RTLWindowsLayout", m_bRTLWindowsLayout);
 	ini.WriteBool(L"ShowActiveDownloadsBold", m_bShowActiveDownloadsBold);
 	ini.WriteBool(L"PreviewOnIconDblClk", m_bPreviewOnIconDblClk);
+	ini.WriteBool(L"PreviewOnFileNameDblClk", m_bPreviewOnFileNameDblClk);
 	ini.WriteString(L"InternetSecurityZone", sInternetSecurityZone);
 	ini.WriteInt(L"MaxMessageSessions", maxmsgsessions);
 	ini.WriteBool(L"PreferRestrictedOverUser", m_bPreferRestrictedOverUser);
@@ -2920,7 +3018,7 @@ void CPreferences::ResetStatsColor(int index)
 	{
 		RGB(0, 0, 64),		RGB(192, 192, 255),	RGB(128, 255, 128),	RGB(0, 210, 0),		RGB(0, 128, 0),
 		RGB(255, 128, 128),	RGB(200, 0, 0),		RGB(140, 0, 0),		RGB(150, 150, 255),	RGB(192, 0, 192),
-		RGB(255, 255, 128),	RGB(0, 255, 0), /**/	RGB(255, 255, 255),	RGB(255, 255, 255),	RGB(255, 190, 190)
+		RGB(255, 255, 128),	RGB(50, 205, 50), /**/	RGB(255, 255, 255),	RGB(255, 255, 255),	RGB(255, 190, 190)
 	};
 	if (index >= 0 && index < _countof(defcol)) {
 		m_adwStatsColors[index] = defcol[index];
@@ -3076,10 +3174,14 @@ void CPreferences::LoadPreferences()
 	if (m_minupload < 1)
 		m_minupload = 1;
 	m_maxupload = (uint32)ini.GetInt(_T("MaxUpload"), -1);
+	if (m_maxupload == 0)
+		m_maxupload = UNLIMITED;
 	if (m_maxupload > maxGraphUploadRate && m_maxupload != UNLIMITED)
 		m_maxupload = maxGraphUploadRate * 4 / 5;
 
 	m_maxdownload = (uint32)ini.GetInt(_T("MaxDownload"), -1);
+	if (m_maxdownload == 0)
+		m_maxdownload = UNLIMITED;
 	if (m_maxdownload > maxGraphDownloadRate && m_maxdownload != UNLIMITED)
 		m_maxdownload = maxGraphDownloadRate * 9 / 10;
 	maxconnections = ini.GetInt(_T("MaxConnections"), GetRecommendedMaxConnections());
@@ -3186,7 +3288,7 @@ void CPreferences::LoadPreferences()
 	m_bAddServersFromClients = ini.GetBool(_T("AddServersFromClient"), false);
 	splashscreen = ini.GetBool(_T("Splashscreen"), true);
 	bringtoforeground = ini.GetBool(_T("BringToFront"), true);
-	transferDoubleclick = ini.GetBool(_T("TransferDoubleClick"), false);
+	transferDoubleclick = ini.GetBool(_T("TransferDoubleClick"), true);
 	beepOnError = ini.GetBool(_T("BeepOnError"), true);
 	confirmExit = ini.GetBool(_T("ConfirmExit"), true);
 	filterLANIPs = ini.GetBool(_T("FilterBadIPs"), true);
@@ -3218,7 +3320,7 @@ void CPreferences::LoadPreferences()
 	m_bResolveSharedShellLinks = ini.GetBool(_T("ResolveSharedShellLinks"), false);
 	m_bKeepUnavailableFixedSharedDirs = ini.GetBool(_T("KeepUnavailableFixedSharedDirs"), false);
 	m_strYourHostname = ini.GetString(_T("YourHostname"), EMPTY);
-	m_bImportParts = false; //enable on demand for the current session only
+	m_bImportParts = ini.GetBool(_T("ImportParts"), false);
 
 	// Barry - New properties...
 	m_bAutoConnectToStaticServersOnly = ini.GetBool(_T("AutoConnectStaticOnly"), false);
@@ -3352,6 +3454,7 @@ void CPreferences::LoadPreferences()
 	m_bDAP = ini.GetBool(_T("DAPPref"), true);
 	m_bUAP = ini.GetBool(_T("UAPPref"), true);
 	m_bPreviewOnIconDblClk = ini.GetBool(_T("PreviewOnIconDblClk"), true);
+	m_bPreviewOnFileNameDblClk = ini.GetBool(_T("PreviewOnFileNameDblClk"), false);
 	m_bCheckFileOpen = ini.GetBool(_T("CheckFileOpen"), true);
 	indicateratings = ini.GetBool(_T("IndicateRatings"), true);
 	watchclipboard = ini.GetBool(_T("WatchClipboard4ED2kFilelinks"), true);
@@ -3539,7 +3642,7 @@ void CPreferences::LoadPreferences()
 		if (_stscanf(ini.GetString(buffer, EMPTY), _T("%li"), (long*)&m_adwStatsColors[i]) != 1)
 			ResetStatsColor(i);
 	}
-	m_bHasCustomTaskIconColor = ini.GetBool(_T("HasCustomTaskIconColor"), false);
+	m_bHasCustomTaskIconColor = ini.GetBool(_T("HasCustomTaskIconColor"), true);
 	m_bShowVerticalHourMarkers = ini.GetBool(_T("ShowVerticalHourMarkers"), true);
 
 	// I changed this to a separate function because it is now also used
@@ -3637,27 +3740,27 @@ void CPreferences::LoadPreferences()
 	m_bDownloadCheckerSkipIncompleteFileConfirmation = ini.GetBool(L"DownloadCheckerSkipIncompleteFileConfirmation", false);
 	m_bDownloadCheckerMarkAsBlacklisted = ini.GetBool(L"DownloadCheckerMarkAsBlacklisted", true);
 	m_bDownloadCheckerAutoMarkAsBlacklisted = ini.GetBool(L"DownloadCheckerAutoMarkAsBlacklisted", true);
-	m_bFileInspectorFake = ini.GetBool(L"FileInspectorFake", true);
-	m_bFileInspectorDRM = ini.GetBool(L"FileInspectorDRM", true);
-	m_bFileInspectorInvalidExt = ini.GetBool(L"FileInspectorInvalidExt", true);
-	m_iFileInspector = ini.GetInt(L"FileInspector", 2);
-	m_iFileInspector = (m_bFileInspectorFake || m_bFileInspectorFake) ? m_iFileInspector : 0; // If none of these checkboxes selected, force 0;
-	m_iFileInspectorCheckPeriod = ini.GetInt(L"FileInspectorCheckPeriod", 30);
-	if (m_iFileInspectorCheckPeriod < 5)
-		m_iFileInspectorCheckPeriod = 30;
-	m_iFileInspectorCompletedThreshold = ini.GetInt(L"FileInspectorCompletedThreshold", 1024);
-	if (m_iFileInspectorCompletedThreshold < 1)
-		m_iFileInspectorCompletedThreshold = 1024;
-	m_iFileInspectorZeroPercentageThreshold = ini.GetInt(L"FileInspectorZeroPercentageThreshold", 1);
-	if (m_iFileInspectorZeroPercentageThreshold < 1 || m_iFileInspectorZeroPercentageThreshold > 100)
-		m_iFileInspectorZeroPercentageThreshold = 90;
-	m_iFileInspectorCompressionThreshold = ini.GetInt(L"FileInspectorCompressionThreshold", 100);
-	if (m_iFileInspectorCompressionThreshold < 100)
-		m_iFileInspectorCompressionThreshold = 100;
-	m_bFileInspectorBypassZeroPercentage = ini.GetBool(L"FileInspectorBypassZeroPercentage", true);
-	m_iFileInspectorCompressionThresholdToBypassZero = ini.GetInt(L"FileInspectorCompressionThresholdToBypassZero", m_iFileInspectorCompressionThreshold * 10 < 10000 ? 10000 : m_iFileInspectorCompressionThreshold * 10);
-	if (m_iFileInspectorCompressionThresholdToBypassZero <= m_iFileInspectorCompressionThreshold)
-		m_iFileInspectorCompressionThresholdToBypassZero = m_iFileInspectorCompressionThreshold * 10 < 10000 ? 10000 : m_iFileInspectorCompressionThreshold * 10;
+	m_bDownloadInspectorFake = ini.GetBool(L"DownloadInspectorFake", ini.GetBool(L"DownloadInspectorFake", true));
+	m_bDownloadInspectorDRM = ini.GetBool(L"DownloadInspectorDRM", ini.GetBool(L"DownloadInspectorDRM", true));
+	m_bDownloadInspectorInvalidExt = ini.GetBool(L"DownloadInspectorInvalidExt", ini.GetBool(L"DownloadInspectorInvalidExt", true));
+	m_iDownloadInspector = ini.GetInt(L"DownloadInspector", ini.GetInt(L"DownloadInspector", 2));
+	m_iDownloadInspector = (m_bDownloadInspectorFake || m_bDownloadInspectorFake) ? m_iDownloadInspector : 0; // If none of these checkboxes selected, force 0;
+	m_iDownloadInspectorCheckPeriod = ini.GetInt(L"DownloadInspectorCheckPeriod", ini.GetInt(L"DownloadInspectorCheckPeriod", 30));
+	if (m_iDownloadInspectorCheckPeriod < 5)
+		m_iDownloadInspectorCheckPeriod = 30;
+	m_iDownloadInspectorCompletedThreshold = ini.GetInt(L"DownloadInspectorCompletedThreshold", ini.GetInt(L"DownloadInspectorCompletedThreshold", 1024));
+	if (m_iDownloadInspectorCompletedThreshold < 1)
+		m_iDownloadInspectorCompletedThreshold = 1024;
+	m_iDownloadInspectorZeroPercentageThreshold = ini.GetInt(L"DownloadInspectorZeroPercentageThreshold", ini.GetInt(L"DownloadInspectorZeroPercentageThreshold", 1));
+	if (m_iDownloadInspectorZeroPercentageThreshold < 1 || m_iDownloadInspectorZeroPercentageThreshold > 100)
+		m_iDownloadInspectorZeroPercentageThreshold = 90;
+	m_iDownloadInspectorCompressionThreshold = ini.GetInt(L"DownloadInspectorCompressionThreshold", ini.GetInt(L"DownloadInspectorCompressionThreshold", 100));
+	if (m_iDownloadInspectorCompressionThreshold < 100)
+		m_iDownloadInspectorCompressionThreshold = 100;
+	m_bDownloadInspectorBypassZeroPercentage = ini.GetBool(L"DownloadInspectorBypassZeroPercentage", ini.GetBool(L"DownloadInspectorBypassZeroPercentage", true));
+	m_iDownloadInspectorCompressionThresholdToBypassZero = ini.GetInt(L"DownloadInspectorCompressionThresholdToBypassZero", ini.GetInt(L"DownloadInspectorCompressionThresholdToBypassZero", m_iDownloadInspectorCompressionThreshold * 10 < 10000 ? 10000 : m_iDownloadInspectorCompressionThreshold * 10));
+	if (m_iDownloadInspectorCompressionThresholdToBypassZero <= m_iDownloadInspectorCompressionThreshold)
+		m_iDownloadInspectorCompressionThresholdToBypassZero = m_iDownloadInspectorCompressionThreshold * 10 < 10000 ? 10000 : m_iDownloadInspectorCompressionThreshold * 10;
 	m_bGroupKnownAtTheBottom = ini.GetBool(_T("GroupKnownAtTheBottom"), true);
 	m_iSpamThreshold = ini.GetInt(L"SpamThreshold ", SEARCH_SPAM_THRESHOLD);
 	m_iKadSearchKeywordTotal = ini.GetInt(L"KadSearchKeywordTotal ", SEARCHKEYWORD_TOTAL);
@@ -3971,6 +4074,17 @@ void CPreferences::SaveCats()
 	}
 }
 
+void CPreferences::ReloadCats()
+{
+	for (INT_PTR i = catArr.GetCount(); --i >= 0;) {
+		delete catArr[i];
+		catArr.RemoveAt(i);
+	}
+
+	catArr.RemoveAll();
+	LoadCats();
+}
+
 void CPreferences::LoadCats()
 {
 	CString strCatIniFilePath;
@@ -4019,13 +4133,58 @@ void CPreferences::RemoveCat(INT_PTR index)
 	}
 }
 
+static bool ShouldSyncCategoryTitleWithFilter(const Category_Struct* pCategory)
+{
+	if (pCategory == NULL)
+		return false;
+
+	CString strTrimmedTitle(pCategory->strTitle);
+	strTrimmedTitle.Trim();
+	if (strTrimmedTitle.IsEmpty() || strTrimmedTitle == _T("?"))
+		return true;
+
+	return strTrimmedTitle.CompareNoCase(CPreferences::GetCatFilterLabel(pCategory->filter)) == 0;
+}
+
 bool CPreferences::SetCatFilter(INT_PTR index, int filter)
 {
 	if (index >= 0 && index < catArr.GetCount()) {
-		catArr[index]->filter = filter;
+		Category_Struct* pCategory = catArr[index];
+		const bool bSyncTitleWithFilter = ShouldSyncCategoryTitleWithFilter(pCategory);
+		pCategory->filter = filter;
+		if (bSyncTitleWithFilter)
+			pCategory->strTitle = GetCatFilterLabel(filter);
 		return true;
 	}
 	return false;
+}
+
+CString CPreferences::GetCatFilterLabel(int filter)
+{
+	static const LPCTSTR s_apszCatFilterKeys[] =
+	{
+		  _T("ALL"), _T("ALLOTHERS"), _T("STATUS_NOTCOMPLETED"), _T("DL_TRANSFCOMPL"), _T("WAITING")
+		, _T("DOWNLOADING"), _T("ERRORLIKE"), _T("PAUSED"), _T("SEENCOMPL"), NULL
+		, _T("VIDEO"), _T("AUDIO"), _T("SEARCH_ARC"), _T("SEARCH_CDIMG"), _T("SEARCH_DOC")
+		, _T("SEARCH_PICS"), _T("SEARCH_PRG"), NULL, _T("REGEXPRESSION"), NULL, _T("SEARCH_EMULECOLLECTION")
+	};
+
+	const LPCTSTR pszResKey = (filter >= 0 && filter < _countof(s_apszCatFilterKeys)) ? s_apszCatFilterKeys[filter] : NULL;
+	return pszResKey != NULL ? GetResString(pszResKey) : CString(_T('?'));
+}
+
+CString CPreferences::GetCategoryDisplayTitle(INT_PTR index)
+{
+	const Category_Struct* pCategory = GetCategory(index);
+	if (pCategory == NULL)
+		return EMPTY;
+
+	CString strTrimmedTitle(pCategory->strTitle);
+	strTrimmedTitle.Trim();
+	if (!strTrimmedTitle.IsEmpty() && strTrimmedTitle != _T("?"))
+		return pCategory->strTitle;
+
+	return GetCatFilterLabel(pCategory->filter);
 }
 
 int CPreferences::GetCatFilter(INT_PTR index)
@@ -4127,6 +4286,16 @@ void CPreferences::SetMaxUpload(uint32 val)
 void CPreferences::SetMaxDownload(uint32 val)
 {
 	m_maxdownload = val ? val : UNLIMITED;
+}
+
+bool CPreferences::HasMaxUploadLimit()
+{
+	return m_maxupload != UNLIMITED;
+}
+
+uint32 CPreferences::GetEffectiveMaxUpload()
+{
+	return HasMaxUploadLimit() ? m_maxupload : GetMaxGraphUploadRate(false);
 }
 
 void CPreferences::SetNetworkKademlia(bool val)

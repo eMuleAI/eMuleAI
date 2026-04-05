@@ -162,7 +162,7 @@ void CDirectDownloadDlg::UpdateCatTabs()
 	int oldsel = m_cattabs.GetCurSel();
 	m_cattabs.DeleteAllItems();
 	for (INT_PTR i = thePrefs.GetCatCount(); --i >= 0;) {
-		CString label(i ? thePrefs.GetCategory(i)->strTitle : GetResString(_T("ALL")));
+		CString label(thePrefs.GetCategoryDisplayTitle(i));
 		DupAmpersand(label);
 		m_cattabs.InsertItem(0, label);
 	}

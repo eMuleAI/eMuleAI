@@ -107,6 +107,9 @@ protected:
 	CString GetItemDisplayText(const CSearchFile *src, int iSubItem) const;
 	const bool	IsFilteredOut(const CSearchFile *pSearchFile) const;
 	const static CString CSearchListCtrl::GetKnownTypeStr(const CSearchFile* src);
+	virtual bool UsePersistentInfoTips() const override { return true; }
+	virtual bool ShouldShowPersistentInfoTip(const SPersistentInfoTipContext& context) override;
+	virtual bool GetPersistentInfoTipText(const SPersistentInfoTipContext& context, CString& strText) override;
 
 	void	DrawSourceParent(CDC *dc, int nColumn, LPRECT lpRect, UINT uDrawTextAlignment, const CSearchFile *src);
 	void	DrawSourceChild(CDC *dc, int nColumn, LPRECT lpRect, UINT uDrawTextAlignment, const CSearchFile *src);

@@ -77,6 +77,10 @@ public:
 	explicit CemuleApp(LPCTSTR lpszAppName = NULL);
 	bool IsRunning() const;
 	bool IsClosing() const;
+	void RefreshShutdownPartFlushDiskSpaceCache();
+	bool CanShutdownFlushPartFile(LPCTSTR pszPath, bool bForceRefresh = false);
+	void RefreshPartMetDiskSpaceCache();
+	bool CanWritePartMetFiles(LPCTSTR pszPath, bool bForceRefresh = false);
 
 	UploadBandwidthThrottler *uploadBandwidthThrottler;
 	LastCommonRouteFinder *lastCommonRouteFinder;
@@ -208,12 +212,14 @@ public:
 	void		ResetStandbyOff()								{ m_bStandbyOff = false; }
 	std::set<CUtpSocket*> g_UtpSockets;
 	time_t m_tLastDiskSpaceCheckTime;
-	bool MediaInfoLibHintGiven;
 
 	void StartDirWatchTP();
-	void StopDirWatchTP();
+	void StopDirWatchTP(bool bWaitForCallbacks = true);
+	bool DirWatchRootsChanged() const;
 	void SyncDirWatchRootsHash();
+	void QueueStartupDirWatchInit();
 	void DrainAutoSharedNewDirs();
+	void DrainDirWatchChangedFiles(CStringArray& outFiles);
 
 	// UploadTimer bridges
 	void OnUploadTick_100ms_DirWatch() noexcept;
@@ -237,6 +243,10 @@ protected:
 
 	// thread safe log calls
 	CCriticalSection m_queueLock;
+	CCriticalSection m_shutdownPartFlushDiskSpaceLock;
+	CMap<CString, LPCTSTR, BYTE, BYTE> m_mapShutdownPartFlushDiskSpaceState;
+	CCriticalSection m_partMetDiskSpaceLock;
+	CMap<CString, LPCTSTR, BYTE, BYTE> m_mapPartMetDiskSpaceState;
 	CTypedPtrList<CPtrList, SLogItem*> m_QueueDebugLog;
 	CTypedPtrList<CPtrList, SLogItem*> m_QueueLog;
 

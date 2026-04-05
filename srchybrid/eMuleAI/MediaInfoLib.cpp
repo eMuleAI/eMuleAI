@@ -25,9 +25,6 @@
 #include "Preferences.h"
 #include "UserMsgs.h"
 #include "SplitterControl.h"
-#include "id3/tag.h"
-#include "id3/misc_support.h"
-#include <locale.h>
 #include "resource.h"
 #include "Log.h"
 #include <corecrt.h>
@@ -135,6 +132,47 @@ static CString FormatMediaDetError(HRESULT hr, LPCTSTR sysMsg)
 	return s;
 }
 
+static CString TrimMediaInfoValue(const CString& strValue)
+{
+	CString strTrimmed(strValue);
+	strTrimmed.Trim();
+	return strTrimmed;
+}
+
+static CString GetMediaInfoValue(CMediaInfoLIB& mediaInfoLib, void* hMediaInfo, MediaInfo_stream_C streamKind, int iStreamNumber, LPCTSTR pszParameter)
+{
+	return TrimMediaInfoValue(mediaInfoLib.InfoGet(hMediaInfo, streamKind, iStreamNumber, pszParameter));
+}
+
+static CString GetFirstMediaInfoValue(CMediaInfoLIB& mediaInfoLib, void* hMediaInfo, MediaInfo_stream_C streamKind, int iStreamNumber, const LPCTSTR* apszParameters, size_t uParameterCount)
+{
+	for (size_t i = 0; i < uParameterCount; ++i) {
+		CString strValue(GetMediaInfoValue(mediaInfoLib, hMediaInfo, streamKind, iStreamNumber, apszParameters[i]));
+		if (!strValue.IsEmpty())
+			return strValue;
+	}
+	return CString();
+}
+
+static void PopulateCoreGeneralTags(CMediaInfoLIB& mediaInfoLib, void* hMediaInfo, SMediaInfo* mi)
+{
+	if (mi == NULL || hMediaInfo == NULL)
+		return;
+
+	const LPCTSTR apszAuthorParameters[] = { _T("Performer"), _T("Author") };
+	const LPCTSTR apszAlbumParameters[] = { _T("Album") };
+
+	mi->strTitle = GetMediaInfoValue(mediaInfoLib, hMediaInfo, MediaInfo_Stream_General, 0, _T("Title"));
+	CString strTitleMore(GetMediaInfoValue(mediaInfoLib, hMediaInfo, MediaInfo_Stream_General, 0, _T("Title_More")));
+	if (mi->strTitle.IsEmpty())
+		mi->strTitle = strTitleMore;
+	else if (!strTitleMore.IsEmpty() && strTitleMore != mi->strTitle)
+		mi->strTitle.AppendFormat(_T("; %s"), (LPCTSTR)strTitleMore);
+
+	mi->strAuthor = GetFirstMediaInfoValue(mediaInfoLib, hMediaInfo, MediaInfo_Stream_General, 0, apszAuthorParameters, _countof(apszAuthorParameters));
+	mi->strAlbum = GetFirstMediaInfoValue(mediaInfoLib, hMediaInfo, MediaInfo_Stream_General, 0, apszAlbumParameters, _countof(apszAlbumParameters));
+}
+
 struct CMediaInfoInvalidParameterException
 {
 };
@@ -220,45 +258,29 @@ CString CMediaInfoLIB::InfoGet(MediaInfo_stream_C StreamKind, int StreamNumber, 
 	return Get(m_handle, StreamKind, StreamNumber, Parameter, MediaInfo_Info_Text, MediaInfo_Info_Name);
 }
 
+CString CMediaInfoLIB::InfoGet(void* Handle, MediaInfo_stream_C StreamKind, int StreamNumber, LPCTSTR Parameter)
+{
+	return Get(Handle, StreamKind, StreamNumber, Parameter, MediaInfo_Info_Text, MediaInfo_Info_Name);
+}
+
+CString CMediaInfoLIB::InfoGetNameText(MediaInfo_stream_C StreamKind, int StreamNumber, LPCTSTR Parameter)
+{
+	return Get(m_handle, StreamKind, StreamNumber, Parameter, MediaInfo_Info_Name_Text, MediaInfo_Info_Name);
+}
+
+CString CMediaInfoLIB::InfoGetNameText(void* Handle, MediaInfo_stream_C StreamKind, int StreamNumber, LPCTSTR Parameter)
+{
+	return Get(Handle, StreamKind, StreamNumber, Parameter, MediaInfo_Info_Name_Text, MediaInfo_Info_Name);
+}
+
 CString CMediaInfoLIB::InfoGetI(MediaInfo_stream_C StreamKind, int StreamNumber, size_t Parameter, MediaInfo_info_C KindOfInfo)
 {
 	return GetI(m_handle, StreamKind, StreamNumber, Parameter, KindOfInfo);
 }
 
-wchar_t* CMediaInfoLIB::ID3_GetStringW(const ID3_Frame* frame, ID3_FieldID fldName, size_t nIndex)
+CString CMediaInfoLIB::InfoGetI(void* Handle, MediaInfo_stream_C StreamKind, int StreamNumber, size_t Parameter, MediaInfo_info_C KindOfInfo)
 {
-	// Do not use 'ID3_FieldImpl::Get(unicode_t *buffer, size_t maxLength, size_t itemNum)'.
-	// That function is broken in id3lib (the bug is in 'GetRawUnicodeTextItem')
-	return (nIndex == 0) ? ID3_GetStringW(frame, fldName) : NULL;
-}
-
-wchar_t* CMediaInfoLIB::ID3_GetStringW(const ID3_Frame* frame, ID3_FieldID fldName)
-{
-	// ID3LIB BUG: Use the Unicode support of id3lib only if the tag is already
-	// in Unicode format, thus avoiding couple of bugs with character conversion in
-	// id3lib to get triggered.
-	if (frame) {
-		ID3_Field* fld = frame->GetField(fldName);
-		if (fld && fld->GetEncoding() == ID3TE_UTF16) {
-			unicode_t* text = NULL;
-			size_t nText = fld->Size();
-			text = new unicode_t[nText / sizeof(unicode_t) + 1];
-			fld->Get(text, nText / sizeof(unicode_t));
-			text[nText / sizeof(unicode_t)] = L'\0';
-
-			for (unsigned int i = 0; i < nText / sizeof(unicode_t); ++i)
-				text[i] = _byteswap_ushort(text[i]);
-
-			return (wchar_t*)text;
-		}
-	}
-
-	char* text = ID3_GetString(frame, fldName);
-	CStringW wstr(text);
-	delete[] text;
-	wchar_t* pwsz = new wchar_t[wstr.GetLength() + 1];
-	wcscpy(pwsz, wstr);
-	return pwsz;
+	return GetI(Handle, StreamKind, StreamNumber, Parameter, KindOfInfo);
 }
 
 
@@ -279,12 +301,9 @@ bool CMediaInfoLIB::GetMediaInfo(const CShareableFile* pFile, SMediaInfo* mi)
 	bool bFoundHeader = false;
 	if (pFile->IsPartFile()) {
 		// Do *not* pass a part file which does not have the beginning of file to the following code.
-		//	- The MP3 reading code will skip all 0-bytes from the beginning of the file and may block
-		//	  the main thread for a long time.
+		//	- Header based parsers will not work without the beginning of the file.
 		//
-		//	- The RIFF reading code will not work without the file header.
-		//
-		//	- Most (if not all) other code also will not work without the beginning of the file available.
+		//	- Most metadata probes also need the header range to be present.
 		if (!static_cast<const CPartFile*>(pFile)->IsCompleteSafe(0, 16 * 1024))
 			return bFoundHeader || !mi->strMimeType.IsEmpty();
 	}
@@ -315,9 +334,9 @@ bool CMediaInfoLIB::GetMediaInfo(const CShareableFile* pFile, SMediaInfo* mi)
 			LPCTSTR	pCodec = _T("Format");
 			LPCTSTR pCodecInfo = _T("Format/Info");
 			LPCTSTR pCodecString = _T("Format/String");
-			LPCTSTR pLanguageInfo = _T("Language_More");
 
 			mi->strFileFormat = InfoGet(MediaInfo_Stream_General, 0, _T("Format"));
+			PopulateCoreGeneralTags(*this, m_handle, mi);
 			CString str(InfoGet(MediaInfo_Stream_General, 0, _T("Format/String")));
 			if (!str.IsEmpty() && str != mi->strFileFormat)
 				mi->strFileFormat.AppendFormat(_T(" (%s)"), (LPCTSTR)str);
@@ -635,5 +654,5 @@ bool CMediaInfoLIB::GetMediaInfo(const CShareableFile* pFile, SMediaInfo* mi)
 #pragma message("WARNING: Missing 'qedit.h' header file - some features will get disabled. See the file 'emule_site_config.h' for more information.")
 #endif//HAVE_QEDIT_H
 
-	return bFoundHeader || !mi->strMimeType.IsEmpty() || bHasDRM;
+	return bFoundHeader || !mi->strTitle.IsEmpty() || !mi->strAuthor.IsEmpty() || !mi->strAlbum.IsEmpty() || !mi->strMimeType.IsEmpty() || bHasDRM;
 }

@@ -49,6 +49,7 @@ void CIrcNickListCtrl::Init()
 	SetPrefsKey(_T("IrcNickListCtrl"));
 	SetExtendedStyle(LVS_EX_FULLROWSELECT | LVS_EX_INFOTIP);
 
+	// Alignment rule: left for text, dates, and status labels; right for sizes, rates, counts, durations, and percentages.
 	InsertColumn(0, GetResString(_T("IRC_NICK")), LVCFMT_LEFT, 90);
 
 	LoadSettings();

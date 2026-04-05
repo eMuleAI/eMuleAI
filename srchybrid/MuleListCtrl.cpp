@@ -70,14 +70,28 @@ const int CMuleListCtrl::sm_iSubItemInset = 4;	// Offset from left and right col
 
 IMPLEMENT_DYNAMIC(CMuleListCtrl, CListCtrl)
 
+namespace
+{
+constexpr int MULELISTCTRL_PERSISTENT_INFOTIP_OFFSET_X = 16;
+constexpr int MULELISTCTRL_PERSISTENT_INFOTIP_OFFSET_Y = 24;
+constexpr UINT_PTR MULELISTCTRL_PERSISTENT_INFOTIP_TOOL_ID = 1;
+constexpr DWORD MULELISTCTRL_PERSISTENT_INFOTIP_MIN_VISIBLE_MS = 350;
+constexpr UINT_PTR MULELISTCTRL_PERSISTENT_INFOTIP_LEAVE_TIMER_ID = 0x4D4C4950;
+constexpr UINT MULELISTCTRL_PERSISTENT_INFOTIP_LEAVE_RECHECK_MS = 75;
+}
+
 BEGIN_MESSAGE_MAP(CMuleListCtrl, CListCtrl)
 	ON_NOTIFY_REFLECT(LVN_GETINFOTIP, OnLvnGetInfoTip)
 	ON_WM_DRAWITEM()
 	ON_WM_ERASEBKGND()
 	ON_WM_KEYDOWN()
 	ON_WM_MEASUREITEM_REFLECT()
+	ON_WM_MOUSEMOVE()
 	ON_WM_SYSCOLORCHANGE()
 	ON_WM_DESTROY()
+	ON_WM_TIMER()
+	ON_MESSAGE(WM_MOUSEHOVER, OnMouseHover)
+	ON_MESSAGE(WM_MOUSELEAVE, OnMouseLeave)
 	ON_MESSAGE(WM_MULELISTCTRL_INVALIDATE, OnAsyncInvalidate)
 END_MESSAGE_MAP()
 
@@ -109,6 +123,16 @@ CMuleListCtrl::CMuleListCtrl(PFNLVCOMPARE pfnCompare, LPARAM iParamSort)
 	, m_iCurrentSortItem(-1)
 	, m_atSortArrow()
 	, m_iRedrawCount()
+	, m_Params()
+	, m_wndInfoTip()
+	, m_wndPersistentInfoTip()
+	, m_strPersistentInfoTipText()
+	, m_PersistentInfoTipContext()
+	, m_PendingInfoTipContext()
+	, m_bPersistentInfoTipVisible()
+	, m_bTrackingMouseHover()
+	, m_bTrackingMouseLeave()
+	, m_liDefaultHiddenColumns()
 	, m_iMaxSortHistory()
 
 {
@@ -119,6 +143,8 @@ CMuleListCtrl::CMuleListCtrl(PFNLVCOMPARE pfnCompare, LPARAM iParamSort)
 
 CMuleListCtrl::~CMuleListCtrl()
 {
+	m_wndInfoTip.CleanupWindow();
+	HidePersistentInfoTip(true);
 	delete[] m_aColumns;
 	m_updatethread->EndThread();
 	if (m_imlHeaderCtrl.m_hImageList != NULL)
@@ -127,6 +153,9 @@ CMuleListCtrl::~CMuleListCtrl()
 
 void CMuleListCtrl::OnDestroy()
 {
+	m_wndInfoTip.CleanupWindow();
+	HidePersistentInfoTip(true);
+
 	// Disassociate and destroy header imagelist to avoid GDI leaks and stale handles
 	if (m_imlHeaderCtrl.m_hImageList != NULL) {
 		CHeaderCtrl* pHeader = GetHeaderCtrl();
@@ -152,6 +181,501 @@ LRESULT CMuleListCtrl::OnAsyncInvalidate(WPARAM, LPARAM)
 
 	Invalidate(FALSE);
 	return 0;
+}
+
+bool CMuleListCtrl::ShouldShowPersistentInfoTip(const SPersistentInfoTipContext& context)
+{
+	return context.iSubItem == 0 && context.dwItemKey != 0;
+}
+
+bool CMuleListCtrl::GetPersistentInfoTipText(const SPersistentInfoTipContext& /*context*/, CString& strText)
+{
+	strText.Empty();
+	return false;
+}
+
+int CMuleListCtrl::GetDefaultPersistentInfoTipExtraLeftPadding(const SPersistentInfoTipContext& /*context*/) const
+{
+	return 0;
+}
+
+bool CMuleListCtrl::GetDefaultPersistentInfoTipText(const SPersistentInfoTipContext& context, CString& strText)
+{
+	strText.Empty();
+	if (context.iItem < 0 || context.iSubItem < 0)
+		return false;
+
+	strText = GetItemText(context.iItem, context.iSubItem);
+	return !strText.IsEmpty() && IsDefaultPersistentInfoTipTruncated(context, strText);
+}
+
+bool CMuleListCtrl::TryGetExplicitPersistentInfoTipText(const SPersistentInfoTipContext& context, CString& strText)
+{
+	strText.Empty();
+	if (!UsePersistentInfoTips() || !ShouldShowPersistentInfoTip(context))
+		return false;
+
+	return GetPersistentInfoTipText(context, strText) && !strText.IsEmpty();
+}
+
+bool CMuleListCtrl::TryGetPersistentInfoTipForContext(const SPersistentInfoTipContext& context, CString& strText, bool* pbExplicitTip)
+{
+	if (pbExplicitTip != NULL)
+		*pbExplicitTip = false;
+
+	if (TryGetExplicitPersistentInfoTipText(context, strText)) {
+		if (pbExplicitTip != NULL)
+			*pbExplicitTip = true;
+		return true;
+	}
+
+	return GetDefaultPersistentInfoTipText(context, strText);
+}
+
+bool CMuleListCtrl::GetDefaultPersistentInfoTipRect(const SPersistentInfoTipContext& context, CRect& rcText) const
+{
+	rcText.SetRectEmpty();
+	if (context.iItem < 0 || context.iSubItem < 0)
+		return false;
+
+	CMuleListCtrl* pThis = const_cast<CMuleListCtrl*>(this);
+	if (context.iSubItem == 0) {
+		if (!pThis->GetItemRect(context.iItem, &rcText, LVIR_LABEL))
+			return false;
+	} else if (!pThis->GetSubItemRect(context.iItem, context.iSubItem, LVIR_LABEL, rcText))
+		return false;
+
+	if (context.iSubItem != 0)
+		rcText.DeflateRect(sm_iSubItemInset, 0);
+	rcText.left += GetDefaultPersistentInfoTipExtraLeftPadding(context);
+
+	return rcText.Width() > 0 && rcText.Height() > 0;
+}
+
+bool CMuleListCtrl::IsDefaultPersistentInfoTipTruncated(const SPersistentInfoTipContext& context, const CString& strText)
+{
+	if (strText.IsEmpty())
+		return false;
+
+	CRect rcText;
+	if (!GetDefaultPersistentInfoTipRect(context, rcText))
+		return false;
+
+	CDC* pDC = GetDC();
+	if (pDC == NULL)
+		return false;
+
+	CFont* pOldFont = NULL;
+	CFont* pFont = GetFont();
+	if (pFont != NULL)
+		pOldFont = pDC->SelectObject(pFont);
+
+	const CSize sizeText = pDC->GetTextExtent(strText);
+	if (pOldFont != NULL)
+		pDC->SelectObject(pOldFont);
+	ReleaseDC(pDC);
+
+	return sizeText.cx > rcText.Width();
+}
+
+bool CMuleListCtrl::TryGetPersistentInfoTipContext(CPoint point, SPersistentInfoTipContext& context)
+{
+	LVHITTESTINFO hti = {};
+	hti.pt = point;
+	if (SubItemHitTest(&hti) < 0 || hti.iItem < 0)
+		return false;
+
+	if (!GetItemRect(hti.iItem, &context.rcItem, LVIR_BOUNDS))
+		return false;
+
+	context.iItem = hti.iItem;
+	context.iSubItem = hti.iSubItem;
+	context.dwItemKey = reinterpret_cast<DWORD_PTR>(GetItemObject(hti.iItem));
+	return true;
+}
+
+bool CMuleListCtrl::TryGetPersistentInfoTip(CPoint point, SPersistentInfoTipContext& context, CString* pstrText)
+{
+	SPersistentInfoTipContext resolvedContext;
+	if (!TryGetPersistentInfoTipContext(point, resolvedContext))
+		return false;
+
+	if (pstrText != NULL) {
+		CString strText;
+		bool bExplicitTip = false;
+		if (!TryGetPersistentInfoTipForContext(resolvedContext, strText, &bExplicitTip))
+			return false;
+		resolvedContext.bExplicitTip = bExplicitTip;
+		*pstrText = strText;
+	}
+
+	context = resolvedContext;
+	return true;
+}
+
+void CMuleListCtrl::EnsureThemeAwareInfoTipCtrl()
+{
+	if (!::IsWindow(m_hWnd))
+		return;
+
+	CToolTipCtrl* pToolTip = GetToolTips();
+	if (pToolTip == NULL || pToolTip->GetSafeHwnd() == NULL)
+		return;
+
+	CWnd* pPermanentToolTipWnd = CWnd::FromHandlePermanent(pToolTip->GetSafeHwnd());
+	if (pPermanentToolTipWnd != NULL && pPermanentToolTipWnd->IsKindOf(RUNTIME_CLASS(CToolTipCtrlX)))
+		return;
+
+	if (m_wndInfoTip.GetSafeHwnd() == pToolTip->GetSafeHwnd())
+		return;
+
+	m_wndInfoTip.CleanupWindow();
+	if (!m_wndInfoTip.SubclassWindow(pToolTip->GetSafeHwnd()))
+		return;
+
+	pToolTip->ModifyStyle(0, TTS_NOPREFIX);
+	pToolTip->SetDelayTime(TTDT_AUTOPOP, SEC2MS(20));
+	pToolTip->SetDelayTime(TTDT_INITIAL, SEC2MS(thePrefs.GetToolTipDelay()));
+	pToolTip->SendMessage(TTM_POP);
+	pToolTip->Activate(FALSE);
+}
+
+void CMuleListCtrl::EnsurePersistentInfoTipCtrl()
+{
+	if (m_wndPersistentInfoTip.GetSafeHwnd() != NULL || !::IsWindow(m_hWnd))
+		return;
+
+	if (!m_wndPersistentInfoTip.Create(this, TTS_ALWAYSTIP | TTS_NOPREFIX))
+		return;
+
+	m_wndPersistentInfoTip.SetFileIconToolTip(true);
+	m_wndPersistentInfoTip.SetDelayTime(TTDT_AUTOPOP, SEC2MS(20));
+	m_wndPersistentInfoTip.SetMinimumVisibleTime(MULELISTCTRL_PERSISTENT_INFOTIP_MIN_VISIBLE_MS);
+
+	TOOLINFO ti = {};
+	ti.cbSize = sizeof(ti);
+	ti.uFlags = TTF_TRACK | TTF_ABSOLUTE | TTF_TRANSPARENT;
+	ti.hwnd = m_hWnd;
+	ti.uId = MULELISTCTRL_PERSISTENT_INFOTIP_TOOL_ID;
+	ti.lpszText = LPSTR_TEXTCALLBACK;
+	m_wndPersistentInfoTip.SendMessage(TTM_ADDTOOL, 0, reinterpret_cast<LPARAM>(&ti));
+}
+
+void CMuleListCtrl::StartPersistentInfoTipLeaveTimer()
+{
+	if (::IsWindow(m_hWnd))
+		SetTimer(MULELISTCTRL_PERSISTENT_INFOTIP_LEAVE_TIMER_ID, MULELISTCTRL_PERSISTENT_INFOTIP_LEAVE_RECHECK_MS, NULL);
+}
+
+void CMuleListCtrl::StopPersistentInfoTipLeaveTimer()
+{
+	if (::IsWindow(m_hWnd))
+		KillTimer(MULELISTCTRL_PERSISTENT_INFOTIP_LEAVE_TIMER_ID);
+}
+
+void CMuleListCtrl::EnsurePersistentInfoTipMouseLeaveTracking()
+{
+	if (!::IsWindow(m_hWnd) || !m_bPersistentInfoTipVisible || m_bTrackingMouseLeave)
+		return;
+
+	TRACKMOUSEEVENT track = {};
+	track.cbSize = sizeof(track);
+	track.dwFlags = TME_LEAVE;
+	track.hwndTrack = m_hWnd;
+	if (::TrackMouseEvent(&track))
+		m_bTrackingMouseLeave = true;
+}
+
+CPoint CMuleListCtrl::GetPersistentInfoTipScreenPosition(const SPersistentInfoTipContext& context) const
+{
+	CPoint ptScreen;
+	if (!::GetCursorPos(&ptScreen)) {
+		ptScreen = CPoint(context.rcItem.left, context.rcItem.bottom);
+		ClientToScreen(&ptScreen);
+	}
+
+	ptScreen.Offset(MULELISTCTRL_PERSISTENT_INFOTIP_OFFSET_X, MULELISTCTRL_PERSISTENT_INFOTIP_OFFSET_Y);
+	return ptScreen;
+}
+
+bool CMuleListCtrl::IsSamePersistentInfoTipTarget(const SPersistentInfoTipContext& left, const SPersistentInfoTipContext& right) const
+{
+	if (left.dwItemKey != 0 || right.dwItemKey != 0) {
+		if (left.dwItemKey != right.dwItemKey)
+			return false;
+	} else if (left.iItem != right.iItem)
+		return false;
+
+	if (right.bExplicitTip)
+		return true;
+
+	return left.iSubItem == right.iSubItem;
+}
+
+bool CMuleListCtrl::ResolvePersistentInfoTipHotArea(SPersistentInfoTipContext& context) const
+{
+	if (GetDefaultPersistentInfoTipRect(context, context.rcHotArea))
+		return true;
+
+	if (context.bExplicitTip) {
+		context.rcHotArea = context.rcItem;
+		return !context.rcHotArea.IsRectEmpty();
+	}
+
+	return false;
+}
+
+bool CMuleListCtrl::IsPointWithinPersistentInfoTipHotArea(CPoint point, const SPersistentInfoTipContext& context) const
+{
+	SPersistentInfoTipContext resolvedContext = context;
+	if (resolvedContext.rcHotArea.IsRectEmpty() && !ResolvePersistentInfoTipHotArea(resolvedContext))
+		return false;
+
+	return resolvedContext.rcHotArea.PtInRect(point) != FALSE;
+}
+
+bool CMuleListCtrl::IsCursorOverPersistentInfoTipTarget()
+{
+	if (!m_bPersistentInfoTipVisible)
+		return false;
+
+	CPoint ptCursor;
+	if (!::GetCursorPos(&ptCursor))
+		return false;
+
+	ScreenToClient(&ptCursor);
+	return IsPointWithinPersistentInfoTipHotArea(ptCursor, m_PersistentInfoTipContext);
+}
+
+bool CMuleListCtrl::IsCursorOverPersistentInfoTipWindow() const
+{
+	if (!m_bPersistentInfoTipVisible || m_wndPersistentInfoTip.GetSafeHwnd() == NULL)
+		return false;
+
+	CPoint ptCursor;
+	if (!::GetCursorPos(&ptCursor))
+		return false;
+
+	CRect rcToolTip;
+	m_wndPersistentInfoTip.GetWindowRect(&rcToolTip);
+	return rcToolTip.PtInRect(ptCursor) != FALSE;
+}
+
+bool CMuleListCtrl::ShouldKeepPersistentInfoTipVisibleOnMouseLeave()
+{
+	return IsCursorOverPersistentInfoTipTarget() || IsCursorOverPersistentInfoTipWindow();
+}
+
+void CMuleListCtrl::ShowPersistentInfoTip(const SPersistentInfoTipContext& context, const CString& strText)
+{
+	EnsurePersistentInfoTipCtrl();
+	if (m_wndPersistentInfoTip.GetSafeHwnd() == NULL)
+		return;
+
+	StopPersistentInfoTipLeaveTimer();
+
+	SPersistentInfoTipContext resolvedContext = context;
+	if (!ResolvePersistentInfoTipHotArea(resolvedContext))
+		resolvedContext.rcHotArea = resolvedContext.rcItem;
+
+	const bool bTooltipWindowVisible = (m_wndPersistentInfoTip.GetSafeHwnd() != NULL && ::IsWindowVisible(m_wndPersistentInfoTip.GetSafeHwnd()) != FALSE);
+	const bool bSameTarget = m_bPersistentInfoTipVisible && bTooltipWindowVisible && IsSamePersistentInfoTipTarget(resolvedContext, m_PersistentInfoTipContext);
+	if (bSameTarget)
+		return;
+
+	m_strPersistentInfoTipText = strText;
+	m_wndPersistentInfoTip.UpdateTipText(m_strPersistentInfoTipText, this, MULELISTCTRL_PERSISTENT_INFOTIP_TOOL_ID);
+
+	TOOLINFO ti = {};
+	ti.cbSize = sizeof(ti);
+	ti.uFlags = TTF_TRACK | TTF_ABSOLUTE | TTF_TRANSPARENT;
+	ti.hwnd = m_hWnd;
+	ti.uId = MULELISTCTRL_PERSISTENT_INFOTIP_TOOL_ID;
+	ti.lpszText = const_cast<LPTSTR>(static_cast<LPCTSTR>(m_strPersistentInfoTipText));
+
+	const CPoint ptScreen = GetPersistentInfoTipScreenPosition(resolvedContext);
+	m_wndPersistentInfoTip.SendMessage(TTM_TRACKPOSITION, 0, MAKELPARAM(ptScreen.x, ptScreen.y));
+	if (!bSameTarget)
+		m_wndPersistentInfoTip.SendMessage(TTM_TRACKACTIVATE, TRUE, reinterpret_cast<LPARAM>(&ti));
+	m_wndPersistentInfoTip.SendMessage(TTM_UPDATE);
+
+	EnsurePersistentInfoTipMouseLeaveTracking();
+
+	m_PersistentInfoTipContext = resolvedContext;
+	m_bPersistentInfoTipVisible = true;
+}
+
+bool CMuleListCtrl::TryGetInfoTipWindowText(HWND hWndInfoTip, CString& strText) const
+{
+	strText.Empty();
+	if (!::IsWindow(hWndInfoTip))
+		return false;
+
+	const int iTextLength = ::GetWindowTextLength(hWndInfoTip);
+	if (iTextLength <= 0)
+		return false;
+
+	LPTSTR pszBuffer = strText.GetBufferSetLength(iTextLength);
+	const int iCopied = ::GetWindowText(hWndInfoTip, pszBuffer, iTextLength + 1);
+	strText.ReleaseBuffer();
+	return iCopied > 0;
+}
+
+bool CMuleListCtrl::HandleNativeInfoTipShow(HWND hWndInfoTip, LRESULT* pResult)
+{
+	if (m_bPersistentInfoTipVisible && IsCursorOverPersistentInfoTipWindow()) {
+		::SetWindowPos(hWndInfoTip, NULL, 0, 0, 0, 0, SWP_HIDEWINDOW | SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER);
+		if (pResult != NULL)
+			*pResult = TRUE;
+		return true;
+	}
+
+	CPoint ptCursor;
+	if (!::GetCursorPos(&ptCursor))
+		return false;
+
+	ScreenToClient(&ptCursor);
+
+	SPersistentInfoTipContext context;
+	if (!TryGetPersistentInfoTipContext(ptCursor, context))
+		return false;
+
+	CString strText;
+	if (!TryGetExplicitPersistentInfoTipText(context, strText)) {
+		if (!TryGetInfoTipWindowText(hWndInfoTip, strText) && !GetDefaultPersistentInfoTipText(context, strText))
+			return false;
+	} else
+		context.bExplicitTip = true;
+
+	ShowPersistentInfoTip(context, strText);
+	::SetWindowPos(hWndInfoTip, NULL, 0, 0, 0, 0, SWP_HIDEWINDOW | SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER);
+	if (pResult != NULL)
+		*pResult = TRUE;
+	return true;
+}
+
+void CMuleListCtrl::ResetPersistentInfoTipState()
+{
+	m_PersistentInfoTipContext = SPersistentInfoTipContext();
+	m_strPersistentInfoTipText.Empty();
+}
+
+void CMuleListCtrl::ResetPendingPersistentInfoTip()
+{
+	m_PendingInfoTipContext = SPersistentInfoTipContext();
+	m_bTrackingMouseHover = false;
+}
+
+void CMuleListCtrl::HidePersistentInfoTip(bool bClearPendingState)
+{
+	StopPersistentInfoTipLeaveTimer();
+
+	if (m_wndPersistentInfoTip.GetSafeHwnd() != NULL && m_bPersistentInfoTipVisible) {
+		TOOLINFO ti = {};
+		ti.cbSize = sizeof(ti);
+		ti.uFlags = TTF_TRACK | TTF_ABSOLUTE | TTF_TRANSPARENT;
+		ti.hwnd = m_hWnd;
+		ti.uId = MULELISTCTRL_PERSISTENT_INFOTIP_TOOL_ID;
+		m_wndPersistentInfoTip.SendMessage(TTM_TRACKACTIVATE, FALSE, reinterpret_cast<LPARAM>(&ti));
+		m_wndPersistentInfoTip.SendMessage(TTM_POP);
+	}
+
+	m_bPersistentInfoTipVisible = false;
+	if (bClearPendingState) {
+		ResetPersistentInfoTipState();
+		ResetPendingPersistentInfoTip();
+	}
+}
+
+void CMuleListCtrl::RefreshPersistentInfoTipFromPoint(CPoint point)
+{
+	if (!::IsWindow(m_hWnd) || !m_bPersistentInfoTipVisible)
+		return;
+
+	if (IsCursorOverPersistentInfoTipWindow())
+		return;
+
+	if (IsPointWithinPersistentInfoTipHotArea(point, m_PersistentInfoTipContext))
+		return;
+
+	HidePersistentInfoTip(true);
+}
+
+void CMuleListCtrl::UpdatePersistentInfoTipTracking(CPoint point)
+{
+	if (!::IsWindow(m_hWnd))
+		return;
+
+	if (m_bPersistentInfoTipVisible) {
+		if (IsCursorOverPersistentInfoTipWindow() || IsPointWithinPersistentInfoTipHotArea(point, m_PersistentInfoTipContext)) {
+			ResetPendingPersistentInfoTip();
+			return;
+		}
+
+		HidePersistentInfoTip(true);
+	}
+
+	SPersistentInfoTipContext context;
+	if (!TryGetPersistentInfoTipContext(point, context)) {
+		ResetPendingPersistentInfoTip();
+		return;
+	}
+
+	if (m_bTrackingMouseHover && IsSamePersistentInfoTipTarget(context, m_PendingInfoTipContext))
+		return;
+
+	CString strText;
+	bool bExplicitTip = false;
+	if (!TryGetPersistentInfoTipForContext(context, strText, &bExplicitTip)) {
+		ResetPendingPersistentInfoTip();
+		if (m_bPersistentInfoTipVisible)
+			HidePersistentInfoTip(true);
+		return;
+	}
+	context.bExplicitTip = bExplicitTip;
+
+	TRACKMOUSEEVENT track = {};
+	track.cbSize = sizeof(track);
+	track.dwFlags = TME_HOVER | TME_LEAVE;
+	track.hwndTrack = m_hWnd;
+	track.dwHoverTime = SEC2MS(thePrefs.GetToolTipDelay());
+	if (!::TrackMouseEvent(&track)) {
+		ResetPendingPersistentInfoTip();
+		return;
+	}
+
+	m_PendingInfoTipContext = context;
+	m_bTrackingMouseHover = true;
+	m_bTrackingMouseLeave = true;
+}
+
+bool CMuleListCtrl::ShouldSuppressDefaultInfoTip(LPNMLVGETINFOTIP pGetInfoTip)
+{
+	if (pGetInfoTip == NULL)
+		return false;
+
+	if (m_bPersistentInfoTipVisible && IsCursorOverPersistentInfoTipWindow())
+		return true;
+
+	CPoint ptCursor;
+	if (!::GetCursorPos(&ptCursor))
+		return false;
+
+	ScreenToClient(&ptCursor);
+
+	SPersistentInfoTipContext context;
+	if (!TryGetPersistentInfoTipContext(ptCursor, context))
+		return false;
+	if (context.iItem != pGetInfoTip->iItem || context.iSubItem != pGetInfoTip->iSubItem)
+		return false;
+
+	CString strText;
+	if (!TryGetExplicitPersistentInfoTipText(context, strText))
+		return false;
+	context.bExplicitTip = true;
+
+	ShowPersistentInfoTip(context, strText);
+	return true;
 }
 
 int CALLBACK CMuleListCtrl::SortProc(LPARAM /*lParam1*/, LPARAM /*lParam2*/, LPARAM /*lParamSort*/)
@@ -1222,22 +1746,32 @@ BOOL CMuleListCtrl::OnWndMsg(UINT message, WPARAM wParam, LPARAM lParam, LRESULT
 			}
 			return (BOOL)(*pResult = lResult);
 		}
-	case WM_DESTROY:
-		SaveSettings();
-		break;
-	case LVM_UPDATE:
-		//better fix for old problem... normally Update(int) causes entire list to redraw
-		if ((int)wParam == UpdateLocation((int)wParam)) { //no need to invalidate rect if item moved
-			RECT rcItem;
+		case WM_DESTROY:
+			HidePersistentInfoTip(true);
+			SaveSettings();
+			break;
+		case WM_CANCELMODE:
+		case WM_CAPTURECHANGED:
+		case WM_KILLFOCUS:
+		case WM_MOUSEWHEEL:
+		case WM_VSCROLL:
+		case WM_HSCROLL:
+			HidePersistentInfoTip(true);
+			break;
+		case LVM_UPDATE:
+			//better fix for old problem... normally Update(int) causes entire list to redraw
+			if ((int)wParam == UpdateLocation((int)wParam)) { //no need to invalidate rect if item moved
+				RECT rcItem;
 			BOOL bResult = GetItemRect((int)wParam, &rcItem, LVIR_BOUNDS);
 			if (bResult)
 				InvalidateRect(&rcItem, FALSE);
 			return (BOOL)(*pResult = bResult);
 		}
 		return (BOOL)(*pResult = TRUE);
-	case WM_CONTEXTMENU:
-		// If the context menu is opened with the _mouse_ and if it was opened _outside_
-		// the client area of the list view, let Windows handle that message.
+		case WM_CONTEXTMENU:
+			HidePersistentInfoTip(true);
+			// If the context menu is opened with the _mouse_ and if it was opened _outside_
+			// the client area of the list view, let Windows handle that message.
 		// Otherwise we would prevent the context menu for e.g. scrollbars to be invoked.
 		if ((HWND)wParam == m_hWnd) {
 			CPoint ptMouse(lParam);
@@ -1308,6 +1842,15 @@ void CMuleListCtrl::OnKeyDown(UINT nChar, UINT nRepCnt, UINT nFlags)
 BOOL CMuleListCtrl::OnChildNotify(UINT message, WPARAM wParam, LPARAM lParam, LRESULT *pResult)
 {
 	if (message != WM_DRAWITEM) {
+		if (message == WM_NOTIFY) {
+			const LPNMHDR pNMHDR = reinterpret_cast<LPNMHDR>(lParam);
+			CToolTipCtrl* pToolTip = GetToolTips();
+			if (pNMHDR != NULL && pToolTip != NULL && pNMHDR->hwndFrom == pToolTip->GetSafeHwnd() && pNMHDR->code == TTN_SHOW) {
+				if (HandleNativeInfoTipShow(pNMHDR->hwndFrom, pResult))
+					return TRUE;
+			}
+		}
+
 		//catch the prepaint and copy struct
 		if (message == WM_NOTIFY && reinterpret_cast<LPNMHDR>(lParam)->code == NM_CUSTOMDRAW
 			&& reinterpret_cast<LPNMLVCUSTOMDRAW>(lParam)->nmcd.dwDrawStage == CDDS_ITEMPREPAINT)
@@ -1570,6 +2113,20 @@ BOOL CMuleListCtrl::OnEraseBkgnd(CDC *pDC)
 	return TRUE;
 }
 
+void CMuleListCtrl::OnMouseMove(UINT nFlags, CPoint point)
+{
+	EnsureThemeAwareInfoTipCtrl();
+	StopPersistentInfoTipLeaveTimer();
+	EnsurePersistentInfoTipMouseLeaveTracking();
+
+	if (m_bPersistentInfoTipVisible)
+		RefreshPersistentInfoTipFromPoint(point);
+
+	UpdatePersistentInfoTipTracking(point);
+
+	CListCtrl::OnMouseMove(nFlags, point);
+}
+
 void CMuleListCtrl::OnSysColorChange()
 {
 	//adjust colors
@@ -1593,6 +2150,51 @@ void CMuleListCtrl::OnSysColorChange()
 		wp.flags = SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOOWNERZORDER | SWP_NOZORDER | SWP_FRAMECHANGED;
 		SendMessage(WM_WINDOWPOSCHANGED, 0, (LPARAM)&wp);
 	}
+}
+
+LRESULT CMuleListCtrl::OnMouseLeave(WPARAM, LPARAM)
+{
+	ResetPendingPersistentInfoTip();
+	m_bTrackingMouseLeave = false;
+
+	if (m_bPersistentInfoTipVisible && ShouldKeepPersistentInfoTipVisibleOnMouseLeave()) {
+		StartPersistentInfoTipLeaveTimer();
+		return 0;
+	}
+
+	HidePersistentInfoTip(true);
+	return 0;
+}
+
+LRESULT CMuleListCtrl::OnMouseHover(WPARAM, LPARAM lParam)
+{
+	m_bTrackingMouseHover = false;
+
+	const CPoint point(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
+	SPersistentInfoTipContext context;
+	CString strText;
+	if (!TryGetPersistentInfoTip(point, context, &strText))
+		return 0;
+
+	if (!IsSamePersistentInfoTipTarget(context, m_PendingInfoTipContext))
+		return 0;
+
+	ShowPersistentInfoTip(context, strText);
+	ResetPendingPersistentInfoTip();
+	return 0;
+}
+
+void CMuleListCtrl::OnTimer(UINT_PTR nIDEvent)
+{
+	if (nIDEvent == MULELISTCTRL_PERSISTENT_INFOTIP_LEAVE_TIMER_ID) {
+		if (!m_bPersistentInfoTipVisible || !ShouldKeepPersistentInfoTipVisibleOnMouseLeave()) {
+			HidePersistentInfoTip(true);
+			return;
+		}
+		return;
+	}
+
+	CListCtrl::OnTimer(nIDEvent);
 }
 
 void CMuleListCtrl::MeasureItem(LPMEASUREITEMSTRUCT lpMeasureItemStruct)
@@ -1816,6 +2418,9 @@ void CMuleListCtrl::OnLvnGetInfoTip(LPNMHDR pNMHDR, LRESULT *pResult)
 			return;
 		}
 	}
+
+	if (ShouldSuppressDefaultInfoTip(pGetInfoTip) && pGetInfoTip->cchTextMax > 0 && pGetInfoTip->pszText != NULL)
+		pGetInfoTip->pszText[0] = _T('\0');
 	*pResult = 0;
 }
 

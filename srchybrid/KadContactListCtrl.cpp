@@ -55,6 +55,7 @@ void CKadContactListCtrl::Init()
 	SetPrefsKey(_T("ONContactListCtrl"));
 	SetExtendedStyle(LVS_EX_FULLROWSELECT | LVS_EX_INFOTIP);
 
+	// Alignment rule: left for text, dates, and status labels; right for sizes, rates, counts, durations, and percentages.
 	InsertColumn(colIP, EMPTY,	LVCFMT_LEFT, 50);
 	InsertColumn(colID, EMPTY, LVCFMT_LEFT, 16 + DFLT_HASH_COL_WIDTH);	//ID
 	InsertColumn(colType, EMPTY, LVCFMT_LEFT, 50);						//TYPE
@@ -331,6 +332,20 @@ const CString CKadContactListCtrl::GetItemDisplayText(const Kademlia::CContact* 
 		break;
 	}
 	return sText;
+}
+
+int CKadContactListCtrl::GetDefaultPersistentInfoTipExtraLeftPadding(const SPersistentInfoTipContext& context) const
+{
+	if (!theApp.geolite2->ShowCountryFlag())
+		return 0;
+
+	if (context.iSubItem == colCountry)
+		return 22 + sm_iIconOffset;
+
+	if (context.iSubItem == colIP && IsColumnHidden(colCountry))
+		return 20 + sm_iSubItemInset;
+
+	return 0;
 }
 
 

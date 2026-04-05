@@ -96,7 +96,9 @@ void CPPgDirectories::LoadSettings()
 	}
 	SetDlgItemText(IDC_TEMPFILES, tempfolders);
 
-	m_ShareSelector.SetSharedDirectories(thePrefs.shareddir_list);
+	CStringList sharedDirs;
+	thePrefs.CopySharedDirectoryList(sharedDirs);
+	m_ShareSelector.SetSharedDirectories(sharedDirs);
 }
 
 void CPPgDirectories::OnBnClickedSelincdir()
@@ -218,13 +220,12 @@ BOOL CPPgDirectories::OnApply()
 	thePrefs.m_strIncomingDir = strIncomingDir;
 	MakeFoldername(thePrefs.m_strIncomingDir);
 
-	thePrefs.shareddir_list.RemoveAll();
-
-	m_ShareSelector.GetSharedDirectories(thePrefs.shareddir_list);
+	CStringList sharedDirs;
+	m_ShareSelector.GetSharedDirectories(sharedDirs);
 
 	// Normalise paths & optionally add subdirs
-	for (POSITION pos = thePrefs.shareddir_list.GetHeadPosition(); pos != NULL;) {
-		CString& strDir = thePrefs.shareddir_list.GetNext(pos);
+	for (POSITION pos = sharedDirs.GetHeadPosition(); pos != NULL;) {
+		CString& strDir = sharedDirs.GetNext(pos);
 		MakeFoldername(strDir); // Ensures trailing '\'
 	}
 
@@ -234,11 +235,12 @@ BOOL CPPgDirectories::OnApply()
 
 
 	// check shared directories for reserved folder names
-	for (POSITION pos = thePrefs.shareddir_list.GetHeadPosition(); pos != NULL;) {
+	for (POSITION pos = sharedDirs.GetHeadPosition(); pos != NULL;) {
 		POSITION posLast = pos;
-		if (!thePrefs.IsShareableDirectory(thePrefs.shareddir_list.GetNext(pos)))
-			thePrefs.shareddir_list.RemoveAt(posLast);
+		if (!thePrefs.IsShareableDirectory(sharedDirs.GetNext(pos)))
+			sharedDirs.RemoveAt(posLast);
 	}
+	thePrefs.ReplaceSharedDirectoryList(sharedDirs);
 
 	// on changing incoming dir, update directories for categories with the same path
 	if (sOldIncoming.CompareNoCase(thePrefs.GetMuleDirectory(EMULE_INCOMINGDIR)) != 0) {
@@ -311,8 +313,10 @@ void CPPgDirectories::OnBnClickedAddUNC()
 	}
 	slosh(unc);
 
-	for (POSITION pos = thePrefs.shareddir_list.GetHeadPosition(); pos != NULL;)
-		if (EqualPaths(thePrefs.shareddir_list.GetNext(pos), unc))
+	CStringList sharedDirs;
+	thePrefs.CopySharedDirectoryList(sharedDirs);
+	for (POSITION pos = sharedDirs.GetHeadPosition(); pos != NULL;)
+		if (EqualPaths(sharedDirs.GetNext(pos), unc))
 			return;
 
 	if (m_ShareSelector.AddUNCShare(unc))

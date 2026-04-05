@@ -1,4 +1,4 @@
-//This file is part of eMule AI
+﻿//This file is part of eMule AI
 //
 //This program is free software; you can redistribute it and/or
 //modify it under the terms of the GNU General Public License
@@ -32,6 +32,7 @@ class CFileInfoDialog : public CResizablePage
 		IDD = IDD_FILEINFO
 	};
 	void InitDisplay(LPCTSTR pStr);
+	void ShowUnavailableMediaInfo();
 	CSimpleArray<CObject*> m_pFiles;
 public:
 	CFileInfoDialog();   // standard constructor
@@ -43,6 +44,7 @@ public:
 
 protected:
 	const CSimpleArray<CObject*> *m_paFiles;
+	UINT m_uMediaInfoRequestId;
 	bool m_bDataChanged;
 	CRichEditCtrlX m_fi;
 	bool m_bReducedDlg;

@@ -1916,7 +1916,7 @@ CString CWebServer::_GetTransferList(const ThreadData &Data)
 			dFile.nFilePrio = pPartFile->GetDownPriority();
 			int pCat = pPartFile->GetCategory();
 
-			CString strCategory(thePrefs.GetCategory(pCat)->strTitle);
+			CString strCategory(thePrefs.GetCategoryDisplayTitle(pCat));
 			strCategory.Replace(_T("'"), _T("\\'"));
 
 			dFile.sCategory = strCategory;
@@ -3929,7 +3929,7 @@ void CWebServer::_InsertCatBox(CString &Out, int preselect, LPCTSTR boxlabel, bo
 		, jump ? _T(" onchange=\"GotoCat(this.form.cat.options[this.form.cat.selectedIndex].value)\"") : EMPTY);
 
 	for (INT_PTR i = 0; i < thePrefs.GetCatCount(); ++i) {
-		CString strCategory(thePrefs.GetCategory(i)->strTitle);
+		CString strCategory(thePrefs.GetCategoryDisplayTitle(i));
 		strCategory.Replace(_T("'"), _T("\\'"));
 		tempBuf.AppendFormat(_T("<option%s value=\"%i\">%s</option>\n"), (i == preselect) ? _T(" selected") : EMPTY, (int)i, (LPCTSTR)strCategory);
 	}
@@ -3948,7 +3948,7 @@ void CWebServer::_InsertCatBox(CString &Out, int preselect, LPCTSTR boxlabel, bo
 	CString tempBuff;
 
 	for (INT_PTR i = 0; i < thePrefs.GetCatCount(); ++i) {
-		CString strCategory(i ? thePrefs.GetCategory(i)->strTitle : GetResString(_T("ALL")));
+		CString strCategory(thePrefs.GetCategoryDisplayTitle(i));
 		if (i == preselect) {
 			tempBuff3 = _T("checked.gif");
 			tempBuff4 = strCategory;
@@ -3989,7 +3989,7 @@ void CWebServer::_InsertCatBox(CString &Out, int preselect, LPCTSTR boxlabel, bo
 	tempBuff.Empty();
 	//	For each user category index...
 	for (INT_PTR i = 0; i < thePrefs.GetCatCount(); ++i) {
-		CString strCategory(i ? thePrefs.GetCategory(i)->strTitle : GetResString(_T("CAT_UNASSIGN")));
+		CString strCategory(i ? thePrefs.GetCategoryDisplayTitle(i) : GetResString(_T("CAT_UNASSIGN")));
 		strCategory.Replace(_T("'"), _T("\\'"));
 
 		tempBuff3 = (i == preselect) ? _T("checked.gif") : _T("checked_no.gif");

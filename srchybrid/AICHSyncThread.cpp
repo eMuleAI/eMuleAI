@@ -272,6 +272,7 @@ int CAICHSyncThread::Run()
 	if (!m_liToHash.IsEmpty()) {
 		theApp.QueueLogLine(true, GetResString(_T("AICH_SYNCTOTAL")), m_liToHash.GetCount());
 		theApp.emuledlg->sharedfileswnd->sharedfilesctrl.SetAICHHashing(m_liToHash.GetCount());
+		theApp.sharedfiles->NotifyShowFilesCount();
 		// first let all normal hashing be done before starting out sync hashing
 		CSingleLock sLock1(&theApp.hashing_mut); // only one file hash at a time
 		while (theApp.sharedfiles->GetHashingCount() != 0) {
@@ -286,9 +287,7 @@ int CAICHSyncThread::Run()
 				return 0;
 
 			theApp.emuledlg->sharedfileswnd->sharedfilesctrl.SetAICHHashing(m_liToHash.GetCount() - cDone);
-	
-			if (theApp.emuledlg->sharedfileswnd->sharedfilesctrl.m_hWnd != NULL)
-				theApp.emuledlg->sharedfileswnd->sharedfilesctrl.ShowFilesCount();
+			theApp.sharedfiles->NotifyShowFilesCount();
 
 			CKnownFile *pCurFile = m_liToHash.GetNext(pos);
 			// just to be sure that the file hasn't been deleted lately
@@ -300,8 +299,7 @@ int CAICHSyncThread::Run()
 		}
 
 		theApp.emuledlg->sharedfileswnd->sharedfilesctrl.SetAICHHashing(0);
-		if (theApp.emuledlg->sharedfileswnd->sharedfilesctrl.m_hWnd != NULL)
-			theApp.emuledlg->sharedfileswnd->sharedfilesctrl.ShowFilesCount();
+		theApp.sharedfiles->NotifyShowFilesCount();
 		sLock1.Unlock();
 	}
 

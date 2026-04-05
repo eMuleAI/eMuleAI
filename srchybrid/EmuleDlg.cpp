@@ -171,6 +171,183 @@ namespace
 		pWnd = NULL;
 		hWndTracked = NULL;
 	}
+
+	int GetMainWndDialogIdForPersistence(const CemuleDlg& dlg)
+	{
+		struct MainWndEntry
+		{
+			CWnd* pWnd;
+			int iDialogId;
+		};
+
+		const MainWndEntry aVisibleWindowOrder[] =
+		{
+			{ dlg.serverwnd, IDD_SERVER },
+			{ dlg.sharedfileswnd, IDD_FILES },
+			{ dlg.searchwnd, IDD_SEARCH },
+			{ dlg.chatwnd, IDD_CHAT },
+			{ dlg.transferwnd, IDD_TRANSFER },
+			{ dlg.statisticswnd, IDD_STATISTICS },
+			{ dlg.kademliawnd, IDD_KADEMLIAWND },
+			{ dlg.ircwnd, IDD_IRC }
+		};
+
+		for (const MainWndEntry& entry : aVisibleWindowOrder) {
+			if (entry.pWnd != NULL && ::IsWindow(entry.pWnd->GetSafeHwnd()) && entry.pWnd->IsWindowVisible())
+				return entry.iDialogId;
+		}
+
+		CWnd* pActiveWnd = dlg.GetActiveDialog();
+		if (pActiveWnd == NULL)
+			return 0;
+
+		if (pActiveWnd->IsKindOf(RUNTIME_CLASS(CServerWnd)))
+			return IDD_SERVER;
+		if (pActiveWnd->IsKindOf(RUNTIME_CLASS(CSharedFilesWnd)))
+			return IDD_FILES;
+		if (pActiveWnd->IsKindOf(RUNTIME_CLASS(CSearchDlg)))
+			return IDD_SEARCH;
+		if (pActiveWnd->IsKindOf(RUNTIME_CLASS(CChatWnd)))
+			return IDD_CHAT;
+		if (pActiveWnd->IsKindOf(RUNTIME_CLASS(CTransferDlg)))
+			return IDD_TRANSFER;
+		if (pActiveWnd->IsKindOf(RUNTIME_CLASS(CStatisticsDlg)))
+			return IDD_STATISTICS;
+		if (pActiveWnd->IsKindOf(RUNTIME_CLASS(CKademliaWnd)))
+			return IDD_KADEMLIAWND;
+		if (pActiveWnd->IsKindOf(RUNTIME_CLASS(CIrcWnd)))
+			return IDD_IRC;
+
+		ASSERT(0);
+		return 0;
+	}
+
+	int GetVisibleToolbarContentRightEdge(CMuleToolbarCtrl& toolbar)
+	{
+		CRect rcClient;
+		toolbar.GetClientRect(&rcClient);
+
+		int iRightEdge = rcClient.left;
+		TBBUTTON button = {};
+		CRect rcItem;
+		CRect rcVisibleItem;
+		for (int i = 0; i < toolbar.GetButtonCount(); ++i) {
+			if (!toolbar.GetButton(i, &button))
+				continue;
+			if (button.fsState & TBSTATE_HIDDEN)
+				continue;
+			if (!toolbar.GetItemRect(i, &rcItem))
+				continue;
+			if (rcVisibleItem.IntersectRect(&rcClient, &rcItem))
+				iRightEdge = max(iRightEdge, rcVisibleItem.right);
+		}
+
+		return iRightEdge;
+	}
+
+	constexpr int kStatusBarTextRightPadding = 4;
+	constexpr int kStatusBarIconLeftPadding = 5;
+	constexpr int kStatusBarTextAfterIconPadding = 4;
+	constexpr int kStatusBarDynamicPanePadding = 12;
+	constexpr int kStatusBarMinimumChatPaneWidth = 25;
+	constexpr int kStatusBarDynamicPaneCount = 5;
+
+	int GetStatusBarPaneTextWidth(CDC& dc, const CString& strText)
+	{
+		if (strText.IsEmpty())
+			return 0;
+
+		return dc.GetTextExtent(strText).cx;
+	}
+
+	int GetStatusBarChatPaneWidth()
+	{
+		return max(kStatusBarMinimumChatPaneWidth, kStatusBarIconLeftPadding + GetSystemMetrics(SM_CXSMICON) + kStatusBarTextRightPadding);
+	}
+
+	int GetStatusBarPaneIconWidth(CMuleStatusBarCtrl& statusbar, EStatusBarPane ePane)
+	{
+		if ((HICON)statusbar.SendMessage(SB_GETICON, static_cast<WPARAM>(ePane), 0) == NULL)
+			return 0;
+
+		return kStatusBarIconLeftPadding + GetSystemMetrics(SM_CXSMICON) + kStatusBarTextAfterIconPadding;
+	}
+
+	int GetStatusBarPaneIdealWidth(CMuleStatusBarCtrl& statusbar, CDC& dc, EStatusBarPane ePane)
+	{
+		return GetStatusBarPaneIconWidth(statusbar, ePane) + GetStatusBarPaneTextWidth(dc, statusbar.GetText(ePane)) + kStatusBarTextRightPadding + kStatusBarDynamicPanePadding;
+	}
+
+	int GetStatusBarPaneMinimumWidth(CMuleStatusBarCtrl& statusbar, CDC& dc, EStatusBarPane ePane)
+	{
+		return GetStatusBarPaneIconWidth(statusbar, ePane) + GetStatusBarPaneTextWidth(dc, _T("...")) + kStatusBarTextRightPadding;
+	}
+
+	void ShrinkStatusBarPaneWidthsToFit(int* piWidths, const int* piMinimumWidths, int iPaneCount, int iAvailableWidth)
+	{
+		if (piWidths == NULL || piMinimumWidths == NULL || iPaneCount <= 0)
+			return;
+
+		int iTotalWidth = 0;
+		int iTotalFlexibleWidth = 0;
+		for (int i = 0; i < iPaneCount; ++i) {
+			iTotalWidth += piWidths[i];
+			iTotalFlexibleWidth += max(0, piWidths[i] - piMinimumWidths[i]);
+		}
+
+		int iOverflow = iTotalWidth - iAvailableWidth;
+		if (iOverflow <= 0)
+			return;
+
+		if (iTotalFlexibleWidth > 0) {
+			if (iPaneCount > kStatusBarDynamicPaneCount)
+				return;
+
+			int aiReductions[kStatusBarDynamicPaneCount] = {};
+			int iAppliedReduction = 0;
+			for (int i = 0; i < iPaneCount; ++i) {
+				const int iFlexibleWidth = max(0, piWidths[i] - piMinimumWidths[i]);
+				if (iFlexibleWidth <= 0)
+					continue;
+
+				aiReductions[i] = min(iFlexibleWidth, MulDiv(iOverflow, iFlexibleWidth, iTotalFlexibleWidth));
+				iAppliedReduction += aiReductions[i];
+			}
+
+			for (int i = 0; i < iPaneCount; ++i)
+				piWidths[i] -= aiReductions[i];
+
+			iOverflow -= iAppliedReduction;
+		}
+
+		while (iOverflow > 0) {
+			bool bReduced = false;
+			for (int i = 0; i < iPaneCount && iOverflow > 0; ++i) {
+				if (piWidths[i] > piMinimumWidths[i]) {
+					--piWidths[i];
+					--iOverflow;
+					bReduced = true;
+				}
+			}
+
+			if (!bReduced)
+				break;
+		}
+
+		while (iOverflow > 0) {
+			bool bReduced = false;
+			for (int i = 0; i < iPaneCount && iOverflow > 0; ++i) {
+				if (piWidths[i] > 0) {
+					--piWidths[i];
+					--iOverflow;
+					bReduced = true;
+				}
+			}
+
+			if (!bReduced)
+				break;
+		}
+	}
 }
 
 #ifndef NMRBCUSTOMDRAW
@@ -774,6 +951,7 @@ CemuleDlg::CemuleDlg(CWnd* pParent /*=NULL*/)
 	, status()
 	, m_wpFirstRestore()
 	, m_hIcon()
+	, m_hIconSmall()
 	, m_connicons()
 	, m_contactIcons()
 	, transicons()
@@ -872,6 +1050,8 @@ CemuleDlg::~CemuleDlg()
 		VERIFY(::DestroyIcon(m_icoSysTrayCurrent));
 	if (m_hIcon)
 		VERIFY(::DestroyIcon(m_hIcon));
+	if (m_hIconSmall)
+		VERIFY(::DestroyIcon(m_hIconSmall));
 	DestroyIconsArr(m_connicons, _countof(m_connicons));
 	DestroyIconsArr(transicons, _countof(transicons));
 	DestroyIconsArr(imicons, _countof(imicons));
@@ -1083,6 +1263,9 @@ BOOL CemuleDlg::OnInitDialog()
 	if (thePrefs.GetRestoreLastMainWndDlg()) {
 		CWnd* activate;
 		switch (thePrefs.GetLastMainWndDlgID()) {
+		case IDD_SERVER:
+			activate = serverwnd;
+			break;
 		case IDD_FILES:
 			activate = sharedfileswnd;
 			break;
@@ -1104,7 +1287,6 @@ BOOL CemuleDlg::OnInitDialog()
 		case IDD_IRC:
 			activate = ircwnd;
 			break;
-			//case IDD_SERVER:
 		default:
 			activate = serverwnd;
 		}
@@ -1804,6 +1986,7 @@ void CemuleDlg::ShowUserCount()
 	else
 		buffer.Format(_T("%s:0|%s:0"), (LPCTSTR)GetResString(_T("UUSERS")), (LPCTSTR)GetResString(_T("FILES")));
 	statusbar->SetText(buffer, SBarUsers, 0);
+	SetStatusBarPartsSize();
 }
 
 void CemuleDlg::ShowMessageState(UINT nIcon)
@@ -1886,6 +2069,7 @@ void CemuleDlg::ShowTransferRate(bool bForceAll)
 	if (IsWindowVisible() || bForceAll) {
 		statusbar->SetText(strTransferRate, SBarUpDown, 0);
 		ShowTransferStateIcon();
+		SetStatusBarPartsSize();
 	}
 	if (IsWindowVisible() && thePrefs.ShowRatesOnTitle()) {
 		CString szBuff;
@@ -1908,6 +2092,7 @@ void CemuleDlg::ShowPing()
 				strState.Format(_T("%.1f | %ums"), lastPing.currentLimit / 1024.0f, lastPing.latency);
 		}
 		statusbar->SetText(strState, SBarUSS, 0);
+		SetStatusBarPartsSize();
 	}
 }
 
@@ -1961,24 +2146,57 @@ void CemuleDlg::SetActiveDialog(CWnd* dlg)
 
 void CemuleDlg::SetStatusBarPartsSize()
 {
-	RECT rect;
+	if (statusbar == NULL || !statusbar->m_hWnd || !::IsWindow(statusbar->m_hWnd))
+		return;
+
+	CRect rect;
 	statusbar->GetClientRect(&rect);
-	int ussShift;
-	if (thePrefs.IsDynUpEnabled())
-		ussShift = thePrefs.IsDynUpUseMillisecondPingTolerance() ? 65 : 110;
-	else
-		ussShift = 0;
-	int aiWidths[7] =
+	if (rect.IsRectEmpty())
+		return;
+
+	CClientDC dc(statusbar);
+	CFont* pFont = statusbar->GetFont();
+	CFont* pOldFont = pFont != NULL ? dc.SelectObject(pFont) : NULL;
+
+	int aiDynamicWidths[5] =
 	{
-		rect.right - 770 - ussShift,
-		rect.right - 525 - ussShift,
-		rect.right - 325 - ussShift,
-		rect.right - 175 - ussShift,
-		rect.right - 25 - ussShift,
-		rect.right - 25,
-		-1
+		GetStatusBarPaneIdealWidth(*statusbar, dc, SBarUsers),
+		GetStatusBarPaneIdealWidth(*statusbar, dc, SBarUpDown),
+		GetStatusBarPaneIdealWidth(*statusbar, dc, SBarED2K),
+		GetStatusBarPaneIdealWidth(*statusbar, dc, SBarKad),
+		thePrefs.IsDynUpEnabled() ? GetStatusBarPaneIdealWidth(*statusbar, dc, SBarUSS) : 0
 	};
-	statusbar->SetParts(_countof(aiWidths), aiWidths);
+
+	int aiMinimumWidths[5] =
+	{
+		GetStatusBarPaneMinimumWidth(*statusbar, dc, SBarUsers),
+		GetStatusBarPaneMinimumWidth(*statusbar, dc, SBarUpDown),
+		GetStatusBarPaneMinimumWidth(*statusbar, dc, SBarED2K),
+		GetStatusBarPaneMinimumWidth(*statusbar, dc, SBarKad),
+		thePrefs.IsDynUpEnabled() ? max(GetStatusBarPaneTextWidth(dc, _T("...")) + kStatusBarTextRightPadding, 1) : 0
+	};
+
+	const int iAvailableDynamicWidth = max(0, rect.Width() - GetStatusBarChatPaneWidth());
+	ShrinkStatusBarPaneWidthsToFit(aiDynamicWidths, aiMinimumWidths, _countof(aiDynamicWidths), iAvailableDynamicWidth);
+
+	int iUsedDynamicWidth = 0;
+	for (int i = 0; i < _countof(aiDynamicWidths); ++i)
+		iUsedDynamicWidth += aiDynamicWidths[i];
+
+	const int iLogWidth = max(0, iAvailableDynamicWidth - iUsedDynamicWidth);
+
+	int aiParts[7];
+	aiParts[0] = iLogWidth;
+	aiParts[1] = aiParts[0] + aiDynamicWidths[0];
+	aiParts[2] = aiParts[1] + aiDynamicWidths[1];
+	aiParts[3] = aiParts[2] + aiDynamicWidths[2];
+	aiParts[4] = aiParts[3] + aiDynamicWidths[3];
+	aiParts[5] = aiParts[4] + aiDynamicWidths[4];
+	aiParts[6] = -1;
+	statusbar->SetParts(_countof(aiParts), aiParts);
+
+	if (pOldFont != NULL)
+		dc.SelectObject(pOldFont);
 }
 
 void CemuleDlg::OnSize(UINT nType, int cx, int cy)
@@ -2484,6 +2702,7 @@ void CemuleDlg::OnClose()
 	//flush queued messages
 	theApp.HandleDebugLogQueue();
 	theApp.HandleLogQueue();
+	theApp.RefreshPartMetDiskSpaceCache();
 
 	theApp.ConChecker->Stop();
 
@@ -2516,29 +2735,8 @@ void CemuleDlg::OnClose()
 		thePrefs.SetWindowLayout(wp);
 	}
 
-	// get active main window dialog
-	if (activewnd) {
-		if (activewnd->IsKindOf(RUNTIME_CLASS(CServerWnd)))
-			thePrefs.SetLastMainWndDlgID(IDD_SERVER);
-		else if (activewnd->IsKindOf(RUNTIME_CLASS(CSharedFilesWnd)))
-			thePrefs.SetLastMainWndDlgID(IDD_FILES);
-		else if (activewnd->IsKindOf(RUNTIME_CLASS(CSearchDlg)))
-			thePrefs.SetLastMainWndDlgID(IDD_SEARCH);
-		else if (activewnd->IsKindOf(RUNTIME_CLASS(CChatWnd)))
-			thePrefs.SetLastMainWndDlgID(IDD_CHAT);
-		else if (activewnd->IsKindOf(RUNTIME_CLASS(CTransferDlg)))
-			thePrefs.SetLastMainWndDlgID(IDD_TRANSFER);
-		else if (activewnd->IsKindOf(RUNTIME_CLASS(CStatisticsDlg)))
-			thePrefs.SetLastMainWndDlgID(IDD_STATISTICS);
-		else if (activewnd->IsKindOf(RUNTIME_CLASS(CKademliaWnd)))
-			thePrefs.SetLastMainWndDlgID(IDD_KADEMLIAWND);
-		else if (activewnd->IsKindOf(RUNTIME_CLASS(CIrcWnd)))
-			thePrefs.SetLastMainWndDlgID(IDD_IRC);
-		else {
-			ASSERT(0);
-			thePrefs.SetLastMainWndDlgID(0);
-		}
-	}
+	// Persist the last visible main page first and fall back to the cached active window.
+	thePrefs.SetLastMainWndDlgID(GetMainWndDialogIdForPersistence(*this));
 
 	Kademlia::CKademlia::Stop();	// couple of data files are written
 
@@ -2653,13 +2851,17 @@ void CemuleDlg::DestroyMiniMule()
 		if (m_pMiniMule->IsInInitDialog()) {
 			TRACE("%s - *** Cannot destroy Minimule, it's still in 'OnInitDialog'\n", __FUNCTION__);
 			m_pMiniMule->SetDestroyAfterInitDialog();
+		} else if (m_pMiniMule->IsInCallback()) {
+			TRACE("%s - *** Cannot destroy Minimule, it's still in callback. Hiding and deferring destruction.\n", __FUNCTION__);
+			m_pMiniMule->SetDestroyAfterCallback();
+			if (m_pMiniMule->m_hWnd && m_pMiniMule->IsWindowVisible())
+				m_pMiniMule->ShowWindow(SW_HIDE);
 		} else if (!m_pMiniMule->IsInCallback()) { // for safety
 			TRACE("%s - m_pMiniMule->DestroyWindow();\n", __FUNCTION__);
 			m_pMiniMule->DestroyWindow();
 			ASSERT(m_pMiniMule == NULL);
 			m_pMiniMule = NULL;
-		} else
-			ASSERT(0);
+		}
 }
 
 LRESULT CemuleDlg::OnCloseMiniMule(WPARAM wParam, LPARAM)
@@ -3146,6 +3348,8 @@ void CemuleDlg::OnSettingChange(UINT uFlags, LPCTSTR lpszSection)
 		PostMessage(UM_APP_SWITCH_DARKMODE, 0, 0); // Switch color scheme for the entire application
 	}
 
+	ApplyMainWindowIcons();
+
 	if (m_fontTitleVersionLink.GetSafeHandle() != NULL)
 		m_fontTitleVersionLink.DeleteObject();
 	UpdateTitleVersionOverlayWindow();
@@ -3185,14 +3389,17 @@ void CemuleDlg::SetAllIcons()
 	if (theApp.IsClosing())
 		return;
 
-	// application icon (although it's not customizable, we may need to load a different color resolution)
+	// application icons
 	if (m_hIcon)
 		VERIFY(::DestroyIcon(m_hIcon));
+	if (m_hIconSmall)
+		VERIFY(::DestroyIcon(m_hIconSmall));
+
 	// NOTE: the application icon name is prefixed with "AAA" to make sure it's alphabetically sorted by the
 	// resource compiler as the 1st icon in the resource table!
-	m_hIcon = AfxGetApp()->LoadIcon(_T("AAAEMULEAPP"));
-	SetIcon(m_hIcon, TRUE);
-	// this scales the 32x32 icon down to 16x16, does not look nice at least under WinXP
+	m_hIcon = theApp.LoadIcon(_T("AAAEMULEAPP"), 32, 32);
+	m_hIconSmall = theApp.LoadIcon(_T("AAAEMULEAPP"), 16, 16);
+	ApplyMainWindowIcons();
 
 	// connection state
 	DestroyIconsArr(m_connicons, _countof(m_connicons));
@@ -3249,6 +3456,17 @@ void CemuleDlg::SetAllIcons()
 	ShowMessageState(m_iMsgIcon);
 }
 
+void CemuleDlg::ApplyMainWindowIcons()
+{
+	if (theApp.IsClosing() || !::IsWindow(m_hWnd))
+		return;
+
+	if (m_hIcon != NULL)
+		SetIcon(m_hIcon, TRUE);
+	if (m_hIconSmall != NULL)
+		SetIcon(m_hIconSmall, FALSE);
+}
+
 void CemuleDlg::Localize()
 {
 	CMenu* pSysMenu = GetSystemMenu(FALSE);
@@ -3293,6 +3511,7 @@ void CemuleDlg::Localize()
 void CemuleDlg::ShowUserStateIcon()
 {
 	statusbar->SetIcon(SBarUsers, usericon);
+	SetStatusBarPartsSize();
 }
 
 void CemuleDlg::QuickSpeedOther(UINT nID)
@@ -5163,6 +5382,7 @@ BOOL CemuleDlg::OnDeviceChange(UINT nEventType, DWORD_PTR dwData)
 
 LRESULT CemuleDlg::OnDisplayChange(WPARAM, LPARAM)
 {
+	ApplyMainWindowIcons();
 	TrayReset();
 	return 0;
 }
@@ -5268,6 +5488,7 @@ LRESULT CemuleDlg::OnTaskbarBtnCreated(WPARAM, LPARAM)
 			m_prevProgress = 0;
 			m_ovlIcon = NULL;
 
+			ApplyMainWindowIcons();
 			UpdateThumbBarButtons(true);
 			UpdateStatusBarProgress();
 		} else
@@ -5472,6 +5693,10 @@ void CemuleDlg::SetSpeedGraphLimits()
 
 void CemuleDlg::ResizeSpeedGraph()
 {
+	const int kSpeedGraphWidth = 265;
+	const int kSpeedGraphMargin = 2;
+	const int kSpeedGraphMinGap = 4;
+
 	if (!thePrefs.GetUITweaksSpeedGraph())
 		return;
 
@@ -5483,22 +5708,21 @@ void CemuleDlg::ResizeSpeedGraph()
 
 	CRect rect;
 	CRect rect1, rect2;
-	CSize csMaxSize;
-	LONG m_lWidth = 265; // Width of SpeedGraph
 
-	toolbar->GetMaxSize(&csMaxSize);
 	toolbar->GetClientRect(&rect);
+	const int iGraphRight = rect.right - kSpeedGraphMargin;
+	const int iGraphLeft = iGraphRight - kSpeedGraphWidth;
 
 	// set updateintervall of graphic rate display (in seconds)
 	rect1.top = rect.top + 2;
-	rect1.right = rect.right - 2;
+	rect1.right = iGraphRight;
 	rect1.bottom = rect.top + (rect.Height() / 2) - 1;
-	rect1.left = rect.right - m_lWidth;
+	rect1.left = iGraphLeft;
 
 	rect2.top = rect.top + (rect.Height() / 2) + 1;
-	rect2.right = rect.right - 2;
+	rect2.right = iGraphRight;
 	rect2.bottom = rect.bottom - 2;
-	rect2.left = rect.right - m_lWidth;
+	rect2.left = iGraphLeft;
 
 	if (!m_UpSpeedGraph.m_hWnd) {
 		m_UpSpeedGraph.Create(IDD_SPEEDGRAPH, rect1, this);
@@ -5510,14 +5734,16 @@ void CemuleDlg::ResizeSpeedGraph()
 		m_DownSpeedGraph.Init_Graph(_T("Down"), thePrefs.GetMaxGraphDownloadRate());
 	}
 
-	m_UpSpeedGraph.SetWindowPos(NULL, rect1.left, rect1.top, rect1.Width(), rect1.Height(), SWP_NOZORDER | SWP_SHOWWINDOW);
-	m_DownSpeedGraph.SetWindowPos(NULL, rect2.left, rect2.top, rect2.Width(), rect2.Height(), SWP_NOZORDER | SWP_SHOWWINDOW);
-
-	if (m_lWidth + csMaxSize.cx > rect.Width()) {
-		// Not enough space in toolbar
+	const int iVisibleToolbarRight = GetVisibleToolbarContentRightEdge(*toolbar);
+	if (iVisibleToolbarRight + kSpeedGraphMinGap > iGraphLeft) {
+		// Keep graphs initialized even while they are hidden.
 		m_UpSpeedGraph.ShowWindow(SW_HIDE);
 		m_DownSpeedGraph.ShowWindow(SW_HIDE);
+		return;
 	}
+
+	m_UpSpeedGraph.SetWindowPos(NULL, rect1.left, rect1.top, rect1.Width(), rect1.Height(), SWP_NOZORDER | SWP_SHOWWINDOW);
+	m_DownSpeedGraph.SetWindowPos(NULL, rect2.left, rect2.top, rect2.Width(), rect2.Height(), SWP_NOZORDER | SWP_SHOWWINDOW);
 }
 
 LRESULT CemuleDlg::OnSharedFileListFoundFiles(WPARAM /*wParam*/, LPARAM /*lParam*/)

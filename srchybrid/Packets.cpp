@@ -20,6 +20,7 @@
 #include "OtherFunctions.h"
 #include "SafeFile.h"
 #include "StringConversion.h"
+#include "Log.h"
 #include "zlib/zlib.h"
 
 #ifdef _DEBUG
@@ -491,10 +492,10 @@ CTag::CTag(CFileDataIO &data, bool bOptUTF8)
 		m_pData = new BYTE[MDX_DIGEST_SIZE];
 		md4cpy(m_pData, bHash);
 	} else if (m_uType == TAGTYPE_BOOL) {
-		TRACE("***NOTE: %s; Reading BOOL tag\n", __FUNCTION__);
+		AddDebugLogLine(DLP_DEFAULT, false, _T("%hs; Reading BOOL tag"), __FUNCTION__);
 		data.Seek(1, CFile::current);
 	} else if (m_uType == TAGTYPE_BOOLARRAY) {
-		TRACE("***NOTE: %s; Reading BOOL Array tag\n", __FUNCTION__);
+		AddDebugLogLine(DLP_DEFAULT, false, _T("%hs; Reading BOOL Array tag"), __FUNCTION__);
 		uint16 len;
 		data.Read(&len, 2);
 		// 07-Apr-2004: eMule versions prior to 0.42e.29 used the formula "(len+7)/8"!
@@ -512,9 +513,9 @@ CTag::CTag(CFileDataIO &data, bool bOptUTF8)
 		}
 	} else {
 		if (m_uName != 0)
-			TRACE("%s; Unknown tag: type=0x%02X  specialtag=%u\n", __FUNCTION__, m_uType, m_uName);
+			AddDebugLogLine(DLP_LOW, false, _T("%hs; Unknown tag: type=0x%02X  specialtag=%u"), __FUNCTION__, m_uType, m_uName);
 		else
-			TRACE("%s; Unknown tag: type=0x%02X  name=\"%s\"\n", __FUNCTION__, m_uType, (LPCSTR)m_sName);
+			AddDebugLogLine(DLP_LOW, false, _T("%hs; Unknown tag: type=0x%02X  name=\"%hs\""), __FUNCTION__, m_uType, (LPCSTR)m_sName);
 		m_uVal = 0;
 	}
 	ASSERT_VALID(this);
@@ -662,7 +663,7 @@ bool CTag::WriteNewEd2kTag(CFileDataIO &data, EUTF8str eStrEncode) const
 		break;
 	default:
 		if (uType < TAGTYPE_STR1 || uType > TAGTYPE_STR16) {
-			TRACE("%s; Unknown tag: type=0x%02X\n", __FUNCTION__, uType);
+			AddDebugLogLine(DLP_LOW, false, _T("%hs; Unknown tag: type=0x%02X"), __FUNCTION__, uType);
 			ASSERT(0);
 			return false;
 		}
@@ -708,13 +709,13 @@ bool CTag::WriteTagToFile(CFileDataIO &file, EUTF8str eStrEncode) const
 			file.WriteHash16(m_pData);
 		} else {
 			//TODO: Support more tag types
-			TRACE("%s; Unknown tag: type=0x%02X\n", __FUNCTION__, m_uType);
+			AddDebugLogLine(DLP_LOW, false, _T("%hs; Unknown tag: type=0x%02X"), __FUNCTION__, m_uType);
 			ASSERT(0);
 			return false;
 		}
 		return true;
 	}
-	TRACE("%s; Ignored tag with unknown type=0x%02X\n", __FUNCTION__, m_uType);
+	AddDebugLogLine(DLP_LOW, false, _T("%hs; Ignored tag with unknown type=0x%02X"), __FUNCTION__, m_uType);
 	ASSERT(0);
 	return false;
 }

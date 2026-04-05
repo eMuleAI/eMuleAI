@@ -35,6 +35,28 @@ static char THIS_FILE[] = __FILE__;
 #define INDICATOR_COLOR  COLOR_HOTLIGHT
 #define METHOD           DSTINVERT
 
+namespace
+{
+	CFont* SelectTabFont(CDC& dc, CFont* pBaseFont, bool bBold, CFont& boldFont)
+	{
+		if (pBaseFont == NULL)
+			return NULL;
+
+		if (!bBold)
+			return dc.SelectObject(pBaseFont);
+
+		LOGFONT lf = {};
+		if (pBaseFont->GetLogFont(&lf) == 0)
+			return dc.SelectObject(pBaseFont);
+
+		lf.lfWeight = FW_BOLD;
+		if (!boldFont.CreateFontIndirect(&lf))
+			return dc.SelectObject(pBaseFont);
+
+		return dc.SelectObject(&boldFont);
+	}
+}
+
 #define _WM_THEMECHANGED		0x031A
 #define _ON_WM_THEMECHANGED()													\
 	{	_WM_THEMECHANGED, 0, 0, 0, AfxSig_l,									\
@@ -243,25 +265,37 @@ void CClosableTabCtrl::OnDestroy()
 void CClosableTabCtrl::OnPaint()
 {
 	// Call the default paint handler for non-dark mode
-    if (!IsDarkModeEnabled()) {
-        CTabCtrl::Default();
-        return;
-    }
+	if (!IsDarkModeEnabled()) {
+		CTabCtrl::Default();
+		return;
+	}
 
-    CPaintDC dc(this); // Create a device context for painting
-    CRect rect;
-    GetClientRect(&rect); // Get the dimensions of the tab control
+	CatchSpinControl();
 
-    // Fill the background
-    dc.FillSolidRect(&rect, GetCustomSysColor(COLOR_WINDOW));
+	CPaintDC dc(this); // Create a device context for painting
+	CRect rect;
+	GetClientRect(&rect); // Get the dimensions of the tab control
+
+	const HWND hSpin = (m_pSpinCtrl != NULL) ? m_pSpinCtrl->GetSafeHwnd() : NULL;
+	const bool bHasVisibleSpin = (hSpin != NULL) && ::IsWindow(hSpin) && ::IsWindowVisible(hSpin);
+	CRect rcSpin;
+	const int iSavedDc = dc.SaveDC();
+	if (bHasVisibleSpin) {
+		::GetWindowRect(hSpin, &rcSpin);
+		ScreenToClient(&rcSpin);
+		dc.ExcludeClipRect(&rcSpin);
+	}
+
+	// Fill the background without painting over the tab scroll spin control.
+	dc.FillSolidRect(&rect, GetCustomSysColor(COLOR_WINDOW));
 
 	// Iterate through each tab item and draw it
-    int tabCount = GetItemCount();
-    for (int nTabIndex = 0; nTabIndex < tabCount; nTabIndex++) {
-        TCHAR szLabel[256];
-        TC_ITEM tci;
-        tci.pszText = szLabel;
-        tci.cchTextMax = _countof(szLabel);
+	int tabCount = GetItemCount();
+	for (int nTabIndex = 0; nTabIndex < tabCount; nTabIndex++) {
+		TCHAR szLabel[256];
+		TC_ITEM tci;
+		tci.pszText = szLabel;
+		tci.cchTextMax = _countof(szLabel);
 		if (m_bDownloadCategoryStyle) {
 			tci.mask = TCIF_TEXT | TCIF_PARAM;
 			szLabel[_countof(szLabel) - 1] = _T('\0');
@@ -278,11 +312,11 @@ void CClosableTabCtrl::OnPaint()
 		GetItemRect(nTabIndex, rcItem);
 		rcItemText = rcItem;
 
-        bool bSelected = (nTabIndex == GetCurSel()); // Determine if the tab is selected
-        bool bHovered = (nTabIndex == m_nHoverTabIndex); // Determine if the tab is hovered
+		bool bSelected = (nTabIndex == GetCurSel()); // Determine if the tab is selected
+		bool bHovered = (nTabIndex == m_nHoverTabIndex); // Determine if the tab is hovered
 
-        // Set background color for selected, hovered, and normal tabs
-        COLORREF bgColor;
+		// Set background color for selected, hovered, and normal tabs
+		COLORREF bgColor;
 		if (bHovered)
 			bgColor = GetCustomSysColor(COLOR_GRADIENTACTIVECAPTION);
 		else if (bSelected)
@@ -290,19 +324,20 @@ void CClosableTabCtrl::OnPaint()
 		else
 			bgColor = GetCustomSysColor(COLOR_BTNFACE);
 
-        dc.FillSolidRect(&rcItem, bgColor);
+		dc.FillSolidRect(&rcItem, bgColor);
 
-        // Draw the icon if it exists
-        CImageList* pImageList = GetImageList();
+		// Draw the icon if it exists
+		CImageList* pImageList = GetImageList();
 		if (pImageList && tci.iImage >= 0) {
 			SafeImageListDraw(pImageList, &dc, tci.iImage, CPoint(rcItem.left + 4, rcItem.top + 2), ILD_TRANSPARENT);
 			if (!m_bClosable || !m_bShowCloseButton) // Closable tabs in search window already have a padding
 				rcItemText.left += 20; // Move the text position to the right of the icon
 		}
 
-        // Set font and text color
-        CFont* pOldFont = dc.SelectObject(GetFont()); // Set the font to default
-        int iOldBkMode = dc.SetBkMode(TRANSPARENT);
+		// Emphasize the active download category tab without affecting other tabs.
+		CFont boldFont;
+		CFont* pOldFont = SelectTabFont(dc, GetFont(), m_bDownloadCategoryStyle && bSelected, boldFont);
+		int iOldBkMode = dc.SetBkMode(TRANSPARENT);
 		COLORREF crOldColor;
 
 		if (m_bDownloadCategoryStyle) {
@@ -319,14 +354,15 @@ void CClosableTabCtrl::OnPaint()
 				crOldColor = dc.SetTextColor(GetCustomSysColor(COLOR_INACTIVECAPTIONTEXT)); // Inactive tab text color
 		}
 
-        // Draw the tab label
+		// Draw the tab label
 		rcItemText.top += bSelected ? 4 : 3; // Adjust position based on selection
-        dc.DrawText(szLabel, rcItemText, DT_SINGLELINE | DT_TOP | DT_CENTER);
+		dc.DrawText(szLabel, rcItemText, DT_SINGLELINE | DT_TOP | DT_CENTER);
 
-        // Restore previous settings
-        dc.SetTextColor(crOldColor);
-        dc.SetBkMode(iOldBkMode);
-        dc.SelectObject(pOldFont);
+		// Restore previous settings
+		dc.SetTextColor(crOldColor);
+		dc.SetBkMode(iOldBkMode);
+		if (pOldFont != NULL)
+			dc.SelectObject(pOldFont);
 
 		// Draw 'Close button' for the tab if closable
 		bool bShowCloseButton = m_bClosable && m_bShowCloseButton; // Initialize the value with the control default. Tabs can still have different values.
@@ -347,6 +383,11 @@ void CClosableTabCtrl::OnPaint()
 		if (bSelected)
 			dc.FillSolidRect(rcItem.left, rcItem.top, rcItem.Width() - 1, 2, GetCustomSysColor(COLOR_TABBORDER)); // Draw 2-pixel medium slate blue line
 	}
+
+	dc.RestoreDC(iSavedDc);
+
+	if (bHasVisibleSpin)
+		::RedrawWindow(hSpin, NULL, NULL, RDW_INVALIDATE | RDW_UPDATENOW | RDW_ERASE | RDW_FRAME);
 }
 
 // DrawItem will be called if the Light Mode is active
@@ -379,6 +420,8 @@ void CClosableTabCtrl::DrawItem(LPDRAWITEMSTRUCT lpDIS)
 	bool bSelected = (lpDIS->itemState & ODS_SELECTED) != 0;
 
 	pDC->FillSolidRect(rcItem, GetSysColor(COLOR_BTNFACE));
+	CFont boldFont;
+	CFont* pOldFont = SelectTabFont(*pDC, GetFont(), m_bDownloadCategoryStyle && bSelected, boldFont);
 	int iOldBkMode = pDC->SetBkMode(TRANSPARENT);
 	COLORREF crOldColor;
 
@@ -434,6 +477,8 @@ void CClosableTabCtrl::DrawItem(LPDRAWITEMSTRUCT lpDIS)
 	if (crOldColor != CLR_NONE)
 		pDC->SetTextColor(crOldColor);
 	pDC->SetBkMode(iOldBkMode);
+	if (pOldFont != NULL)
+		pDC->SelectObject(pOldFont);
 }
 
 void CClosableTabCtrl::PreSubclassWindow()
@@ -572,6 +617,9 @@ HBRUSH CClosableTabCtrl::OnCtlColor(CDC* pDC, CWnd* pWnd, UINT nCtlColor)
 // Vista: Can not be used to workaround the problems with owner drawn tab control
 BOOL CClosableTabCtrl::OnEraseBkgnd(CDC* pDC)
 {
+	if (IsDarkModeEnabled())
+		return TRUE;
+
 	return CTabCtrl::OnEraseBkgnd(pDC);
 }
 
@@ -612,18 +660,35 @@ LONG CClosableTabCtrl::InsertItem(int nItem, LPCTSTR lpszItem, int nImage)
 }
 
 void CClosableTabCtrl::CatchSpinControl()
- {
+{
 	// SpinControl will be created when tabs filled the tabbar and when it is created we need to catch it and switch its dark mode. 
-	// To do this we need to check every InsertItem and also OnSize.
-	if (!m_pSpinCtrl) {
-		CWnd* pWnd = FindWindowEx(GetSafeHwnd(), 0, UPDOWN_CLASS, 0);
-		if (pWnd) {
-			m_pSpinCtrl = new CSpinButtonCtrl;
-			m_pSpinCtrl->Attach(pWnd->GetSafeHwnd());
-			if (IsDarkModeEnabled())
-				ApplyThemeToWindow(m_pSpinCtrl->GetSafeHwnd(), true, true);
+	// Recreate the wrapper whenever the tab control destroys and recreates its scroll buttons.
+	CWnd* pWnd = FindWindowEx(GetSafeHwnd(), 0, UPDOWN_CLASS, 0);
+	if (pWnd == NULL) {
+		if (m_pSpinCtrl != NULL && (!::IsWindow(m_pSpinCtrl->GetSafeHwnd()) || ::GetParent(m_pSpinCtrl->GetSafeHwnd()) != GetSafeHwnd())) {
+			if (m_pSpinCtrl->m_hWnd)
+				m_pSpinCtrl->Detach();
+			delete m_pSpinCtrl;
+			m_pSpinCtrl = NULL;
 		}
+		return;
 	}
+
+	HWND hSpin = pWnd->GetSafeHwnd();
+	if (m_pSpinCtrl != NULL) {
+		if (m_pSpinCtrl->GetSafeHwnd() == hSpin)
+			return;
+
+		if (m_pSpinCtrl->m_hWnd)
+			m_pSpinCtrl->Detach();
+		delete m_pSpinCtrl;
+		m_pSpinCtrl = NULL;
+	}
+
+	m_pSpinCtrl = new CSpinButtonCtrl;
+	m_pSpinCtrl->Attach(hSpin);
+	if (IsDarkModeEnabled())
+		ApplyThemeToWindow(hSpin, true, true);
 }
 
 void CClosableTabCtrl::OnMouseLeave()

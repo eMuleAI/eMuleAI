@@ -172,6 +172,7 @@ LRESULT CSearchParamsWnd::OnInitDialog(WPARAM, LPARAM)
 
 	m_ctlOpts.ModifyStyle(0, WS_CLIPCHILDREN); // Does not help, control keeps flickering like mad
 	m_ctlOpts.SetExtendedStyle(IsDarkModeEnabled() ? LVS_EX_LABELTIP : LVS_EX_GRIDLINES | LVS_EX_LABELTIP);
+	// Alignment rule: left for text, dates, and status labels; right for sizes, rates, counts, durations, and percentages.
 	m_ctlOpts.InsertColumn(0, GetResString(_T("PARAMETER")));
 	m_ctlOpts.InsertColumn(1, GetResString(_T("VALUE")));
 

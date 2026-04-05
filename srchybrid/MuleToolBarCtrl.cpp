@@ -192,7 +192,6 @@ void CMuleToolbarCtrl::Init()
 	sepButton.iBitmap = -1;
 
 	const CString &config(thePrefs.GetToolbarSettings());
-	const int iEmuleAIButtonIndex = TBBTN_EMULEAI - IDC_TOOLBARBUTTON;
 	bool bLegacyConfigIndices = false;
 	for (int i = 0; i + 1 < config.GetLength(); i += 2) {
 		const int index = _tstoi(config.Mid(i, 2));
@@ -202,7 +201,6 @@ void CMuleToolbarCtrl::Init()
 		}
 	}
 
-	bool bHasEmuleAIButton = false;
 	CString normalizedConfig;
 	for (int i = 0; i < config.GetLength(); i += 2) {
 		int index = _tstoi(config.Mid(i, 2));
@@ -221,27 +219,10 @@ void CMuleToolbarCtrl::Init()
 
 		if (index < 0 || index >= m_buttoncount)
 			continue;
-		if (index == iEmuleAIButtonIndex)
-			bHasEmuleAIButton = true;
 		AddButtons(1, &TBButtons[index]);
 		normalizedConfig.AppendFormat(_T("%02i"), index);
 	}
-	if (!bHasEmuleAIButton) {
-		TBBUTTON emuleAIButton = TBButtons[iEmuleAIButtonIndex];
-		TBBUTTON lastButton = {};
-		if (GetButtonCount() > 0 && GetButton(GetButtonCount() - 1, &lastButton) && (lastButton.fsStyle & TBSTYLE_SEP) == 0)
-			AddButtons(1, &sepButton);
-		AddButtons(1, &emuleAIButton);
-
-		CString updatedConfig;
-		TBBUTTON buttonInfo = {};
-		for (int i = 0; i < GetButtonCount(); ++i) {
-			if (!GetButton(i, &buttonInfo))
-				continue;
-			updatedConfig.AppendFormat(_T("%02i"), (buttonInfo.idCommand != 0) ? buttonInfo.idCommand - IDC_TOOLBARBUTTON : 99);
-		}
-		thePrefs.SetToolbarSettings(updatedConfig);
-	} else if (normalizedConfig != config) {
+	if (normalizedConfig != config) {
 		thePrefs.SetToolbarSettings(normalizedConfig);
 	}
 

@@ -143,7 +143,7 @@ public:
 	CMenuXP* GetPrioMenu();
 	float	GetFinishedSize();
 	bool	ReportAvailableCommands(CList<int> &liAvailableCommands);
-	void	FileInspector(const bool bForce = false);
+	void	DownloadInspector(const bool bForce = false);
 	void	ShowActiveDownloadsBold(const bool bEnabled);
 	const bool IsFilteredOut(CPartFile* pFile);
 	uint32 GetTotalFilesCount();
@@ -172,11 +172,20 @@ protected:
 
 	void ShowFileDialog(UINT uInvokePage);
 	void ShowClientDialog(CUpDownClient *pClient);
+	bool TryGetActionPoint(const NMITEMACTIVATE* pNMIA, CPoint& point);
+	bool IsPointOverFileNameColumn(int iItem, const CPoint& point);
+	bool IsPointOverFilePreviewIcon(int iItem, const CPoint& point);
+	bool IsPointOverFileRatingIcon(int iItem, const CPoint& point, const CPartFile* pFile);
+	bool IsPointOverPreviewActivationArea(int iItem, const CPoint& point);
+	void PreviewFileOrBeep(CPartFile* pFile);
 	void SetAllIcons();
 	void DrawFileItem(CDC *dc, int nColumn, LPCRECT lpRect, UINT uDrawTextAlignment, CtrlItem_Struct *pCtrlItem);
 	void DrawSourceItem(CDC *dc, int nColumn, LPCRECT lpRect, UINT uDrawTextAlignment, CtrlItem_Struct *pCtrlItem);
 	CString GetFileItemDisplayText(const CPartFile *lpPartFile, int iSubItem);
 	CString GetSourceItemDisplayText(const CtrlItem_Struct *pCtrlItem, int iSubItem);
+	virtual bool UsePersistentInfoTips() const override { return true; }
+	virtual bool GetPersistentInfoTipText(const SPersistentInfoTipContext& context, CString& strText) override;
+	virtual int GetDefaultPersistentInfoTipExtraLeftPadding(const SPersistentInfoTipContext& context) const override;
 
 	static int CALLBACK SortProc(const LPARAM lParam1, const LPARAM lParam2, const LPARAM lParamSort);
 	const static int Compare(const CPartFile *file1, const CPartFile *file2, const LPARAM lParamSort);
@@ -200,8 +209,8 @@ protected:
 	afx_msg LRESULT OnEmptyFakeFileFound(WPARAM wParam, LPARAM lParam);
 	afx_msg LRESULT OnInvalidExtensionFound(WPARAM wParam, LPARAM lParam);
 private:
-	static UINT AFX_CDECL FileInspectorProc(LPVOID pParam);
-	CWinThread* pDetectEmptyFakeFiles;
+	static UINT AFX_CDECL DownloadInspectorProc(LPVOID pParam);
+	CWinThread* pDownloadInspectorThread;
 	DWORD m_dwLastDetection;
 
 	struct PartFileOperationMsgParams

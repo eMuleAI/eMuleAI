@@ -3015,8 +3015,8 @@ bool CClientReqSocket::ProcessExtPacket(const BYTE *packet, uint32 size, UINT op
 			{
 				// HighID buddy is telling us (LowID) about another LowID client that wants to connect
 				// This is received after server callback - we may not have established buddy relationship yet
-				TRACE(_T("[eServerBuddy] *** OP_ESERVER_PEER_INFO HANDLER ENTERED *** from %s\n"), (LPCTSTR)client->DbgGetClientInfo());
 				if (thePrefs.GetLogNatTraversalEvents()) {
+					AddDebugLogLine(DLP_DEFAULT, false, _T("[eServerBuddy] *** OP_ESERVER_PEER_INFO HANDLER ENTERED *** from %s"), (LPCTSTR)EscPercent(client->DbgGetClientInfo()));
 					AddDebugLogLine(false, _T("[eServerBuddy] OP_ESERVER_PEER_INFO received from %s"), 
 						(LPCTSTR)EscPercent(client->DbgGetClientInfo()));
 				}
@@ -3156,12 +3156,14 @@ bool CClientReqSocket::ProcessExtPacket(const BYTE *packet, uint32 size, UINT op
 				// Safety check: Never bind to the sender or an unrelated hash.
 				// Sender may be the buddy before we establish the serving buddy relationship.
 				if (pPeer && pPeer == client) {
-					TRACE(_T("[eServerBuddy] WARNING: Found sender instead of requester. Forcing new client creation.\n"));
+					if (thePrefs.GetLogNatTraversalEvents())
+						AddDebugLogLine(DLP_LOW, false, _T("[eServerBuddy] WARNING: Found sender instead of requester. Forcing new client creation."));
 					pPeer = NULL;
 				}
 
 				if (pPeer && bHasRequesterHash && pPeer->HasValidHash() && memcmp(pPeer->GetUserHash(), requesterHash, 16) != 0) {
-					TRACE(_T("[eServerBuddy] WARNING: Hash mismatch for requester. Forcing new client creation.\n"));
+					if (thePrefs.GetLogNatTraversalEvents())
+						AddDebugLogLine(DLP_LOW, false, _T("[eServerBuddy] WARNING: Hash mismatch for requester. Forcing new client creation."));
 					pPeer = NULL;
 				}
 
@@ -3170,10 +3172,12 @@ bool CClientReqSocket::ProcessExtPacket(const BYTE *packet, uint32 size, UINT op
 				// But Buddy's KadPort should be different from Requester's KadPort.
 				CUpDownClient* pServingBuddy = theApp.clientlist->GetServingEServerBuddy();
 				if (pPeer && pPeer == pServingBuddy) {
-					TRACE(_T("[eServerBuddy] WARNING: Found Buddy instead of Requester! Forcing new client creation.\n"));
+					if (thePrefs.GetLogNatTraversalEvents())
+						AddDebugLogLine(DLP_LOW, false, _T("[eServerBuddy] WARNING: Found Buddy instead of Requester! Forcing new client creation."));
 					pPeer = NULL; 
 				} else if (pPeer) {
-					TRACE(_T("[eServerBuddy] Found existing client by IP+KadPort: %s\n"), (LPCTSTR)pPeer->DbgGetClientInfo());
+					if (thePrefs.GetLogNatTraversalEvents())
+						AddDebugLogLine(DLP_DEFAULT, false, _T("[eServerBuddy] Found existing client by IP+KadPort: %s"), (LPCTSTR)EscPercent(pPeer->DbgGetClientInfo()));
 				}
 
 				// Always create a new client for the requester if not found by hash or IP+KadPort
@@ -3186,7 +3190,8 @@ bool CClientReqSocket::ProcessExtPacket(const BYTE *packet, uint32 size, UINT op
 						AddDebugLogLine(false, _T("[eServerBuddy] OP_ESERVER_PEER_INFO: Created NEW client for requester %s:%u"),
 							(LPCTSTR)ipstr(peerAddr), nPeerPort);
 					}
-					TRACE(_T("[eServerBuddy] Created NEW client for requester %s:%u\n"), (LPCTSTR)ipstr(peerAddr), nPeerPort);
+					if (thePrefs.GetLogNatTraversalEvents())
+						AddDebugLogLine(DLP_DEFAULT, false, _T("[eServerBuddy] Created NEW client for requester %s:%u"), (LPCTSTR)ipstr(peerAddr), nPeerPort);
 				} else {
 					if (bHasRequesterHash && !pPeer->HasValidHash())
 						pPeer->SetUserHash(requesterHash, true);

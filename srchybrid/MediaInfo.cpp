@@ -1153,7 +1153,7 @@ CString GetRealMediaCodecInfo(LPCSTR pszCodecID)
 
 bool GetRMHeaders(LPCTSTR pszFileName, SMediaInfo *mi, bool &rbIsRM, bool bFullInfo)
 {
-	ASSERT(!bFullInfo);
+	ASSERT(!bFullInfo || mi->strInfo.m_hWnd != NULL);
 
 	CSafeBufferedFile file;
 
@@ -1987,8 +1987,6 @@ static CWmvCoreDLL theWmvCoreDLL;
 
 bool GetWMHeaders(LPCTSTR pszFileName, SMediaInfo *mi, bool &rbIsWM, bool bFullInfo)
 {
-	ASSERT(!bFullInfo);
-
 	if (!theWmvCoreDLL.Initialize())
 		return false;
 

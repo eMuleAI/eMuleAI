@@ -43,6 +43,7 @@ void CCommentListCtrl::Init()
 	ASSERT((GetStyle() & LVS_SINGLESEL) == 0);
 	SetExtendedStyle(LVS_EX_FULLROWSELECT | LVS_EX_INFOTIP);
 
+	// Alignment rule: left for text, dates, and status labels; right for sizes, rates, counts, durations, and percentages.
 	InsertColumn(colRating, GetResString(_T("QL_RATING")), LVCFMT_LEFT, 80);								//QL_RATING
 	InsertColumn(colComment, GetResString(_T("COMMENT")), LVCFMT_LEFT, 340);								//COMMENT	
 	InsertColumn(colFileName, GetResString(_T("DL_FILENAME")), LVCFMT_LEFT, DFLT_FILENAME_COL_WIDTH);		//DL_FILENAME

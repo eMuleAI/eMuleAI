@@ -298,6 +298,9 @@ bool CMigrationWizardDlg::CopyMigrationFile(const CString &sourceConfigDir, LPCT
 		return true;
 
 	const CString destinationPath(thePrefs.GetMuleDirectory(EMULE_CONFIGDIR) + CString(pszFileName));
+	if (EqualPaths(sourcePath, destinationPath))
+		return true;
+
 	if (!::CopyFile(sourcePath, destinationPath, FALSE)) {
 		m_astrFailedFiles.Add(pszFileName);
 		TRACE(_T("MigrationWizard: failed to copy '%s' from '%s' to '%s' (error=%lu)\n"), pszFileName, (LPCTSTR)sourcePath, (LPCTSTR)destinationPath, ::GetLastError());

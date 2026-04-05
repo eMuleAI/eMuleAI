@@ -61,7 +61,7 @@ namespace Kademlia
 #define SEARCHFINDSERVINGBUDDY_LIFETIME	100
 #define SEARCHFINDSOURCE_LIFETIME	45
 #define SEARCHFILE_TOTAL			300
-#define SEARCHKEYWORD_TOTAL			1500	// Increased to 1500 (was 300). On today's larger/faster networks, 300 is too conservative; lifetime still bounds Kad searches, while the higher cap avoids premature stopping on high-volume keyword lookups.
+#define SEARCHKEYWORD_TOTAL			1500	// Increased to 1500 (was 300). This is a client-side early-stop threshold, not a Kad protocol parameter; one keyword index node can already return up to 300 results, so 300 can stop aggregation after a single full responder.
 #define SEARCHNOTES_TOTAL			50
 #define SEARCHSTOREFILE_TOTAL		10
 #define SEARCHSTOREKEYWORD_TOTAL	10

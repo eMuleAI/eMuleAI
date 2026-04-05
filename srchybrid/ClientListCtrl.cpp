@@ -91,6 +91,7 @@ void CClientListCtrl::Init()
 	SetPrefsKey(_T("ClientListCtrl"));
 	SetExtendedStyle(LVS_EX_FULLROWSELECT | LVS_EX_INFOTIP);
 
+	// Alignment rule: left for text, dates, and status labels; right for sizes, rates, counts, durations, and percentages.
 	InsertColumn(0, EMPTY,	LVCFMT_LEFT,	DFLT_CLIENTNAME_COL_WIDTH);	//QL_USERNAME
 	InsertColumn(1, EMPTY,	LVCFMT_LEFT,	100);						//CL_UPLOADSTATUS
 	InsertColumn(2, EMPTY,	LVCFMT_RIGHT,	DFLT_SIZE_COL_WIDTH);		//CL_TRANSFUP
@@ -102,14 +103,14 @@ void CClientListCtrl::Init()
 	InsertColumn(8, EMPTY, LVCFMT_LEFT,	100);
 	InsertColumn(9, EMPTY, LVCFMT_LEFT,	100);
 	InsertColumn(10, EMPTY, LVCFMT_LEFT,	100);
-	InsertColumn(11, EMPTY, LVCFMT_LEFT,	80);
-	InsertColumn(12, EMPTY, LVCFMT_LEFT,	100);
+	InsertColumn(11, EMPTY, LVCFMT_RIGHT,	80);
+	InsertColumn(12, EMPTY, LVCFMT_RIGHT,	100);
 	InsertColumn(13, EMPTY, LVCFMT_LEFT,	100);
 	InsertColumn(14, EMPTY, LVCFMT_LEFT,	100);
 	InsertColumn(15, EMPTY, LVCFMT_LEFT,	100);
 	InsertColumn(16, EMPTY, LVCFMT_LEFT,	100);
-	InsertColumn(17, EMPTY, LVCFMT_LEFT,	100);
-	InsertColumn(18, EMPTY, LVCFMT_LEFT,	100);
+	InsertColumn(17, EMPTY, LVCFMT_RIGHT,	100);
+	InsertColumn(18, EMPTY, LVCFMT_RIGHT,	100);
 	InsertColumn(19, EMPTY, LVCFMT_LEFT,	100);
 
 	SetAllIcons();
@@ -391,6 +392,20 @@ CString CClientListCtrl::GetItemDisplayText(const CUpDownClient *client, int iSu
 		break;
 	}
 	return sText;
+}
+
+int CClientListCtrl::GetDefaultPersistentInfoTipExtraLeftPadding(const SPersistentInfoTipContext& context) const
+{
+	if (!theApp.geolite2->ShowCountryFlag())
+		return 0;
+
+	if (context.iSubItem == 9)
+		return 22 + sm_iIconOffset;
+
+	if (context.iSubItem == 0 && IsColumnHidden(9))
+		return 20 + sm_iSubItemInset;
+
+	return 0;
 }
 
 void CClientListCtrl::OnLvnGetDispInfo(LPNMHDR pNMHDR, LRESULT *pResult)

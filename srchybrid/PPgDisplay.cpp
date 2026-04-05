@@ -44,6 +44,7 @@ IMPLEMENT_DYNAMIC(CPPgDisplay, CPropertyPage)
 BEGIN_MESSAGE_MAP(CPPgDisplay, CPropertyPage)
 	ON_BN_CLICKED(IDC_MINTRAY, OnSettingsChange)
 	ON_BN_CLICKED(IDC_DBLCLICK, OnSettingsChange)
+	ON_BN_CLICKED(IDC_DBLCLICKFILENAMEPREVIEW, OnSettingsChange)
 	ON_EN_CHANGE(IDC_TOOLTIPDELAY, OnSettingsChange)
 	ON_WM_HSCROLL()
 	ON_BN_CLICKED(IDC_SHOWRATEONTITLE, OnSettingsChange)
@@ -77,6 +78,7 @@ void CPPgDisplay::LoadSettings()
 {
 	CheckDlgButton(IDC_MINTRAY, static_cast<UINT>(thePrefs.mintotray));
 	CheckDlgButton(IDC_DBLCLICK, static_cast<UINT>(thePrefs.transferDoubleclick));
+	CheckDlgButton(IDC_DBLCLICKFILENAMEPREVIEW, static_cast<UINT>(thePrefs.GetPreviewOnFileNameDblClk()));
 	CheckDlgButton(IDC_SHOWRATEONTITLE, static_cast<UINT>(thePrefs.showRatesInTitle));
 	CheckDlgButton(IDC_DISABLEKNOWNLIST, static_cast<UINT>(thePrefs.m_bDisableKnownClientList));
 	CheckDlgButton(IDC_DISABLEQUEUELIST, static_cast<UINT>(thePrefs.m_bDisableQueueList));
@@ -125,6 +127,7 @@ BOOL CPPgDisplay::OnApply()
 	bool mintotray_old = thePrefs.mintotray;
 	thePrefs.mintotray = IsDlgButtonChecked(IDC_MINTRAY) != 0;
 	thePrefs.transferDoubleclick = IsDlgButtonChecked(IDC_DBLCLICK) != 0;
+	thePrefs.m_bPreviewOnFileNameDblClk = IsDlgButtonChecked(IDC_DBLCLICKFILENAMEPREVIEW) != 0;
 	thePrefs.depth3D = static_cast<CSliderCtrl*>(GetDlgItem(IDC_3DDEPTH))->GetPos();
 	thePrefs.m_bShowDwlPercentage = IsDlgButtonChecked(IDC_SHOWDWLPERCENT) != 0;
 	thePrefs.m_bRemoveFinishedDownloads = IsDlgButtonChecked(IDC_CLEARCOMPL) != 0;
@@ -192,6 +195,7 @@ void CPPgDisplay::Localize()
 		SetWindowText(GetResString(_T("PW_DISPLAY")));
 		SetDlgItemText(IDC_MINTRAY, GetResString(_T("PW_TRAY")));
 		SetDlgItemText(IDC_DBLCLICK, GetResString(_T("PW_DBLCLICK")));
+		SetDlgItemText(IDC_DBLCLICKFILENAMEPREVIEW, GetResString(_T("PW_DBLCLICKFILENAMEPREVIEW")));
 		SetDlgItemText(IDC_TOOLTIPDELAY_LBL, GetResString(_T("PW_TOOL")));
 		SetDlgItemText(IDC_3DDEP, GetResString(_T("3DDEP")));
 		SetDlgItemText(IDC_FLAT, GetResString(_T("FLAT")));

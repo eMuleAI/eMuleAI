@@ -47,6 +47,35 @@ static char THIS_FILE[] = __FILE__;
 #define	WNDS_BUTTON_HEIGHT	22	// don't set the height do something different than 22 unless you know exactly what you are doing!
 #define	NUMS_WINA_BUTTONS	2
 
+namespace
+{
+	int GetPageBottomOverflow(CWnd *pPage)
+	{
+		if (pPage == NULL || !::IsWindow(pPage->GetSafeHwnd()) || !::IsWindowVisible(pPage->GetSafeHwnd()))
+			return 0;
+
+		CRect rcClient;
+		pPage->GetClientRect(&rcClient);
+
+		int nBottomMost = 0;
+		for (CWnd *pChild = pPage->GetWindow(GW_CHILD); pChild != NULL; pChild = pChild->GetNextWindow()) {
+			if (!::IsWindowVisible(pChild->GetSafeHwnd()))
+				continue;
+
+			CRect rcChild;
+			pChild->GetWindowRect(&rcChild);
+			pPage->ScreenToClient(&rcChild);
+			if (rcChild.bottom > nBottomMost)
+				nBottomMost = rcChild.bottom;
+		}
+
+		static const int s_iBottomMargin = 2;
+		if (nBottomMost + s_iBottomMargin <= rcClient.bottom)
+			return 0;
+		return nBottomMost + s_iBottomMargin - rcClient.bottom;
+	}
+}
+
 // CSharedFilesWnd dialog
 
 IMPLEMENT_DYNAMIC(CSharedFilesWnd, CDialog)
@@ -60,6 +89,7 @@ BEGIN_MESSAGE_MAP(CSharedFilesWnd, CResizableDialog)
 	ON_STN_DBLCLK(IDC_FILES_ICO, OnStnDblClickFilesIco)
 	ON_WM_CTLCOLOR()
 	ON_WM_HELPINFO()
+	ON_WM_SIZE()
 	ON_WM_SYSCOLORCHANGE()
 	ON_BN_CLICKED(IDC_SF_HIDESHOWDETAILS, OnBnClickedSfHideshowdetails)
 	ON_NOTIFY(LVN_ITEMCHANGED, IDC_SFLIST, OnLvnItemchangedSflist)
@@ -68,6 +98,7 @@ BEGIN_MESSAGE_MAP(CSharedFilesWnd, CResizableDialog)
 	ON_MESSAGE(UM_SHOWFILESCOUNT, OnShowFilesCount)
 	ON_MESSAGE(UM_METADATAUPDATED, OnMetadataUpdated)
 	ON_MESSAGE(UM_AUTO_RELOAD_SHARED_FILES, OnAutoReloadSharedFiles) // 0 = file-level change (fast list reload) 1 = roots changed (force tree + scan + watcher rebuild) 2 = directory created/removed under a shared root (force tree)
+	ON_MESSAGE(UM_SHARED_FILES_ADJUST_DETAILS_PANEL, OnAdjustDetailsPanelHeight)
 
 END_MESSAGE_MAP()
 
@@ -79,6 +110,8 @@ CSharedFilesWnd::CSharedFilesWnd(CWnd *pParent /*=NULL*/)
 	, m_strFullFilterExpr()
 	, m_nFilterColumn()
 	, m_bDetailsVisible(true)
+	, m_bDetailsPanelHeightAdjustmentPending(false)
+	, m_bDeferredTreeInitPending(true)
 	, icon_files(NULL)
 {
 }
@@ -151,7 +184,8 @@ BOOL CSharedFilesWnd::OnInitDialog()
 	ShowDetailsPanel(thePrefs.GetShowSharedFilesDetails());
 
 	InitWindowStyles(this); //Moved down
-	Localize();
+	LocalizeInternal(true);
+	RequestDetailsPanelHeightAdjustment();
 	return TRUE;
 }
 
@@ -198,6 +232,7 @@ void CSharedFilesWnd::DoResize(int iDelta)
 	ScreenToClient(&rcWnd);
 	m_wndSplitter.SetRange(rcWnd.left + SPLITTER_RANGE_MIN, rcWnd.left + SPLITTER_RANGE_MAX);
 
+	RequestDetailsPanelHeightAdjustment();
 	Invalidate();
 	UpdateWindow();
 }
@@ -206,6 +241,7 @@ void CSharedFilesWnd::Reload(bool bForceTreeReload, bool bUserForced)
 {
 	// Avoid touching the directory tree on pure file-level changes.
 	if (bForceTreeReload) {
+		m_bDeferredTreeInitPending = false;
 		sharedfilesctrl.SetDirectoryFilter(NULL, false); // Only force a full tree rebuild if the user explicitly requested it. Otherwise, let the control detect structural changes and bypass rebuild when unnecessary.
 		m_ctlSharedDirTree.Reload(bUserForced ? true : false);
 		sharedfilesctrl.SetDirectoryFilter(m_ctlSharedDirTree.GetSelectedFilter(), false);
@@ -214,7 +250,9 @@ void CSharedFilesWnd::Reload(bool bForceTreeReload, bool bUserForced)
 	theApp.sharedfiles->Reload(); // Always refresh the shared files list (fast path for file-only changes).
 
 	if (bForceTreeReload) {
-		theApp.StartDirWatchTP();
+		if (theApp.DirWatchRootsChanged())
+			theApp.StartDirWatchTP();
+
 		theApp.SyncDirWatchRootsHash();
 	}
 
@@ -224,6 +262,23 @@ void CSharedFilesWnd::Reload(bool bForceTreeReload, bool bUserForced)
 void CSharedFilesWnd::OnStnDblClickFilesIco()
 {
 	theApp.emuledlg->ShowPreferences(IDD_PPG_DIRECTORIES);
+}
+
+void CSharedFilesWnd::OnSize(UINT nType, int cx, int cy)
+{
+	CResizableDialog::OnSize(nType, cx, cy);
+
+	if (nType == SIZE_MINIMIZED || !::IsWindow(m_hWnd) || !::IsWindow(m_dlgDetails.GetSafeHwnd()))
+		return;
+
+	if (m_wndSplitter) {
+		RECT rcWnd;
+		GetWindowRect(&rcWnd);
+		ScreenToClient(&rcWnd);
+		m_wndSplitter.SetRange(rcWnd.left + SPLITTER_RANGE_MIN, rcWnd.left + SPLITTER_RANGE_MAX);
+	}
+
+	RequestDetailsPanelHeightAdjustment();
 }
 
 
@@ -242,28 +297,23 @@ void CSharedFilesWnd::OnBnClickedUpdateMetaData()
 // Coalesced auto-reload from threadpool I/O watcher; keep it cheap and deterministic.
 LRESULT CSharedFilesWnd::OnAutoReloadSharedFiles(WPARAM wParam, LPARAM)
 {
+	CStringArray changedFiles;
+	theApp.DrainDirWatchChangedFiles(changedFiles);
+	if (changedFiles.GetCount() > 0)
+		theApp.sharedfiles->ReconcileMovedSharedFiles(changedFiles);
+
 	// Drain auto-added subdirs (if any) before rebuilding tree, so model matches view
 	if (wParam == 2) // Directory-level change
 		theApp.DrainAutoSharedNewDirs();
 
-    if (wParam == 1) {
-        // Root set changed: keep model+view in sync for AutoShareSubdirs
-        if (thePrefs.GetAutoShareSubdirs())
-            CPreferences::ExpandSharedDirsForUI();
-
-        Reload(true, true);// Structural change in root set: force tree reload
-
-        // Collapse back to minimal roots to avoid model pollution
-        if (thePrefs.GetAutoShareSubdirs())
-            CPreferences::CollapseSharedDirsToRoots();
-
-		theApp.StartDirWatchTP();  // Idempotent watcher rebuild
+	if (wParam == 1) {
+		Reload(true, true); // Structural change in root set: force tree reload
 	} else if (wParam == 2)
 		Reload(true, false); // Directory created/removed under a root: let tree detect structural change and rebuild only if needed
 	else
 		Reload(false); // File-level change: fast path
 
-	if (theApp.uploadqueue != NULL)
+	if (theApp.uploadqueue != NULL && !theApp.sharedfiles->IsReloading())
 		theApp.uploadqueue->PruneWaitersForMissingSharedFiles();
 
 	return 0;
@@ -378,8 +428,16 @@ void CSharedFilesWnd::SetAllIcons()
 
 void CSharedFilesWnd::Localize()
 {
+	LocalizeInternal(false);
+}
+
+void CSharedFilesWnd::LocalizeInternal(bool bDeferTreeInit)
+{
 	sharedfilesctrl.Localize();
-	m_ctlSharedDirTree.Localize();
+	if (bDeferTreeInit || m_bDeferredTreeInitPending)
+		m_ctlSharedDirTree.LocalizeSkeleton();
+	else
+		m_ctlSharedDirTree.Localize();
 	m_ctlFilter.ShowColumnText(true);
 	sharedfilesctrl.SetDirectoryFilter(NULL, true);
 	SetDlgItemText(IDC_RELOADSHAREDFILES, GetResString(_T("SF_RELOAD")));
@@ -399,16 +457,39 @@ void CSharedFilesWnd::Localize()
 	m_dlgDetails.Localize();
 }
 
+void CSharedFilesWnd::TryCompleteDeferredTreeInit()
+{
+	if (!m_bDeferredTreeInitPending || theApp.IsClosing())
+		return;
+	if (!::IsWindow(m_hWnd) || !IsWindowVisible())
+		return;
+
+	m_bDeferredTreeInitPending = false;
+	m_ctlSharedDirTree.Reload(true);
+	sharedfilesctrl.SetDirectoryFilter(m_ctlSharedDirTree.GetSelectedFilter(), false);
+	ShowSelectedFilesDetails(true);
+}
+
 void CSharedFilesWnd::OnTvnSelChangedSharedDirsTree(LPNMHDR, LRESULT* pResult)
 {
 	*pResult = 0;
 	CDirectoryItem* pNewDirectoryFilter = m_ctlSharedDirTree.GetSelectedFilter();
+	if (pNewDirectoryFilter == NULL)
+		return;
+
+	if (m_bDeferredTreeInitPending && (pNewDirectoryFilter->m_eItemType == SDI_DIRECTORY || (pNewDirectoryFilter->m_eItemType == SDI_INCOMING && thePrefs.GetAutoShareSubdirs()))) {
+		TryCompleteDeferredTreeInit();
+		pNewDirectoryFilter = m_ctlSharedDirTree.GetSelectedFilter();
+		if (pNewDirectoryFilter == NULL)
+			return;
+	}
+
 	if (!sharedfilesctrl || sharedfilesctrl.GetDirectoryFilter() == pNewDirectoryFilter)
 		return; // If the selected filter has not changed, we don't need to do anything.
 
 	sharedfilesctrl.m_eFilter = FilterType::Shared; // Set default value
 
-	if (m_ctlSharedDirTree.GetSelectedFilter()->m_eItemType == SDI_ALLHISTORY || (m_ctlSharedDirTree.GetSelectedFilterParent() && m_ctlSharedDirTree.GetSelectedFilterParent()->m_eItemType == SDI_ALLHISTORY))
+	if (pNewDirectoryFilter->m_eItemType == SDI_ALLHISTORY || (m_ctlSharedDirTree.GetSelectedFilterParent() && m_ctlSharedDirTree.GetSelectedFilterParent()->m_eItemType == SDI_ALLHISTORY))
 		sharedfilesctrl.m_eFilter = FilterType::History;
 
 	// This part needs to be executed after SetDirectoryFilter since they uses m_eItemType.
@@ -582,11 +663,8 @@ void CSharedFilesWnd::ShowSelectedFilesDetails(bool bForce)
 		m_dlgDetails.SetFiles(selectedList);
 }
 
-void CSharedFilesWnd::ShowDetailsPanel(bool bShow)
+void CSharedFilesWnd::UpdateDetailsPanelLayout()
 {
-	m_bDetailsVisible = bShow;
-	thePrefs.SetShowSharedFilesDetails(bShow);
-
 	CRect rcFiles;
 	sharedfilesctrl.GetWindowRect(rcFiles);
 	ScreenToClient(rcFiles);
@@ -602,7 +680,7 @@ void CSharedFilesWnd::ShowDetailsPanel(bool bShow)
 	m_wndSplitter.GetWindowRect(&rcSpl);
 	ScreenToClient(&rcSpl);
 
-	if (bShow) {
+	if (m_bDetailsVisible) {
 		sharedfilesctrl.SetWindowPos(NULL, 0, 0, rcFiles.Width(), rcSpl.bottom - rcFiles.top - rcDetailDlg.Height() - 2, SWP_NOMOVE | SWP_NOOWNERZORDER | SWP_NOZORDER | SWP_NOACTIVATE);
 		m_dlgDetails.ShowWindow(SW_SHOW);
 		GetDlgItem(IDC_SF_FICON)->ShowWindow(SW_HIDE);
@@ -620,8 +698,58 @@ void CSharedFilesWnd::ShowDetailsPanel(bool bShow)
 
 	AddOrReplaceAnchor(this, sharedfilesctrl, TOP_LEFT, BOTTOM_RIGHT);
 	AddOrReplaceAnchor(this, IDC_SF_HIDESHOWDETAILS, BOTTOM_RIGHT);
+}
+
+void CSharedFilesWnd::ShowDetailsPanel(bool bShow)
+{
+	m_bDetailsVisible = bShow;
+	thePrefs.SetShowSharedFilesDetails(bShow);
+
+	UpdateDetailsPanelLayout();
 	sharedfilesctrl.SetFocus();
 	ShowSelectedFilesDetails();
+	if (m_bDetailsVisible)
+		RequestDetailsPanelHeightAdjustment();
+}
+
+void CSharedFilesWnd::RequestDetailsPanelHeightAdjustment()
+{
+	if (!m_bDetailsVisible || m_bDetailsPanelHeightAdjustmentPending || !::IsWindow(m_hWnd))
+		return;
+
+	m_bDetailsPanelHeightAdjustmentPending = true;
+	PostMessage(UM_SHARED_FILES_ADJUST_DETAILS_PANEL);
+}
+
+void CSharedFilesWnd::AdjustDetailsPanelHeightForPageOverflow()
+{
+	if (!m_bDetailsVisible || !::IsWindow(m_dlgDetails.GetSafeHwnd()) || !::IsWindow(sharedfilesctrl.GetSafeHwnd()) || !::IsWindow(m_wndSplitter.GetSafeHwnd()) || GetDlgItem(IDC_SF_HIDESHOWDETAILS) == NULL)
+		return;
+
+	static const int s_iMaxAdjustmentPasses = 6;
+	bool bAdjusted = false;
+	for (int iPass = 0; iPass < s_iMaxAdjustmentPasses; ++iPass) {
+		const int iOverflow = m_dlgDetails.GetRequiredHeightCompensation();
+		if (iOverflow <= 0)
+			break;
+
+		CRect rcDetailDlg;
+		m_dlgDetails.GetWindowRect(&rcDetailDlg);
+		ScreenToClient(&rcDetailDlg);
+
+		const int iMoveUp = min(iOverflow, rcDetailDlg.top);
+		if (iMoveUp <= 0)
+			break;
+
+		rcDetailDlg.top -= iMoveUp;
+		m_dlgDetails.MoveWindow(&rcDetailDlg);
+		UpdateDetailsPanelLayout();
+		m_dlgDetails.RedrawWindow(NULL, NULL, RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN);
+		bAdjusted = true;
+	}
+
+	if (bAdjusted)
+		AddOrReplaceAnchor(this, m_dlgDetails, BOTTOM_LEFT, BOTTOM_RIGHT);
 }
 
 void CSharedFilesWnd::OnBnClickedSfHideshowdetails()
@@ -631,14 +759,24 @@ void CSharedFilesWnd::OnBnClickedSfHideshowdetails()
 
 void CSharedFilesWnd::OnLvnItemchangedSflist(LPNMHDR, LRESULT *pResult)
 {
-	ShowSelectedFilesDetails();
+	if (!sharedfilesctrl.IsSelectionRestoreInProgress())
+		ShowSelectedFilesDetails();
 	*pResult = 0;
 }
 
 void CSharedFilesWnd::OnShowWindow(BOOL bShow, UINT)
 {
-	if (bShow)
+	if (bShow) {
 		ShowSelectedFilesDetails(true);
+		RequestDetailsPanelHeightAdjustment();
+	}
+}
+
+LRESULT CSharedFilesWnd::OnAdjustDetailsPanelHeight(WPARAM, LPARAM)
+{
+	m_bDetailsPanelHeightAdjustmentPending = false;
+	AdjustDetailsPanelHeightForPageOverflow();
+	return 0;
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////////
@@ -723,6 +861,23 @@ BOOL CSharedFileDetailsModelessSheet::OnInitDialog()
 	return bResult;
 }
 
+int CSharedFileDetailsModelessSheet::GetRequiredHeightCompensation()
+{
+	int iOverflow = GetPageBottomOverflow(GetActivePage());
+	if (iOverflow > 0)
+		return iOverflow;
+
+	for (int iPage = 0; iPage < GetPageCount(); ++iPage) {
+		CPropertyPage *pPage = GetPage(iPage);
+		if (pPage == GetActivePage())
+			continue;
+		const int iPageOverflow = GetPageBottomOverflow(pPage);
+		if (iPageOverflow > iOverflow)
+			iOverflow = iPageOverflow;
+	}
+	return iOverflow;
+}
+
 void  CSharedFileDetailsModelessSheet::SetFiles(CTypedPtrList<CPtrList, CShareableFile*> &aFiles)
 {
 	m_aItems.RemoveAll();
@@ -750,6 +905,9 @@ LRESULT CSharedFileDetailsModelessSheet::OnDataChanged(WPARAM, LPARAM)
 	//When using up/down keys in shared files list, "Content" tab grabs focus on archives
 	CWnd *pFocused = GetFocus();
 	UpdateFileDetailsPages(this, &m_wndArchiveInfo, &m_wndMediaInfo, &m_wndFileLink);
+	CSharedFilesWnd *pParent = DYNAMIC_DOWNCAST(CSharedFilesWnd, GetParent());
+	if (pParent != NULL)
+		pParent->RequestDetailsPanelHeightAdjustment();
 	if (pFocused) //try to stay in file list
 		pFocused->SetFocus();
 	return TRUE;

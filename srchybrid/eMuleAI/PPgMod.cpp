@@ -59,6 +59,7 @@ CPPgMod::CPPgMod()
 	, m_htiUIDarkModeOn()
 	, m_htiUIDarkModeOff()
 	, m_htiUITweaksSpeedGraph()
+	, m_htiShowDownloadCommandsToolbar()
 	, m_htiDisableFindAsYouType()
 	, m_htiUITweaksListUpdatePeriod()
 	, m_htiUITweaksMaxSortHistory()
@@ -74,6 +75,7 @@ CPPgMod::CPPgMod()
 	, m_htiUITweaksKadSearchSortHistory()
 	, m_iUIDarkMode()
 	, m_bUITweaksSpeedGraph()
+	, m_bShowDownloadCommandsToolbar()
 	, m_bDisableFindAsYouType()
 	, m_iUITweaksListUpdatePeriod()
 	, m_iUITweaksServerListMaxSortHistory()
@@ -165,29 +167,29 @@ CPPgMod::CPPgMod()
 	, m_bDownloadCheckerMarkAsBlacklisted()
 	, m_bDownloadCheckerAutoMarkAsBlacklisted()
 
-	, m_htiFileInspector()
-	, m_htiFileInspectorDisable()
-	, m_htiFileInspectorLogOnly()
-	, m_htiFileInspectorDelete()
-	, m_htiFileInspectorFake()
-	, m_htiFileInspectorDRM()
-	, m_htiFileInspectorCheckPeriod()
-	, m_htiFileInspectorCompletedThreshold()
-	, m_htiFileInspectorZeroPercentageThreshold()
-	, m_htiFileInspectorCompressionThreshold()
-	, m_htiFileInspectorBypassZeroPercentage()
-	, m_htiFileInspectorCompressionThresholdToBypassZero()
-	, m_iFileInspector()
-	, m_bFileInspectorFake()
-	, m_bFileInspectorDRM()
-	, m_htiFileInspectorInvalidExt()
-	, m_bFileInspectorInvalidExt()
-	, m_iFileInspectorCheckPeriod()
-	, m_iFileInspectorCompletedThreshold()
-	, m_iFileInspectorZeroPercentageThreshold()
-	, m_iFileInspectorCompressionThreshold()
-	, m_bFileInspectorBypassZeroPercentage()
-	, m_iFileInspectorCompressionThresholdToBypassZero()
+	, m_htiDownloadInspector()
+	, m_htiDownloadInspectorDisable()
+	, m_htiDownloadInspectorLogOnly()
+	, m_htiDownloadInspectorDelete()
+	, m_htiDownloadInspectorFake()
+	, m_htiDownloadInspectorDRM()
+	, m_htiDownloadInspectorCheckPeriod()
+	, m_htiDownloadInspectorCompletedThreshold()
+	, m_htiDownloadInspectorZeroPercentageThreshold()
+	, m_htiDownloadInspectorCompressionThreshold()
+	, m_htiDownloadInspectorBypassZeroPercentage()
+	, m_htiDownloadInspectorCompressionThresholdToBypassZero()
+	, m_iDownloadInspector()
+	, m_bDownloadInspectorFake()
+	, m_bDownloadInspectorDRM()
+	, m_htiDownloadInspectorInvalidExt()
+	, m_bDownloadInspectorInvalidExt()
+	, m_iDownloadInspectorCheckPeriod()
+	, m_iDownloadInspectorCompletedThreshold()
+	, m_iDownloadInspectorZeroPercentageThreshold()
+	, m_iDownloadInspectorCompressionThreshold()
+	, m_bDownloadInspectorBypassZeroPercentage()
+	, m_iDownloadInspectorCompressionThresholdToBypassZero()
 
 	, m_htiSearchTweaksGroup()
 	, m_htiGroupKnownAtTheBottom()
@@ -477,6 +479,7 @@ void CPPgMod::DoDataExchange(CDataExchange *pDX)
 		m_htiUIDarkModeOff = m_ctrlTreeOptions.InsertRadioButton(GetResString(_T("DARK_MODE_OFF")), m_htiUIDarkMode, m_iUIDarkMode == 2);
 		m_ctrlTreeOptions.Expand(m_htiUIDarkMode, TVE_EXPAND);
 		m_htiUITweaksSpeedGraph = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("SHOW_SPEED_GRAPH")), m_htiUITweaks, m_bUITweaksSpeedGraph);
+		m_htiShowDownloadCommandsToolbar = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("SHOW_DOWNLOAD_COMMANDS_TOOLBAR")), m_htiUITweaks, m_bShowDownloadCommandsToolbar);
 		m_htiDisableFindAsYouType = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("DISABLE_AS_YOU_TYPE")), m_htiUITweaks, m_bDisableFindAsYouType);
 		m_htiUITweaksListUpdatePeriod = m_ctrlTreeOptions.InsertItem(GetResString(_T("UI_TWEAKS_LIST_UPDATE_PERIOD")), TREEOPTSCTRLIMG_EDIT, TREEOPTSCTRLIMG_EDIT, m_htiUITweaks);
 		m_ctrlTreeOptions.AddEditBox(m_htiUITweaksListUpdatePeriod, RUNTIME_CLASS(CNumTreeOptionsEdit));
@@ -567,24 +570,24 @@ void CPPgMod::DoDataExchange(CDataExchange *pDX)
 		m_htiDownloadCheckerMarkAsBlacklisted = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("DOWNLOAD_CHECK_MARK_AS_BLACKLISTED")), m_htiDownloadChecker, m_bDownloadCheckerMarkAsBlacklisted);
 		m_htiDownloadCheckerAutoMarkAsBlacklisted = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("DOWNLOAD_CHECK_AUTO_MARK_AS_BLACKLISTED")), m_htiDownloadChecker, m_bDownloadCheckerAutoMarkAsBlacklisted);
 		
-		m_htiFileInspector = m_ctrlTreeOptions.InsertGroup(GetResString(_T("FILE_INSPECTOR")), iImgInspect, TVI_ROOT);
-		m_htiFileInspectorDisable = m_ctrlTreeOptions.InsertRadioButton(GetResString(_T("FILE_INSPECTOR_DISABLE")), m_htiFileInspector, m_iFileInspector == 0);
-		m_htiFileInspectorLogOnly = m_ctrlTreeOptions.InsertRadioButton(GetResString(_T("FILE_INSPECTOR_LOG_ONLY")), m_htiFileInspector, m_iFileInspector == 1);
-		m_htiFileInspectorDelete = m_ctrlTreeOptions.InsertRadioButton(GetResString(_T("FILE_INSPECTOR_DELETE")), m_htiFileInspector, m_iFileInspector == 2);
-		m_htiFileInspectorFake = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("FILE_INSPECTOR_INCLUDE_FAKE")), m_htiFileInspector, m_bFileInspectorFake);
-		m_htiFileInspectorDRM = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("FILE_INSPECTOR_INCLUDE_DRM")), m_htiFileInspector, m_bFileInspectorDRM);
-		m_htiFileInspectorInvalidExt = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("REPLACE_INVALID_FILE_EXTENSION")), m_htiFileInspector, m_bFileInspectorInvalidExt);
-		m_htiFileInspectorCheckPeriod = m_ctrlTreeOptions.InsertItem(GetResString(_T("FILE_INSPECTOR_CHECK_PERIOD")), TREEOPTSCTRLIMG_EDIT, TREEOPTSCTRLIMG_EDIT, m_htiFileInspector);
-		m_ctrlTreeOptions.AddEditBox(m_htiFileInspectorCheckPeriod, RUNTIME_CLASS(CNumTreeOptionsEdit));
-		m_htiFileInspectorCompletedThreshold = m_ctrlTreeOptions.InsertItem(GetResString(_T("FILE_INSPECTOR_DATA_THRESHOLD")), TREEOPTSCTRLIMG_EDIT, TREEOPTSCTRLIMG_EDIT, m_htiFileInspector);
-		m_ctrlTreeOptions.AddEditBox(m_htiFileInspectorCompletedThreshold, RUNTIME_CLASS(CNumTreeOptionsEdit));
-		m_htiFileInspectorZeroPercentageThreshold = m_ctrlTreeOptions.InsertItem(GetResString(_T("FILE_INSPECTOR_ZERO_PERCENTAGE_THRESHOLD")), TREEOPTSCTRLIMG_EDIT, TREEOPTSCTRLIMG_EDIT, m_htiFileInspector);
-		m_ctrlTreeOptions.AddEditBox(m_htiFileInspectorZeroPercentageThreshold, RUNTIME_CLASS(CNumTreeOptionsEdit));
-		m_htiFileInspectorCompressionThreshold = m_ctrlTreeOptions.InsertItem(GetResString(_T("FILE_INSPECTOR_COMPRESSION_THRESHOLD")), TREEOPTSCTRLIMG_EDIT, TREEOPTSCTRLIMG_EDIT, m_htiFileInspector);
-		m_ctrlTreeOptions.AddEditBox(m_htiFileInspectorCompressionThreshold, RUNTIME_CLASS(CNumTreeOptionsEdit));
-		m_htiFileInspectorBypassZeroPercentage = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("FILE_INSPECTOR_BYPASS_ZERO_PERCENTAGE")), m_htiFileInspector, m_bFileInspectorBypassZeroPercentage);
-		m_htiFileInspectorCompressionThresholdToBypassZero = m_ctrlTreeOptions.InsertItem(GetResString(_T("FILE_INSPECTOR_COMPRESSION_THRESHOLD_TO_BYPASS_ZERO")), TREEOPTSCTRLIMG_EDIT, TREEOPTSCTRLIMG_EDIT, m_htiFileInspector);
-		m_ctrlTreeOptions.AddEditBox(m_htiFileInspectorCompressionThresholdToBypassZero, RUNTIME_CLASS(CNumTreeOptionsEdit));
+		m_htiDownloadInspector = m_ctrlTreeOptions.InsertGroup(GetResString(_T("DOWNLOAD_INSPECTOR")), iImgInspect, TVI_ROOT);
+		m_htiDownloadInspectorDisable = m_ctrlTreeOptions.InsertRadioButton(GetResString(_T("DOWNLOAD_INSPECTOR_DISABLE")), m_htiDownloadInspector, m_iDownloadInspector == 0);
+		m_htiDownloadInspectorLogOnly = m_ctrlTreeOptions.InsertRadioButton(GetResString(_T("DOWNLOAD_INSPECTOR_LOG_ONLY")), m_htiDownloadInspector, m_iDownloadInspector == 1);
+		m_htiDownloadInspectorDelete = m_ctrlTreeOptions.InsertRadioButton(GetResString(_T("DOWNLOAD_INSPECTOR_DELETE")), m_htiDownloadInspector, m_iDownloadInspector == 2);
+		m_htiDownloadInspectorFake = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("DOWNLOAD_INSPECTOR_INCLUDE_FAKE")), m_htiDownloadInspector, m_bDownloadInspectorFake);
+		m_htiDownloadInspectorDRM = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("DOWNLOAD_INSPECTOR_INCLUDE_DRM")), m_htiDownloadInspector, m_bDownloadInspectorDRM);
+		m_htiDownloadInspectorInvalidExt = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("REPLACE_INVALID_FILE_EXTENSION")), m_htiDownloadInspector, m_bDownloadInspectorInvalidExt);
+		m_htiDownloadInspectorCheckPeriod = m_ctrlTreeOptions.InsertItem(GetResString(_T("DOWNLOAD_INSPECTOR_CHECK_PERIOD")), TREEOPTSCTRLIMG_EDIT, TREEOPTSCTRLIMG_EDIT, m_htiDownloadInspector);
+		m_ctrlTreeOptions.AddEditBox(m_htiDownloadInspectorCheckPeriod, RUNTIME_CLASS(CNumTreeOptionsEdit));
+		m_htiDownloadInspectorCompletedThreshold = m_ctrlTreeOptions.InsertItem(GetResString(_T("DOWNLOAD_INSPECTOR_DATA_THRESHOLD")), TREEOPTSCTRLIMG_EDIT, TREEOPTSCTRLIMG_EDIT, m_htiDownloadInspector);
+		m_ctrlTreeOptions.AddEditBox(m_htiDownloadInspectorCompletedThreshold, RUNTIME_CLASS(CNumTreeOptionsEdit));
+		m_htiDownloadInspectorZeroPercentageThreshold = m_ctrlTreeOptions.InsertItem(GetResString(_T("DOWNLOAD_INSPECTOR_ZERO_PERCENTAGE_THRESHOLD")), TREEOPTSCTRLIMG_EDIT, TREEOPTSCTRLIMG_EDIT, m_htiDownloadInspector);
+		m_ctrlTreeOptions.AddEditBox(m_htiDownloadInspectorZeroPercentageThreshold, RUNTIME_CLASS(CNumTreeOptionsEdit));
+		m_htiDownloadInspectorCompressionThreshold = m_ctrlTreeOptions.InsertItem(GetResString(_T("DOWNLOAD_INSPECTOR_COMPRESSION_THRESHOLD")), TREEOPTSCTRLIMG_EDIT, TREEOPTSCTRLIMG_EDIT, m_htiDownloadInspector);
+		m_ctrlTreeOptions.AddEditBox(m_htiDownloadInspectorCompressionThreshold, RUNTIME_CLASS(CNumTreeOptionsEdit));
+		m_htiDownloadInspectorBypassZeroPercentage = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("DOWNLOAD_INSPECTOR_BYPASS_ZERO_PERCENTAGE")), m_htiDownloadInspector, m_bDownloadInspectorBypassZeroPercentage);
+		m_htiDownloadInspectorCompressionThresholdToBypassZero = m_ctrlTreeOptions.InsertItem(GetResString(_T("DOWNLOAD_INSPECTOR_COMPRESSION_THRESHOLD_TO_BYPASS_ZERO")), TREEOPTSCTRLIMG_EDIT, TREEOPTSCTRLIMG_EDIT, m_htiDownloadInspector);
+		m_ctrlTreeOptions.AddEditBox(m_htiDownloadInspectorCompressionThresholdToBypassZero, RUNTIME_CLASS(CNumTreeOptionsEdit));
 
 		m_htiSearchTweaksGroup = m_ctrlTreeOptions.InsertGroup(GetResString(_T("SEARCH_TWEAKS")), iImgESearch, TVI_ROOT);
 		m_htiGroupKnownAtTheBottom = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("GROUP_KNOWN_AT_THE_BOTTOM")), m_htiSearchTweaksGroup, m_bGroupKnownAtTheBottom);
@@ -762,6 +765,7 @@ void CPPgMod::DoDataExchange(CDataExchange *pDX)
 
 	DDX_TreeRadio(pDX, IDC_MOD_OPTS, m_htiUIDarkMode, m_iUIDarkMode);
 	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiUITweaksSpeedGraph, m_bUITweaksSpeedGraph);
+	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiShowDownloadCommandsToolbar, m_bShowDownloadCommandsToolbar);
 	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiDisableFindAsYouType, m_bDisableFindAsYouType);
 	if (m_htiUITweaksListUpdatePeriod) {
 		DDX_TreeEdit(pDX, IDC_MOD_OPTS, m_htiUITweaksListUpdatePeriod, m_iUITweaksListUpdatePeriod);
@@ -861,31 +865,31 @@ void CPPgMod::DoDataExchange(CDataExchange *pDX)
 	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiDownloadCheckerMarkAsBlacklisted, m_bDownloadCheckerMarkAsBlacklisted);
 	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiDownloadCheckerAutoMarkAsBlacklisted, m_bDownloadCheckerAutoMarkAsBlacklisted);
 
-	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiFileInspectorFake, m_bFileInspectorFake);
-	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiFileInspectorDRM, m_bFileInspectorDRM);
-	DDX_TreeRadio(pDX, IDC_MOD_OPTS, m_htiFileInspector, m_iFileInspector);
-	m_iFileInspector = (m_bFileInspectorFake || m_bFileInspectorFake) ? m_iFileInspector : 0; // If none of these checkboxes selected, force 0;
-	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiFileInspectorInvalidExt, m_bFileInspectorInvalidExt);
-	if (m_htiFileInspectorCheckPeriod) {
-		DDX_TreeEdit(pDX, IDC_MOD_OPTS, m_htiFileInspectorCheckPeriod, m_iFileInspectorCheckPeriod);
-		DDV_MinMaxInt(pDX, m_iFileInspectorCheckPeriod, 5, INT_MAX);
+	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiDownloadInspectorFake, m_bDownloadInspectorFake);
+	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiDownloadInspectorDRM, m_bDownloadInspectorDRM);
+	DDX_TreeRadio(pDX, IDC_MOD_OPTS, m_htiDownloadInspector, m_iDownloadInspector);
+	m_iDownloadInspector = (m_bDownloadInspectorFake || m_bDownloadInspectorFake) ? m_iDownloadInspector : 0; // If none of these checkboxes selected, force 0;
+	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiDownloadInspectorInvalidExt, m_bDownloadInspectorInvalidExt);
+	if (m_htiDownloadInspectorCheckPeriod) {
+		DDX_TreeEdit(pDX, IDC_MOD_OPTS, m_htiDownloadInspectorCheckPeriod, m_iDownloadInspectorCheckPeriod);
+		DDV_MinMaxInt(pDX, m_iDownloadInspectorCheckPeriod, 5, INT_MAX);
 	}
-	if (m_htiFileInspectorCompletedThreshold) {
-		DDX_TreeEdit(pDX, IDC_MOD_OPTS, m_htiFileInspectorCompletedThreshold, m_iFileInspectorCompletedThreshold);
-		DDV_MinMaxInt(pDX, m_iFileInspectorCompletedThreshold, 1, INT_MAX);
+	if (m_htiDownloadInspectorCompletedThreshold) {
+		DDX_TreeEdit(pDX, IDC_MOD_OPTS, m_htiDownloadInspectorCompletedThreshold, m_iDownloadInspectorCompletedThreshold);
+		DDV_MinMaxInt(pDX, m_iDownloadInspectorCompletedThreshold, 1, INT_MAX);
 	}
-	if (m_htiFileInspectorZeroPercentageThreshold) {
-		DDX_TreeEdit(pDX, IDC_MOD_OPTS, m_htiFileInspectorZeroPercentageThreshold, m_iFileInspectorZeroPercentageThreshold);
-		DDV_MinMaxInt(pDX, m_iFileInspectorZeroPercentageThreshold, 1, 100);
+	if (m_htiDownloadInspectorZeroPercentageThreshold) {
+		DDX_TreeEdit(pDX, IDC_MOD_OPTS, m_htiDownloadInspectorZeroPercentageThreshold, m_iDownloadInspectorZeroPercentageThreshold);
+		DDV_MinMaxInt(pDX, m_iDownloadInspectorZeroPercentageThreshold, 1, 100);
 	}
-	if (m_htiFileInspectorCompressionThreshold) {
-		DDX_TreeEdit(pDX, IDC_MOD_OPTS, m_htiFileInspectorCompressionThreshold, m_iFileInspectorCompressionThreshold);
-		DDV_MinMaxInt(pDX, m_iFileInspectorCompressionThreshold, 100, INT_MAX);
+	if (m_htiDownloadInspectorCompressionThreshold) {
+		DDX_TreeEdit(pDX, IDC_MOD_OPTS, m_htiDownloadInspectorCompressionThreshold, m_iDownloadInspectorCompressionThreshold);
+		DDV_MinMaxInt(pDX, m_iDownloadInspectorCompressionThreshold, 100, INT_MAX);
 	}
-	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiFileInspectorBypassZeroPercentage, m_bFileInspectorBypassZeroPercentage);
-	if (m_htiFileInspectorCompressionThresholdToBypassZero) {
-		DDX_TreeEdit(pDX, IDC_MOD_OPTS, m_htiFileInspectorCompressionThresholdToBypassZero, m_iFileInspectorCompressionThresholdToBypassZero);
-		DDV_MinMaxInt(pDX, m_iFileInspectorCompressionThresholdToBypassZero, m_iFileInspectorCompressionThreshold+1, INT_MAX);
+	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiDownloadInspectorBypassZeroPercentage, m_bDownloadInspectorBypassZeroPercentage);
+	if (m_htiDownloadInspectorCompressionThresholdToBypassZero) {
+		DDX_TreeEdit(pDX, IDC_MOD_OPTS, m_htiDownloadInspectorCompressionThresholdToBypassZero, m_iDownloadInspectorCompressionThresholdToBypassZero);
+		DDV_MinMaxInt(pDX, m_iDownloadInspectorCompressionThresholdToBypassZero, m_iDownloadInspectorCompressionThreshold+1, INT_MAX);
 	}
 
 	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiGroupKnownAtTheBottom, m_bGroupKnownAtTheBottom);
@@ -1068,6 +1072,7 @@ BOOL CPPgMod::OnInitDialog()
 {	
 	m_iUIDarkMode = thePrefs.GetUIDarkMode();
 	m_bUITweaksSpeedGraph = thePrefs.GetUITweaksSpeedGraph();
+	m_bShowDownloadCommandsToolbar = thePrefs.IsDownloadToolbarEnabled();
 	m_bDisableFindAsYouType = thePrefs.m_bDisableFindAsYouType;
 	m_iUITweaksListUpdatePeriod = thePrefs.GetUITweaksListUpdatePeriod();
 	m_iUITweaksServerListMaxSortHistory = theApp.emuledlg->serverwnd->serverlistctrl.GetMaxSortHistory();
@@ -1117,16 +1122,16 @@ BOOL CPPgMod::OnInitDialog()
 	m_bDownloadCheckerMarkAsBlacklisted = thePrefs.GetDownloadCheckerMarkAsBlacklisted();
 	m_bDownloadCheckerAutoMarkAsBlacklisted = thePrefs.GetDownloadCheckerAutoMarkAsBlacklisted();
 
-	m_iFileInspector = thePrefs.GetFileInspector();
-	m_bFileInspectorFake = thePrefs.GetFileInspectorFake();
-	m_bFileInspectorDRM = thePrefs.GetFileInspectorDRM();
-	m_bFileInspectorInvalidExt = thePrefs.m_bFileInspectorInvalidExt;
-	m_iFileInspectorCheckPeriod = thePrefs.GetFileInspectorCheckPeriod();
-	m_iFileInspectorCompletedThreshold = thePrefs.GetFileInspectorCompletedThreshold();
-	m_iFileInspectorZeroPercentageThreshold = thePrefs.GetFileInspectorZeroPercentageThreshold();
-	m_iFileInspectorCompressionThreshold = thePrefs.GetFileInspectorCompressionThreshold();
-	m_bFileInspectorBypassZeroPercentage = thePrefs.GetFileInspectorBypassZeroPercentage();
-	m_iFileInspectorCompressionThresholdToBypassZero = thePrefs.GetFileInspectorCompressionThresholdToBypassZero();
+	m_iDownloadInspector = thePrefs.GetDownloadInspector();
+	m_bDownloadInspectorFake = thePrefs.GetDownloadInspectorFake();
+	m_bDownloadInspectorDRM = thePrefs.GetDownloadInspectorDRM();
+	m_bDownloadInspectorInvalidExt = thePrefs.m_bDownloadInspectorInvalidExt;
+	m_iDownloadInspectorCheckPeriod = thePrefs.GetDownloadInspectorCheckPeriod();
+	m_iDownloadInspectorCompletedThreshold = thePrefs.GetDownloadInspectorCompletedThreshold();
+	m_iDownloadInspectorZeroPercentageThreshold = thePrefs.GetDownloadInspectorZeroPercentageThreshold();
+	m_iDownloadInspectorCompressionThreshold = thePrefs.GetDownloadInspectorCompressionThreshold();
+	m_bDownloadInspectorBypassZeroPercentage = thePrefs.GetDownloadInspectorBypassZeroPercentage();
+	m_iDownloadInspectorCompressionThresholdToBypassZero = thePrefs.GetDownloadInspectorCompressionThresholdToBypassZero();
 
 	m_bGroupKnownAtTheBottom = thePrefs.GetGroupKnownAtTheBottom();
 	m_iSpamThreshold = thePrefs.GetSpamThreshold();
@@ -1270,6 +1275,10 @@ BOOL CPPgMod::OnApply()
 		thePrefs.SetUITweaksSpeedGraph(m_bUITweaksSpeedGraph);
 		theApp.emuledlg->ShowSpeedGraph(m_bUITweaksSpeedGraph);
 	}
+	if (m_bShowDownloadCommandsToolbar != thePrefs.IsDownloadToolbarEnabled()) {
+		thePrefs.SetDownloadToolbar(m_bShowDownloadCommandsToolbar);
+		theApp.emuledlg->transferwnd->ShowToolbar(m_bShowDownloadCommandsToolbar);
+	}
 	thePrefs.m_bDisableFindAsYouType = m_bDisableFindAsYouType;
 	thePrefs.SetUITweaksListUpdatePeriod(m_iUITweaksListUpdatePeriod);
 	theApp.emuledlg->serverwnd->serverlistctrl.SetMaxSortHistory(m_iUITweaksServerListMaxSortHistory);
@@ -1373,16 +1382,16 @@ BOOL CPPgMod::OnApply()
 	thePrefs.SetDownloadCheckerMarkAsBlacklisted(m_bDownloadCheckerMarkAsBlacklisted);
 	thePrefs.SetDownloadCheckerAutoMarkAsBlacklisted(m_bDownloadCheckerAutoMarkAsBlacklisted);
 
-	thePrefs.SetFileInspector(m_iFileInspector);
-	thePrefs.SetFileInspectorFake(m_bFileInspectorFake);
-	thePrefs.SetFileInspectorDRM(m_bFileInspectorDRM);
-	thePrefs.m_bFileInspectorInvalidExt = m_bFileInspectorInvalidExt;
-	thePrefs.SetFileInspectorCheckPeriod(m_iFileInspectorCheckPeriod);
-	thePrefs.SetFileInspectorCompletedThreshold(m_iFileInspectorCompletedThreshold);
-	thePrefs.SetFileInspectorZeroPercentageThreshold(m_iFileInspectorZeroPercentageThreshold);
-	thePrefs.SetFileInspectorCompressionThreshold(m_iFileInspectorCompressionThreshold);
-	thePrefs.SetFileInspectorBypassZeroPercentage(m_bFileInspectorBypassZeroPercentage);
-	thePrefs.SetFileInspectorCompressionThresholdToBypassZero(m_iFileInspectorCompressionThresholdToBypassZero);
+	thePrefs.SetDownloadInspector(m_iDownloadInspector);
+	thePrefs.SetDownloadInspectorFake(m_bDownloadInspectorFake);
+	thePrefs.SetDownloadInspectorDRM(m_bDownloadInspectorDRM);
+	thePrefs.m_bDownloadInspectorInvalidExt = m_bDownloadInspectorInvalidExt;
+	thePrefs.SetDownloadInspectorCheckPeriod(m_iDownloadInspectorCheckPeriod);
+	thePrefs.SetDownloadInspectorCompletedThreshold(m_iDownloadInspectorCompletedThreshold);
+	thePrefs.SetDownloadInspectorZeroPercentageThreshold(m_iDownloadInspectorZeroPercentageThreshold);
+	thePrefs.SetDownloadInspectorCompressionThreshold(m_iDownloadInspectorCompressionThreshold);
+	thePrefs.SetDownloadInspectorBypassZeroPercentage(m_bDownloadInspectorBypassZeroPercentage);
+	thePrefs.SetDownloadInspectorCompressionThresholdToBypassZero(m_iDownloadInspectorCompressionThresholdToBypassZero);
 
 	thePrefs.SetGroupKnownAtTheBottom(m_bGroupKnownAtTheBottom);
 	thePrefs.SetSpamThreshold(m_iSpamThreshold);
@@ -1596,6 +1605,8 @@ void CPPgMod::Localize()
 		LocalizeItemInfoText(m_htiUIDarkModeOff, _T("DARK_MODE_OFF_INFO"));
 		LocalizeEditLabel(m_htiUITweaksSpeedGraph, _T("SHOW_SPEED_GRAPH"));
 		LocalizeItemInfoText(m_htiUITweaksSpeedGraph, _T("SHOW_SPEED_GRAPH"));
+		LocalizeItemText(m_htiShowDownloadCommandsToolbar, _T("SHOW_DOWNLOAD_COMMANDS_TOOLBAR"));
+		LocalizeItemInfoText(m_htiShowDownloadCommandsToolbar, _T("SHOW_DOWNLOAD_COMMANDS_TOOLBAR_INFO"));
 		LocalizeItemText(m_htiDisableFindAsYouType, _T("DISABLE_AS_YOU_TYPE"));
 		LocalizeItemInfoText(m_htiDisableFindAsYouType, _T("DISABLE_AS_YOU_TYPE_INFO"));
 		LocalizeEditLabel(m_htiUITweaksListUpdatePeriod, _T("UI_TWEAKS_LIST_UPDATE_PERIOD"));
@@ -1715,32 +1726,32 @@ void CPPgMod::Localize()
 		LocalizeItemText(m_htiDownloadCheckerAutoMarkAsBlacklisted, _T("DOWNLOAD_CHECK_AUTO_MARK_AS_BLACKLISTED"));
 		LocalizeItemInfoText(m_htiDownloadCheckerAutoMarkAsBlacklisted, _T("DOWNLOAD_CHECK_AUTO_MARK_AS_BLACKLISTED_INFO"));
 
-		LocalizeItemText(m_htiFileInspector, _T("FILE_INSPECTOR"));
-		LocalizeItemInfoText(m_htiFileInspector, _T("FILE_INSPECTOR_INFO"));
-		LocalizeItemText(m_htiFileInspectorDisable, _T("FILE_INSPECTOR_DISABLE"));
-		LocalizeItemInfoText(m_htiFileInspectorDisable, _T("FILE_INSPECTOR_DISABLE_INFO"));
-		LocalizeItemText(m_htiFileInspectorLogOnly, _T("FILE_INSPECTOR_LOG_ONLY"));
-		LocalizeItemInfoText(m_htiFileInspectorLogOnly, _T("FILE_INSPECTOR_LOG_ONLY_INFO"));
-		LocalizeItemText(m_htiFileInspectorDelete, _T("FILE_INSPECTOR_DELETE"));
-		LocalizeItemInfoText(m_htiFileInspectorDelete, _T("FILE_INSPECTOR_DELETE_INFO"));
-		LocalizeItemText(m_htiFileInspectorFake, _T("FILE_INSPECTOR_INCLUDE_FAKE"));
-		LocalizeItemInfoText(m_htiFileInspectorFake, _T("FILE_INSPECTOR_INCLUDE_FAKE_INFO"));
-		LocalizeItemText(m_htiFileInspectorDRM, _T("FILE_INSPECTOR_INCLUDE_DRM"));
-		LocalizeItemInfoText(m_htiFileInspectorDRM, _T("FILE_INSPECTOR_INCLUDE_DRM_INFO"));
-		LocalizeItemText(m_htiFileInspectorInvalidExt, _T("REPLACE_INVALID_FILE_EXTENSION"));
-		LocalizeItemInfoText(m_htiFileInspectorInvalidExt, _T("REPLACE_INVALID_FILE_EXTENSION_INFO"));
-		LocalizeEditLabel(m_htiFileInspectorCheckPeriod, _T("FILE_INSPECTOR_CHECK_PERIOD"));
-		LocalizeItemInfoText(m_htiFileInspectorCheckPeriod, _T("FILE_INSPECTOR_CHECK_PERIOD_INFO"));
-		LocalizeEditLabel(m_htiFileInspectorCompletedThreshold, _T("FILE_INSPECTOR_DATA_THRESHOLD"));
-		LocalizeItemInfoText(m_htiFileInspectorCompletedThreshold, _T("FILE_INSPECTOR_DATA_THRESHOLD_INFO"));
-		LocalizeEditLabel(m_htiFileInspectorZeroPercentageThreshold, _T("FILE_INSPECTOR_ZERO_PERCENTAGE_THRESHOLD"));
-		LocalizeItemInfoText(m_htiFileInspectorZeroPercentageThreshold, _T("FILE_INSPECTOR_ZERO_PERCENTAGE_THRESHOLD_INFO"));
-		LocalizeEditLabel(m_htiFileInspectorCompressionThreshold, _T("FILE_INSPECTOR_COMPRESSION_THRESHOLD"));
-		LocalizeItemInfoText(m_htiFileInspectorCompressionThreshold, _T("FILE_INSPECTOR_COMPRESSION_THRESHOLD_INFO"));
-		LocalizeItemText(m_htiFileInspectorBypassZeroPercentage, _T("FILE_INSPECTOR_BYPASS_ZERO_PERCENTAGE"));
-		LocalizeItemInfoText(m_htiFileInspectorBypassZeroPercentage, _T("FILE_INSPECTOR_BYPASS_ZERO_PERCENTAGE_INFO"));
-		LocalizeEditLabel(m_htiFileInspectorCompressionThresholdToBypassZero, _T("FILE_INSPECTOR_COMPRESSION_THRESHOLD_TO_BYPASS_ZERO"));
-		LocalizeItemInfoText(m_htiFileInspectorCompressionThresholdToBypassZero, _T("FILE_INSPECTOR_COMPRESSION_THRESHOLD_TO_BYPASS_ZERO_INFO"));
+		LocalizeItemText(m_htiDownloadInspector, _T("DOWNLOAD_INSPECTOR"));
+		LocalizeItemInfoText(m_htiDownloadInspector, _T("DOWNLOAD_INSPECTOR_INFO"));
+		LocalizeItemText(m_htiDownloadInspectorDisable, _T("DOWNLOAD_INSPECTOR_DISABLE"));
+		LocalizeItemInfoText(m_htiDownloadInspectorDisable, _T("DOWNLOAD_INSPECTOR_DISABLE_INFO"));
+		LocalizeItemText(m_htiDownloadInspectorLogOnly, _T("DOWNLOAD_INSPECTOR_LOG_ONLY"));
+		LocalizeItemInfoText(m_htiDownloadInspectorLogOnly, _T("DOWNLOAD_INSPECTOR_LOG_ONLY_INFO"));
+		LocalizeItemText(m_htiDownloadInspectorDelete, _T("DOWNLOAD_INSPECTOR_DELETE"));
+		LocalizeItemInfoText(m_htiDownloadInspectorDelete, _T("DOWNLOAD_INSPECTOR_DELETE_INFO"));
+		LocalizeItemText(m_htiDownloadInspectorFake, _T("DOWNLOAD_INSPECTOR_INCLUDE_FAKE"));
+		LocalizeItemInfoText(m_htiDownloadInspectorFake, _T("DOWNLOAD_INSPECTOR_INCLUDE_FAKE_INFO"));
+		LocalizeItemText(m_htiDownloadInspectorDRM, _T("DOWNLOAD_INSPECTOR_INCLUDE_DRM"));
+		LocalizeItemInfoText(m_htiDownloadInspectorDRM, _T("DOWNLOAD_INSPECTOR_INCLUDE_DRM_INFO"));
+		LocalizeItemText(m_htiDownloadInspectorInvalidExt, _T("REPLACE_INVALID_FILE_EXTENSION"));
+		LocalizeItemInfoText(m_htiDownloadInspectorInvalidExt, _T("REPLACE_INVALID_FILE_EXTENSION_INFO"));
+		LocalizeEditLabel(m_htiDownloadInspectorCheckPeriod, _T("DOWNLOAD_INSPECTOR_CHECK_PERIOD"));
+		LocalizeItemInfoText(m_htiDownloadInspectorCheckPeriod, _T("DOWNLOAD_INSPECTOR_CHECK_PERIOD_INFO"));
+		LocalizeEditLabel(m_htiDownloadInspectorCompletedThreshold, _T("DOWNLOAD_INSPECTOR_DATA_THRESHOLD"));
+		LocalizeItemInfoText(m_htiDownloadInspectorCompletedThreshold, _T("DOWNLOAD_INSPECTOR_DATA_THRESHOLD_INFO"));
+		LocalizeEditLabel(m_htiDownloadInspectorZeroPercentageThreshold, _T("DOWNLOAD_INSPECTOR_ZERO_PERCENTAGE_THRESHOLD"));
+		LocalizeItemInfoText(m_htiDownloadInspectorZeroPercentageThreshold, _T("DOWNLOAD_INSPECTOR_ZERO_PERCENTAGE_THRESHOLD_INFO"));
+		LocalizeEditLabel(m_htiDownloadInspectorCompressionThreshold, _T("DOWNLOAD_INSPECTOR_COMPRESSION_THRESHOLD"));
+		LocalizeItemInfoText(m_htiDownloadInspectorCompressionThreshold, _T("DOWNLOAD_INSPECTOR_COMPRESSION_THRESHOLD_INFO"));
+		LocalizeItemText(m_htiDownloadInspectorBypassZeroPercentage, _T("DOWNLOAD_INSPECTOR_BYPASS_ZERO_PERCENTAGE"));
+		LocalizeItemInfoText(m_htiDownloadInspectorBypassZeroPercentage, _T("DOWNLOAD_INSPECTOR_BYPASS_ZERO_PERCENTAGE_INFO"));
+		LocalizeEditLabel(m_htiDownloadInspectorCompressionThresholdToBypassZero, _T("DOWNLOAD_INSPECTOR_COMPRESSION_THRESHOLD_TO_BYPASS_ZERO"));
+		LocalizeItemInfoText(m_htiDownloadInspectorCompressionThresholdToBypassZero, _T("DOWNLOAD_INSPECTOR_COMPRESSION_THRESHOLD_TO_BYPASS_ZERO_INFO"));
 
 		LocalizeItemText(m_htiSearchTweaksGroup, _T("SEARCH_TWEAKS"));
 		LocalizeItemInfoText(m_htiSearchTweaksGroup, _T("SEARCH_TWEAKS_INFO"));
@@ -2069,6 +2080,7 @@ void CPPgMod::OnDestroy()
 	m_htiUIDarkModeOn = NULL;
 	m_htiUIDarkModeOff = NULL;
 	m_htiUITweaksSpeedGraph = NULL;
+	m_htiShowDownloadCommandsToolbar = NULL;
 	m_htiDisableFindAsYouType = NULL;
 	m_htiUITweaksListUpdatePeriod = NULL;
 	m_htiUITweaksMaxSortHistory = NULL;
@@ -2130,28 +2142,28 @@ void CPPgMod::OnDestroy()
 	m_htiDownloadCheckerMarkAsBlacklisted = NULL;
 	m_htiDownloadCheckerAutoMarkAsBlacklisted = NULL;
 
-	m_htiFileInspector = NULL;
-	m_htiFileInspectorDisable = NULL;
-	m_htiFileInspectorLogOnly = NULL;
-	m_htiFileInspectorDelete = NULL;
-	m_htiFileInspectorFake = NULL;
-	m_htiFileInspectorDRM = NULL;
-	m_htiFileInspectorInvalidExt = NULL;
-	m_htiFileInspectorCheckPeriod = NULL;
-	m_htiFileInspectorCompletedThreshold = NULL;
-	m_htiFileInspectorZeroPercentageThreshold = NULL;
-	m_htiFileInspectorCompressionThreshold = NULL;
-	m_htiFileInspectorBypassZeroPercentage = NULL;
-	m_htiFileInspectorCompressionThresholdToBypassZero = NULL;
-	m_iFileInspector = NULL;
-	m_bFileInspectorFake = NULL;
-	m_bFileInspectorDRM = NULL;
-	m_iFileInspectorCheckPeriod = NULL;
-	m_iFileInspectorCompletedThreshold = NULL;
-	m_iFileInspectorZeroPercentageThreshold = NULL;
-	m_iFileInspectorCompressionThreshold = NULL;
-	m_bFileInspectorBypassZeroPercentage = NULL;
-	m_iFileInspectorCompressionThresholdToBypassZero = NULL;
+	m_htiDownloadInspector = NULL;
+	m_htiDownloadInspectorDisable = NULL;
+	m_htiDownloadInspectorLogOnly = NULL;
+	m_htiDownloadInspectorDelete = NULL;
+	m_htiDownloadInspectorFake = NULL;
+	m_htiDownloadInspectorDRM = NULL;
+	m_htiDownloadInspectorInvalidExt = NULL;
+	m_htiDownloadInspectorCheckPeriod = NULL;
+	m_htiDownloadInspectorCompletedThreshold = NULL;
+	m_htiDownloadInspectorZeroPercentageThreshold = NULL;
+	m_htiDownloadInspectorCompressionThreshold = NULL;
+	m_htiDownloadInspectorBypassZeroPercentage = NULL;
+	m_htiDownloadInspectorCompressionThresholdToBypassZero = NULL;
+	m_iDownloadInspector = NULL;
+	m_bDownloadInspectorFake = NULL;
+	m_bDownloadInspectorDRM = NULL;
+	m_iDownloadInspectorCheckPeriod = NULL;
+	m_iDownloadInspectorCompletedThreshold = NULL;
+	m_iDownloadInspectorZeroPercentageThreshold = NULL;
+	m_iDownloadInspectorCompressionThreshold = NULL;
+	m_bDownloadInspectorBypassZeroPercentage = NULL;
+	m_iDownloadInspectorCompressionThresholdToBypassZero = NULL;
 
 	m_htiSearchTweaksGroup = NULL;
 	m_htiGroupKnownAtTheBottom = NULL;

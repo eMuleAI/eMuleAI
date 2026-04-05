@@ -116,6 +116,20 @@ public:
 		return m_foundFilesCount.Lookup(nSearchID, returnVal) ? returnVal : 0;
 	}
 
+	UINT	GetOriginalFoundFiles(uint32 nSearchID) const
+	{
+		UINT returnVal;
+		return m_originalFoundFilesCount.Lookup(nSearchID, returnVal) ? returnVal : 0;
+	}
+
+	bool	HasMergedSearchHistory(uint32 nSearchID) const
+	{
+		bool bMerged = false;
+		return m_mergedSearchHistory.Lookup(nSearchID, bMerged) && bMerged;
+	}
+
+	void	MarkSearchAsMerged(uint32 nSearchID);
+
 	uint32 GetParentItemCount(uint32 nResultsID);
 
 	void	Process();
@@ -133,9 +147,11 @@ protected:
 private:
 	CTypedPtrList<CPtrList, SearchListsStruct*> m_listFileLists;
 	CMap<uint32, uint32, UINT, UINT> m_foundFilesCount;
+	CMap<uint32, uint32, UINT, UINT> m_originalFoundFilesCount;
 	CMap<uint32, uint32, UINT, UINT> m_foundSourcesCount;
 	CMap<uint32, uint32, UINT, UINT> m_ReceivedUDPAnswersCount;
 	CMap<uint32, uint32, UINT, UINT> m_RequestedUDPAnswersCount;
+	CMap<uint32, uint32, bool, bool> m_mergedSearchHistory;
 	CSearchListCtrl *outputwnd;
 	CString	m_strResultFileType;
 

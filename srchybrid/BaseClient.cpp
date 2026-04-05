@@ -82,6 +82,49 @@ IMPLEMENT_DYNAMIC(CClientException, CException)
 IMPLEMENT_DYNAMIC(CUpDownClient, CObject)
 CString CUpDownClient::m_strAntiUserNameThiefNick;
 
+static EClientSoftware DetectStoredClientSoftware(const CString& clientSoftware)
+{
+	CString softwareLower = clientSoftware;
+	softwareLower.MakeLower();
+
+	// Archived clients already store a normalized software label.
+	if (softwareLower.Find(_T("old emule")) == 0)
+		return SO_OLDEMULE;
+	if (softwareLower.Find(_T("edonkeyhybrid")) == 0)
+		return SO_EDONKEYHYBRID;
+	if (softwareLower.Find(_T("edonkey")) == 0)
+		return SO_EDONKEY;
+	if (softwareLower.Find(_T("amule")) == 0)
+		return SO_AMULE;
+	if (softwareLower.Find(_T("mldonkey")) == 0)
+		return SO_MLDONKEY;
+	if (softwareLower.Find(_T("shareaza")) == 0)
+		return SO_SHAREAZA;
+	if (softwareLower.Find(_T("lphant")) == 0)
+		return SO_LPHANT;
+	if (softwareLower.Find(_T("emule plus")) == 0)
+		return SO_EMULEPLUS;
+	if (softwareLower.Find(_T("hydranode")) == 0)
+		return SO_HYDRANODE;
+	if (softwareLower.Find(_T("hydra")) == 0)
+		return SO_HYDRA;
+	if (softwareLower.Find(_T("trustyfiles")) == 0)
+		return SO_TRUSTYFILES;
+	if (softwareLower.Find(_T("easymule")) == 0)
+		return SO_EASYMULE2;
+	if (softwareLower.Find(_T("neoloader")) == 0)
+		return SO_NEOLOADER;
+	if (softwareLower.Find(_T("kmule")) == 0)
+		return SO_KMULE;
+	if (softwareLower.Find(_T("cdonkey")) == 0)
+		return SO_CDONKEY;
+	if (softwareLower.Find(_T("xmule")) == 0 || softwareLower.Find(_T("emule compat")) == 0)
+		return SO_XMULE;
+	if (softwareLower.Find(_T("emule")) == 0)
+		return SO_EMULE;
+	return SO_UNKNOWN;
+}
+
 CUpDownClient::CUpDownClient(CClientReqSocket *sender)
 	: socket(sender)
 	, m_reqfile()
@@ -1624,8 +1667,6 @@ void CUpDownClient::SendHelloTypePacket(CSafeMemFile &data)
 	data.WriteUInt32(tagcount);
 
 	// eD2K Name
-
-	// TODO implement multi language website which informs users of the effects of bad mods
 	CString m_strGeneratedUserName = thePrefs.GetUserNick(); // Copy our user name as the initial value in case of below conditions are not met.
 	if ((IsBadClient() != PR_MODTHIEF && IsBadClient() != PR_USERNAMETHIEF) || ((IsBadClient() == PR_MODTHIEF || IsBadClient() == PR_USERNAMETHIEF) && !thePrefs.IsInformBadClients())) // send Nickaddon only if we're not informing UserNameThiefs/ModThiefs
 	{	
@@ -3689,6 +3730,11 @@ void CUpDownClient::ConnectionEstablished()
 
 void CUpDownClient::InitClientSoftwareVersion()
 {
+	if (m_bIsArchived && !m_strClientSoftware.IsEmpty()) {
+		m_clientSoft = DetectStoredClientSoftware(m_strClientSoftware);
+		return;
+	}
+
 	if (m_pszUsername == NULL) {
 		m_clientSoft = SO_UNKNOWN;
 		return;
@@ -5217,8 +5263,10 @@ void CUpDownClient::SendSharedDirectories()
 	theApp.sharedfiles->ResetPseudoDirNames(); //purge stale data
 	// add shared directories
 	CStringArray arFolders;
-	for (POSITION pos = thePrefs.shareddir_list.GetHeadPosition(); pos != NULL;) {
-		const CString &strDir(theApp.sharedfiles->GetPseudoDirName(thePrefs.shareddir_list.GetNext(pos)));
+	CStringList sharedDirs;
+	thePrefs.CopySharedDirectoryList(sharedDirs);
+	for (POSITION pos = sharedDirs.GetHeadPosition(); pos != NULL;) {
+		const CString &strDir(theApp.sharedfiles->GetPseudoDirName(sharedDirs.GetNext(pos)));
 		if (!strDir.IsEmpty())
 			arFolders.Add(strDir);
 	}

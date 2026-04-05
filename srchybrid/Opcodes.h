@@ -18,10 +18,10 @@
 #pragma once
 
 #define MOD_NAME		_T("AI") 
-#define MOD_VERSION		_T("AI v1.2") 
+#define MOD_VERSION		_T("AI v1.3") 
 #define MOD_MAIN_VER	1
-#define MOD_MIN_VER		2
-#define MOD_FLOAT_VER	1.2
+#define MOD_MIN_VER		3
+#define MOD_FLOAT_VER	1.3
 #define MOD_REPO_BASE_URL _T("https://github.com/eMuleAI/eMuleAI")
 #define MOD_PAGES_BASE_URL _T("https://eMuleAI.github.io")
 
@@ -85,9 +85,9 @@
 #define	MIN2MS(min)		SEC2MS(MIN2S(min))
 #define	HR2MS(hr)		SEC2MS(HR2S(hr))
 #define DAY2MS(day)		SEC2MS(DAY2S(day))
-#define MS2SEC(ms)		(int)(ms/1000)
-#define SEC2MIN(sec)	(int)(sec/60)
-#define MS2MIN(ms)		(int)(SEC2MIN(MS2SEC(ms)))
+#define MS2SEC(ms)		((int)((ms)/1000))
+#define SEC2MIN(sec)	((int)((sec)/60))
+#define MS2MIN(ms)		((int)(SEC2MIN(MS2SEC(ms))))
 
 // MOD Note: Do not change this part - Merkur
 #define UDPSEARCHSPEED			250			// Decreased to 250 msec (was 1000msec). Modern routers process UDP faster, speeding up source finding.
@@ -134,6 +134,9 @@
 #define SESSIONMAXTIME			HR2MS(1)	//1 hour
 #define	MAXFILECOMMENTLEN		128
 #define	PARTSIZE				9728000ui64
+// Conservative reservation budget for a single part.met save transaction. With the current 256 GB file limit and PARTSIZE this covers up to 28,257 parts, the full MD4 hashset, the full AICH hashset, and heavy gap/corruption tags with headroom.
+// Revisit this value if MAX_EMULE_FILE_SIZE, PARTSIZE, hashset serialization, or gap/tag serialization changes.
+#define	MAXMETSIZE				(4ui64 * 1024ui64 * 1024ui64)
 #define	MAX_EMULE_FILE_SIZE		0x4000000000ui64 // = 2^38 = 256GB
 #define OLD_MAX_EMULE_FILE_SIZE	4290048000ui64	// (4294967295/PARTSIZE)*PARTSIZE = ~4GB
 // MOD Note: end

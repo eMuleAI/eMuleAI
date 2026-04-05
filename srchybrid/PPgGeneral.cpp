@@ -36,6 +36,7 @@
 #include "Log.h"
 #include "eMuleAI/Shield.h"
 #include "eMuleAI/DarkMode.h"
+#include "UserMsgs.h"
 #include "translations/lang_registry.gen.h"
 
 #if !defined(LOCALE_SLOCALIZEDDISPLAYNAME)
@@ -291,7 +292,12 @@ BOOL CPPgGeneral::OnApply()
 	thePrefs.bringtoforeground = IsDlgButtonChecked(IDC_BRINGTOFOREGROUND) != 0;
 	thePrefs.confirmExit = IsDlgButtonChecked(IDC_EXIT) != 0;
 	thePrefs.onlineSig = IsDlgButtonChecked(IDC_ONLINESIG) != 0;
-	thePrefs.m_bEnableMiniMule = IsDlgButtonChecked(IDC_MINIMULE) != 0;
+	const bool bEnableMiniMule = IsDlgButtonChecked(IDC_MINIMULE) != 0;
+	const bool bCloseMiniMule = thePrefs.m_bEnableMiniMule && !bEnableMiniMule;
+	thePrefs.m_bEnableMiniMule = bEnableMiniMule;
+	if (bCloseMiniMule && theApp.emuledlg != NULL && ::IsWindow(theApp.emuledlg->GetSafeHwnd())) {
+		theApp.emuledlg->SendMessage(UM_CLOSE_MINIMULE);
+	}
 	thePrefs.m_bPreventStandby = IsDlgButtonChecked(IDC_PREVENTSTANDBY) != 0;
 	thePrefs.splashscreen = IsDlgButtonChecked(IDC_SPLASHON) != 0;
 	thePrefs.startMinimized = IsDlgButtonChecked(IDC_STARTMIN) != 0;

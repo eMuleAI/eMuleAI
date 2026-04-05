@@ -75,7 +75,13 @@ static __forceinline VOID BB_CancelThreadpoolIo(BB_PTP_IO io)
 {
 	typedef VOID(WINAPI* PFN_CancelThreadpoolIo)(PVOID);
 	PFN_CancelThreadpoolIo p = reinterpret_cast<PFN_CancelThreadpoolIo>(BB_GetProc("CancelThreadpoolIo"));
-	if (p && io) p(io);
+	if (p && io) {
+		__try {
+			p(io);
+		} __except (EXCEPTION_EXECUTE_HANDLER) {
+			// Best-effort cancel during teardown; swallow invalid-state SEH from the OS.
+		}
+	}
 }
 
 static __forceinline VOID BB_CloseThreadpoolIo(BB_PTP_IO io)
@@ -100,10 +106,42 @@ static __forceinline VOID BB_CloseThreadpoolIoX(BB_PTP_IO* pIo)
 // Atomically null out and really call CloseThreadpoolIo; use only when not exiting process.
 static __forceinline VOID BB_CloseThreadpoolIoRealX(BB_PTP_IO* pIo)
 {
-	// Degraded to no-op like X: atomically null and skip OS close for debugger stability.
 	if (pIo == NULL)
 		return;
-	(void)InterlockedExchangePointer(reinterpret_cast<PVOID*>(pIo), NULL);
+
+	PVOID io = InterlockedExchangePointer(reinterpret_cast<PVOID*>(pIo), NULL);
+	if (io == NULL)
+		return;
+
+	typedef VOID(WINAPI* PFN_CloseThreadpoolIo)(PVOID);
+	PFN_CloseThreadpoolIo p = reinterpret_cast<PFN_CloseThreadpoolIo>(BB_GetProc("CloseThreadpoolIo"));
+	if (p != NULL) {
+		__try {
+			p(io);
+		} __except (EXCEPTION_EXECUTE_HANDLER) {
+			// Best-effort runtime cleanup; swallow invalid-state SEH from the OS.
+		}
+	}
+}
+
+static __forceinline BOOL BB_WaitForThreadpoolIoCallbacks(BB_PTP_IO io, BOOL fCancelPendingCallbacks)
+{
+	typedef VOID(WINAPI* PFN_WaitForThreadpoolIoCallbacks)(PVOID, BOOL);
+	PFN_WaitForThreadpoolIoCallbacks p = reinterpret_cast<PFN_WaitForThreadpoolIoCallbacks>(BB_GetProc("WaitForThreadpoolIoCallbacks"));
+	if (io == NULL)
+		return TRUE;
+
+	if (p == NULL)
+		return FALSE;
+
+	__try {
+		p(io, fCancelPendingCallbacks);
+		return TRUE;
+	} __except (EXCEPTION_EXECUTE_HANDLER) {
+		// Best-effort wait during teardown; swallow invalid-state SEH from the OS.
+	}
+
+	return FALSE;
 }
 
 static __forceinline BOOL BB_CancelIoEx(HANDLE h, LPOVERLAPPED pov)

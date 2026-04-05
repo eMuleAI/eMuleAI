@@ -34,13 +34,13 @@ BEGIN
     BEGIN
         BLOCK "040904B0" // Lang=US English, CharSet=Unicode
         BEGIN
-            VALUE "CompanyName", "https://www.emule-project.net"
-            VALUE "FileDescription", "eMule"
+            VALUE "CompanyName", "https://github.com/eMuleAI/eMuleAI"
+            VALUE "FileDescription", "eMule AI"
             VALUE "FileVersion", SZ_VERSION_NAME " Unicode"
-            VALUE "InternalName", "emule.exe"
-            VALUE "LegalCopyright", "Copyright © 2002-2025 Merkur - Read license.txt for more infos."
-            VALUE "OriginalFilename", "emule.exe"
-            VALUE "ProductName", "eMule"
+            VALUE "InternalName", "eMuleAI.exe"
+            VALUE "LegalCopyright", "Copyright © 2002-2026 Merkur. Copyright © 2026 eMule AI. See license.txt for details."
+            VALUE "OriginalFilename", "eMuleAI.exe"
+            VALUE "ProductName", "eMule AI"
             VALUE "ProductVersion", SZ_VERSION_NAME " Unicode"
         END
     END

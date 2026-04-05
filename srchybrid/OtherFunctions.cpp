@@ -808,6 +808,54 @@ uint64 GetFreeDiskSpaceX(LPCTSTR pDirectory, bool bUpdateTime)
 	return ::GetDiskFreeSpaceEx(pDirectory, &nFreeDiskSpace, NULL, NULL) ? nFreeDiskSpace.QuadPart : 0;
 }
 
+bool GetVolumeRootPath(LPCTSTR pszFilePath, CString& strRootPath)
+{
+	strRootPath = pszFilePath;
+	BOOL bResult = ::PathStripToRoot(strRootPath.GetBuffer());
+	strRootPath.ReleaseBuffer();
+	if (!bResult || strRootPath.IsEmpty())
+		return false;
+	slosh(strRootPath);
+	return true;
+}
+
+bool ReplaceFileAtomically(const CString& strSourcePath, const CString& strTargetPath, DWORD* pdwLastError)
+{
+	if (pdwLastError != NULL)
+		*pdwLastError = ERROR_SUCCESS;
+
+	if (::MoveFileEx(PreparePathForWin32LongPath(strSourcePath), PreparePathForWin32LongPath(strTargetPath), MOVEFILE_REPLACE_EXISTING))
+		return true;
+
+	if (pdwLastError != NULL)
+		*pdwLastError = ::GetLastError();
+	return false;
+}
+
+bool CopyFileToTempAndReplace(const CString& strSourcePath, const CString& strTargetPath, const CString& strTempTargetPath, bool bDontOverrideTarget, DWORD* pdwLastError)
+{
+	if (pdwLastError != NULL)
+		*pdwLastError = ERROR_SUCCESS;
+
+	const CString strLongTargetPath = PreparePathForWin32LongPath(strTargetPath);
+	if (bDontOverrideTarget && ::GetFileAttributes(strLongTargetPath) != INVALID_FILE_ATTRIBUTES)
+		return true;
+
+	const CString strLongTempTargetPath = PreparePathForWin32LongPath(strTempTargetPath);
+	if (!::CopyFile(PreparePathForWin32LongPath(strSourcePath), strLongTempTargetPath, FALSE)) {
+		if (pdwLastError != NULL)
+			*pdwLastError = ::GetLastError();
+		::DeleteFile(strLongTempTargetPath);
+		return false;
+	}
+
+	if (ReplaceFileAtomically(strTempTargetPath, strTargetPath, pdwLastError))
+		return true;
+
+	::DeleteFile(strLongTempTargetPath);
+	return false;
+}
+
 CString GetRateString(UINT rate)
 {
 	static const LPCTSTR ids[6] =
@@ -2898,27 +2946,17 @@ void ClearVolumeInfoCache(int iDrive)
 
 bool IsFileOnNTFSVolume(LPCTSTR pszFilePath)
 {
-	CString strRootPath(pszFilePath);
-	BOOL bResult = ::PathStripToRoot(strRootPath.GetBuffer());
-	strRootPath.ReleaseBuffer();
-	if (!bResult)
+	CString strRootPath;
+	if (!GetVolumeRootPath(pszFilePath, strRootPath))
 		return false;
-	// Need to add a trailing backslash in case of a network share
-	if (!strRootPath.IsEmpty())
-		slosh(strRootPath);
 	return IsNTFSVolume(strRootPath);
 }
 
 bool IsFileOnFATVolume(LPCTSTR pszFilePath)
 {
-	CString strRootPath(pszFilePath);
-	BOOL bResult = ::PathStripToRoot(strRootPath.GetBuffer());
-	strRootPath.ReleaseBuffer();
-	if (!bResult)
+	CString strRootPath;
+	if (!GetVolumeRootPath(pszFilePath, strRootPath))
 		return false;
-	// Need to add a trailing backslash in case of a network share
-	if (!strRootPath.IsEmpty())
-		slosh(strRootPath);
 	return IsFATVolume(strRootPath);
 }
 

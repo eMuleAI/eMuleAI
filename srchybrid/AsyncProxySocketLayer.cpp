@@ -120,6 +120,7 @@ Version history
 #include "AsyncProxySocketLayer.h"
 #include "opcodes.h"
 #include "otherfunctions.h"
+#include "Log.h"
 
 #ifdef _DEBUG
 #define new DEBUG_NEW
@@ -291,7 +292,7 @@ void CAsyncProxySocketLayer::OnReceive(int nErrorCode)
 			//            report different user-ids
 
 			if (m_nRecvBufferPos == 8) {
-				TRACE(_T("SOCKS4 response: VN=%u  CD=%u  DSTPORT=%u  DSTIP=%s\n"), (BYTE)m_pRecvBuffer[0], (BYTE)m_pRecvBuffer[1], ntohs(*(u_short*)&m_pRecvBuffer[2]), (LPCTSTR)ipstr(*(u_long*)&m_pRecvBuffer[4]));
+				AddDebugLogLine(DLP_LOW, false, _T("SOCKS4 response: VN=%u  CD=%u  DSTPORT=%u  DSTIP=%s"), (BYTE)m_pRecvBuffer[0], (BYTE)m_pRecvBuffer[1], ntohs(*(u_short*)&m_pRecvBuffer[2]), (LPCTSTR)ipstr(*(u_long*)&m_pRecvBuffer[4]));
 				if (m_pRecvBuffer[0] != 0 || m_pRecvBuffer[1] != 90) {
 					DoLayerCallback(LAYERCALLBACK_LAYERSPECIFIC, PROXYERROR_REQUESTFAILED, 0, const_cast<LPSTR>((LPCSTR)GetSocks4Error(m_pRecvBuffer[0], m_pRecvBuffer[1])));
 					TriggerEvent((m_nProxyOpID == PROXYOP_CONNECT) ? FD_CONNECT : FD_ACCEPT, WSAECONNABORTED, TRUE);
@@ -375,7 +376,7 @@ void CAsyncProxySocketLayer::OnReceive(int nErrorCode)
 			}
 			m_nRecvBufferPos += numread;
 			if (m_nRecvBufferPos == 2) {
-				TRACE(_T("SOCKS5 response: VER=%u  METHOD=%u\n"), (BYTE)m_pRecvBuffer[0], (BYTE)m_pRecvBuffer[1]);
+				AddDebugLogLine(DLP_LOW, false, _T("SOCKS5 response: VER=%u  METHOD=%u"), (BYTE)m_pRecvBuffer[0], (BYTE)m_pRecvBuffer[1]);
 				if (m_pRecvBuffer[0] != 5) {
 					DoLayerCallback(LAYERCALLBACK_LAYERSPECIFIC, PROXYERROR_REQUESTFAILED, 0, const_cast<LPSTR>((LPCSTR)GetSocks5Error(m_pRecvBuffer[1])));
 					TriggerEvent((m_nProxyOpID == PROXYOP_CONNECT) ? FD_CONNECT : FD_ACCEPT, WSAECONNABORTED, TRUE);
@@ -613,7 +614,7 @@ void CAsyncProxySocketLayer::OnReceive(int nErrorCode)
 				return;
 			}
 			m_nRecvBufferPos += numread;
-			TRACE(_T("SOCKS5 response: VER=%u  REP=%u  RSV=%u  ATYP=%u  BND.ADDR=%s  BND.PORT=%u\n"), (BYTE)m_pRecvBuffer[0], (BYTE)m_pRecvBuffer[1], (BYTE)m_pRecvBuffer[2], (BYTE)m_pRecvBuffer[3], (LPCTSTR)ipstr(*(u_long*)&m_pRecvBuffer[4]), ntohs(*(u_short*)&m_pRecvBuffer[8]));
+			AddDebugLogLine(DLP_LOW, false, _T("SOCKS5 response: VER=%u  REP=%u  RSV=%u  ATYP=%u  BND.ADDR=%s  BND.PORT=%u"), (BYTE)m_pRecvBuffer[0], (BYTE)m_pRecvBuffer[1], (BYTE)m_pRecvBuffer[2], (BYTE)m_pRecvBuffer[3], (LPCTSTR)ipstr(*(u_long*)&m_pRecvBuffer[4]), ntohs(*(u_short*)&m_pRecvBuffer[8]));
 			if (m_nRecvBufferPos == 10) {
 				if (m_pRecvBuffer[1] != 0) {
 					DoLayerCallback(LAYERCALLBACK_LAYERSPECIFIC, PROXYERROR_REQUESTFAILED, 0, const_cast<LPSTR>((LPCSTR)GetSocks5Error(m_pRecvBuffer[1])));

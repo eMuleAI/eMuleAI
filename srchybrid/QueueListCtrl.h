@@ -54,6 +54,7 @@ protected:
 
 	void SetAllIcons();
 	const CString GetItemDisplayText(CUpDownClient *client, const int iSubItem) const;
+	virtual int GetDefaultPersistentInfoTipExtraLeftPadding(const SPersistentInfoTipContext& context) const override;
 	static int CALLBACK SortProc(const LPARAM lParam1, const LPARAM lParam2, const LPARAM lParamSort);
 	static void CALLBACK QueueUpdateTimer(HWND hwnd, UINT uiMsg, UINT_PTR idEvent, DWORD dwTime) noexcept;
 

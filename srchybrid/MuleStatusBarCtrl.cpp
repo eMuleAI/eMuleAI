@@ -37,6 +37,11 @@ static char THIS_FILE[] = __FILE__;
 
 namespace
 {
+constexpr int kStatusBarLogTextLeftPadding = 6;
+constexpr int kStatusBarTextRightPadding = 4;
+constexpr int kStatusBarIconLeftPadding = 5;
+constexpr int kStatusBarTextAfterIconPadding = 4;
+
 void AppendStatusBarToolTipLine(CString& strText, LPCTSTR pszBuddyKey)
 {
 	if (pszBuddyKey == NULL || *pszBuddyKey == _T('\0'))
@@ -44,6 +49,23 @@ void AppendStatusBarToolTipLine(CString& strText, LPCTSTR pszBuddyKey)
 
 	strText += _T('\n');
 	strText += GetResString(pszBuddyKey);
+}
+
+void DrawStatusBarPaneText(CDC& dc, const CRect& paneRect, CRect& textRect, const CString& strText)
+{
+	if (textRect.left >= textRect.right)
+		return;
+
+	TEXTMETRIC textMetrics = {};
+	dc.GetTextMetrics(&textMetrics);
+	const int nTextHeight = textMetrics.tmHeight;
+	const int nDescenderCompensation = max(0, textMetrics.tmDescent / 2);
+
+	// Ignore part of the descender space so the glyphs align with the icon center.
+	const int nTextTop = max(paneRect.top, paneRect.top + max(0, (paneRect.Height() - nTextHeight) / 2) - nDescenderCompensation);
+	textRect.top = nTextTop;
+	textRect.bottom = min(paneRect.bottom, nTextTop + nTextHeight);
+	dc.DrawText(strText, -1, &textRect, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
 }
 }
 
@@ -176,8 +198,33 @@ INT_PTR CMuleStatusBarCtrl::OnToolHitTest(CPoint point, TOOLINFO *pTI) const
 void CMuleStatusBarCtrl::OnPaint()
 {
 	if (!IsDarkModeEnabled()) {
-		// Call the default paint handler for non-dark mode
-		CStatusBarCtrl::Default(); // Calls the default painting routine
+		// Preserve the themed light-mode rendering and only redraw the log pane text with a safer left margin.
+		CStatusBarCtrl::Default();
+
+		CClientDC dc(this);
+		CFont* pOldFont = dc.SelectObject(GetFont());
+		dc.SetTextColor(GetCustomSysColor(COLOR_WINDOWTEXT));
+		dc.SetBkMode(TRANSPARENT);
+
+		CRect paneRect;
+		GetRect(SBarLog, &paneRect);
+
+		int aiBorders[3] = {};
+		SendMessage(SB_GETBORDERS, 0, reinterpret_cast<LPARAM>(aiBorders));
+
+		CRect fillRect(paneRect);
+		fillRect.DeflateRect(max(1, aiBorders[0]), max(1, aiBorders[1]));
+		if (!fillRect.IsRectEmpty()) {
+			dc.FillSolidRect(&fillRect, GetCustomSysColor(COLOR_WINDOW));
+
+			CRect textRect(fillRect);
+			textRect.left += kStatusBarLogTextLeftPadding;
+			textRect.right -= kStatusBarTextRightPadding;
+			const CString strText = GetText(SBarLog);
+			DrawStatusBarPaneText(dc, paneRect, textRect, strText);
+		}
+
+		dc.SelectObject(pOldFont);
 		return;
 	}
 
@@ -185,16 +232,11 @@ void CMuleStatusBarCtrl::OnPaint()
 	CRect rect;
 	const int nParts = GetParts(0, NULL); // Get the number of parts
 	const COLORREF backgroundColor = GetCustomSysColor(COLOR_WINDOW);
+	const COLORREF separatorColor = GetCustomSysColor(COLOR_TABBORDER);
 	const int nIconWidth = GetSystemMetrics(SM_CXSMICON);
 	const int nIconHeight = GetSystemMetrics(SM_CYSMICON);
-	const int nIconLeftPadding = 5;
-	const int nTextLeftPadding = 4;
 
 	CFont* pOldFont = dc.SelectObject(GetFont()); // Save the current font
-	TEXTMETRIC textMetrics = {};
-	dc.GetTextMetrics(&textMetrics);
-	const int nTextHeight = textMetrics.tmHeight;
-	const int nDescenderCompensation = max(0, textMetrics.tmDescent / 2);
 	GetClientRect(&rect); // Get the dimensions of the control
 	dc.FillSolidRect(&rect, backgroundColor); // Fill the entire control
 	dc.SetTextColor(GetCustomSysColor(COLOR_WINDOWTEXT));
@@ -206,6 +248,10 @@ void CMuleStatusBarCtrl::OnPaint()
 		dc.FillSolidRect(&paneRect, backgroundColor);
 
 		CRect textRect(paneRect);
+		if (i == SBarLog)
+			textRect.left += kStatusBarLogTextLeftPadding;
+		textRect.right -= kStatusBarTextRightPadding;
+
 		CString strText = GetText(i);
 		HICON hIcon = (HICON)SendMessage(SB_GETICON, i, 0);
 		if (hIcon != NULL) {
@@ -221,24 +267,20 @@ void CMuleStatusBarCtrl::OnPaint()
 			DrawIconEx(memDC.m_hDC, 0, 0, hIcon, nIconWidth, nIconHeight, 0, NULL, DI_NORMAL);
 
 			const int nIconTop = paneRect.top + max(0, (paneRect.Height() - nIconHeight) / 2);
-			dc.BitBlt(paneRect.left + nIconLeftPadding, nIconTop, nIconWidth, nIconHeight, &memDC, 0, 0, SRCCOPY);
+			dc.BitBlt(paneRect.left + kStatusBarIconLeftPadding, nIconTop, nIconWidth, nIconHeight, &memDC, 0, 0, SRCCOPY);
 
 			memDC.SelectObject(pOldBmp);
 			bmp.DeleteObject();
 
-			textRect.left += nIconLeftPadding + nIconWidth + nTextLeftPadding;
+			textRect.left = paneRect.left + kStatusBarIconLeftPadding + nIconWidth + kStatusBarTextAfterIconPadding;
 		}
 
-		// Ignore part of the descender space so the glyphs align with the icon center.
-		const int nTextTop = max(paneRect.top, paneRect.top + max(0, (paneRect.Height() - nTextHeight) / 2) - nDescenderCompensation);
-		textRect.top = nTextTop;
-		textRect.bottom = min(paneRect.bottom, nTextTop + nTextHeight);
-		dc.DrawText(strText, -1, &textRect, DT_LEFT | DT_SINGLELINE);
+		DrawStatusBarPaneText(dc, paneRect, textRect, strText);
 
 		// Draw a separator line after the part, but keep the last pane open-ended.
 		if (i < nParts - 1)
-			dc.FillSolidRect(CRect(paneRect.right + 1, paneRect.top + 3, paneRect.right + 2, paneRect.bottom - 3), GetCustomSysColor(COLOR_TABBORDER));
-	}
+			dc.FillSolidRect(CRect(paneRect.right + 1, paneRect.top + 3, paneRect.right + 2, paneRect.bottom - 3), separatorColor);
+		}
 
 	dc.SelectObject(pOldFont);
 }

@@ -230,6 +230,11 @@ void CPartFileWriteThread::WriteBuffers()
 					CleanUp(item, pFile);
 					continue;
 				}
+
+				if (!theApp.CanWritePartMetFiles(pFile->GetTmpPath())) {
+					CleanUp(item, pFile);
+					continue;
+				}
 				// get file date
 				time_t	m_tLastModified = 0;
 				time_t	m_tUtcLastModified = 0;
@@ -255,6 +260,7 @@ void CPartFileWriteThread::WriteBuffers()
 					CString s;
 					s.Format(GetResString(_T("ERR_SAVEMET")), (LPCTSTR)pFile->PartMetFileData->m_partmetfilename, (LPCTSTR)EscPercent(pFile->PartMetFileData->m_strFileName));
 					theApp.QueueLogLine(false, _T("%s%s"), (LPCTSTR)EscPercent(s), (LPCTSTR)EscPercent(CExceptionStrDash(fex)));
+					(void)theApp.CanWritePartMetFiles(pFile->GetTmpPath(), true);
 					CleanUp(item, pFile);
 					continue;
 				}
@@ -297,40 +303,44 @@ void CPartFileWriteThread::WriteBuffers()
 				} catch (CFileException* ex) {
 					CString strError;
 					strError.Format(GetResString(_T("ERR_SAVEMET")), (LPCTSTR)pFile->PartMetFileData->m_partmetfilename, (LPCTSTR)EscPercent(pFile->PartMetFileData->m_strFileName));
-					theApp.QueueLogLine(false, (_T("%s%s"), (LPCTSTR)EscPercent(strError), (LPCTSTR)EscPercent(CExceptionStrDash(*ex))));
+					theApp.QueueLogLine(false, _T("%s%s"), (LPCTSTR)EscPercent(strError), (LPCTSTR)EscPercent(CExceptionStrDash(*ex)));
 					ex->Delete();
 
 					// remove the partially written or otherwise damaged temporary file,
 					// need to close the file before removing it.
 					file.Abort(); //Call 'Abort' instead of 'Close' to avoid ASSERT.
 					(void)_tremove(strTmpFile);
+					(void)theApp.CanWritePartMetFiles(pFile->GetTmpPath(), true);
 					CleanUp(item, pFile);
 					continue;
 				}
 
 				// after successfully writing the temporary part.met file...
-				if (_tremove(pFile->PartMetFileData->m_fullname) != 0 && errno != ENOENT) {
+				DWORD dwReplaceError = ERROR_SUCCESS;
+				if (!ReplaceFileAtomically(strTmpFile, pFile->PartMetFileData->m_fullname, &dwReplaceError)) {
+					(void)theApp.CanWritePartMetFiles(pFile->GetTmpPath(), true);
 					if (m_bVerbose)
-						theApp.QueueDebugLogLine(false, _T("Failed to remove \"%s\" - %s"), (LPCTSTR)EscPercent(pFile->PartMetFileData->m_fullname), _tcserror(errno));
-				}
-
-				if (_trename(strTmpFile, pFile->PartMetFileData->m_fullname) != 0) {
-					int iErrno = errno;
-					if (m_bVerbose)
-						theApp.QueueDebugLogLine(false, _T("Failed to move temporary part.met file \"%s\" to \"%s\" - %s"), (LPCTSTR)EscPercent(strTmpFile), (LPCTSTR)EscPercent(pFile->PartMetFileData->m_fullname), _tcserror(iErrno));
+						theApp.QueueDebugLogLine(false, _T("Failed to move temporary part.met file \"%s\" to \"%s\" - %s"),
+							(LPCTSTR)EscPercent(strTmpFile), (LPCTSTR)EscPercent(pFile->PartMetFileData->m_fullname), (LPCTSTR)EscPercent(GetErrorMessage(dwReplaceError)));
 
 					CString strError;
 					strError.Format(GetResString(_T("ERR_SAVEMET")), (LPCTSTR)pFile->PartMetFileData->m_partmetfilename, (LPCTSTR)EscPercent(pFile->PartMetFileData->m_strFileName));
-					strError.AppendFormat(_T(" - %s"), _tcserror(iErrno));
+					strError.AppendFormat(_T(" - %s"), (LPCTSTR)EscPercent(GetErrorMessage(dwReplaceError)));
 					theApp.QueueLogLine(false, _T("%s"), (LPCTSTR)strError);
 					CleanUp(item, pFile);
 					continue;
 				}
 
 				// create a backup of the successfully written part.met file
-				if (!::CopyFile(pFile->PartMetFileData->m_fullname, pFile->PartMetFileData->m_fullname + PARTMET_BAK_EXT, static_cast<BOOL>(item.pFlushPartMetData->bDontOverrideBak)))
-					if (!item.pFlushPartMetData->bDontOverrideBak)
-						theApp.QueueDebugLogLine(false, _T("Failed to create backup of %s (%s) - %s"), (LPCTSTR)EscPercent(pFile->PartMetFileData->m_fullname), (LPCTSTR)EscPercent(pFile->PartMetFileData->m_strFileName), (LPCTSTR)EscPercent(GetErrorMessage(::GetLastError())));
+				const CString strBakFile(pFile->PartMetFileData->m_fullname + PARTMET_BAK_EXT);
+				const CString strBakTmpFile(strBakFile + PARTMET_TMP_EXT);
+				DWORD dwBakError = ERROR_SUCCESS;
+				if (!CopyFileToTempAndReplace(pFile->PartMetFileData->m_fullname, strBakFile, strBakTmpFile, item.pFlushPartMetData->bDontOverrideBak, &dwBakError)) {
+					if (!item.pFlushPartMetData->bDontOverrideBak && theApp.CanWritePartMetFiles(pFile->GetTmpPath(), true)) {
+						theApp.QueueDebugLogLine(false, _T("Failed to create backup of %s (%s) - %s"),
+							(LPCTSTR)EscPercent(pFile->PartMetFileData->m_fullname), (LPCTSTR)EscPercent(pFile->PartMetFileData->m_strFileName), (LPCTSTR)EscPercent(GetErrorMessage(dwBakError)));
+					}
+				}
 				CleanUp(item, pFile);
 			} else if (item.pSaveSourcesData) { // Save sources
 				CSingleLock sSaveSourcesLock(&pFile->m_SaveSourcesLock, TRUE);

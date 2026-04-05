@@ -296,6 +296,7 @@ void CSearchListCtrl::Init(CSearchList *in_searchlist)
 	}
 	searchlist = in_searchlist;
 
+	// Alignment rule: left for text, dates, and status labels; right for sizes, rates, counts, durations, and percentages.
 	InsertColumn(0,		EMPTY,	LVCFMT_LEFT,	DFLT_FILENAME_COL_WIDTH);			//DL_FILENAME
 	InsertColumn(1,		EMPTY,	LVCFMT_RIGHT,	DFLT_SIZE_COL_WIDTH);				//DL_SIZE
 	InsertColumn(2,		EMPTY,	LVCFMT_RIGHT,	60);								//SEARCHAVAIL
@@ -311,7 +312,7 @@ void CSearchListCtrl::Init(CSearchList *in_searchlist)
 	InsertColumn(12,	EMPTY,	LVCFMT_LEFT,	DFLT_FOLDER_COL_WIDTH, -1, true);	//FOLDER
 	InsertColumn(13,	EMPTY,	LVCFMT_LEFT,	50);								//KNOWN
 	InsertColumn(14,	EMPTY,	LVCFMT_LEFT,	DFLT_HASH_COL_WIDTH, -1, true);		//AICHHASH
-	InsertColumn(15,	EMPTY,	LVCFMT_LEFT,	65, -1, true);						//SPAM_RATING
+	InsertColumn(15,	EMPTY,	LVCFMT_RIGHT,	65, -1, true);						//SPAM_RATING
 
 	SetAllIcons();
 
@@ -559,7 +560,7 @@ void CSearchListCtrl::UpdateTabHeader(uint32 nResultsID, CString strClientHash, 
 							m_TabClient = theApp.clientlist->FindClientByUserHash(m_uchClientHash);
 
 						if (m_TabClient != NULL) {
-							if (thePrefs.GetRemoteSharedFilesUserHash() & !isnulmd4(m_TabClient->GetUserHash()))
+							if (thePrefs.GetRemoteSharedFilesUserHash() && !isnulmd4(m_TabClient->GetUserHash()))
 								strTabLabel = md4str(m_TabClient->GetUserHash()); // Replace search title with client hash
 
 							if (thePrefs.GetRemoteSharedFilesClientNote() && !m_TabClient->m_strClientNote.IsEmpty())
@@ -567,17 +568,17 @@ void CSearchListCtrl::UpdateTabHeader(uint32 nResultsID, CString strClientHash, 
 						}
 					}
 				}
-				 
-				uint32 m_uAvailableResultCount = searchlist->GetFoundFiles(pSearchParams->dwSearchID);
-				uint32 m_uParentItemsCount = theApp.searchlist->GetParentItemCount(nResultsID); // Get the number of items that are parents of this search result excluding sources when they are shown
-				uint32 m_uListedItemsCount = m_ListedItemsVector.size();
 
-				if (m_uListedItemsCount == m_uParentItemsCount && m_uParentItemsCount != m_uAvailableResultCount)
-					strTabLabel.AppendFormat(_T(" (%u/%u)"), m_uParentItemsCount, m_uAvailableResultCount);
-				else if (m_uListedItemsCount != m_uParentItemsCount && m_uParentItemsCount != m_uAvailableResultCount)
-					strTabLabel.AppendFormat(_T(" (%u/%u/%u)"), m_uListedItemsCount, m_uParentItemsCount, m_uAvailableResultCount);
-				else
-					strTabLabel.AppendFormat(_T(" (%u)"), m_uAvailableResultCount);
+				const uint32 m_uSearchID = pSearchParams->dwSearchID;
+				const uint32 m_uOriginalResultCount = theApp.searchlist->GetOriginalFoundFiles(m_uSearchID);
+				const uint32 m_uParentItemsCount = theApp.searchlist->GetParentItemCount(m_uSearchID);
+				const bool m_bHasMergeHistory = theApp.searchlist->HasMergedSearchHistory(m_uSearchID);
+
+				if (m_bHasMergeHistory || m_uParentItemsCount != m_uOriginalResultCount) {
+					strTabLabel.AppendFormat(_T(" (%u/%u)"), m_uParentItemsCount, m_uOriginalResultCount);
+				} else if (m_uParentItemsCount > 0) {
+					strTabLabel.AppendFormat(_T(" (%u)"), m_uParentItemsCount);
+				}
 
 				DupAmpersand(strTabLabel);
 				ti.pszText = const_cast<LPTSTR>((LPCTSTR)strTabLabel);
@@ -1218,221 +1219,214 @@ void CSearchListCtrl::CreateMenus()
 	m_SearchFileMenu.AppendMenu(MF_STRING, MP_SEARCHRELATED, GetResString(_T("SEARCHRELATED")), _T("KadFileSearch"));
 }
 
-void CSearchListCtrl::OnLvnGetInfoTip(LPNMHDR pNMHDR, LRESULT *pResult)
+bool CSearchListCtrl::ShouldShowPersistentInfoTip(const SPersistentInfoTipContext& context)
 {
-	LPNMLVGETINFOTIP pGetInfoTip = reinterpret_cast<LPNMLVGETINFOTIP>(pNMHDR);
-	LVHITTESTINFO hti;
-	if (pGetInfoTip->iSubItem == 0 && ::GetCursorPos(&hti.pt)) {
-		ScreenToClient(&hti.pt);
-		bool bOverMainItem = (SubItemHitTest(&hti) != -1 && hti.iItem == pGetInfoTip->iItem && hti.iSubItem == 0);
+	if (!CMuleListCtrl::ShouldShowPersistentInfoTip(context))
+		return false;
 
-		// those tooltips are very nice for debugging/testing but pretty annoying for general usage
-		// enable tooltips only if Ctrl is currently pressed
-		bool bShowInfoTip = bOverMainItem && (GetSelectedCount() > 1 || GetKeyState(VK_CONTROL) < 0);
-		if (bShowInfoTip && GetSelectedCount() > 1) {
-			// Don't show the tooltip if the mouse cursor is not over at least one of the selected items
-			bool bInfoTipItemIsPartOfMultiSelection = false;
-			for (POSITION pos = GetFirstSelectedItemPosition(); pos != NULL;) {
-				if (GetNextSelectedItem(pos) == pGetInfoTip->iItem) {
-					bInfoTipItemIsPartOfMultiSelection = true;
+	bool bShowInfoTip = (GetSelectedCount() > 1 || GetKeyState(VK_CONTROL) < 0);
+	if (bShowInfoTip && GetSelectedCount() > 1) {
+		bool bInfoTipItemIsPartOfMultiSelection = false;
+		for (POSITION pos = GetFirstSelectedItemPosition(); pos != NULL;) {
+			if (GetNextSelectedItem(pos) == context.iItem) {
+				bInfoTipItemIsPartOfMultiSelection = true;
+				break;
+			}
+		}
+		if (!bInfoTipItemIsPartOfMultiSelection)
+			bShowInfoTip = false;
+	}
+
+	return bShowInfoTip;
+}
+
+bool CSearchListCtrl::GetPersistentInfoTipText(const SPersistentInfoTipContext& context, CString& strText)
+{
+	const int iMaxInfoLength = 4096;
+
+	if (GetSelectedCount() <= 1) {
+		const CSearchFile* file = reinterpret_cast<CSearchFile*>(GetItemData(context.iItem));
+		if (file == NULL)
+			return false;
+
+		CString strInfo;
+		CString strHead(file->GetFileName());
+		strHead.AppendFormat(_T("\n") _T("%s %s\n") _T("%s %s\n<br_head>\n")
+			, (LPCTSTR)GetResString(_T("FD_HASH")), (LPCTSTR)md4str(file->GetFileHash())
+			, (LPCTSTR)GetResString(_T("FD_SIZE")), (LPCTSTR)CastItoXBytes((uint64)file->GetFileSize()));
+
+		const CArray<CTag*, CTag*>& tags = file->GetTags();
+		for (INT_PTR i = 0; i < tags.GetCount(); ++i) {
+			const CTag* tag = tags[i];
+			if (tag) {
+				CString strTag;
+				switch (tag->GetNameID()) {
+				case FT_FILETYPE:
+					strTag.Format(_T("%s: %s"), (LPCTSTR)GetResString(_T("TYPE")), (LPCTSTR)tag->GetStr());
 					break;
-				}
-			}
-			if (!bInfoTipItemIsPartOfMultiSelection)
-				bShowInfoTip = false;
-		}
-
-		if (!bShowInfoTip) {
-			if (!bOverMainItem) {
-				// don't show the default label tip for the main item, if the mouse is not over the main item
-				if ((pGetInfoTip->dwFlags & LVGIT_UNFOLDED) == 0 && pGetInfoTip->cchTextMax > 0 && pGetInfoTip->pszText)
-					pGetInfoTip->pszText[0] = _T('\0');
-			}
-			return;
-		}
-
-		if (GetSelectedCount() <= 1) {
-			const CSearchFile* file = (CSearchFile*)GetItemData(pGetInfoTip->iItem);
-			if (file && pGetInfoTip->pszText && pGetInfoTip->cchTextMax > 0) {
-				CString strInfo;
-				CString strHead(file->GetFileName());
-				strHead.AppendFormat(_T("\n") _T("%s %s\n") _T("%s %s\n<br_head>\n")
-					, (LPCTSTR)GetResString(_T("FD_HASH")), (LPCTSTR)md4str(file->GetFileHash())
-					, (LPCTSTR)GetResString(_T("FD_SIZE")), (LPCTSTR)CastItoXBytes((uint64)file->GetFileSize()));
-
-				const CArray<CTag*, CTag*> &tags = file->GetTags();
-				for (INT_PTR i = 0; i < tags.GetCount(); ++i) {
-					const CTag *tag = tags[i];
-					if (tag) {
-						CString strTag;
-						switch (tag->GetNameID()) {
-						case FT_FILETYPE:
-							strTag.Format(_T("%s: %s"), (LPCTSTR)GetResString(_T("TYPE")), (LPCTSTR)tag->GetStr());
+				case FT_FILEFORMAT:
+					strTag.Format(_T("%s: %s"), (LPCTSTR)GetResString(_T("SEARCHEXTENTION")), (LPCTSTR)tag->GetStr());
+					break;
+				case FT_SOURCES:
+					strTag.Format(_T("%s: %u"), (LPCTSTR)GetResString(_T("SEARCHAVAIL")), file->GetSourceCount());
+					break;
+				case 0x13:
+					{
+						strTag.Format(_T("%s: "), (LPCTSTR)GetResString(_T("PRIORITY")));
+						LPCTSTR uid = EMPTY;
+						switch ((int)tag->GetInt()) {
+						case 0:
+							uid = _T("PRIONORMAL");
 							break;
-						case FT_FILEFORMAT:
-							strTag.Format(_T("%s: %s"), (LPCTSTR)GetResString(_T("SEARCHEXTENTION")), (LPCTSTR)tag->GetStr());
+						case 2:
+							uid = _T("PRIOHIGH");
 							break;
-						case FT_SOURCES:
-							strTag.Format(_T("%s: %u"), (LPCTSTR)GetResString(_T("SEARCHAVAIL")), file->GetSourceCount());
+						case -2:
+							uid = _T("PRIOLOW");
 							break;
-						case 0x13: // remote client's upload file priority (tested with Hybrid 0.47)
-							{
-								strTag.Format(_T("%s: "), (LPCTSTR)GetResString(_T("PRIORITY")));
-								LPCTSTR uid = EMPTY;
-								switch ((int)tag->GetInt()) {
-								case 0:
-									uid = _T("PRIONORMAL");
-									break;
-								case 2:
-									uid = _T("PRIOHIGH");
-									break;
-								case -2:
-									uid = _T("PRIOLOW");
-									break;
 #ifdef _DEBUG
-								default:
-									strTag.AppendFormat(_T("%u (***Unknown***)"), tag->GetInt());
-#endif
-								}
-								if (uid)
-									strTag += GetResString(_T("PRIORITY"));
-							}
-							break;
 						default:
-							{
-								bool bSkipTag = false;
-								if (tag->GetNameID() == FT_FILENAME || tag->GetNameID() == FT_FILESIZE)
-									bSkipTag = true;
-								else if (tag->HasName()) {
-									strTag.Format(_T("%hs: "), tag->GetName());
-									strTag.SetAt(0, _totupper(strTag[0]));
-								} else {
-									extern CString GetName(const CTag *pTag);
-									const CString &strTagName(GetName(tag));
-									if (strTagName.IsEmpty()) {
-#ifdef _DEBUG
-										strTag.Format(_T("Unknown tag #%02X: "), tag->GetNameID());
+							strTag.AppendFormat(_T("%u (***Unknown***)"), tag->GetInt());
 #endif
-										break;
-									}
-									strTag.Format(_T("%s: "), (LPCTSTR)strTagName);
-								}
-								if (!bSkipTag) {
-									if (tag->IsStr())
-										strTag += tag->GetStr();
-									else if (tag->IsInt()) {
-										if (tag->GetNameID() == FT_MEDIA_LENGTH)
-											strTag += SecToTimeLength(tag->GetInt());
-										else
-											strTag.AppendFormat(_T("%u"), tag->GetInt());
-									} else if (tag->IsFloat())
-										strTag.AppendFormat(_T("%f"), tag->GetFloat());
-									else
-#ifdef _DEBUG
-										strTag.AppendFormat(_T("Unknown value type=#%02X"), tag->GetType());
-#else
-										strTag.Empty();
-#endif
-								}
-							}
 						}
-						if (!strTag.IsEmpty()) {
-							if (!strInfo.IsEmpty())
-								strInfo += _T('\n');
-							strInfo += strTag;
-							if (strInfo.GetLength() >= pGetInfoTip->cchTextMax)
+						if (uid)
+							strTag += GetResString(_T("PRIORITY"));
+					}
+					break;
+				default:
+					{
+						bool bSkipTag = false;
+						if (tag->GetNameID() == FT_FILENAME || tag->GetNameID() == FT_FILESIZE)
+							bSkipTag = true;
+						else if (tag->HasName()) {
+							strTag.Format(_T("%hs: "), tag->GetName());
+							strTag.SetAt(0, _totupper(strTag[0]));
+						} else {
+							extern CString GetName(const CTag *pTag);
+							const CString& strTagName(GetName(tag));
+							if (strTagName.IsEmpty()) {
+#ifdef _DEBUG
+								strTag.Format(_T("Unknown tag #%02X: "), tag->GetNameID());
+#endif
 								break;
+							}
+							strTag.Format(_T("%s: "), (LPCTSTR)strTagName);
+						}
+						if (!bSkipTag) {
+							if (tag->IsStr())
+								strTag += tag->GetStr();
+							else if (tag->IsInt()) {
+								if (tag->GetNameID() == FT_MEDIA_LENGTH)
+									strTag += SecToTimeLength(tag->GetInt());
+								else
+									strTag.AppendFormat(_T("%u"), tag->GetInt());
+							} else if (tag->IsFloat())
+								strTag.AppendFormat(_T("%f"), tag->GetFloat());
+							else
+#ifdef _DEBUG
+								strTag.AppendFormat(_T("Unknown value type=#%02X"), tag->GetType());
+#else
+								strTag.Empty();
+#endif
 						}
 					}
 				}
+				if (!strTag.IsEmpty()) {
+					if (!strInfo.IsEmpty())
+						strInfo += _T('\n');
+					strInfo += strTag;
+					if (strInfo.GetLength() >= iMaxInfoLength)
+						break;
+				}
+			}
+		}
 
 #ifdef USE_DEBUG_DEVICE
-				if (file->GetClientsCount()) {
-					bool bFirst = true;
-					if (file->GetClientID() && file->GetClientPort()) {
-						uint32 uClientIP = file->GetClientID();
-						uint32 uServerIP = file->GetClientServerIP();
-						CString strSource;
-						if (bFirst) {
-							bFirst = false;
-							strSource = _T("Sources");
-						}
-						strSource.AppendFormat(_T(": %u.%u.%u.%u:%u  Server: %u.%u.%u.%u:%u"),
-							(uint8)uClientIP, (uint8)(uClientIP >> 8), (uint8)(uClientIP >> 16), (uint8)(uClientIP >> 24), file->GetClientPort(),
-							(uint8)uServerIP, (uint8)(uServerIP >> 8), (uint8)(uServerIP >> 16), (uint8)(uServerIP >> 24), file->GetClientServerPort());
-						if (!strInfo.IsEmpty())
-							strInfo += _T('\n');
-						strInfo += strSource;
-					}
-
-					const CSimpleArray<CSearchFile::SClient> &aClients = file->GetClients();
-					for (INT_PTR i = 0; i < aClients.GetSize(); ++i) {
-						uint32 uClientIP = aClients[i].m_nIP;
-						uint32 uServerIP = aClients[i].m_nServerIP;
-						CString strSource;
-						if (bFirst) {
-							bFirst = false;
-							strSource = _T("Sources");
-						}
-						strSource.AppendFormat(_T(": %u.%u.%u.%u:%u  Server: %u.%u.%u.%u:%u"),
-							(uint8)uClientIP, (uint8)(uClientIP >> 8), (uint8)(uClientIP >> 16), (uint8)(uClientIP >> 24), aClients[i].m_nPort,
-							(uint8)uServerIP, (uint8)(uServerIP >> 8), (uint8)(uServerIP >> 16), (uint8)(uServerIP >> 24), aClients[i].m_nServerPort);
-						if (!strInfo.IsEmpty())
-							strInfo += _T('\n');
-						strInfo += strSource;
-						if (strInfo.GetLength() >= pGetInfoTip->cchTextMax)
-							break;
-					}
+		if (file->GetClientsCount()) {
+			bool bFirst = true;
+			if (file->GetClientID() && file->GetClientPort()) {
+				uint32 uClientIP = file->GetClientID();
+				uint32 uServerIP = file->GetClientServerIP();
+				CString strSource;
+				if (bFirst) {
+					bFirst = false;
+					strSource = _T("Sources");
 				}
+				strSource.AppendFormat(_T(": %u.%u.%u.%u:%u  Server: %u.%u.%u.%u:%u"),
+					(uint8)uClientIP, (uint8)(uClientIP >> 8), (uint8)(uClientIP >> 16), (uint8)(uClientIP >> 24), file->GetClientPort(),
+					(uint8)uServerIP, (uint8)(uServerIP >> 8), (uint8)(uServerIP >> 16), (uint8)(uServerIP >> 24), file->GetClientServerPort());
+				if (!strInfo.IsEmpty())
+					strInfo += _T('\n');
+				strInfo += strSource;
+			}
 
-				if (file->GetServers().GetSize()) {
-					const CSimpleArray<CSearchFile::SServer> &aServers = file->GetServers();
-					for (INT_PTR i = 0; i < aServers.GetSize(); ++i) {
-						uint32 uServerIP = aServers[i].m_nIP;
-						CString strServer;
-						if (i == 0)
-							strServer = _T("Servers");
-						strServer.AppendFormat(_T(": %u.%u.%u.%u:%u  Avail: %u"),
-							(uint8)uServerIP, (uint8)(uServerIP >> 8), (uint8)(uServerIP >> 16), (uint8)(uServerIP >> 24), aServers[i].m_nPort, aServers[i].m_uAvail);
-						if (!strInfo.IsEmpty())
-							strInfo += _T('\n');
-						strInfo += strServer;
-						if (strInfo.GetLength() >= pGetInfoTip->cchTextMax)
-							break;
-					}
+			const CSimpleArray<CSearchFile::SClient>& aClients = file->GetClients();
+			for (INT_PTR i = 0; i < aClients.GetSize(); ++i) {
+				uint32 uClientIP = aClients[i].m_nIP;
+				uint32 uServerIP = aClients[i].m_nServerIP;
+				CString strSource;
+				if (bFirst) {
+					bFirst = false;
+					strSource = _T("Sources");
 				}
+				strSource.AppendFormat(_T(": %u.%u.%u.%u:%u  Server: %u.%u.%u.%u:%u"),
+					(uint8)uClientIP, (uint8)(uClientIP >> 8), (uint8)(uClientIP >> 16), (uint8)(uClientIP >> 24), aClients[i].m_nPort,
+					(uint8)uServerIP, (uint8)(uServerIP >> 8), (uint8)(uServerIP >> 16), (uint8)(uServerIP >> 24), aClients[i].m_nServerPort);
+				if (!strInfo.IsEmpty())
+					strInfo += _T('\n');
+				strInfo += strSource;
+				if (strInfo.GetLength() >= iMaxInfoLength)
+					break;
+			}
+		}
+
+		if (file->GetServers().GetSize()) {
+			const CSimpleArray<CSearchFile::SServer>& aServers = file->GetServers();
+			for (INT_PTR i = 0; i < aServers.GetSize(); ++i) {
+				uint32 uServerIP = aServers[i].m_nIP;
+				CString strServer;
+				if (i == 0)
+					strServer = _T("Servers");
+				strServer.AppendFormat(_T(": %u.%u.%u.%u:%u  Avail: %u"),
+					(uint8)uServerIP, (uint8)(uServerIP >> 8), (uint8)(uServerIP >> 16), (uint8)(uServerIP >> 24), aServers[i].m_nPort, aServers[i].m_uAvail);
+				if (!strInfo.IsEmpty())
+					strInfo += _T('\n');
+				strInfo += strServer;
+				if (strInfo.GetLength() >= iMaxInfoLength)
+					break;
+			}
+		}
 #endif
-				strInfo.Insert(0, strHead);
-				strInfo += TOOLTIP_AUTOFORMAT_SUFFIX_CH;
-				_tcsncpy(pGetInfoTip->pszText, strInfo, pGetInfoTip->cchTextMax);
-				pGetInfoTip->pszText[pGetInfoTip->cchTextMax - 1] = _T('\0');
-			}
-		} else {
-			int iSelected = 0;
-			ULONGLONG ulTotalSize = 0;
-			for (POSITION pos = GetFirstSelectedItemPosition(); pos != NULL;) {
-				const CSearchFile* pFile = (CSearchFile*)GetItemData(GetNextSelectedItem(pos));
-				if (pFile) {
-					++iSelected;
-					ulTotalSize += (uint64)pFile->GetFileSize();
-				}
-			}
+		strInfo.Insert(0, strHead);
+		strText = strInfo + TOOLTIP_AUTOFORMAT_SUFFIX_CH;
+		return !strInfo.IsEmpty();
+	}
 
-			if (iSelected > 0) {
-				CString strInfo(GetResString(_T("FILES")));
-				strInfo.AppendFormat(_T(": %i\r\n%s: %s%c")
-					, iSelected
-					, (LPCTSTR)GetResString(_T("DL_SIZE"))
-					, (LPCTSTR)FormatFileSize(ulTotalSize)
-					, TOOLTIP_AUTOFORMAT_SUFFIX_CH
-				);
-				_tcsncpy(pGetInfoTip->pszText, strInfo, pGetInfoTip->cchTextMax);
-				pGetInfoTip->pszText[pGetInfoTip->cchTextMax - 1] = _T('\0');
-			}
+	int iSelected = 0;
+	ULONGLONG ulTotalSize = 0;
+	for (POSITION pos = GetFirstSelectedItemPosition(); pos != NULL;) {
+		const CSearchFile* pFile = reinterpret_cast<CSearchFile*>(GetItemData(GetNextSelectedItem(pos)));
+		if (pFile) {
+			++iSelected;
+			ulTotalSize += (uint64)pFile->GetFileSize();
 		}
 	}
 
-	*pResult = 0;
+	if (iSelected <= 0)
+		return false;
+
+	strText.Format(_T("%s: %i\r\n%s: %s%c")
+		, (LPCTSTR)GetResString(_T("FILES"))
+		, iSelected
+		, (LPCTSTR)GetResString(_T("DL_SIZE"))
+		, (LPCTSTR)FormatFileSize(ulTotalSize)
+		, TOOLTIP_AUTOFORMAT_SUFFIX_CH);
+	return true;
+}
+
+void CSearchListCtrl::OnLvnGetInfoTip(LPNMHDR pNMHDR, LRESULT *pResult)
+{
+	CMuleListCtrl::OnLvnGetInfoTip(pNMHDR, pResult);
 }
 
 

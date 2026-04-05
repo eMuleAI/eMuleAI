@@ -40,6 +40,8 @@ public:
 	bool IsInInitDialog() const				{ return m_iInInitDialog != 0; }
 	bool GetDestroyAfterInitDialog() const	{ return m_bDestroyAfterInitDialog; }
 	void SetDestroyAfterInitDialog()		{ m_bDestroyAfterInitDialog = true; }
+	bool GetDestroyAfterCallback() const	{ return m_bDestroyAfterCallback; }
+	void SetDestroyAfterCallback()			{ m_bDestroyAfterCallback = true; }
 	void UpdateContent(UINT uUpDatarate = UINT_MAX, UINT uDownDatarate = UINT_MAX);
 	void Localize();
 
@@ -49,6 +51,7 @@ protected:
 	int m_iInCallback;
 	UINT m_uWndTransparency;
 	bool m_bDestroyAfterInitDialog;
+	bool m_bDestroyAfterCallback;
 	bool m_bResolveImages;
 	bool m_bRestoreMainWnd;
 

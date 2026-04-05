@@ -108,7 +108,7 @@ bool CKnownFileList::LoadKnownFiles()
 		for (uint32 i = 0; i < uRecordsNumber; ++i) {
 			pRecord = new CKnownFile();
 			if (!pRecord->LoadFromFile(file)) {
-				TRACE(_T("*** Failed to load entry %u (name=%s  hash=%s  size=%I64u  parthashes=%u expected parthashes=%u) from known.met\n")
+				AddDebugLogLine(DLP_LOW, false, _T("Failed to load entry %u (name=%s  hash=%s  size=%I64u  parthashes=%u expected parthashes=%u) from known.met")
 				, i, (LPCTSTR)pRecord->GetFileName(), (LPCTSTR)md4str(pRecord->GetFileHash()), (uint64)pRecord->GetFileSize()
 				, pRecord->GetFileIdentifier().GetAvailableMD4PartHashCount(), pRecord->GetFileIdentifier().GetTheoreticalMD4PartHashCount());
 				delete pRecord;
@@ -218,18 +218,6 @@ void CKnownFileList::Save()
 
 			INT_PTR iRecordsNumber = 0;
 
-			// Duplicates handling. Duplicates needs to be saved first, since it is the last entry that gets used.
-			CSingleLock slDuplicatesLock(&m_csDuplicatesLock, TRUE);
-			KnownFileList::iterator itDup = m_duplicateFileList.begin();
-			for (; itDup != m_duplicateFileList.end(); ++itDup) {
-				(*itDup)->SetLastSeen(); // Files in duplicates list have been seen this sesssion.
-				if (!(*itDup)->ShouldCompletelyPurgeFile()) {
-					(*itDup)->WriteToFile(file);
-					++iRecordsNumber;
-				}
-			}
-			slDuplicatesLock.Unlock();
-
 			for (const CKnownFilesMap::CPair *pair = m_Files_map.PGetFirstAssoc(); pair != NULL; pair = m_Files_map.PGetNextAssoc(pair)) {
 				CKnownFile *pFile = pair->value;
 				if (thePrefs.IsRememberingDownloadedFiles() || theApp.sharedfiles->IsFilePtrInList(pFile)) {
@@ -241,6 +229,19 @@ void CKnownFileList::Save()
 					}
 				}
 			}
+
+			// Save duplicates after their primary known-file entry so LoadKnownFiles keeps
+			// the shared/primary instance in the map and restores duplicates into the duplicate list.
+			CSingleLock slDuplicatesLock(&m_csDuplicatesLock, TRUE);
+			KnownFileList::iterator itDup = m_duplicateFileList.begin();
+			for (; itDup != m_duplicateFileList.end(); ++itDup) {
+				(*itDup)->SetLastSeen(); // Files in duplicates list have been seen this sesssion.
+				if (!(*itDup)->ShouldCompletelyPurgeFile()) {
+					(*itDup)->WriteToFile(file);
+					++iRecordsNumber;
+				}
+			}
+			slDuplicatesLock.Unlock();
 
 				file.Seek(1, CFile::begin);
 				file.WriteUInt32((uint32)iRecordsNumber);
@@ -327,19 +328,19 @@ bool CKnownFileList::SafeAddKFile(CKnownFile *toadd)
     CKnownFile* pFileInDuplicatesList = IsOnDuplicates(toadd->GetFileName(), toadd->GetUtcFileDate(), toadd->GetFileSize());
 	if (m_Files_map.Lookup(key, pFileInMap) && pFileInMap != NULL) {
 		if (pFileInDuplicatesList != NULL && pFileInMap != pFileInDuplicatesList) { // Same file as in duplicate file list
-			TRACE2(_T("%hs: File is already in duplicates list:   %s %I64u \"%s\"\n"), __FUNCTION__, (LPCTSTR)md4str(pFileInDuplicatesList->GetFileHash()), (uint64)pFileInDuplicatesList->GetFileSize(), (LPCTSTR)pFileInDuplicatesList->GetFileName());
+			AddDebugLogLine(DLP_VERYLOW, false, _T("%hs: File is already in duplicates list:   %s %I64u \"%s\""), __FUNCTION__, (LPCTSTR)md4str(pFileInDuplicatesList->GetFileHash()), (uint64)pFileInDuplicatesList->GetFileSize(), (LPCTSTR)EscPercent(pFileInDuplicatesList->GetFileName()));
 			return false;
 		}
 
 		// If this is same file, don't add it again.
 		if (toadd == pFileInMap) {
-			TRACE2(_T("%hs: File is already in known list: %s %I64u \"%s\"\n"), __FUNCTION__, (LPCTSTR)md4str(pFileInMap->GetFileHash()), (uint64)pFileInMap->GetFileSize(), (LPCTSTR)pFileInMap->GetFileName());
+			AddDebugLogLine(DLP_VERYLOW, false, _T("%hs: File is already in known list: %s %I64u \"%s\""), __FUNCTION__, (LPCTSTR)md4str(pFileInMap->GetFileHash()), (uint64)pFileInMap->GetFileSize(), (LPCTSTR)EscPercent(pFileInMap->GetFileName()));
 			return false;
 		}
 
 		// If this file has same hash and same path, replace it in pFileInMap, but don't add it to duplicates list.
 		if ((!pFileInMap->GetFilePath().IsEmpty() && !toadd->GetFilePath().IsEmpty() && pFileInMap->GetFilePath().CompareNoCase(toadd->GetFilePath()) == 0)) {
-			TRACE2(_T("%hs: File is already in known list: %s %I64u \"%s\"\n"), __FUNCTION__, (LPCTSTR)md4str(pFileInMap->GetFileHash()), (uint64)pFileInMap->GetFileSize(), (LPCTSTR)pFileInMap->GetFileName());
+			AddDebugLogLine(DLP_VERYLOW, false, _T("%hs: File is already in known list: %s %I64u \"%s\""), __FUNCTION__, (LPCTSTR)md4str(pFileInMap->GetFileHash()), (uint64)pFileInMap->GetFileSize(), (LPCTSTR)EscPercent(pFileInMap->GetFileName()));
 			theApp.emuledlg->sharedfileswnd->sharedfilesctrl.RemoveFromHistory(pFileInMap, false); // Remove known file
 			RemoveSizeIndex(toadd); // Sync size index
 			m_Files_map[key] = toadd; // Replace pFileInMap with toadd in map
@@ -358,7 +359,10 @@ bool CKnownFileList::SafeAddKFile(CKnownFile *toadd)
 			RemoveDupSizeIndex(toadd); // Sync duplicate index
 			RemoveSizeIndex(toadd); // Sync size index
 
+			const CString strOldFilePath = pFileInMap->GetFilePath();
 			pFileInMap->SetFilePath(NULL); // Remove file path from pFileInMap since this file is not on disk.
+			if (!strOldFilePath.IsEmpty() && theApp.sharedfiles != NULL)
+				theApp.sharedfiles->UpdateSharedPathCache(pFileInMap, strOldFilePath);
 			m_duplicateFileList.push_back(pFileInMap);
             AddDupSizeIndex(pFileInMap); // Sync duplicate index
 			RemoveSizeIndex(pFileInMap); // Sync size index
@@ -371,8 +375,8 @@ bool CKnownFileList::SafeAddKFile(CKnownFile *toadd)
 
 			theApp.DownloadChecker->AddToMap(toadd->GetFileHash(), toadd->GetFileName(), toadd->GetFileSize());
 
-			TRACE2(_T("%hs: File is removed from duplicate list: %s %I64u \"%s\"\n"), __FUNCTION__, (LPCTSTR)md4str(toadd->GetFileHash()), (uint64)toadd->GetFileSize(), (LPCTSTR)toadd->GetFileName());
-			TRACE2(_T("%hs: File is added to duplicate list: %s %I64u \"%s\"\n"), __FUNCTION__, (LPCTSTR)md4str(pFileInMap->GetFileHash()), (uint64)pFileInMap->GetFileSize(), (LPCTSTR)pFileInMap->GetFileName());
+			AddDebugLogLine(DLP_VERYLOW, false, _T("%hs: File is removed from duplicate list: %s %I64u \"%s\""), __FUNCTION__, (LPCTSTR)md4str(toadd->GetFileHash()), (uint64)toadd->GetFileSize(), (LPCTSTR)EscPercent(toadd->GetFileName()));
+			AddDebugLogLine(DLP_VERYLOW, false, _T("%hs: File is added to duplicate list: %s %I64u \"%s\""), __FUNCTION__, (LPCTSTR)md4str(pFileInMap->GetFileHash()), (uint64)pFileInMap->GetFileSize(), (LPCTSTR)EscPercent(pFileInMap->GetFileName()));
 
 			return true;
 		}
@@ -380,8 +384,8 @@ bool CKnownFileList::SafeAddKFile(CKnownFile *toadd)
 		if (!m_bToaddExists)
 			toadd->SetFilePath(NULL); // Remove file path from toadd since this file is not on disk.
 
-		TRACE2(_T("%hs: File is already in known list: %s %I64u \"%s\"\n"), __FUNCTION__, (LPCTSTR)md4str(pFileInMap->GetFileHash()), (uint64)pFileInMap->GetFileSize(), (LPCTSTR)pFileInMap->GetFileName());
-		TRACE2(_T("%hs: File is added to duplicate list: %s %I64u \"%s\"\n"), __FUNCTION__, (LPCTSTR)md4str(toadd->GetFileHash()), (uint64)toadd->GetFileSize(), (LPCTSTR)toadd->GetFileName());
+		AddDebugLogLine(DLP_VERYLOW, false, _T("%hs: File is already in known list: %s %I64u \"%s\""), __FUNCTION__, (LPCTSTR)md4str(pFileInMap->GetFileHash()), (uint64)pFileInMap->GetFileSize(), (LPCTSTR)EscPercent(pFileInMap->GetFileName()));
+		AddDebugLogLine(DLP_VERYLOW, false, _T("%hs: File is added to duplicate list: %s %I64u \"%s\""), __FUNCTION__, (LPCTSTR)md4str(toadd->GetFileHash()), (uint64)toadd->GetFileSize(), (LPCTSTR)EscPercent(toadd->GetFileName()));
 
 		// We need to add toadd to m_duplicateFileList.
 		CSingleLock slDuplicatesLock(&m_csDuplicatesLock, TRUE);
@@ -394,7 +398,7 @@ bool CKnownFileList::SafeAddKFile(CKnownFile *toadd)
 	// This is not an expected case, doing this check just to be sure.
 	// toadd will be added to the known file list below. We need to remove toadd from the duplicate list, if it is there. 
 	if (pFileInDuplicatesList != NULL) {
-		TRACE2(_T("%hs: File is already in duplicates list, removing it: %s %I64u \"%s\"\n"), __FUNCTION__, (LPCTSTR)md4str(toadd->GetFileHash()), (uint64)toadd->GetFileSize(), (LPCTSTR)toadd->GetFileName());
+		AddDebugLogLine(DLP_VERYLOW, false, _T("%hs: File is already in duplicates list, removing it: %s %I64u \"%s\""), __FUNCTION__, (LPCTSTR)md4str(toadd->GetFileHash()), (uint64)toadd->GetFileSize(), (LPCTSTR)EscPercent(toadd->GetFileName()));
 		CSingleLock slDuplicatesLock(&m_csDuplicatesLock, TRUE);
 		m_duplicateFileList.remove(toadd);
 		RemoveDupSizeIndex(toadd); // Sync duplicate index
@@ -459,6 +463,13 @@ bool CKnownFileList::IsFilePtrInList(const CKnownFile *file) const
 		for (const CKnownFilesMap::CPair *pair = m_Files_map.PGetFirstAssoc(); pair != NULL; pair = m_Files_map.PGetNextAssoc(pair))
 			if (file == pair->value)
 				return true;
+
+	if (file) {
+		CSingleLock slDuplicatesLock(const_cast<CCriticalSection*>(&m_csDuplicatesLock), TRUE);
+		for (KnownFileList::const_iterator it = m_duplicateFileList.begin(); it != m_duplicateFileList.end(); ++it)
+			if (file == *it)
+				return true;
+	}
 
 	return false;
 }

@@ -85,10 +85,9 @@ enum ESearchResultImage
 
 namespace
 {
-	UINT_PTR GetSearchTabToolId(int iTab)
+	UINT_PTR GetSearchSelectorToolId()
 	{
-		ASSERT(iTab >= 0);
-		return static_cast<UINT_PTR>(iTab + 1);
+		return 1;
 	}
 
 	CString FormatTooltipTimeValue(time_t tValue)
@@ -1560,20 +1559,27 @@ void CSearchResultsWnd::DeleteAllSearches()
 {
 	CancelEd2kSearch();
 
+	CTypedPtrList<CPtrList, SSearchParams*> listSearchParamsToDelete;
 	TCITEM ti;
 	ti.mask = TCIF_PARAM;
 	for (int i = searchselect.GetItemCount(); --i >= 0;)
 		if (searchselect.GetItem(i, &ti) && ti.lParam != NULL) {
-			const SSearchParams *params = reinterpret_cast<SSearchParams*>(ti.lParam);
+			SSearchParams *params = reinterpret_cast<SSearchParams*>(ti.lParam);
 			Kademlia::CSearchManager::StopSearch(params->dwSearchID, false);
-			delete params;
+			listSearchParamsToDelete.AddTail(params);
 		}
 	NoTabItems();
-	searchselect.UpdateTabToolTips();
+
+	while (!listSearchParamsToDelete.IsEmpty())
+		delete listSearchParamsToDelete.RemoveHead();
 }
 
 void CSearchResultsWnd::NoTabItems()
 {
+	searchlistctrl.m_ListedItemsVector.clear();
+	searchlistctrl.m_ListedItemsMap.RemoveAll();
+	searchlistctrl.SetItemCountEx(static_cast<int>(0), LVSICF_NOINVALIDATEALL);
+
 	theApp.searchlist->Clear();
 	ShowSearchSelector(false);
 	searchselect.DeleteAllItems();
@@ -1622,6 +1628,7 @@ void CSearchResultsWnd::OnSelChangeTab(LPNMHDR, LRESULT *pResult)
 		if (searchselect.GetItem(cur_sel, &ti) && ti.lParam != NULL) {
 			searchselect.HighlightItem(cur_sel, FALSE);
 			ShowResults(reinterpret_cast<SSearchParams*>(ti.lParam));
+			searchselect.UpdateTabToolTips();
 		}
 	}
 	*pResult = 0;
@@ -1713,7 +1720,7 @@ void CSearchResultsWnd::UpdateCatTabs()
 	int oldsel = m_cattabs.GetCurSel();
 	m_cattabs.DeleteAllItems();
 	for (INT_PTR i = 0; i < thePrefs.GetCatCount(); ++i) {
-		CString label(i ? thePrefs.GetCategory(i)->strTitle : GetResString(_T("ALL")));
+		CString label(thePrefs.GetCategoryDisplayTitle(i));
 		DupAmpersand(label);
 		m_cattabs.InsertItem((int)i, label);
 	}
@@ -1843,11 +1850,14 @@ void CSearchResultsWnd::SearchRelatedFiles(CPtrList &listFiles)
 
 BEGIN_MESSAGE_MAP(CSearchResultsSelector, CClosableTabCtrl)
 	ON_WM_CONTEXTMENU()
+	ON_WM_MOUSELEAVE()
+	ON_WM_MOUSEMOVE()
 	ON_WM_SIZE()
 END_MESSAGE_MAP()
 
 CSearchResultsSelector::CSearchResultsSelector()
 	: m_SelectedClient()
+	, m_nTooltipTabIndex(-1)
 {
 }
 
@@ -1870,35 +1880,49 @@ void CSearchResultsSelector::UpdateTabToolTips(int tab)
 	if (m_tooltipTabs.GetSafeHwnd() == NULL)
 		return;
 
-	if (tab == -1) {
-		for (int i = m_tooltipTabs.GetToolCount(); --i >= 0;)
-			m_tooltipTabs.DelTool(this, GetSearchTabToolId(i));
+	m_tooltipTabs.DelTool(this, GetSearchSelectorToolId());
 
-		for (int i = 0; i < GetItemCount(); ++i) {
-			CString strTip = BuildSharedFilesTooltip(i);
-			if (strTip.IsEmpty())
-				strTip = BuildSearchTooltip(i);
-			if (strTip.IsEmpty())
-				continue;
-
-			CRect rcItem;
-			GetItemRect(i, &rcItem);
-			VERIFY(m_tooltipTabs.AddTool(this, strTip, &rcItem, GetSearchTabToolId(i)));
-		}
+	int iTooltipTab = m_nTooltipTabIndex;
+	if (iTooltipTab < 0)
+		iTooltipTab = tab;
+	if (iTooltipTab < 0 || iTooltipTab >= GetItemCount())
 		return;
-	}
 
-	m_tooltipTabs.DelTool(this, GetSearchTabToolId(tab));
-
-	CString strTip = BuildSharedFilesTooltip(tab);
+	CString strTip = BuildSharedFilesTooltip(iTooltipTab);
 	if (strTip.IsEmpty())
-		strTip = BuildSearchTooltip(tab);
+		strTip = BuildSearchTooltip(iTooltipTab);
 	if (strTip.IsEmpty())
 		return;
 
 	CRect rcItem;
-	GetItemRect(tab, &rcItem);
-	VERIFY(m_tooltipTabs.AddTool(this, strTip, &rcItem, GetSearchTabToolId(tab)));
+	GetItemRect(iTooltipTab, &rcItem);
+	VERIFY(m_tooltipTabs.AddTool(this, strTip, &rcItem, GetSearchSelectorToolId()));
+}
+
+void CSearchResultsSelector::OnMouseLeave()
+{
+	if (m_nTooltipTabIndex != -1 && m_tooltipTabs.GetSafeHwnd() != NULL)
+		m_tooltipTabs.Pop();
+
+	m_nTooltipTabIndex = -1;
+	UpdateTabToolTips();
+	CClosableTabCtrl::OnMouseLeave();
+}
+
+void CSearchResultsSelector::OnMouseMove(UINT nFlags, CPoint point)
+{
+	TCHITTESTINFO hitTestInfo = {};
+	hitTestInfo.pt = point;
+	const int nHoverTabIndex = HitTest(&hitTestInfo);
+
+	if (nHoverTabIndex != m_nTooltipTabIndex) {
+		if (m_tooltipTabs.GetSafeHwnd() != NULL)
+			m_tooltipTabs.Pop();
+		m_nTooltipTabIndex = nHoverTabIndex;
+		UpdateTabToolTips(nHoverTabIndex);
+	}
+
+	CClosableTabCtrl::OnMouseMove(nFlags, point);
 }
 
 CUpDownClient* CSearchResultsSelector::GetClientForTab(int iTab) const
@@ -2551,16 +2575,30 @@ BOOL CSearchResultsWnd::MergeSearchResults(uint32 uFromSearchID, uint32 uToSearc
 		return FALSE; // No valid source or target search list, or both lists are the same.
 
 	CWaitCursor curWait; // This may take a while, so show a wait cursor.
+	bool bHasSourceParentItems = false;
+	bool bSourceTabRetainedParentItems = false;
 	for (POSITION pos = pFromList->GetHeadPosition(); pos != NULL;) {
 		POSITION posCur = pos;
 		CSearchFile* pFile = pFromList->GetNext(pos);
+		const bool bWasParentItem = (pFile->GetListParent() == NULL);
+		if (bWasParentItem)
+			bHasSourceParentItems = true;
 		pFile->SetSearchID(uToSearchID); // Set search ID to the target search list.
 
-		if (theApp.searchlist->AddToList(pFile, pFile->GetDirectory() != NULL, 0, false)) // Add the file to the target search list, if it was not already there. GetDirectory() only filled for shared files listings.
+		if (theApp.searchlist->AddToList(pFile, pFile->GetDirectory() != NULL, 0, false)) { // Add the file to the target search list, if it was not already there. GetDirectory() only filled for shared files listings.
 			pFromList->RemoveAt(posCur); // Remove the file from the source search list if it was added to the target search list.
-		else
+		} else {
 			pFile->SetSearchID(uFromSearchID); // Restore search ID if the file was not added to the target search list.
+			if (bWasParentItem)
+				bSourceTabRetainedParentItems = true;
+		}
 	}
+
+	if (bHasSourceParentItems)
+		theApp.searchlist->MarkSearchAsMerged(uToSearchID);
+
+	if (bSourceTabRetainedParentItems)
+		theApp.searchlist->MarkSearchAsMerged(uFromSearchID);
 
 	if (pFromList->GetCount()) { // If the source search list is not empty after the merge, refresh the results in the source tab.
 		if (uFromSearchID == searchlistctrl.m_nResultsID) // If this is the current search tab, reload the results.

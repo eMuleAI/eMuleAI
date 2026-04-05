@@ -303,6 +303,7 @@
 #define IDC_SOURCECOUNT                 2349
 #define IDC_SPLITTER                    2351
 #define IDC_DBLCLICK                    2354
+#define IDC_DBLCLICKFILENAMEPREVIEW     2401
 #define IDC_LASTSEENCOMPL               2355
 #define IDC_STARTMIN                    2356
 #define IDC_FILECREATED                 2357

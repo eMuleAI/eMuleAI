@@ -27,6 +27,7 @@
 #include "ArchivePreviewDlg.h"
 #include "FileInfoDialog.h"
 #include "MetaDataDlg.h"
+#include "ClosableTabCtrl.h"
 #include "ToolTipCtrlX.h"
 
 /////////////////////////////////////////////////////////////////////////////////////////////
@@ -41,6 +42,7 @@ public:
 	CSharedFileDetailsModelessSheet& operator=(const CSharedFileDetailsModelessSheet&) = delete;
 
 	virtual BOOL OnInitDialog();
+	int GetRequiredHeightCompensation();
 
 	void SetFiles(CTypedPtrList<CPtrList, CShareableFile*> &aFiles);
 	void Localize();
@@ -75,11 +77,14 @@ public:
 	void Localize();
 	void SetToolTipsDelay(DWORD dwDelay);
 	void Reload(bool bForceTreeReload = false, bool bUserForced = false);
+	void TryCompleteDeferredTreeInit();
 	uint32	GetFilterColumn() const				{ return m_nFilterColumn; }
 	void OnVolumesChanged()						{ m_ctlSharedDirTree.OnVolumesChanged(); }
 	void OnSingleFileShareStatusChanged()		{ m_ctlSharedDirTree.FileSystemTreeUpdateBoldState(NULL); }
 	void ShowSelectedFilesDetails(bool bForce = false);
 	void ShowDetailsPanel(bool bShow);
+	void RequestDetailsPanelHeightAdjustment();
+	void AdjustDetailsPanelHeightForPageOverflow();
 
 	CSharedFilesCtrl sharedfilesctrl;
 	CStringArray m_astrFilter;
@@ -94,6 +99,8 @@ private:
 	CHeaderCtrl		m_ctlSharedListHeader;
 	uint32			m_nFilterColumn;
 	bool			m_bDetailsVisible;
+	bool			m_bDetailsPanelHeightAdjustmentPending;
+	bool			m_bDeferredTreeInitPending;
 
 protected:
 	CStringArray	m_astrFilterTemp;
@@ -103,8 +110,10 @@ protected:
 
 	CToolTipCtrlX m_ToolTip;
 
+	void LocalizeInternal(bool bDeferTreeInit);
 	void SetAllIcons();
 	void DoResize(int iDelta);
+	void UpdateDetailsPanelLayout();
 
 	virtual void DoDataExchange(CDataExchange *pDX);    // DDX/DDV support
 	virtual BOOL PreTranslateMessage(MSG *pMsg);
@@ -118,6 +127,7 @@ protected:
 	afx_msg void OnLvnItemActivateSharedFiles(LPNMHDR, LRESULT*);
 	afx_msg void OnNmClickSharedFiles(LPNMHDR pNMHDR, LRESULT *pResult);
 	afx_msg void OnStnDblClickFilesIco();
+	afx_msg void OnSize(UINT nType, int cx, int cy);
 	afx_msg void OnSysColorChange();
 	afx_msg void OnTvnSelChangedSharedDirsTree(LPNMHDR, LRESULT *pResult);
 	afx_msg void OnShowWindow(BOOL bShow, UINT);
@@ -130,4 +140,5 @@ protected:
 	afx_msg LRESULT OnShowFilesCount(WPARAM wParam, LPARAM lParam);
 	afx_msg LRESULT OnMetadataUpdated(WPARAM wParam, LPARAM lParam);
 	afx_msg LRESULT OnAutoReloadSharedFiles(WPARAM wParam, LPARAM);
+	afx_msg LRESULT OnAdjustDetailsPanelHeight(WPARAM, LPARAM);
 };

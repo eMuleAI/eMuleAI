@@ -530,7 +530,7 @@ bool CUploadQueue::AcceptNewClient(INT_PTR curUploadSlots) const
 	if (thePrefs.IsDynUpEnabled())
 		MaxSpeed = theApp.lastCommonRouteFinder->GetUpload() / 1024;
 	else
-		MaxSpeed = thePrefs.GetMaxUpload();
+		MaxSpeed = thePrefs.GetEffectiveMaxUpload();
 	uint32 TargetRate = GetTargetClientDataRate(false);
 
 	if (curUploadSlots >= (INT_PTR)(datarate / GetTargetClientDataRate(true)) || curUploadSlots >= (INT_PTR)(MaxSpeed * 1024 / TargetRate))
@@ -575,7 +575,7 @@ bool CUploadQueue::ForceNewClient(bool allowEmptyWaitingQueue)
 	if (thePrefs.IsDynUpEnabled())
 		MaxSpeed = theApp.lastCommonRouteFinder->GetUpload() / 1024;
 	else
-		MaxSpeed = thePrefs.GetMaxUpload();
+		MaxSpeed = thePrefs.GetEffectiveMaxUpload();
 
 	uint32 upPerClient = GetTargetClientDataRate(false);
 
@@ -1103,7 +1103,7 @@ VOID CALLBACK CUploadQueue::UploadTimer(HWND /*hwnd*/, UINT /*uMsg*/, UINT_PTR /
 		cur.dPingTolerance = (thePrefs.GetDynUpPingTolerance() > 100) ? ((thePrefs.GetDynUpPingTolerance() - 100) / 100.0) : 0;
 		cur.uCurUpload = theApp.uploadqueue->GetDatarate();
 		cur.uMinUpload = thePrefs.GetMinUpload();
-		cur.uMaxUpload = (thePrefs.GetMaxUpload() ? thePrefs.GetMaxUpload() : thePrefs.GetMaxGraphUploadRate(false));
+		cur.uMaxUpload = thePrefs.GetEffectiveMaxUpload();
 		cur.uPingToleranceMilliseconds = thePrefs.GetDynUpPingToleranceMilliseconds();
 		cur.uGoingUpDivider = thePrefs.GetDynUpGoingUpDivider();
 		cur.uGoingDownDivider = thePrefs.GetDynUpGoingDownDivider();
@@ -1310,8 +1310,8 @@ VOID CALLBACK CUploadQueue::UploadTimer(HWND /*hwnd*/, UINT /*uMsg*/, UINT_PTR /
 				if (thePrefs.GetPreventStandby())
 					theApp.ResetStandByIdleTimer(); // Reset Windows idle standby timer if necessary
 
-				if (thePrefs.GetFileInspector() > 0 || thePrefs.IsFileInspectorInvalidExt())
-					theApp.emuledlg->transferwnd->GetDownloadList()->FileInspector();
+				if (thePrefs.GetDownloadInspector() > 0 || thePrefs.IsDownloadInspectorInvalidExt())
+					theApp.emuledlg->transferwnd->GetDownloadList()->DownloadInspector();
 
 #ifdef TESTMODE
 				if (thePrefs.GetClientHistory() && ++m_uAutoQuerySFCounter >= thePrefs.GetRemoteSharedFilesAutoQueryPeriod()) {

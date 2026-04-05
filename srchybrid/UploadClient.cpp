@@ -51,8 +51,11 @@ namespace
 
 	CBarShader& BB_GetUploadStatusBar()
 	{
-		if (g_pUploadStatusBar == NULL)
+		if (g_pUploadStatusBar == NULL) {
 			g_pUploadStatusBar = new CBarShader(16);
+			// Keep the 3D shading, but avoid muddy subpixel color averaging for dense uploaded block maps.
+			g_pUploadStatusBar->SetSubPixelMixMode(CBarShader::SPM_DOMINANT_COLOR);
+		}
 		return *g_pUploadStatusBar;
 	}
 }

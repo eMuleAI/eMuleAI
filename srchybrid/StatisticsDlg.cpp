@@ -2630,7 +2630,15 @@ void CStatisticsDlg::UpdateClientSoftwareBreakdown(int branchIndex, int software
 		UINT verMin = (version - (verMaj * 100 * 10 * 100)) / (100 * 10);
 		UINT verUp = (version - (verMaj * 100 * 10 * 100) - (verMin * 100 * 10)) / 100;
 		CString sText;
-		sText.Format(_T("v%u.%u.%u: %u (%1.1f%%)"), verMaj, verMin, verUp, count, topPer);
+		if (softwareIndex == 0 && (version >= MAKE_CLIENT_VERSION(0, 40, 0) || verUp != 0)) {
+			if (verUp <= _T('z') - _T('a'))
+				sText.Format(_T("v%u.%u%c: %u (%1.1f%%)"), verMaj, verMin, _T('a') + verUp, count, topPer);
+			else
+				sText.Format(_T("v%u.%u.%u: %u (%1.1f%%)"), verMaj, verMin, verUp, count, topPer);
+		} else if (softwareIndex != 0 && (version >= MAKE_CLIENT_VERSION(0, 40, 0) || verUp != 0))
+			sText.Format(_T("v%u.%u.%u: %u (%1.1f%%)"), verMaj, verMin, verUp, count, topPer);
+		else
+			sText.Format(_T("v%u.%u: %u (%1.1f%%)"), verMaj, verMin, count, topPer);
 
 		if (idx >= MAX_SUB_CLIENT_VERSIONS / 2)
 			totalOther += count;

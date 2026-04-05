@@ -161,8 +161,10 @@ bool CSecRunAsUser::SetDirectoryPermissions()
 	// shared files list: read permission only
 	// we odnt check for success here, for emule will also run if one dir fails for some reason
 	// if there is a dir which is also an incoming dir, rights will be overwritten below
-	for (POSITION pos = thePrefs.shareddir_list.GetHeadPosition(); pos != NULL;)
-		VERIFY(SetObjectPermission(thePrefs.shareddir_list.GetNext(pos), (DWORD)ADS_RIGHT_GENERIC_READ));
+	CStringList sharedDirs;
+	thePrefs.CopySharedDirectoryList(sharedDirs);
+	for (POSITION pos = sharedDirs.GetHeadPosition(); pos != NULL;)
+		VERIFY(SetObjectPermission(sharedDirs.GetNext(pos), (DWORD)ADS_RIGHT_GENERIC_READ));
 
 	// set special permission for emule account on needed folders
 

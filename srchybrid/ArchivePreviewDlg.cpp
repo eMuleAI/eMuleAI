@@ -24,6 +24,7 @@
 #include "UserMsgs.h"
 #include "SplitterControl.h"
 #include "MenuCmds.h"
+#include "SharedFilesWnd.h"
 #include "eMuleAI/MenuXP.h"
 
 #ifdef _DEBUG
@@ -31,6 +32,23 @@
 #undef THIS_FILE
 static char THIS_FILE[] = __FILE__;
 #endif
+
+namespace
+{
+	void AdjustSharedFilesDetailsHost(CWnd *pPage)
+	{
+		if (pPage == NULL)
+			return;
+
+		CWnd *pSheet = pPage->GetParent();
+		if (pSheet == NULL)
+			return;
+
+		CSharedFilesWnd *pSharedFilesWnd = DYNAMIC_DOWNCAST(CSharedFilesWnd, pSheet->GetParent());
+		if (pSharedFilesWnd != NULL)
+			pSharedFilesWnd->RequestDetailsPanelHeightAdjustment();
+	}
+}
 
 
 // from free unRAR, Alexander L. Roshal
@@ -109,6 +127,7 @@ enum EArchiveCols
 	ARCHPREV_COL_CMT
 };
 
+// Alignment rule: left for text, dates, and status labels; right for sizes, rates, counts, durations, and percentages.
 static LCX_COLUMN_INIT s_aColumns[] =
 {
 	{ ARCHPREV_COL_NAME, _T("Name"),  _T("DL_FILENAME"),  LVCFMT_LEFT,  -1, 0, ASCENDING, NONE, _T("LONG FILENAME.DAT") },
@@ -258,6 +277,7 @@ BOOL CArchivePreviewDlg::OnSetActive()
 {
 	if (!CResizablePage::OnSetActive())
 		return FALSE;
+	AdjustSharedFilesDetailsHost(this);
 
 	if (m_bDataChanged) {
 		UpdateArchiveDisplay(thePrefs.m_bAutomaticArcPreviewStart);

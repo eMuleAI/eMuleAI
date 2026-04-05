@@ -196,14 +196,14 @@ void CTransferWnd::OnInitialUpdate()
 	// show & cat-tabs
 	m_dlTab.m_bDownloadCategoryStyle = true;
 	m_dlTab.ModifyStyle(0, TCS_OWNERDRAWFIXED);
-	m_dlTab.SetPadding(CSize(6, 4));
+	// Reserve a few extra pixels for bold active category captions without changing tab widths dynamically.
+	m_dlTab.SetPadding(CSize(11, 4));
 	Category_Struct *cat0 = thePrefs.GetCategory(0);
-	cat0->strTitle = GetCatTitle(cat0->filter);
 	cat0->strIncomingPath = thePrefs.GetMuleDirectory(EMULE_INCOMINGDIR);
 	cat0->care4all = true;
 
 	for (INT_PTR i = 0; i < thePrefs.GetCatCount(); ++i)
-		m_dlTab.InsertItem((int)i, thePrefs.GetCategory(i)->strTitle);
+		m_dlTab.InsertItem((int)i, thePrefs.GetCategoryDisplayTitle(i));
 
 	// create tooltip control for download categories
 	m_tooltipCats.Create(this, TTS_NOPREFIX);
@@ -226,10 +226,10 @@ void CTransferWnd::OnInitialUpdate()
 	m_ctlListHeaderUploadList.Attach(uploadlistctrl.GetHeaderCtrl()->Detach());
 	m_ctlFilterUploadList.OnInit(&m_ctlListHeaderUploadList);
 
-	m_ctlListHeaderDownloadClients.Attach(queuelistctrl.GetHeaderCtrl()->Detach());
+	m_ctlListHeaderDownloadClients.Attach(downloadclientsctrl.GetHeaderCtrl()->Detach());
 	m_ctlFilterDownloadClients.OnInit(&m_ctlListHeaderDownloadClients);
 
-	m_ctlListHeaderQueueList.Attach(downloadclientsctrl.GetHeaderCtrl()->Detach());
+	m_ctlListHeaderQueueList.Attach(queuelistctrl.GetHeaderCtrl()->Detach());
 	m_ctlFilterQueueList.OnInit(&m_ctlListHeaderQueueList);
 
 	m_ctlListHeaderClientList.Attach(clientlistctrl.GetHeaderCtrl()->Detach());
@@ -249,6 +249,10 @@ void CTransferWnd::OnInitialUpdate()
 	InitWindowStyles(this); //Moved down
 	VerifyCatTabSize();
 	Localize();
+
+	// Capture the initial anchors and first list layout against the dialog template size first.
+	// Switching to a 1x1 scroll area earlier makes right-anchored controls use the tiny 50x50 startup frame.
+	SetScrollSizes(MM_TEXT, CSize(1, 1));
 }
 
 void CTransferWnd::ShowQueueCount(INT_PTR number)
@@ -271,9 +275,9 @@ void CTransferWnd::DoDataExchange(CDataExchange *pDX)
 	DDX_Control(pDX, IDC_DOWNLOADCLIENTS, downloadclientsctrl);
 	DDX_Control(pDX, IDC_FILTER_DOWNLOAD_LIST, m_ctlFilterDownloadList);
 	DDX_Control(pDX, IDC_FILTER_UPLOAD_LIST, m_ctlFilterUploadList);
-	DDX_Control(pDX, IDC_FILTER_QUEUE_LIST, m_ctlFilterDownloadClients);
-	DDX_Control(pDX, IDC_FILTER_CLIENT_LIST, m_ctlFilterQueueList);
-	DDX_Control(pDX, IDC_FILTER_DOWNLOAD_CLIENTS, m_ctlFilterClientList);
+	DDX_Control(pDX, IDC_FILTER_DOWNLOAD_CLIENTS, m_ctlFilterDownloadClients);
+	DDX_Control(pDX, IDC_FILTER_QUEUE_LIST, m_ctlFilterQueueList);
+	DDX_Control(pDX, IDC_FILTER_CLIENT_LIST, m_ctlFilterClientList);
 	DDX_Control(pDX, IDC_FILETYPE, m_FileTypeComboBox);
 }
 
@@ -326,7 +330,7 @@ void CTransferWnd::DoResize(int delta)
 void CTransferWnd::UpdateSplitterRange()
 {
 	CRect rcWnd;
-	GetWindowRect(rcWnd);
+	GetTotalClientRect(&rcWnd);
 	if (rcWnd.Height() == 0) {
 		ASSERT(0);
 		return;
@@ -696,6 +700,7 @@ void CTransferWnd::UpdateListCount()
 	uint32 m_uTotal = 0;
 	uint32 m_uListed = 0;
 	LPCTSTR resStringID = EMPTY;
+	bool bShowDownloadActiveVisibleCounts = false;
 
 	// Update m_btnWnd2
 	if (m_btnWnd2.IsWindowVisible() && m_dwShowListIDC == IDC_DOWNLOADLIST + IDC_UPLOADLIST) {
@@ -738,8 +743,11 @@ void CTransferWnd::UpdateListCount()
 	switch (m_dwShowListIDC) {
 	case IDC_DOWNLOADLIST:
 	case IDC_DOWNLOADLIST + IDC_UPLOADLIST:
-		m_uTotal = downloadlistctrl.GetTotalFilesCount();
-		m_uListed = downloadlistctrl.m_uListedFilesCount;
+		if (m_bCatTabInfoDirty || m_cachedActiveDwl < 0)
+			RebuildActiveDownloadCache();
+		m_uTotal = downloadlistctrl.m_uListedFilesCount;
+		m_uListed = static_cast<uint32>(GetActiveDownloadCount());
+		bShowDownloadActiveVisibleCounts = true;
 		resStringID = _T("TW_DOWNLOADS");
 		break;
 
@@ -783,7 +791,9 @@ void CTransferWnd::UpdateListCount()
 
 	// Format the string based on the counts and update the button text
 	strBuffer.Empty();
-	if (m_uTotal > m_uListed)
+	if (bShowDownloadActiveVisibleCounts)
+		strBuffer.Format(_T("%s (%u/%u)"), (LPCTSTR)GetResString(resStringID), m_uListed, m_uTotal);
+	else if (m_uTotal > m_uListed)
 		strBuffer.Format(_T("%s (%u/%u)"), (LPCTSTR)GetResString(resStringID), m_uListed, m_uTotal);
 	else
 		strBuffer.Format(_T("%s (%u)"), (LPCTSTR)GetResString(resStringID), m_uListed);
@@ -1049,7 +1059,7 @@ void CTransferWnd::OnNmRClickDltab(LPNMHDR, LRESULT *pResult)
 	menu.CreatePopupMenu();
 	CString sCat(GetResString(_T("CAT")));
 	if (m_rightclickindex)
-		sCat.AppendFormat(_T(" (%s)"), (LPCTSTR)thePrefs.GetCategory(m_rightclickindex)->strTitle);
+		sCat.AppendFormat(_T(" (%s)"), (LPCTSTR)thePrefs.GetCategoryDisplayTitle(m_rightclickindex));
 	menu.AddMenuSidebar(sCat);
 
 	m_isetcatmenu = m_rightclickindex;
@@ -1258,7 +1268,7 @@ BOOL CTransferWnd::OnCommand(WPARAM wParam, LPARAM lParam)
 			const CString &oldincpath(thePrefs.GetCatPath(m_rightclickindex));
 			CCatDialog dialog(m_rightclickindex);
 			if (dialog.DoModal() == IDOK) {
-				EditCatTabLabel(m_rightclickindex, thePrefs.GetCategory(m_rightclickindex)->strTitle);
+				EditCatTabLabel(m_rightclickindex, thePrefs.GetCategoryDisplayTitle(m_rightclickindex));
 				m_dlTab.SetTabTextColor(m_rightclickindex, thePrefs.GetCatColor(m_rightclickindex));
 				theApp.emuledlg->searchwnd->UpdateCatTabs();
 				downloadlistctrl.UpdateCurrentCategoryView();
@@ -1277,9 +1287,9 @@ BOOL CTransferWnd::OnCommand(WPARAM wParam, LPARAM lParam)
 			m_dlTab.DeleteItem(m_rightclickindex);
 			m_dlTab.SetCurSel(0);
 			downloadlistctrl.ChangeCategory(0);
-			thePrefs.SaveCats();
 			if (thePrefs.GetCatCount() == 1)
-				thePrefs.GetCategory(0)->filter = 0;
+				thePrefs.SetCatFilter(0, 0);
+			thePrefs.SaveCats();
 			theApp.emuledlg->searchwnd->UpdateCatTabs();
 			VerifyCatTabSize();
 			if (toreload)
@@ -1388,7 +1398,7 @@ void CTransferWnd::UpdateCatTabTitles(bool force)
 		return;
 
 	for (int i = m_dlTab.GetItemCount(); --i >= 0;) {
-		EditCatTabLabel(i, /*(i==0) ? GetCatTitle(thePrefs.GetCategory(0)->filter) :*/thePrefs.GetCategory(i)->strTitle);
+		EditCatTabLabel(i, thePrefs.GetCategoryDisplayTitle(i));
 		m_dlTab.SetTabTextColor(i, thePrefs.GetCatColor(i));
 	}
 
@@ -1438,7 +1448,7 @@ LRESULT CTransferWnd::OnUpdateCatTabTitlesIfDirty(WPARAM wParam, LPARAM lParam)
 
 void CTransferWnd::EditCatTabLabel(int index)
 {
-	EditCatTabLabel(index, /*(index==0) ? GetCatTitle(thePrefs.GetAllcatType()) :*/thePrefs.GetCategory(index)->strTitle);
+	EditCatTabLabel(index, thePrefs.GetCategoryDisplayTitle(index));
 }
 
 void CTransferWnd::EditCatTabLabel(int index, CString newlabel)
@@ -1448,30 +1458,11 @@ void CTransferWnd::EditCatTabLabel(int index, CString newlabel)
 	m_dlTab.GetItem(index, &tabitem);
 	tabitem.mask = TCIF_TEXT;
 
-	if (index)
-		DupAmpersand(newlabel);
-	else
-		newlabel.Empty();
-
-	if (!index || thePrefs.GetCatFilter(index) > 0) {
-		if (index)
-			newlabel += _T(" (");
-
-		if (thePrefs.GetCatFilterNeg(index))
-			newlabel += _T('!');
-
-		if (thePrefs.GetCatFilter(index) == 18)
-			newlabel.AppendFormat(_T("\"%s\""), (LPCTSTR)thePrefs.GetCategory(index)->regexp);
-		else
-			newlabel += GetCatTitle(thePrefs.GetCatFilter(index));
-
-		if (index)
-			newlabel += _T(')');
-	}
+	DupAmpersand(newlabel);
 
 	if (thePrefs.ShowCatTabInfos()) {
 		int count;
-		int completed = downloadlistctrl.GetCompleteDownloads(index, count); // existing logic (count= total, completed=return value)
+		downloadlistctrl.GetCompleteDownloads(index, count); // existing logic (count= total)
 		
 		// Calculate active downloads for this specific category
 		int activeDwlForCategory = 0;
@@ -1527,7 +1518,7 @@ int CTransferWnd::AddCategoryInteractive()
 	CCatDialog dialog(newindex);
 	if (dialog.DoModal() == IDOK) {
 		theApp.emuledlg->searchwnd->UpdateCatTabs();
-		m_dlTab.InsertItem(newindex, thePrefs.GetCategory(newindex)->strTitle);
+		m_dlTab.InsertItem(newindex, thePrefs.GetCategoryDisplayTitle(newindex));
 		m_dlTab.SetTabTextColor(newindex, thePrefs.GetCatColor(newindex));
 		EditCatTabLabel(newindex);
 		thePrefs.SaveCats();
@@ -1735,16 +1726,7 @@ void CTransferWnd::VerifyCatTabSize()
 
 CString CTransferWnd::GetCatTitle(int catid)
 {
-	static const LPCTSTR idscat[19] =
-	{
-		  _T("ALL"), _T("ALLOTHERS"), _T("STATUS_NOTCOMPLETED"), _T("DL_TRANSFCOMPL"), _T("WAITING")
-		, _T("DOWNLOADING"), _T("ERRORLIKE"), _T("PAUSED"), _T("SEENCOMPL"), 0
-		, _T("VIDEO"), _T("AUDIO"), _T("SEARCH_ARC"), _T("SEARCH_CDIMG"), _T("SEARCH_DOC")
-		, _T("SEARCH_PICS"), _T("SEARCH_PRG"), 0, _T("REGEXPRESSION")
-	};
-	
-	CString ret = (catid >= 0 && catid < 17) ? idscat[catid] : EMPTY;
-	return ret.IsEmpty() ? GetResString(ret) : CString(_T('?'));
+	return thePrefs.GetCatFilterLabel(catid);
 }
 
 void CTransferWnd::OnBnClickedChangeView()
@@ -1795,8 +1777,7 @@ void CTransferWnd::SetWnd2Icon(EWnd2Icon iIcon)
 void CTransferWnd::ShowList(uint32 dwListIDC)
 {
 	RECT rcWnd;
-	GetWindowRect(&rcWnd);
-	ScreenToClient(&rcWnd);
+	GetTotalClientRect(&rcWnd);
 
 	RECT rcDown;
 	GetDlgItem(dwListIDC)->GetWindowRect(&rcDown);
@@ -1887,8 +1868,7 @@ void CTransferWnd::ShowSplitWindow(bool bReDraw)
 	SetWnd1Icon(w1iDownloadFiles);
 
 	CRect rcWnd;
-	GetWindowRect(rcWnd);
-	ScreenToClient(rcWnd);
+	GetTotalClientRect(&rcWnd);
 
 	LONG splitpos = (thePrefs.GetSplitterbarPosition() * rcWnd.Height()) / 100;
 
@@ -2218,7 +2198,7 @@ void CTransferWnd::OnPaint()
 {
 	CResizableFormView::OnPaint();
 	CRect rcWnd;
-	GetWindowRect(rcWnd);
+	GetTotalClientRect(&rcWnd);
 
 	// Another small work around: Init/Redraw the layout as soon as we have our real windows size
 	// as the initial size is far below the minimum and will mess things up which expect this size

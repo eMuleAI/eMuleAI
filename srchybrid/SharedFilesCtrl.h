@@ -1,4 +1,4 @@
-//This file is part of eMule AI
+﻿//This file is part of eMule AI
 //Copyright (C)2002-2026 Merkur ( strEmail.Format("%s@%s", "devteam", "emule-project.net") / https://www.emule-project.net )
 //Copyright (C)2026 eMule AI
 //
@@ -90,15 +90,18 @@ public:
 	CHistoryFilesMap m_ListedItemsMap; // This map is used to lookup file index.
 	FilterType m_eFilter; // Type of directory this control is displaying
 	uint32 m_uFilterID; // ID of the filter, used to identify the filter in the list
-	volatile INT_PTR nAICHHashing;
+	volatile LONG nAICHHashing;
 	void	UpdateFile(CKnownFile* file, const bool bUpdateFileSummary = true, const bool bDeletedFromDisk = false, const int iIndex = -1);
 	bool	CheckBoxesEnabled() const;
 	void	Localize();
 	void	ShowFilesCount();
 	void	ShowComments(CShareableFile *file);
-	void	SetAICHHashing(INT_PTR nVal)				{ nAICHHashing = nVal; }
+	LONG	GetAICHHashing()							{ return InterlockedCompareExchange(&nAICHHashing, 0, 0); }
+	void	SetAICHHashing(INT_PTR nVal)				{ InterlockedExchange(&nAICHHashing, static_cast<LONG>(nVal)); }
 	CDirectoryItem* GetDirectoryFilter()				{ return m_pDirectoryFilter; }
 	void	SetDirectoryFilter(CDirectoryItem *pNewFilter, bool bRefresh = true);
+	bool	IsSelectionRestoreInProgress() const		{ return m_bSelectionRestoreInProgress; }
+	void	SetSelectionRestoreInProgress(bool bInProgress)	{ m_bSelectionRestoreInProgress = bInProgress; }
 protected:
 	CMenuXP		m_SharedFilesMenu;
 	CMenuXP		m_CollectionsMenu;
@@ -114,15 +117,22 @@ protected:
 	CTypedPtrList<CPtrList, CShareableFile*>	liTempShareableFilesInDir;
 	CShareableFile *m_pHighlightedItem;
 	CShareDropTarget m_ShareDropTarget;
+	bool m_bSelectionRestoreInProgress;
 
+	void UpdateListedItemsMapRange(int iStartIndex, int iEndIndex);
 	static int CALLBACK SortProc(const LPARAM lParam1, const LPARAM lParam2, const LPARAM lParamSort);
 	static bool SortFunc(const CKnownFile* fileA, const CKnownFile* fileB);
+	bool HasActiveSortOrder() const;
+	bool NeedsSortReposition(int iIndex) const;
+	bool RepositionFileByCurrentSort(CKnownFile* file, int iIndex);
 	void OpenFile(const CShareableFile *file);
 	void ShowFileDialog(CTypedPtrList<CPtrList, CShareableFile*> &aFiles, UINT uInvokePage = 0);
 	const CString GetItemDisplayText(const CShareableFile *file, const int iSubItem) const;
 	const bool IsFilteredOut(const CShareableFile *pKnownFile) const;
 	const bool IsSharedInKad(const CKnownFile *file) const;
 	void CheckBoxClicked(const int iItem);
+	virtual bool UsePersistentInfoTips() const override { return true; }
+	virtual bool GetPersistentInfoTipText(const SPersistentInfoTipContext& context, CString& strText) override;
 
 	virtual BOOL OnCommand(WPARAM wParam, LPARAM);
 	virtual void DrawItem(LPDRAWITEMSTRUCT lpDrawItemStruct);

@@ -67,6 +67,7 @@ public:
 	virtual	~CSharedDirsTreeCtrl();
 
 	void			Initialize(CSharedFilesCtrl *pSharedFilesCtrl);
+	void			LocalizeSkeleton();
 	void			SetAllIcons();
 
 	CDirectoryItem* GetSelectedFilter() const;
@@ -133,10 +134,9 @@ private:
 	void	FilterTreeAddSubDirectories(CDirectoryItem *pDirectory, const CStringList &liDirs, int nLevel, bool &rbShowWarning, bool bParentAccessible);
 	bool	FilterTreeIsSubDirectory(const CString &strDir, const CString &strRoot, const CStringList &liDirs);
 	void	FilterTreeReloadTree();
-    DWORD   ComputeTreeStructureCRC() const; // Compute a stable CRC of the directory structure under incoming and shared roots
-    static void AppendAllSubdirsRecursive(const CString& root, CMapStringToPtr& seen, CStringArray& out);
+	ULONGLONG ComputeTreeStructureCRC() const; // Compute a stable signature of the visible directory tree structure
 
-	DWORD   m_dwLastTreeStructCRC; // Snapshot of directory structure for bypassing unnecessary tree rebuilds
+	ULONGLONG m_ullLastTreeStructCRC; // Snapshot of directory structure for bypassing unnecessary tree rebuilds
 	bool	m_bCreatingTree;
 	bool	m_bUseIcons;
 	CMap<int, int, int, int> m_mapSystemIcons;

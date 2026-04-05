@@ -393,8 +393,8 @@ UINT UploadBandwidthThrottler::RunInternal()
 		// if this is kept, the loop above can be optimized a little (don't count nCanSend,
 		// just use nCanSend = GetSlotLimit(theApp.uploadqueue->GetDatarate())
 
-		// When no upload limit has been set in options, try to guess a good upload limit.
-		if (thePrefs.GetMaxUpload() == UNLIMITED) {
+		// When upload is effectively unlimited, try to guess a good upload limit.
+		if (thePrefs.GetEffectiveMaxUpload() == UNLIMITED) {
 			++loopsCount;
 			if (nCanSend > 0) {
 				//the limits were: "fBusyFraction > 0.75f" and "fBusyFraction < 0.25f"

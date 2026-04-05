@@ -266,7 +266,7 @@ BOOL CHttpDownloadDlg::OnInitDialog()
 		//Try to prepend "http://"
 		m_sURLToDownload = _T("http://") + m_sURLToDownload;
 		if (!AfxParseURL(m_sURLToDownload, m_dwServiceType, m_sServer, m_sObject, m_nPort)) {
-			TRACE(_T("Failed to parse the URL: %s\n"), (LPCTSTR)m_sURLToDownload);
+			AddDebugLogLine(DLP_LOW, false, _T("Failed to parse the URL: %s"), (LPCTSTR)EscPercent(m_sURLToDownload));
 			EndDialog(IDCANCEL);
 			return TRUE;
 		}
@@ -311,7 +311,7 @@ BOOL CHttpDownloadDlg::OnInitDialog()
 	//Spin off the background thread which will do the actual downloading
 	m_pThread = AfxBeginThread(_DownloadThread, this, THREAD_PRIORITY_NORMAL, 0, CREATE_SUSPENDED);
 	if (m_pThread == NULL) {
-		TRACE(_T("Failed to create download thread, dialog is aborting\n"));
+		AddDebugLogLine(DLP_LOW, false, _T("Failed to create download thread, dialog is aborting"));
 		EndDialog(IDCANCEL);
 		return TRUE;
 	}
@@ -419,7 +419,7 @@ void CHttpDownloadDlg::DownloadThread()
 	ASSERT(m_hInternetSession == NULL);
 	m_hInternetSession = ::InternetOpen(AfxGetAppName(), INTERNET_OPEN_TYPE_PRECONFIG, NULL, NULL, 0);
 	if (m_hInternetSession == NULL) {
-		TRACE(_T("Failed in call to InternetOpen, Error: %d\n"), ::GetLastError());
+		AddDebugLogLine(DLP_LOW, false, _T("Failed in call to InternetOpen, Error: %d"), ::GetLastError());
 		HandleThreadErrorWithLastError(GetResString(_T("HTTPDOWNLOAD_GENERIC_ERROR")));
 		return;
 	}
@@ -432,7 +432,7 @@ void CHttpDownloadDlg::DownloadThread()
 
 	//Setup the status callback function
 	if (::InternetSetStatusCallback(m_hInternetSession, _OnStatusCallBack) == INTERNET_INVALID_STATUS_CALLBACK) {
-		TRACE(_T("Failed in call to InternetSetStatusCallback, Error:%d\n"), ::GetLastError());
+		AddDebugLogLine(DLP_LOW, false, _T("Failed in call to InternetSetStatusCallback, Error:%d"), ::GetLastError());
 		HandleThreadErrorWithLastError(GetResString(_T("HTTPDOWNLOAD_GENERIC_ERROR")));
 		return;
 	}
@@ -453,7 +453,7 @@ void CHttpDownloadDlg::DownloadThread()
 	m_hHttpConnection = ::InternetConnect(m_hInternetSession, m_sServer, m_nPort
 		, m_sUserName, m_sPassword, m_dwServiceType, 0, reinterpret_cast<DWORD_PTR>(this));
 	if (m_hHttpConnection == NULL) {
-		TRACE(_T("Failed in call to InternetConnect, Error:%d\n"), ::GetLastError());
+		AddDebugLogLine(DLP_LOW, false, _T("Failed in call to InternetConnect, Error:%d"), ::GetLastError());
 		HandleThreadErrorWithLastError(GetResString(_T("HTTPDOWNLOAD_FAIL_CONNECT_SERVER")));
 		return;
 	}
@@ -474,7 +474,7 @@ void CHttpDownloadDlg::DownloadThread()
 	m_hHttpFile = HttpOpenRequest(m_hHttpConnection, NULL, m_sObject, NULL, NULL
 		, ppszAcceptTypes, dwFlags, reinterpret_cast<DWORD_PTR>(this));
 	if (m_hHttpFile == NULL) {
-		TRACE(_T("Failed in call to HttpOpenRequest, Error:%d\n"), ::GetLastError());
+		AddDebugLogLine(DLP_LOW, false, _T("Failed in call to HttpOpenRequest, Error:%d"), ::GetLastError());
 		HandleThreadErrorWithLastError(GetResString(_T("HTTPDOWNLOAD_FAIL_CONNECT_SERVER")));
 		return;
 	}
@@ -497,7 +497,7 @@ resend:
 	//Issue the request
 	BOOL bSend = HttpSendRequest(m_hHttpFile, NULL, 0, NULL, 0);
 	if (!bSend) {
-		TRACE(_T("Failed in call to HttpSendRequest, Error:%d\n"), ::GetLastError());
+		AddDebugLogLine(DLP_LOW, false, _T("Failed in call to HttpSendRequest, Error:%d"), ::GetLastError());
 		HandleThreadErrorWithLastError(GetResString(_T("HTTPDOWNLOAD_FAIL_CONNECT_SERVER")));
 		return;
 	}
@@ -506,7 +506,7 @@ resend:
 	TCHAR szStatusCode[32];
 	DWORD dwInfoSize = _countof(szStatusCode);
 	if (!HttpQueryInfo(m_hHttpFile, HTTP_QUERY_STATUS_CODE, szStatusCode, &dwInfoSize, NULL)) {
-		TRACE(_T("Failed in call to HttpQueryInfo for HTTP query status code, Error:%d\n"), ::GetLastError());
+		AddDebugLogLine(DLP_LOW, false, _T("Failed in call to HttpQueryInfo for HTTP query status code, Error:%d"), ::GetLastError());
 		HandleThreadError(GetResString(_T("HTTPDOWNLOAD_INVALID_SERVER_RESPONSE")));
 		return;
 	}
@@ -528,7 +528,7 @@ resend:
 			FLAGS_ERROR_UI_FLAGS_GENERATE_DATA | FLAGS_ERROR_UI_FLAGS_CHANGE_OPTIONS, NULL) == ERROR_INTERNET_FORCE_RETRY)
 			goto resend;
 	} else if (nStatusCode != HTTP_STATUS_OK) {
-		TRACE(_T("Failed to retrieve a HTTP 200 status, Status Code:%d\n"), nStatusCode);
+		AddDebugLogLine(DLP_LOW, false, _T("Failed to retrieve a HTTP 200 status, Status Code:%d"), nStatusCode);
 		HandleThreadErrorWithLastError(GetResString(_T("HTTPDOWNLOAD_INVALID_HTTP_RESPONSE")), nStatusCode);
 		return;
 	}
@@ -573,7 +573,7 @@ resend:
 	PREPARE_DECODER;
 	do {
 		if (!::InternetReadFile(m_hHttpFile, szReadBuf, dwBytesToRead, &dwBytesRead)) {
-			TRACE(_T("Failed in call to InternetReadFile, Error:%d\n"), ::GetLastError());
+			AddDebugLogLine(DLP_LOW, false, _T("Failed in call to InternetReadFile, Error:%d"), ::GetLastError());
 			HandleThreadErrorWithLastError(GetResString(_T("HTTPDOWNLOAD_ERROR_READFILE")));
 			ENCODING_CLEAN_UP;
 			return;
@@ -583,7 +583,7 @@ resend:
 			try {
 				DECODE_DATA(m_FileToWrite, szReadBuf, dwBytesRead);
 			} catch (CFileException *ex) {
-				TRACE(_T("An exception occurred while writing to the download file\n"));
+				AddDebugLogLine(DLP_LOW, false, _T("An exception occurred while writing to the download file"));
 				HandleThreadErrorWithLastError(GetResString(_T("HTTPDOWNLOAD_ERROR_READFILE")), ex->m_lOsError);
 				ex->Delete();
 				//clean up any encoding data before we return

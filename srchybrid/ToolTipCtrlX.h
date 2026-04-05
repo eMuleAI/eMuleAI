@@ -31,6 +31,8 @@ public:
 	void SetCol1DrawTextFlags(DWORD dwFlags);
 	void SetCol2DrawTextFlags(DWORD dwFlags);
 	void SetFileIconToolTip(bool bEnable)		{ m_bShowFileIcon = bEnable; }
+	void SetDeferVisibleUpdates(bool bEnable)	{ m_bDeferVisibleUpdates = bEnable; }
+	void SetMinimumVisibleTime(DWORD dwMilliseconds) { m_dwMinimumVisibleTime = dwMilliseconds; }
 	BOOL SubclassWindow(HWND hWnd);
 	void CleanupWindow();
 
@@ -41,21 +43,43 @@ protected:
 	CRect m_rcScreen;
 	DWORD m_dwCol1DrawTextFlags;
 	DWORD m_dwCol2DrawTextFlags;
+	DWORD m_dwMinimumVisibleTime;
+	DWORD m_dwVisibleSinceTick;
 	int m_iScreenWidth4;
 	bool m_bCol1Bold;
+	bool m_bDeferVisibleUpdates;
+	bool m_bHasDeferredTextUpdate;
+	bool m_bDeferredTextUsesCallback;
 	bool m_bShowFileIcon;
 	bool m_bOwnsWindow;
+	bool m_bProcessingDeferredMessage;
+	UINT m_uDeferredHideMessage;
+	TOOLINFO m_tiDeferredTextUpdate;
+	TOOLINFO m_tiDeferredHide;
+	CString m_strDeferredTextUpdate;
 
 	void ApplyTooltipStyles();
 	void ResetSystemMetrics();
 	void CustomPaint(LPNMTTCUSTOMDRAW);
+	bool IsTooltipVisible() const;
+	bool TryGetCurrentToolInfo(TOOLINFO& ti) const;
+	static bool IsSameTool(const TOOLINFO& left, const TOOLINFO& right);
+	void ResetDeferredTextUpdate();
+	void StoreDeferredTextUpdate(const TOOLINFO& ti);
+	void ApplyDeferredTextUpdate();
+	void ResetDeferredHide();
+	void ScheduleDeferredHide(UINT uMessage, const TOOLINFO* pToolInfo, DWORD dwDelay);
+	DWORD GetRemainingMinimumVisibleTime() const;
+	virtual LRESULT WindowProc(UINT message, WPARAM wParam, LPARAM lParam);
 
 	DECLARE_MESSAGE_MAP()
 	afx_msg void OnNmCustomDraw(LPNMHDR pNMHDR, LRESULT *pResult);
 	afx_msg void OnNmThemeChanged(LPNMHDR, LRESULT *pResult);
 	afx_msg BOOL OnTTShow(LPNMHDR pNMHDR, LRESULT *pResult);
+	afx_msg BOOL OnTTPop(LPNMHDR pNMHDR, LRESULT *pResult);
 	afx_msg void OnSysColorChange();
 	afx_msg void OnSettingChange(UINT uFlags, LPCTSTR lpszSection);
+	afx_msg void OnTimer(UINT_PTR nIDEvent);
 };
 
 void EnsureMfcThreadToolTipCtrlX(CWnd *pOwner);

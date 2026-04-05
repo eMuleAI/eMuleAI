@@ -23,6 +23,7 @@
 #include "Packets.h"
 #include "StringConversion.h"
 #include "Preferences.h"
+#include "Log.h"
 #include "Kademlia/Kademlia/Entry.h"
 #include "emule.h"
 #include "emuledlg.h"
@@ -55,14 +56,14 @@ namespace
 		__try {
 			const size_t cchDirectory = _tcsnlen(pszDirectory, kMaxStoredSearchDirectoryChars + 1);
 			if (cchDirectory == 0 || cchDirectory > kMaxStoredSearchDirectoryChars) {
-				TRACE(_T("[SearchFile] Skipping invalid stored search directory, length=%Iu\n"), cchDirectory);
+				AddDebugLogLine(DLP_LOW, false, _T("[SearchFile] Skipping invalid stored search directory, length=%Iu"), cchDirectory);
 				return false;
 			}
 
 			strDirectory.SetString(pszDirectory, static_cast<int>(cchDirectory));
 			return !strDirectory.IsEmpty();
 		} __except (EXCEPTION_EXECUTE_HANDLER) {
-			TRACE(_T("[SearchFile] Skipping unreadable stored search directory pointer.\n"));
+			AddDebugLogLine(DLP_LOW, false, _T("[SearchFile] Skipping unreadable stored search directory pointer."));
 		}
 
 		return false;

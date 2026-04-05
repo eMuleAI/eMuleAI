@@ -53,6 +53,9 @@ public:
 	virtual void MaintainSortOrderAfterUpdate() override;
 protected:
 	CToolTipCtrlX m_tooltip;
+	virtual bool UsePersistentInfoTips() const override { return true; }
+	virtual bool GetPersistentInfoTipText(const SPersistentInfoTipContext& context, CString& strText) override;
+	virtual int GetDefaultPersistentInfoTipExtraLeftPadding(const SPersistentInfoTipContext& context) const override;
 
 	void SetAllIcons();
 	const CString GetItemDisplayText(CUpDownClient *client, const int iSubItem) const;

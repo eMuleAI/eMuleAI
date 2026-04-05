@@ -18,6 +18,7 @@
 #include "stdafx.h"
 #define _USE_MATH_DEFINES
 #include <math.h>
+#include <vector>
 #include "barshader.h"
 #include "Preferences.h"
 
@@ -38,6 +39,7 @@ CBarShader::CBarShader(uint32 height, uint32 width)
 	, m_bIsPreview()
 	, m_used3dlevel()
 	, m_Modifiers()
+	, m_eSubPixelMixMode(SPM_WEIGHTED_AVERAGE)
 {
 	m_Spans.SetAt(0, 0);	// SLUGFILLER: speedBarShader
 }
@@ -159,6 +161,57 @@ void CBarShader::Fill(COLORREF color)
 	// SLUGFILLER: speedBarShader
 }
 
+COLORREF CBarShader::GetDominantColorForPixel(POSITION pos, COLORREF color, uint64 start, uint64 end) const
+{
+	struct ColorCoverage
+	{
+		COLORREF color;
+		uint64 coverage;
+	};
+
+	std::vector<ColorCoverage> aCoverage;
+	aCoverage.reserve(4);
+
+	COLORREF dominantColor = color;
+	uint64 uDominantCoverage = 0;
+	uint64 iLast = start;
+
+	do {
+		const uint64 uKey = m_Spans.GetKeyAt(pos);
+		const uint64 uCoverage = min(uKey, end) - iLast;
+		if (uCoverage > 0) {
+			bool bFound = false;
+			for (size_t i = 0; i < aCoverage.size(); ++i) {
+				if (aCoverage[i].color == color) {
+					aCoverage[i].coverage += uCoverage;
+					if (aCoverage[i].coverage > uDominantCoverage) {
+						uDominantCoverage = aCoverage[i].coverage;
+						dominantColor = color;
+					}
+					bFound = true;
+					break;
+				}
+			}
+
+			if (!bFound) {
+				aCoverage.push_back({ color, uCoverage });
+				if (uCoverage > uDominantCoverage) {
+					uDominantCoverage = uCoverage;
+					dominantColor = color;
+				}
+			}
+		}
+
+		if (uKey > end)
+			break;
+
+		iLast = uKey;
+		color = m_Spans.GetNextValue(pos);
+	} while (pos != NULL);
+
+	return dominantColor;
+}
+
 void CBarShader::Draw(CDC *dc, int iLeft, int iTop, bool bFlat)
 {
 	//FillSolidRect() is simpler and faster, though FillRect() did not alter background colour
@@ -202,6 +255,8 @@ void CBarShader::Draw(CDC *dc, int iLeft, int iTop, bool bFlat)
 			++rectSpan.right;
 			if (g_bLowColorDesktop)
 				FillBarRect(dc, &rectSpan, color, bFlat);
+			else if (m_eSubPixelMixMode == SPM_DOMINANT_COLOR)
+				FillBarRect(dc, &rectSpan, GetDominantColorForPixel(pos, color, start, iEnd), bFlat);
 			else
 				FillBarRect(dc, &rectSpan, fRed, fGreen, fBlue, bFlat);
 			start += uBytesInOnePixel;

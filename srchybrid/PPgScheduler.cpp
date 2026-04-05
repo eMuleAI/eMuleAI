@@ -68,6 +68,7 @@ BOOL CPPgScheduler::OnInitDialog()
 
 	m_list.SetExtendedStyle(LVS_EX_FULLROWSELECT | LVS_EX_INFOTIP);
 	ASSERT((m_list.GetStyle() & LVS_SINGLESEL) == 0);
+	// Alignment rule: left for text, dates, and status labels; right for sizes, rates, counts, durations, and percentages.
 	m_list.InsertColumn(0, GetResString(_T("TITLE")), LVCFMT_LEFT, 150);
 	m_list.InsertColumn(1, GetResString(_T("S_DAYS")), LVCFMT_LEFT, 80);
 	m_list.InsertColumn(2, GetResString(_T("STARTTIME")), LVCFMT_LEFT, 80);
@@ -76,6 +77,7 @@ BOOL CPPgScheduler::OnInitDialog()
 
 	m_actions.SetExtendedStyle(LVS_EX_FULLROWSELECT | LVS_EX_INFOTIP);
 	ASSERT((m_actions.GetStyle() & LVS_SINGLESEL) == 0);
+	// Alignment rule: left for text, dates, and status labels; right for sizes, rates, counts, durations, and percentages.
 	m_actions.InsertColumn(0, GetResString(_T("ACTION")), LVCFMT_LEFT, 150);
 	m_actions.InsertColumn(1, GetResString(_T("VALUE")), LVCFMT_LEFT, 80);
 
@@ -366,9 +368,9 @@ void CPPgScheduler::OnNmRClickActionlist(LPNMHDR, LRESULT *pResult)
 	if (isCatAction) {
 		if (thePrefs.GetCatCount() > 1)
 			m_CatActionSel.AppendMenu(MF_STRING, MP_SCHACTIONS + 20, GetResString(_T("ALLUNASSIGNED")));
-		m_CatActionSel.AppendMenu(MF_STRING, MP_SCHACTIONS + 21, GetResString(_T("ALL")));
+		m_CatActionSel.AppendMenu(MF_STRING, MP_SCHACTIONS + 21, thePrefs.GetCategoryDisplayTitle(0));
 		for (INT_PTR i = 1; i < thePrefs.GetCatCount(); ++i)
-			m_CatActionSel.AppendMenu(MF_STRING, MP_SCHACTIONS + 22 + i, thePrefs.GetCategory(i)->strTitle);
+			m_CatActionSel.AppendMenu(MF_STRING, MP_SCHACTIONS + 22 + i, thePrefs.GetCategoryDisplayTitle(i));
 		m_ActionMenu.AppendMenu(MF_POPUP, (UINT_PTR)m_CatActionSel.m_hMenu, GetResString(_T("SELECTCAT")));
 	} else
 		m_ActionMenu.AppendMenu(nFlag, MP_CAT_EDIT, GetResString(_T("EDIT")));

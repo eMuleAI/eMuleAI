@@ -72,6 +72,7 @@ void CDownloadClientsCtrl::Init()
 	SetPrefsKey(_T("DownloadClientsCtrl"));
 	SetExtendedStyle(LVS_EX_FULLROWSELECT | LVS_EX_INFOTIP);
 
+	// Alignment rule: left for text, dates, and status labels; right for sizes, rates, counts, durations, and percentages.
 	InsertColumn(0,	EMPTY,	LVCFMT_LEFT,	DFLT_CLIENTNAME_COL_WIDTH);	//QL_USERNAME
 	InsertColumn(1,	EMPTY,	LVCFMT_LEFT,	DFLT_CLIENTSOFT_COL_WIDTH);	//CD_CSOFT
 	InsertColumn(2,	EMPTY,	LVCFMT_LEFT,	DFLT_FILENAME_COL_WIDTH);	//FILE
@@ -84,14 +85,14 @@ void CDownloadClientsCtrl::Init()
 	InsertColumn(9, EMPTY, LVCFMT_LEFT,	100); // IP:Port Column
 	InsertColumn(10, EMPTY, LVCFMT_LEFT,	50);
 	InsertColumn(11, EMPTY, LVCFMT_LEFT,	100);
-	InsertColumn(12, EMPTY, LVCFMT_LEFT, 80);
-	InsertColumn(13, EMPTY, LVCFMT_LEFT,	100);
+	InsertColumn(12, EMPTY, LVCFMT_RIGHT, 80);
+	InsertColumn(13, EMPTY, LVCFMT_RIGHT,	100);
 	InsertColumn(14, EMPTY, LVCFMT_LEFT,	100);
 	InsertColumn(15, EMPTY, LVCFMT_LEFT,	100);
 	InsertColumn(16, EMPTY, LVCFMT_LEFT,	100);
 	InsertColumn(17, EMPTY, LVCFMT_LEFT,	100);
-	InsertColumn(18, EMPTY, LVCFMT_LEFT,	100);
-	InsertColumn(19, EMPTY, LVCFMT_LEFT,	100);
+	InsertColumn(18, EMPTY, LVCFMT_RIGHT,	100);
+	InsertColumn(19, EMPTY, LVCFMT_RIGHT,	100);
 	InsertColumn(20, EMPTY, LVCFMT_LEFT, 100);
 
 	SetAllIcons();

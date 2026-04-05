@@ -24,6 +24,7 @@
 #include "SharedFileList.h"
 #include "UploadQueue.h"
 #include "emuledlg.h"
+#include "SharedFilesWnd.h"
 #include "eMuleAI/DarkMode.h"
 
 #ifdef _DEBUG
@@ -33,6 +34,23 @@ static char THIS_FILE[] = __FILE__;
 #endif
 
 #define REFRESH_TIMER_ID	9042
+
+namespace
+{
+	void AdjustSharedFilesDetailsHost(CWnd *pPage)
+	{
+		if (pPage == NULL)
+			return;
+
+		CWnd *pSheet = pPage->GetParent();
+		if (pSheet == NULL)
+			return;
+
+		CSharedFilesWnd *pSharedFilesWnd = DYNAMIC_DOWNCAST(CSharedFilesWnd, pSheet->GetParent());
+		if (pSharedFilesWnd != NULL)
+			pSharedFilesWnd->RequestDetailsPanelHeightAdjustment();
+	}
+}
 
 IMPLEMENT_DYNAMIC(CFileDetailDlgStatistics, CResizablePage)
 
@@ -119,6 +137,7 @@ BOOL CFileDetailDlgStatistics::OnSetActive()
 {
 	if (!CResizablePage::OnSetActive())
 		return FALSE;
+	AdjustSharedFilesDetailsHost(this);
 	if (m_hRefreshTimer == 0) {
 		m_hRefreshTimer = SetTimer(REFRESH_TIMER_ID, SEC2MS(3), NULL);
 		m_bDataChanged = true;

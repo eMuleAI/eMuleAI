@@ -58,6 +58,7 @@ static _CrtMemState g_msAfterInit;
 #include "KnownFileList.h"
 #include "Server.h"
 #include "ED2KLink.h"
+#include "PartFile.h"
 #include "Preferences.h"
 #include "Preview.h"
 #include "secrunasuser.h"
@@ -221,9 +222,9 @@ static void ApplyCrtBreakAllocsFromEnv()
 //
 // This security feature must be enabled at compile time, due to using the
 // linker command line option "/SafeSEH". Depending on the used libraries and
-// object files which are used to link eMule.exe, the linker may or may not
+// object files which are used to link eMuleAI.exe, the linker may or may not
 // throw some errors about 'safeseh'. Those errors have to get resolved until
-// the linker is capable of linking eMule.exe *with* "/SafeSEH".
+// the linker is capable of linking eMuleAI.exe *with* "/SafeSEH".
 //
 // At runtime, we just can check if the linker created an according SafeSEH
 // exception table in the '__safe_se_handler_table' object. If SafeSEH was not
@@ -238,7 +239,7 @@ void InitSafeSEH()
 	// Need to workaround the optimizer of the C-compiler...
 	volatile PVOID safe_se_handler_table = __safe_se_handler_table;
 	if (safe_se_handler_table == NULL)
-		CDarkMode::MessageBox(_T("eMule.exe was not linked with /SafeSEH!"), MB_ICONSTOP);
+		CDarkMode::MessageBox(_T("eMuleAI.exe was not linked with /SafeSEH!"), MB_ICONSTOP);
 }
 #endif //_M_IX86
 
@@ -372,6 +373,53 @@ static const UINT UWM_ARE_YOU_EMULE = RegisterWindowMessage(EMULE_GUID);
 
 BOOL WINAPI ConsoleCtrlHandler(DWORD dwCtrlType) noexcept;
 
+namespace
+{
+	enum EPartMetDiskSpaceState : BYTE
+	{
+		PARTMET_DISKSPACE_UNKNOWN = 0,
+		PARTMET_DISKSPACE_ALLOWED = 1,
+		PARTMET_DISKSPACE_BLOCKED = 2
+	};
+
+	BYTE QueryPartMetDiskSpaceState(const CString& strRootPath)
+	{
+		ULARGE_INTEGER nFreeDiskSpace;
+		if (!::GetDiskFreeSpaceEx(strRootPath, &nFreeDiskSpace, NULL, NULL)) {
+			DebugLogWarning(_T("Part.met disk-space guard could not query \"%s\" (%s), keeping metadata writes enabled."), (LPCTSTR)EscPercent(strRootPath), (LPCTSTR)EscPercent(GetErrorMessage(::GetLastError())));
+			return PARTMET_DISKSPACE_ALLOWED;
+		}
+
+		if (nFreeDiskSpace.QuadPart < MAXMETSIZE) {
+			AddDebugLogLine(DLP_LOW, false, _T("Part.met disk-space guard blocked \"%s\" (%I64u bytes free, need %I64u)."), (LPCTSTR)EscPercent(strRootPath), nFreeDiskSpace.QuadPart, (ULONGLONG)MAXMETSIZE);
+			return PARTMET_DISKSPACE_BLOCKED;
+		}
+
+		return PARTMET_DISKSPACE_ALLOWED;
+	}
+
+	BYTE QueryShutdownPartFlushDiskSpaceState(const CString& strRootPath)
+	{
+		if (!thePrefs.IsCheckDiskspaceEnabled() || thePrefs.GetMinFreeDiskSpace() == 0)
+			return PARTMET_DISKSPACE_ALLOWED;
+
+		ULARGE_INTEGER nFreeDiskSpace;
+		if (!::GetDiskFreeSpaceEx(strRootPath, &nFreeDiskSpace, NULL, NULL)) {
+			DebugLogWarning(_T("Shutdown part flush guard could not query \"%s\" (%s), keeping flush enabled."),
+				(LPCTSTR)EscPercent(strRootPath), (LPCTSTR)EscPercent(GetErrorMessage(::GetLastError())));
+			return PARTMET_DISKSPACE_ALLOWED;
+		}
+
+		if (nFreeDiskSpace.QuadPart < thePrefs.GetMinFreeDiskSpace()) {
+			AddDebugLogLine(DLP_LOW, false, _T("Shutdown part flush guard blocked \"%s\" (%I64u bytes free, need %I64u)."),
+				(LPCTSTR)EscPercent(strRootPath), nFreeDiskSpace.QuadPart, thePrefs.GetMinFreeDiskSpace());
+			return PARTMET_DISKSPACE_BLOCKED;
+		}
+
+		return PARTMET_DISKSPACE_ALLOWED;
+	}
+}
+
 ///////////////////////////////////////////////////////////////////////////////
 // CemuleApp
 
@@ -398,7 +446,6 @@ CemuleApp::CemuleApp(LPCTSTR lpszAppName)
 	, m_bFirstIPv6(true)
 	, m_dwLastValidIPv4()
 	, m_tLastDiskSpaceCheckTime()
-	, MediaInfoLibHintGiven ()
 	, tLastBackupTime()
 	, m_nConnectionState(CONSTATE_ONLINE)
 
@@ -473,6 +520,119 @@ bool CemuleApp::IsRunning() const
 bool CemuleApp::IsClosing() const
 {
 	return m_app_state == APP_STATE_SHUTTINGDOWN || m_app_state == APP_STATE_DONE;
+}
+
+void CemuleApp::RefreshShutdownPartFlushDiskSpaceCache()
+{
+	{
+		CSingleLock sShutdownPartFlushDiskSpaceLock(&m_shutdownPartFlushDiskSpaceLock, TRUE);
+		m_mapShutdownPartFlushDiskSpaceState.RemoveAll();
+	}
+
+	if (downloadqueue == NULL || !thePrefs.IsCheckDiskspaceEnabled() || thePrefs.GetMinFreeDiskSpace() == 0)
+		return;
+
+	CMapStringToPtr mapSeenRoots;
+	for (POSITION pos = downloadqueue->filelist.GetHeadPosition(); pos != NULL;) {
+		CPartFile* pPartFile = downloadqueue->filelist.GetNext(pos);
+		if (pPartFile == NULL)
+			continue;
+
+		CString strRootPath;
+		if (!GetVolumeRootPath(pPartFile->GetTmpPath(), strRootPath))
+			continue;
+
+		strRootPath.MakeLower();
+		void* pDummy = NULL;
+		if (mapSeenRoots.Lookup(strRootPath, pDummy))
+			continue;
+
+		mapSeenRoots.SetAt(strRootPath, this);
+		(void)CanShutdownFlushPartFile(strRootPath, true);
+	}
+}
+
+bool CemuleApp::CanShutdownFlushPartFile(LPCTSTR pszPath, bool bForceRefresh)
+{
+	if (!thePrefs.IsCheckDiskspaceEnabled() || thePrefs.GetMinFreeDiskSpace() == 0)
+		return true;
+
+	CString strRootPath;
+	if (!GetVolumeRootPath(pszPath, strRootPath))
+		return true;
+
+	strRootPath.MakeLower();
+
+	BYTE byState = PARTMET_DISKSPACE_UNKNOWN;
+	{
+		CSingleLock sShutdownPartFlushDiskSpaceLock(&m_shutdownPartFlushDiskSpaceLock, TRUE);
+		if (!bForceRefresh && m_mapShutdownPartFlushDiskSpaceState.Lookup(strRootPath, byState))
+			return byState != PARTMET_DISKSPACE_BLOCKED;
+	}
+
+	byState = QueryShutdownPartFlushDiskSpaceState(strRootPath);
+
+	{
+		CSingleLock sShutdownPartFlushDiskSpaceLock(&m_shutdownPartFlushDiskSpaceLock, TRUE);
+		m_mapShutdownPartFlushDiskSpaceState.SetAt(strRootPath, byState);
+	}
+
+	return byState != PARTMET_DISKSPACE_BLOCKED;
+}
+
+void CemuleApp::RefreshPartMetDiskSpaceCache()
+{
+	{
+		CSingleLock sPartMetDiskSpaceLock(&m_partMetDiskSpaceLock, TRUE);
+		m_mapPartMetDiskSpaceState.RemoveAll();
+	}
+
+	if (downloadqueue == NULL)
+		return;
+
+	CMapStringToPtr mapSeenRoots;
+	for (POSITION pos = downloadqueue->filelist.GetHeadPosition(); pos != NULL;) {
+		CPartFile* pPartFile = downloadqueue->filelist.GetNext(pos);
+		if (pPartFile == NULL)
+			continue;
+
+		CString strRootPath;
+		if (!GetVolumeRootPath(pPartFile->GetTmpPath(), strRootPath))
+			continue;
+
+		strRootPath.MakeLower();
+		void* pDummy = NULL;
+		if (mapSeenRoots.Lookup(strRootPath, pDummy))
+			continue;
+
+		mapSeenRoots.SetAt(strRootPath, this);
+		(void)CanWritePartMetFiles(strRootPath, true);
+	}
+}
+
+bool CemuleApp::CanWritePartMetFiles(LPCTSTR pszPath, bool bForceRefresh)
+{
+	CString strRootPath;
+	if (!GetVolumeRootPath(pszPath, strRootPath))
+		return true;
+
+	strRootPath.MakeLower();
+
+	BYTE byState = PARTMET_DISKSPACE_UNKNOWN;
+	{
+		CSingleLock sPartMetDiskSpaceLock(&m_partMetDiskSpaceLock, TRUE);
+		if (!bForceRefresh && m_mapPartMetDiskSpaceState.Lookup(strRootPath, byState))
+			return byState != PARTMET_DISKSPACE_BLOCKED;
+	}
+
+	byState = QueryPartMetDiskSpaceState(strRootPath);
+
+	{
+		CSingleLock sPartMetDiskSpaceLock(&m_partMetDiskSpaceLock, TRUE);
+		m_mapPartMetDiskSpaceState.SetAt(strRootPath, byState);
+	}
+
+	return byState != PARTMET_DISKSPACE_BLOCKED;
 }
 
 CString CemuleApp::GetAppVersion() const
@@ -744,7 +904,7 @@ BOOL CemuleApp::InitInstance()
 	emuledlg = new CemuleDlg;
 	m_pMainWnd = emuledlg;
 
-	StartDirWatchTP();
+	QueueStartupDirWatchInit();
 
 #ifdef DEBUGLEAKHELPER
 	_CrtMemCheckpoint(&g_msAfterInit); // Snapshot after init
@@ -1969,7 +2129,7 @@ HICON CemuleApp::LoadIcon(LPCTSTR lpszResourceName, int cx, int cy, UINT uFlags)
 				}
 			} else {
 				// WINBUG???: 'ExtractIcon' does not work well on ICO-files when using the color
-				// scheme 'Windows-Standard (extragro�)' -> always try to use 'LoadImage'!
+				// scheme 'Windows-Standard (extragroß)' -> always try to use 'LoadImage'!
 				//
 				// If the ICO file contains a 16x16 icon, 'LoadImage' will though return a 32x32 icon,
 				// if LR_DEFAULTSIZE is specified! -> always specify the requested size!
@@ -2831,7 +2991,8 @@ struct TPIODirWatch {
 	CString rootPath;
 	volatile LONG nCallbacks; // Number of in-flight I/O callbacks (atomic)
 	volatile LONG nArmed;     // 1 if an overlapped ReadDirectoryChangesW is armed
-	TPIODirWatch() : hDir(INVALID_HANDLE_VALUE), tpIo(NULL), hEvent(NULL), pBuf(NULL), cbBuf(0), nCallbacks(0), nArmed(0) { ZeroMemory(&ov, sizeof(ov)); }
+	volatile LONG nRetiring;  // 1 once runtime rebuild has canceled this watch and it must not rearm
+	TPIODirWatch() : hDir(INVALID_HANDLE_VALUE), tpIo(NULL), hEvent(NULL), pBuf(NULL), cbBuf(0), nCallbacks(0), nArmed(0), nRetiring(0) { ZeroMemory(&ov, sizeof(ov)); }
 };
 
 // Globals for watcher state (file scope, not exposed)
@@ -2840,6 +3001,8 @@ static CRITICAL_SECTION g_tpCleanupCS;
 static std::vector<TPIODirWatch*>* g_tpWatches = NULL;
 static std::vector<TPIODirWatch*>* g_tpCleanup = NULL; // Deferred cleanup queue
 static std::vector<CString>* g_tpNewSharedDirs = NULL;
+static CRITICAL_SECTION g_tpChangedFilesCS;
+static std::vector<CString>* g_tpChangedFiles = NULL;
 static volatile LONG g_tpTimerArmed = 0;
 static volatile LONG g_tpStopping = 0;
 static volatile LONG g_tpForceTreeReload = 0; // Set to 1 by I/O cb when directory-level change requires tree rebuild
@@ -2848,6 +3011,7 @@ static volatile LONG g_tpRefreshPending = 0;
 static volatile LONG g_tpCleanupPending = 0;
 static bool g_tpNewSharedDirsCSInit = false;
 static bool g_tpCleanupCSInit = false;
+static bool g_tpChangedFilesCSInit = false;
 static DWORD g_dwRefreshDueAt = 0;
 static DWORD g_dwCleanupDueAt = 0;
 
@@ -2871,14 +3035,39 @@ static std::vector<TPIODirWatch*>& BB_GetTpCleanup()
 }
 
 // Root set change detector (lightweight): hash + periodic TP timer.
-static volatile LONG g_tpRebuildingRoots = 0;
-static volatile DWORD g_tpRootsHash = 0;
-static volatile LONG g_tpSuppressRootPost = 0; // Suppress next root-change post after UI-driven rebuild
+static volatile LONG g_tpRebuildingRoots = 0; // 1 while a roots reload or missing-root rearm is already pending/running
+static volatile DWORD g_tpRootsHash = 0; // Hash of the configured roots already acknowledged by the UI reload flow
+static volatile DWORD g_tpActiveRootsHash = 0; // Hash of the roots currently represented by active watchers
+static volatile DWORD g_tpMissingRootRetryAt = 0; // Next retry tick for incomplete watcher sets
+static volatile LONG g_tpStartupArmPending = 0; // Defer initial watcher arming until the UI is already pumping messages.
+static const DWORD kDirWatchMissingRootRetryDelayMs = SEC2MS(60);
 
 // Forward declerations
 static VOID CALLBACK DirWatchRootsTimerCb(PVOID /*inst*/, PVOID /*ctx*/, PVOID /*timer*/);
 static VOID CALLBACK DirWatchTimerCb(PVOID /*instance*/, PVOID /*context*/, PVOID /*timer*/);
 static DWORD BB_ComputeWatchRootsHash();
+
+static void BB_AddWatchRoot(std::vector<CString>& roots, const CString& rawPath)
+{
+	CString path(rawPath);
+	if (path.IsEmpty())
+		return;
+
+	if (path.Right(1) != _T("\\"))
+		path += _T("\\");
+
+	for (std::vector<CString>::iterator it = roots.begin(); it != roots.end();) {
+		if (EqualPaths(*it, path) || IsSubDirectoryOf(path, *it))
+			return;
+
+		if (IsSubDirectoryOf(*it, path))
+			it = roots.erase(it);
+		else
+			++it;
+	}
+
+	roots.push_back(path);
+}
 
 static __forceinline void BB_HashFeedCi(DWORD& h, const CString& s)
 {
@@ -2896,33 +3085,11 @@ static __forceinline void BB_HashFeedCi(DWORD& h, const CString& s)
 	h = v;
 }
 
-static DWORD BB_ComputeWatchRootsHash()
+static DWORD BB_ComputeRootsHash(const std::vector<CString>& roots)
 {
-	std::vector<CString> roots;
-
-	// Incoming
-	CString cur = thePrefs.GetMuleDirectory(EMULE_INCOMINGDIR);
-	if (!cur.IsEmpty())
-		roots.push_back(cur);
-
-	// Categories
-	for (INT_PTR i = 0; i < thePrefs.GetCatCount(); ++i) {
-		const CString& p = thePrefs.GetCatPath(i);
-		if (!p.IsEmpty()) roots.push_back(p);
-	}
-
-	// Shared directories
-	POSITION pos = thePrefs.shareddir_list.GetHeadPosition();
-	while (pos) {
-		CString p = thePrefs.shareddir_list.GetNext(pos);
-		if (!p.IsEmpty()) roots.push_back(p);
-	}
-
-	// Hash
 	DWORD h = 0;
 	for (size_t i = 0; i < roots.size(); ++i) {
 		CString norm = roots[i];
-		// Normalize trailing backslash
 		if (!norm.IsEmpty() && norm[norm.GetLength() - 1] == _T('\\'))
 			norm = norm.Left(norm.GetLength() - 1);
 
@@ -2932,30 +3099,174 @@ static DWORD BB_ComputeWatchRootsHash()
 	return h;
 }
 
+static void BB_CollectConfiguredWatchRoots(std::vector<CString>& roots)
+{
+	roots.clear();
+	roots.reserve(static_cast<size_t>(thePrefs.GetCatCount() + 8));
+	CStringList sharedDirs;
+	thePrefs.CopySharedDirectoryList(sharedDirs);
+
+	// Incoming
+	BB_AddWatchRoot(roots, thePrefs.GetMuleDirectory(EMULE_INCOMINGDIR));
+
+	// Categories
+	for (INT_PTR i = 0; i < thePrefs.GetCatCount(); ++i)
+		BB_AddWatchRoot(roots, thePrefs.GetCatPath(i));
+
+	// Shared directories
+	POSITION pos = sharedDirs.GetHeadPosition();
+	while (pos)
+		BB_AddWatchRoot(roots, sharedDirs.GetNext(pos));
+}
+
+static DWORD BB_ComputeWatchRootsHash()
+{
+	std::vector<CString> roots;
+	BB_CollectConfiguredWatchRoots(roots);
+	return BB_ComputeRootsHash(roots);
+}
+
+static DWORD BB_ComputeActiveWatchRootsHash()
+{
+	std::vector<CString> roots;
+	if (g_tpWatches != NULL) {
+		roots.reserve(g_tpWatches->size());
+		for (size_t i = 0; i < g_tpWatches->size(); ++i) {
+			TPIODirWatch* pW = (*g_tpWatches)[i];
+			if (pW != NULL && InterlockedCompareExchange(&pW->nRetiring, 0, 0) == 0)
+				BB_AddWatchRoot(roots, pW->rootPath);
+		}
+	}
+
+	return BB_ComputeRootsHash(roots);
+}
+
+static void BB_EnsureDirWatchCleanupInitialized()
+{
+	if (!g_tpCleanupCSInit) {
+		InitializeCriticalSection(&g_tpCleanupCS);
+		g_tpCleanupCSInit = true;
+	}
+}
+
+static void BB_QueueDirWatchForDeferredCleanup(TPIODirWatch* pW)
+{
+	if (pW == NULL)
+		return;
+
+	BB_EnsureDirWatchCleanupInitialized();
+	EnterCriticalSection(&g_tpCleanupCS);
+	BB_GetTpCleanup().push_back(pW);
+	LeaveCriticalSection(&g_tpCleanupCS);
+	InterlockedExchange(&g_tpCleanupPending, 1);
+	g_dwCleanupDueAt = ::GetTickCount() + 50;
+}
+
+static bool BB_TryDrainDirWatchShutdown(TPIODirWatch* pW, DWORD dwTimeoutMs)
+{
+	if (pW == NULL)
+		return true;
+
+	const DWORD dwStart = ::GetTickCount();
+	const DWORD dwPollMs = 25;
+	bool bSawCompletion = (pW->hEvent == NULL);
+
+	for (;;) {
+		if (pW->hEvent != NULL) {
+			const DWORD dwWait = ::WaitForSingleObject(pW->hEvent, 0);
+			if (dwWait == WAIT_OBJECT_0)
+				bSawCompletion = true;
+			else if (dwWait == WAIT_FAILED)
+				return false;
+		}
+
+		const LONG nArmed = InterlockedCompareExchange(&pW->nArmed, 0, 0);
+		const LONG nCallbacks = InterlockedCompareExchange(&pW->nCallbacks, 0, 0);
+		if (nArmed == 0 && nCallbacks == 0) {
+			if (!bSawCompletion && pW->hEvent != NULL)
+				return false;
+
+			return (pW->tpIo == NULL) || (BB_WaitForThreadpoolIoCallbacks(pW->tpIo, FALSE) != FALSE);
+		}
+
+		const DWORD dwElapsed = ::GetTickCount() - dwStart;
+		if (dwElapsed >= dwTimeoutMs)
+			return false;
+
+		const DWORD dwSleep = min(dwPollMs, dwTimeoutMs - dwElapsed);
+		if (pW->hEvent != NULL)
+			::WaitForSingleObject(pW->hEvent, dwSleep);
+		else
+			::Sleep(dwSleep);
+	}
+}
+
+static void BB_DestroyDirWatchSync(TPIODirWatch* pW)
+{
+	if (pW == NULL)
+		return;
+
+	constexpr DWORD kDirWatchShutdownDrainTimeoutMs = 1000;
+	InterlockedExchange(&pW->nRetiring, 1);
+
+	if (pW->hEvent == NULL)
+		pW->hEvent = ::CreateEvent(NULL, TRUE, FALSE, NULL);
+
+	if (pW->hDir != INVALID_HANDLE_VALUE)
+		// Cancel the overlapped watcher I/O; the completion callback drains the started TP I/O.
+		BB_CancelIoEx(pW->hDir, &pW->ov);
+
+	if (!BB_TryDrainDirWatchShutdown(pW, kDirWatchShutdownDrainTimeoutMs)) {
+		TRACE(_T("Shared Files Watcher: deferred release skipped during shutdown because callbacks did not drain safely.\n"));
+		return; // Leak on shutdown rather than risking a hang or use-after-free.
+	}
+
+	if (pW->tpIo != NULL)
+		BB_CloseThreadpoolIoX(&pW->tpIo);
+
+	BB_SafeCloseHandle(&pW->hDir);
+	if (pW->hEvent != NULL) {
+		::CloseHandle(pW->hEvent);
+		pW->hEvent = NULL;
+	}
+
+	if (pW->pBuf != NULL) {
+		free(pW->pBuf);
+		pW->pBuf = NULL;
+	}
+
+	delete pW;
+}
+
 static VOID CALLBACK DirWatchRootsTimerCb(PVOID /*inst*/, PVOID /*ctx*/, PVOID /*timer*/)
 {
 	if (InterlockedCompareExchange(&g_tpStopping, 0, 0) != 0)
 		return; // App is stopping; ignore
 
 	const DWORD cur = BB_ComputeWatchRootsHash();
-	const DWORD prev = (DWORD)InterlockedCompareExchange((LONG*)&g_tpRootsHash, (LONG)g_tpRootsHash, (LONG)g_tpRootsHash);
+	const DWORD prev = (DWORD)InterlockedCompareExchange((LONG*)&g_tpRootsHash, 0, 0);
 	if (cur != prev) {
-		if (InterlockedExchange(&g_tpSuppressRootPost, 0) == 1) { // If we are suppressing the next root post, just update the hash and return.
-			InterlockedExchange((LONG*)&g_tpRootsHash, (LONG)cur);
-			return;
-		}
-				
-		if (InterlockedExchange(&g_tpRebuildingRoots, 1) == 0) { // If we are not already rebuilding roots, start the watcher and post a message to the shared files window.
-			theApp.StartDirWatchTP();
-			InterlockedExchange((LONG*)&g_tpRootsHash, (LONG)cur);
-
-			if (CemuleDlg* pDlg = theApp.emuledlg) {
-				if (pDlg->sharedfileswnd && ::IsWindow(pDlg->sharedfileswnd->m_hWnd))
-					::PostMessage(pDlg->sharedfileswnd->m_hWnd, UM_AUTO_RELOAD_SHARED_FILES, 1, 0);
+		if (CemuleDlg* pDlg = theApp.emuledlg) {
+			if (pDlg->sharedfileswnd && ::IsWindow(pDlg->sharedfileswnd->m_hWnd) && InterlockedCompareExchange(&g_tpRebuildingRoots, 1, 0) == 0) {
+				if (!::PostMessage(pDlg->sharedfileswnd->m_hWnd, UM_AUTO_RELOAD_SHARED_FILES, 1, 0))
+					InterlockedExchange(&g_tpRebuildingRoots, 0);
 			}
-
-			InterlockedExchange(&g_tpRebuildingRoots, 0);
 		}
+
+		return;
+	}
+
+	const DWORD active = (DWORD)InterlockedCompareExchange((LONG*)&g_tpActiveRootsHash, 0, 0);
+	if (cur == active)
+		return;
+
+	const DWORD retryAt = (DWORD)InterlockedCompareExchange((LONG*)&g_tpMissingRootRetryAt, 0, 0);
+	if (retryAt != 0 && (LONG)(::GetTickCount() - retryAt) < 0)
+		return;
+
+	if (InterlockedCompareExchange(&g_tpRebuildingRoots, 1, 0) == 0) {
+		TRACE(_T("Shared Files Watcher: retrying incomplete watcher root set.\n"));
+		theApp.StartDirWatchTP();
 	}
 }
 
@@ -3062,6 +3373,20 @@ static void BB_CollectDeletedFromBuffer(struct TPIODirWatch* pW, DWORD bytes)
 		InterlockedExchange(&g_tpForceTreeReload, 1);
 }
 
+static __forceinline void BB_PushChangedFilePath(const CString& full)
+{
+	if (full.IsEmpty())
+		return;
+
+	if (!g_tpChangedFilesCSInit || g_tpChangedFiles == NULL)
+		return;
+
+	EnterCriticalSection(&g_tpChangedFilesCS);
+	if (g_tpChangedFiles != NULL)
+		g_tpChangedFiles->push_back(full);
+	LeaveCriticalSection(&g_tpChangedFilesCS);
+}
+
 static VOID CALLBACK DirWatchTimerCb(PVOID /*instance*/, PVOID /*context*/, PVOID /*timer*/)
 {
 	// Coalesced GUI refresh after FS change; promote to forced tree reload if a dir-level change was seen.
@@ -3083,6 +3408,7 @@ static bool RearmWatch(TPIODirWatch* pW)
 	if (pW->hEvent == NULL) 
 		pW->hEvent = ::CreateEvent(NULL, TRUE, FALSE, NULL); // Manual-reset, non-signaled
 
+	::ResetEvent(pW->hEvent);
 	pW->ov.hEvent = pW->hEvent; // Bind overlapped to event for deterministic shutdown wait
 	DWORD dwBytes = 0;
 	BB_StartThreadpoolIo(pW->tpIo);
@@ -3101,10 +3427,42 @@ static bool RearmWatch(TPIODirWatch* pW)
 
 void CemuleApp::SyncDirWatchRootsHash()
 {
-	// UI thread: rebuild roots hash and post a message to the shared files window.
-	InterlockedExchange(&g_tpSuppressRootPost, 1);
+	// UI thread: acknowledge the current roots after a tree reload or watcher rebuild.
 	const DWORD cur = BB_ComputeWatchRootsHash();
 	InterlockedExchange((LONG*)&g_tpRootsHash, (LONG)cur);
+	InterlockedExchange(&g_tpRebuildingRoots, 0);
+}
+
+void CemuleApp::QueueStartupDirWatchInit()
+{
+	InterlockedExchange((LONG*)&g_tpRootsHash, (LONG)BB_ComputeWatchRootsHash());
+	InterlockedExchange((LONG*)&g_tpActiveRootsHash, 0);
+	InterlockedExchange((LONG*)&g_tpMissingRootRetryAt, 0);
+	InterlockedExchange(&g_tpRebuildingRoots, 0);
+	InterlockedExchange(&g_tpStartupArmPending, 1);
+}
+
+bool CemuleApp::DirWatchRootsChanged() const
+{
+	const DWORD cur = BB_ComputeWatchRootsHash();
+	const DWORD prev = (DWORD)InterlockedCompareExchange((LONG*)&g_tpRootsHash, 0, 0);
+	return cur != prev;
+}
+
+void CemuleApp::DrainDirWatchChangedFiles(CStringArray& outFiles)
+{
+	outFiles.RemoveAll();
+	if (!g_tpChangedFilesCSInit || g_tpChangedFiles == NULL)
+		return;
+
+	std::vector<CString> todo;
+	EnterCriticalSection(&g_tpChangedFilesCS);
+	if (g_tpChangedFiles != NULL)
+		todo.swap(*g_tpChangedFiles);
+	LeaveCriticalSection(&g_tpChangedFilesCS);
+
+	for (size_t i = 0; i < todo.size(); ++i)
+		outFiles.Add(todo[i]);
 }
 
 // Drains newly created subdirs (AutoShareSubdirs) and appends to thePrefs.shared list.
@@ -3160,14 +3518,7 @@ void CemuleApp::DrainAutoSharedNewDirs()
 				continue;
 		}
 
-		bool present = false;
-		for (POSITION pos = thePrefs.shareddir_list.GetHeadPosition(); pos != NULL; ) {
-			const CString& cur = thePrefs.shareddir_list.GetNext(pos);
-			if (cur.CompareNoCase(s) == 0) { present = true; break; }
-		}
-
-		if (!present && thePrefs.IsShareableDirectory(s)) {
-			thePrefs.shareddir_list.AddTail(s);
+		if (thePrefs.IsShareableDirectory(s) && thePrefs.AddSharedDirectoryIfAbsent(s)) {
 			bAdded = true;
 		}
 	}
@@ -3186,7 +3537,7 @@ static VOID CALLBACK DirWatchIoCb(PVOID /*instance*/, PVOID ctx, PVOID /*overlap
 	// Ensure counter is decremented even on early-return paths via RAII guard.
 	struct CCbGuard { TPIODirWatch* w; ~CCbGuard() { if (w) InterlockedDecrement(&w->nCallbacks); } } _guard{ pW };
 
-	if (InterlockedCompareExchange(&g_tpStopping, 0, 0) != 0)
+	if (InterlockedCompareExchange(&g_tpStopping, 0, 0) != 0 || InterlockedCompareExchange(&pW->nRetiring, 0, 0) != 0)
 		return; // Stopping, do not rearm
 
 	if (ioResult == ERROR_OPERATION_ABORTED)
@@ -3232,6 +3583,8 @@ static VOID CALLBACK DirWatchIoCb(PVOID /*instance*/, PVOID ctx, PVOID /*overlap
 
 					break; // One is enough per batch
 				}
+
+				BB_PushChangedFilePath(full);
 			}
 
 			DWORD advance = (p->NextEntryOffset != 0) ? p->NextEntryOffset : remaining;
@@ -3249,22 +3602,20 @@ static VOID CALLBACK DirWatchIoCb(PVOID /*instance*/, PVOID ctx, PVOID /*overlap
 	BB_CollectDeletedFromBuffer(pW, cbData);
 
 	// Debounced GUI refresh via UploadTimer (300 ms)
-	if (InterlockedCompareExchange(&g_tpStopping, 0, 0) == 0) {
+	if (InterlockedCompareExchange(&g_tpStopping, 0, 0) == 0 && InterlockedCompareExchange(&pW->nRetiring, 0, 0) == 0) {
 		InterlockedExchange(&g_tpRefreshPending, 1);
 		g_dwRefreshDueAt = ::GetTickCount() + 300;
+		RearmWatch(pW);
 	}
-
-	// Rearm immediately for subsequent changes
-	RearmWatch(pW);
 }
 
 void CemuleApp::StartDirWatchTP()
 {
-	StopDirWatchTP();
+	InterlockedExchange(&g_tpStartupArmPending, 0);
+	StopDirWatchTP(false);
 	InterlockedExchange(&g_tpStopping, 0);
 	InterlockedExchange(&g_tpRefreshPending, 0);
-	InterlockedExchange(&g_tpCleanupPending, 0);
-	g_dwRefreshDueAt = g_dwCleanupDueAt = 0;
+	g_dwRefreshDueAt = 0;
 	InterlockedExchange(&g_tpTimerArmed, 0);
 
 	// Init per-run queue for auto-added subdirs (if feature enabled)
@@ -3281,44 +3632,23 @@ void CemuleApp::StartDirWatchTP()
 		LeaveCriticalSection(&g_tpNewSharedDirsCS);
 	}
 
+	// Init per-run queue for changed files so watcher callbacks never race on lazy initialization.
+	if (!g_tpChangedFilesCSInit) {
+		InitializeCriticalSection(&g_tpChangedFilesCS);
+		g_tpChangedFiles = new std::vector<CString>();
+		g_tpChangedFilesCSInit = true;
+	}
+
+	if (g_tpChangedFilesCSInit) {
+		EnterCriticalSection(&g_tpChangedFilesCS);
+		if (g_tpChangedFiles != NULL)
+			g_tpChangedFiles->clear();
+		LeaveCriticalSection(&g_tpChangedFilesCS);
+	}
+
 	// Build unique root list (incoming, categories, shared dirs)
 	std::vector<CString> roots;
-	CString cur;
-
-	// Incoming
-	cur = thePrefs.GetMuleDirectory(EMULE_INCOMINGDIR);
-	if (!cur.IsEmpty())
-		roots.push_back(cur);
-
-	// Categories
-	for (INT_PTR i = 0; i < thePrefs.GetCatCount(); ++i) {
-		const CString& p = thePrefs.GetCatPath(i);
-		bool dup = false;
-
-		for (size_t k = 0; k < roots.size(); ++k) 
-			if (roots[k].CompareNoCase(p) == 0) {
-				dup = true;
-				break;
-			}
-
-		if (!dup && !p.IsEmpty()) 
-			roots.push_back(p);
-	}
-
-	// Shared directories list
-	POSITION pos = thePrefs.shareddir_list.GetHeadPosition();
-	while (pos) {
-		CString p = thePrefs.shareddir_list.GetNext(pos);
-		bool dup = false;
-		for (size_t k = 0; k < roots.size(); ++k)
-			if (roots[k].CompareNoCase(p) == 0) {
-				dup = true;
-				break;
-			}
-
-		if (!dup && !p.IsEmpty())
-			roots.push_back(p);
-	}
+	BB_CollectConfiguredWatchRoots(roots);
 
 	for (size_t i = 0; i < roots.size(); ++i) {
 		const CString& path = roots[i];
@@ -3364,84 +3694,65 @@ void CemuleApp::StartDirWatchTP()
 
 	if (g_tpWatches != NULL && !g_tpWatches->empty())
 		TRACE2(_T("Shared Files Watcher (TP I/O): %u roots armed\n"), (UINT)g_tpWatches->size());
+
+	const DWORD desiredHash = BB_ComputeRootsHash(roots);
+	const DWORD activeHash = BB_ComputeActiveWatchRootsHash();
+	if (activeHash != desiredHash)
+		TRACE(_T("Shared Files Watcher (TP I/O): %u/%u roots armed; next retry deferred.\n"), (UINT)((g_tpWatches != NULL) ? g_tpWatches->size() : 0), (UINT)roots.size());
+
+	InterlockedExchange((LONG*)&g_tpRootsHash, (LONG)desiredHash);
+	InterlockedExchange((LONG*)&g_tpActiveRootsHash, (LONG)activeHash);
+	InterlockedExchange((LONG*)&g_tpMissingRootRetryAt, (LONG)((activeHash != desiredHash) ? (::GetTickCount() + kDirWatchMissingRootRetryDelayMs) : 0));
+	InterlockedExchange(&g_tpRebuildingRoots, 0);
 }
 
-void CemuleApp::StopDirWatchTP()
+void CemuleApp::StopDirWatchTP(bool bWaitForCallbacks)
 {
-	InterlockedExchange(&g_tpStopping, 1);
+	if (bWaitForCallbacks)
+		InterlockedExchange(&g_tpStopping, 1);
+
 	InterlockedExchange(&g_tpRefreshPending, 0);
-	InterlockedExchange(&g_tpCleanupPending, 0);
 	InterlockedExchange(&g_tpTimerArmed, 0);
+	InterlockedExchange((LONG*)&g_tpActiveRootsHash, 0);
+	InterlockedExchange((LONG*)&g_tpMissingRootRetryAt, 0);
+	std::vector<TPIODirWatch*> deferred;
 
-	// Ensure cleanup CS is initialized even if StartDirWatchTP has not created it yet.
-	if (!g_tpCleanupCSInit) {
-		InitializeCriticalSection(&g_tpCleanupCS);
-		g_tpCleanupCSInit = true;
+	if (bWaitForCallbacks) {
+		InterlockedExchange(&g_tpCleanupPending, 0);
+		BB_EnsureDirWatchCleanupInitialized();
+		if (g_tpCleanupCSInit) {
+			EnterCriticalSection(&g_tpCleanupCS);
+			if (g_tpCleanup != NULL)
+				deferred.swap(*g_tpCleanup);
+			LeaveCriticalSection(&g_tpCleanupCS);
+		}
 	}
 
-	// Drop any deferred cleanup items to avoid dangling pointers during shutdown.
-	if (g_tpCleanupCSInit) {
-		EnterCriticalSection(&g_tpCleanupCS);
-		if (g_tpCleanup != NULL)
-			g_tpCleanup->clear();
-		LeaveCriticalSection(&g_tpCleanupCS);
-	}
-
-	// Synchronous, deterministic teardown of all watches to avoid post-snapshot leaks.
+	// Runtime rebuild: retire current watches immediately and let the upload timer clean them up off the hot UI path.
 	if (g_tpWatches != NULL) for (size_t i = 0; i < g_tpWatches->size(); ++i) {
 		TPIODirWatch* pW = (*g_tpWatches)[i];
 		if (!pW)
 			continue;
 
-		// Cancel outstanding I/O and drain callbacks deterministically.
-		// Order: ensure event -> CancelThreadpoolIo -> CancelIoEx -> wait event (short) -> WaitForThreadpoolIoCallbacks(FALSE) -> CloseThreadpoolIo.
-		if (pW->hEvent == NULL)
-			pW->hEvent = ::CreateEvent(NULL, TRUE, FALSE, NULL);
-
-		if (pW->tpIo != NULL)
-			BB_CancelThreadpoolIo(pW->tpIo);
-
-		if (pW->hDir != INVALID_HANDLE_VALUE)
-			BB_CancelIoEx(pW->hDir, &pW->ov);
-
-		// Give the kernel a tiny window to signal the overlapped if it was in flight.
-		if (pW->hEvent)
-			::WaitForSingleObject(pW->hEvent, 50);
-
-		if (pW->tpIo != NULL) {
-			// Wait until no callback is in-flight and I/O is not armed.
-			DWORD start = ::GetTickCount();
-			for (;;) {
-				const LONG inFlight = InterlockedCompareExchange(&pW->nCallbacks, 0, 0);
-				const LONG armed = InterlockedCompareExchange(&pW->nArmed, 0, 0);
-				if (inFlight == 0 && armed == 0)
-					break;
-				if ((LONG)(::GetTickCount() - start) > 1000) // 1s safety cap
-					break;
-				::Sleep(0);
-			}
-
-			// Always avoid OS CloseThreadpoolIo here to prevent sporadic INVALID_PARAMETER during teardown.
-			// Runtime rebuilds are handled by deferred cleanup which calls the RealX variant outside shutdown.
-			BB_CloseThreadpoolIoX(&pW->tpIo);
+		if (!bWaitForCallbacks) {
+			InterlockedExchange(&pW->nRetiring, 1);
+			if (pW->hDir != INVALID_HANDLE_VALUE)
+				// Let ReadDirectoryChangesW cancellation complete naturally; avoid CancelThreadpoolIo on armed I/O.
+				BB_CancelIoEx(pW->hDir, &pW->ov);
+			BB_QueueDirWatchForDeferredCleanup(pW);
+			continue;
 		}
 
-		// Close handles and free buffers.
-		BB_SafeCloseHandle(&pW->hDir);
-		if (pW->hEvent) {
-			::CloseHandle(pW->hEvent);
-			pW->hEvent = NULL;
-		}
-
-		if (pW->pBuf) {
-			free(pW->pBuf);
-			pW->pBuf = NULL;
-		}
-
-		delete pW;
+		BB_DestroyDirWatchSync(pW);
 	}
 	delete g_tpWatches;
 	g_tpWatches = NULL;
+
+	if (!bWaitForCallbacks)
+		return;
+
+	for (size_t i = 0; i < deferred.size(); ++i)
+		BB_DestroyDirWatchSync(deferred[i]);
 
 	// Reset per-run queue
 	if (g_tpNewSharedDirsCSInit) {
@@ -3462,6 +3773,18 @@ void CemuleApp::StopDirWatchTP()
 		g_tpCleanup = NULL;
 		DeleteCriticalSection(&g_tpCleanupCS);
 		g_tpCleanupCSInit = false;
+	}
+
+	if (g_tpChangedFilesCSInit) {
+		EnterCriticalSection(&g_tpChangedFilesCS);
+		if (g_tpChangedFiles != NULL) {
+			g_tpChangedFiles->clear();
+			delete g_tpChangedFiles;
+			g_tpChangedFiles = NULL;
+		}
+		LeaveCriticalSection(&g_tpChangedFilesCS);
+		DeleteCriticalSection(&g_tpChangedFilesCS);
+		g_tpChangedFilesCSInit = false;
 	}
 
 	// Delete deleted-paths CS if it was initialized anywhere (defensive: initialize here on demand)
@@ -3511,9 +3834,17 @@ void CemuleApp::OnUploadTick_100ms_DirWatch() noexcept
 					if (inFlight == 0 && armed == 0) {
 						// We're in runtime timer (OnUploadTick_100ms_DirWatch returns early if stopping),
 						// so we can safely close the TP I/O once drained to avoid leaking PTP_IO objects.
-						if (pW->tpIo != NULL) BB_CloseThreadpoolIoRealX(&pW->tpIo);
+						if (pW->tpIo != NULL)
+							BB_CloseThreadpoolIoRealX(&pW->tpIo);
 						BB_SafeCloseHandle(&pW->hDir);
-						if (pW->pBuf) { free(pW->pBuf); pW->pBuf = NULL; }
+						if (pW->hEvent != NULL) {
+							::CloseHandle(pW->hEvent);
+							pW->hEvent = NULL;
+						}
+						if (pW->pBuf != NULL) {
+							free(pW->pBuf);
+							pW->pBuf = NULL;
+						}
 						delete pW;
 					} else
 						remaining.push_back(pW);
@@ -3538,6 +3869,8 @@ void CemuleApp::OnUploadTick_100ms_DirWatch() noexcept
 void CemuleApp::OnUploadTick_1s_DirWatch() noexcept
 {
 	DrainAutoSharedNewDirs(); // Drain auto-added dirs (if any) without blocking UI
+	if (InterlockedExchange(&g_tpStartupArmPending, 0) == 1 && !IsClosing())
+		StartDirWatchTP();
 }
 
 void CemuleApp::OnUploadTick_5s_DirWatch() noexcept

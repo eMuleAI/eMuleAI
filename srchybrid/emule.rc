@@ -854,16 +854,18 @@ BEGIN
     CONTROL         "Minimize to tray",IDC_MINTRAY,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,4,46,216,10
     CONTROL         "Download list double-click to expand",IDC_DBLCLICK,
                     "Button",BS_AUTOCHECKBOX | WS_TABSTOP,4,56,216,10
-    CONTROL         "Show download percentage",IDC_SHOWDWLPERCENT,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,4,66,216,10
-    CONTROL         "Show transfer rate on title",IDC_SHOWRATEONTITLE,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,4,76,216,10
-    CONTROL         "CatInfo",IDC_SHOWCATINFO,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,4,86,216,10
-    CONTROL         "Auto Clear Completed Downloads",IDC_CLEARCOMPL,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,4,96,216,10
+    CONTROL         "Preview file by double-clicking its name in the download list",IDC_DBLCLICKFILENAMEPREVIEW,
+                    "Button",BS_AUTOCHECKBOX | WS_TABSTOP,4,66,216,10
+    CONTROL         "Show download percentage",IDC_SHOWDWLPERCENT,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,4,75,216,10
+    CONTROL         "Show transfer rate on title",IDC_SHOWRATEONTITLE,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,4,84,216,10
+    CONTROL         "CatInfo",IDC_SHOWCATINFO,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,4,93,216,10
+    CONTROL         "Auto Clear Completed Downloads",IDC_CLEARCOMPL,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,4,102,216,10
     CONTROL         "Show additional toolbar on Transfers window",IDC_SHOWTRANSTOOLBAR,
-                    "Button",BS_AUTOCHECKBOX | WS_TABSTOP,4,106,216,10
+                    "Button",BS_AUTOCHECKBOX | WS_TABSTOP,4,111,216,10
     CONTROL         "Remember open searches between restarts",IDC_STORESEARCHES,
-                    "Button",BS_AUTOCHECKBOX | WS_TABSTOP,4,116,216,10
+                    "Button",BS_AUTOCHECKBOX | WS_TABSTOP,4,120,216,10
     CONTROL         "Enable Win7 taskbar stuff",IDC_WIN7TASKBARGOODIES,
-                    "Button",BS_AUTOCHECKBOX | WS_TABSTOP,4,126,216,10
+                    "Button",BS_AUTOCHECKBOX | WS_TABSTOP,4,129,216,10
     GROUPBOX        "Lower CPU && Memory Usage",IDC_STATIC_CPUMEM,4,145,223,35
     CONTROL         "Disable Known Clients list",IDC_DISABLEKNOWNLIST,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,12,156,202,10
     CONTROL         "Disable Queue List",IDC_DISABLEQUEUELIST,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,12,166,202,10

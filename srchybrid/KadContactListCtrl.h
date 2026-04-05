@@ -51,6 +51,7 @@ public:
 protected:
 	void UpdateKadContactCount();
 	void SetAllIcons();
+	virtual int GetDefaultPersistentInfoTipExtraLeftPadding(const SPersistentInfoTipContext& context) const override;
 
 	static int CALLBACK SortProc(const LPARAM lParam1, const LPARAM lParam2, const LPARAM lParamSort);
 

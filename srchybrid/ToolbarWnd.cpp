@@ -305,10 +305,10 @@ void CToolbarWnd::FillToolbar()
 	atb1[iPreviewAppCount + 16 - m_iDontShowPreviewButton].iString = m_btnBar.AddString(GetResString(_T("BACKUP_TIP")));
 
 	atb1[iPreviewAppCount + 17 - m_iDontShowPreviewButton].iBitmap = DownloadToolbarImageInspect;
-	atb1[iPreviewAppCount + 17 - m_iDontShowPreviewButton].idCommand = MP_FILEINSPECTOR;
+	atb1[iPreviewAppCount + 17 - m_iDontShowPreviewButton].idCommand = MP_DOWNLOADINSPECTOR;
 	atb1[iPreviewAppCount + 17 - m_iDontShowPreviewButton].fsState = TBSTATE_WRAP;
 	atb1[iPreviewAppCount + 17 - m_iDontShowPreviewButton].fsStyle = BTNS_BUTTON | BTNS_AUTOSIZE;
-	atb1[iPreviewAppCount + 17 - m_iDontShowPreviewButton].iString = m_btnBar.AddString(GetResString(_T("FILE_INSPECTOR_NOW")));
+	atb1[iPreviewAppCount + 17 - m_iDontShowPreviewButton].iString = m_btnBar.AddString(GetResString(_T("DOWNLOAD_INSPECTOR_NOW")));
 
 	/////////////
 	atb1[iPreviewAppCount + 18 - m_iDontShowPreviewButton].iBitmap = -1;

@@ -163,6 +163,7 @@ void CCollectionListCtrl::Init(const CString &strNameAdd)
 
 	SetExtendedStyle(LVS_EX_FULLROWSELECT | LVS_EX_INFOTIP);
 
+	// Alignment rule: left for text, dates, and status labels; right for sizes, rates, counts, durations, and percentages.
 	InsertColumn(colName, GetResString(_T("DL_FILENAME")),	LVCFMT_LEFT,  DFLT_FILENAME_COL_WIDTH);
 	InsertColumn(colSize, GetResString(_T("DL_SIZE")),		LVCFMT_RIGHT, DFLT_SIZE_COL_WIDTH);
 	InsertColumn(colHash, GetResString(_T("FILEHASH")),		LVCFMT_LEFT,  DFLT_HASH_COL_WIDTH);

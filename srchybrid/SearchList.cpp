@@ -139,6 +139,12 @@ void CSearchList::RemoveResults(uint32 nSearchID)
 				delete listCur->m_listSearchFiles.RemoveHead();
 			m_listFileLists.RemoveAt(posLast);
 			delete listCur;
+			m_foundFilesCount.RemoveKey(nSearchID);
+			m_originalFoundFilesCount.RemoveKey(nSearchID);
+			m_foundSourcesCount.RemoveKey(nSearchID);
+			m_ReceivedUDPAnswersCount.RemoveKey(nSearchID);
+			m_RequestedUDPAnswersCount.RemoveKey(nSearchID);
+			m_mergedSearchHistory.RemoveKey(nSearchID);
 			return;
 		}
 	}
@@ -187,9 +193,11 @@ void CSearchList::NewSearch(CSearchListCtrl *pWnd, const CString &strResultFileT
 		m_aCurED2KSentReceivedIPs.RemoveAll();
 	}
 	m_foundFilesCount[pParams->dwSearchID] = 0;
+	m_originalFoundFilesCount[pParams->dwSearchID] = 0;
 	m_foundSourcesCount[pParams->dwSearchID] = 0;
 	m_ReceivedUDPAnswersCount[pParams->dwSearchID] = 0;
 	m_RequestedUDPAnswersCount[pParams->dwSearchID] = 0;
+	m_mergedSearchHistory[pParams->dwSearchID] = false;
 
 	if (pParams->strBooleanExpr.IsEmpty())
 		pParams->strBooleanExpr = pParams->strExpression;
@@ -232,7 +240,9 @@ UINT CSearchList::ProcessSearchAnswer(const uchar *in_packet, uint32 size
 	pParams->m_strClientHash = md4str(sender.GetUserHash());
 	if (theApp.emuledlg->searchwnd->CreateNewTab(pParams)) {
 		m_foundFilesCount[uSearchID] = 0;
+		m_originalFoundFilesCount[uSearchID] = 0;
 		m_foundSourcesCount[uSearchID] = 0;
+		m_mergedSearchHistory[uSearchID] = false;
 	} else
 		delete pParams;
 
@@ -258,6 +268,7 @@ UINT CSearchList::ProcessSearchAnswer(const uchar *in_packet, uint32 size
 	}
 	if (outputwnd) {
 		if (uSearchID == theApp.emuledlg->searchwnd->m_pwndResults->searchlistctrl.m_nResultsID)
+			// Search results are accumulated in the model first and then projected to the visible list in one rebuild.
 			outputwnd->ReloadList(false, LSF_SELECTION);
 		else
 			outputwnd->UpdateTabHeader(uSearchID, EMPTY, false);
@@ -685,6 +696,12 @@ bool CSearchList::AddToList(CSearchFile* toadd, bool bClientResponse, uint32 dwF
 		if (!m_foundFilesCount.Lookup(toadd->GetSearchID(), tempValue))
 			tempValue = 0;
 		m_foundFilesCount[toadd->GetSearchID()] = tempValue + 1;
+
+		if (bDoSpamRating) {
+			if (!m_originalFoundFilesCount.Lookup(toadd->GetSearchID(), tempValue))
+				tempValue = 0;
+			m_originalFoundFilesCount[toadd->GetSearchID()] = tempValue + 1;
+		}
 
 		// get the 'Availability' of this new search result entry
 		if (bClientResponse)
@@ -1932,6 +1949,11 @@ uint32 CSearchList::GetParentItemCount(uint32 nResultsID)
 	}
 
 	return nParents;
+}
+
+void CSearchList::MarkSearchAsMerged(uint32 nSearchID)
+{
+	m_mergedSearchHistory[nSearchID] = true;
 }
 
 void CSearchList::SetSearchItemKnownType(CSearchFile* src)

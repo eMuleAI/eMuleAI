@@ -18,6 +18,8 @@
 #include "stdafx.h"
 #include "emule.h"
 #include "PreferencesDlg.h"
+#include "OtherFunctions.h"
+#include "Opcodes.h"
 #include "eMuleAI/DarkMode.h"
 #include <atlimage.h>
 
@@ -29,14 +31,18 @@ static char THIS_FILE[] = __FILE__;
 
 namespace
 {
+	void OpenPreferencesHelpPage()
+	{
+		BrowserOpen(MOD_PAGES_BASE_URL, thePrefs.GetMuleDirectory(EMULE_EXECUTABLEDIR));
+	}
+
 	const UINT PREFS_BANNER_CTRL_ID = 0x7EE1;
-	const int PREFS_BANNER_MIN_WIDTH = 128;
-	const int PREFS_BANNER_MAX_WIDTH = 176;
+	const int PREFS_BANNER_MIN_WIDTH = 96;
+	const int PREFS_BANNER_MAX_WIDTH = 144;
 	const int PREFS_BANNER_MARGIN = 4;
-	const int PREFS_BANNER_PADDING = 2;
-	const double PREFS_BANNER_WIDTH_SCALE = 0.92;
-	const double PREFS_BANNER_WIDTH_REDUCTION_SCALE = 0.50;
-	const double PREFS_BANNER_PREVIOUS_SIZE_SCALE = 0.67;
+	const int PREFS_BANNER_PADDING = 4;
+	const int PREFS_BANNER_LAYOUT_DIVISOR = 4;
+	const double PREFS_BANNER_FRAME_WIDTH_SCALE = 0.88;
 	const int PREFS_BANNER_ALPHA_THRESHOLD = 10;
 	const int PREFS_BANNER_BRIGHTNESS_THRESHOLD = 20;
 	const UINT PREFS_BANNER_RESOURCE_ID_DARK = IDR_MOD_BANNER;
@@ -114,17 +120,31 @@ namespace
 			if (nTargetHeight <= 0 || m_imgBanner.IsNull())
 				return PREFS_BANNER_MIN_WIDTH;
 
-			const int nImageWidth = m_imgBanner.GetWidth();
-			const int nImageHeight = m_imgBanner.GetHeight();
-			if (nImageWidth <= 0 || nImageHeight <= 0)
+			const CRect rectSource = GetSourceRect();
+			const int nSourceWidth = rectSource.Width();
+			const int nSourceHeight = rectSource.Height();
+			if (nSourceWidth <= 0 || nSourceHeight <= 0)
 				return PREFS_BANNER_MIN_WIDTH;
 
-			return max(1, static_cast<int>(nTargetHeight * (static_cast<double>(nImageWidth) / static_cast<double>(nImageHeight)) * PREFS_BANNER_WIDTH_SCALE + 0.5));
+			const int nAvailableHeight = max(1, nTargetHeight - (PREFS_BANNER_PADDING * 2));
+			const int nContentWidth = max(1, static_cast<int>(nAvailableHeight * (static_cast<double>(nSourceWidth) / static_cast<double>(nSourceHeight)) + 0.5));
+			return nContentWidth + (PREFS_BANNER_PADDING * 2);
 		}
 
-	protected:
-		void UpdateContentRect()
+		protected:
+		CRect GetSourceRect() const
 		{
+			if (!m_rcContent.IsRectEmpty())
+				return m_rcContent;
+
+			if (!m_imgBanner.IsNull())
+				return CRect(0, 0, m_imgBanner.GetWidth(), m_imgBanner.GetHeight());
+
+			return CRect(0, 0, 0, 0);
+		}
+
+			void UpdateContentRect()
+			{
 			m_rcContent.SetRectEmpty();
 			if (m_imgBanner.IsNull())
 				return;
@@ -197,9 +217,7 @@ namespace
 			if (nImageWidth <= 0 || nImageHeight <= 0)
 				return;
 
-			CRect rectSource = m_rcContent;
-			if (rectSource.IsRectEmpty())
-				rectSource.SetRect(0, 0, nImageWidth, nImageHeight);
+				const CRect rectSource = GetSourceRect();
 
 			CRect rectDrawArea(rectClient);
 			rectDrawArea.DeflateRect(PREFS_BANNER_PADDING, PREFS_BANNER_PADDING);
@@ -213,10 +231,8 @@ namespace
 
 			const double fScaleX = static_cast<double>(rectDrawArea.Width()) / static_cast<double>(nSourceWidth);
 			const double fScaleY = static_cast<double>(rectDrawArea.Height()) / static_cast<double>(nSourceHeight);
-			// Keep aspect ratio and draw close to the previous visual size while avoiding over-shrinking.
-			const double fContainScale = min(fScaleX, fScaleY);
-			const double fCoverScale = max(fScaleX, fScaleY);
-			const double fScale = max(fContainScale, fCoverScale * PREFS_BANNER_PREVIOUS_SIZE_SCALE);
+			// Always fit the full banner content inside the frame to avoid edge clipping on narrower layouts.
+			const double fScale = min(fScaleX, fScaleY);
 			const int nDrawWidth = max(1, static_cast<int>(nSourceWidth * fScale + 0.5));
 			const int nDrawHeight = max(1, static_cast<int>(nSourceHeight * fScale + 0.5));
 			const int nDrawX = rectDrawArea.left + (rectDrawArea.Width() - nDrawWidth) / 2;
@@ -384,9 +400,9 @@ bool CPreferencesDlg::InitSideBanner()
 	GetClientRect(&rectClient);
 	const int nTargetBannerHeight = max(1, rectClient.Height() - (PREFS_BANNER_MARGIN * 2));
 	const int nSuggestedWidth = pBannerWnd->GetSuggestedWidth(nTargetBannerHeight);
-	const int nLayoutLimit = max(PREFS_BANNER_MIN_WIDTH, rectClient.Width() / 3);
+	const int nLayoutLimit = max(PREFS_BANNER_MIN_WIDTH, rectClient.Width() / PREFS_BANNER_LAYOUT_DIVISOR);
 	const int nBaseBannerWidth = min(min(PREFS_BANNER_MAX_WIDTH, nLayoutLimit), max(PREFS_BANNER_MIN_WIDTH, nSuggestedWidth));
-	m_nBannerWidth = max(1, static_cast<int>(nBaseBannerWidth * PREFS_BANNER_WIDTH_REDUCTION_SCALE + 0.5));
+	m_nBannerWidth = max(1, static_cast<int>(nBaseBannerWidth * PREFS_BANNER_FRAME_WIDTH_SCALE + 0.5));
 
 	const int nDialogGrowWidth = m_nBannerWidth + PREFS_BANNER_MARGIN + PREFS_BANNER_MARGIN;
 	CRect rectWindow;
@@ -432,6 +448,19 @@ void CPreferencesDlg::LocalizeItemText(int i, LPCTSTR strid)
 void CPreferencesDlg::Localize()
 {
 	SetTitle(GetResNoAmp(_T("EM_PREFS")));
+
+	if (m_hWnd != NULL) {
+		if (GetDlgItem(IDOK) != NULL)
+			SetDlgItemText(IDOK, GetResString(_T("TREEOPTIONS_OK")));
+		if (GetDlgItem(IDCANCEL) != NULL)
+			SetDlgItemText(IDCANCEL, GetResString(_T("CANCEL")));
+		if (GetDlgItem(ID_APPLY_NOW) != NULL)
+			SetDlgItemText(ID_APPLY_NOW, GetResString(_T("PW_APPLY")));
+		if (GetDlgItem(ID_HELP) != NULL)
+			SetDlgItemText(ID_HELP, GetResNoAmp(_T("EM_HELP")));
+		if (GetDlgItem(IDHELP) != NULL)
+			SetDlgItemText(IDHELP, GetResNoAmp(_T("EM_HELP")));
+	}
 
 	m_wndGeneral.Localize();
 	m_wndDisplay.Localize();
@@ -493,7 +522,9 @@ BOOL CPreferencesDlg::OnCommand(WPARAM wParam, LPARAM lParam)
 {
 	switch (wParam) {
 	case ID_HELP:
-		return OnHelpInfo(NULL);
+	case IDHELP:
+		OpenPreferencesHelpPage();
+		return TRUE;
 	case IDOK:
 		m_bApplyButtonClicked = false; 
 		m_bSaveIniFile = true;

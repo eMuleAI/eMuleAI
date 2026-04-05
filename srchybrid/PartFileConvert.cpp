@@ -424,9 +424,10 @@ void CPartFileConvert::ShowGUI()
 		m_convertgui->SetIcon(m_convertgui->m_icoWnd = theApp.LoadIcon(_T("Convert")), FALSE);
 
 		// init GUI
+		// Alignment rule: left for text, dates, and status labels; right for sizes, rates, counts, durations, and percentages.
 		m_convertgui->joblist.InsertColumn(0, GetResString(_T("DL_FILENAME")), LVCFMT_LEFT, DFLT_FILENAME_COL_WIDTH);
 		m_convertgui->joblist.InsertColumn(1, GetResString(_T("STATUS")), LVCFMT_LEFT, 110);
-		m_convertgui->joblist.InsertColumn(2, GetResString(_T("DL_SIZE")), LVCFMT_LEFT, DFLT_SIZE_COL_WIDTH);
+		m_convertgui->joblist.InsertColumn(2, GetResString(_T("DL_SIZE")), LVCFMT_RIGHT, DFLT_SIZE_COL_WIDTH);
 		m_convertgui->joblist.InsertColumn(3, GetResString(_T("FILEHASH")), LVCFMT_LEFT, DFLT_HASH_COL_WIDTH);
 		m_convertgui->pb_current.SetRange(0, 100);
 		m_convertgui->joblist.SetExtendedStyle(LVS_EX_FULLROWSELECT | LVS_EX_INFOTIP);

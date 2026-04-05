@@ -383,14 +383,14 @@ public:
 
 	static UINT		m_uTransferWnd1;
 	static UINT		m_uTransferWnd2;
-	//MORPH START - Added by SiRoB, Splitting Bar [O�]
+	//MORPH START - Added by SiRoB, Splitting Bar [O²]
 	static UINT		splitterbarPositionStat;
 	static UINT		splitterbarPositionStat_HL;
 	static UINT		splitterbarPositionStat_HR;
 	static UINT		splitterbarPositionFriend;
 	static UINT		splitterbarPositionIRC;
 	static UINT		splitterbarPositionShared;
-	//MORPH END - Added by SiRoB, Splitting Bar [O�]
+	//MORPH END - Added by SiRoB, Splitting Bar [O²]
 	static UINT		m_uDeadServerRetries;
 	static uint8	m_nMaxEServerBuddySlots;
 	static uint16	m_nEServerDiscoveredExternalUdpPort;
@@ -501,6 +501,7 @@ public:
 	static int		m_iPreviewSmallBlocks;
 	static bool		m_bPreviewCopiedArchives;
 	static bool		m_bPreviewOnIconDblClk;
+	static bool		m_bPreviewOnFileNameDblClk;
 	static bool		m_bCheckFileOpen;
 	static bool		indicateratings;
 	static bool		watchclipboard;
@@ -616,6 +617,10 @@ public:
 
 	static bool		m_bResolveSharedShellLinks;
 	static CStringList shareddir_list;
+	static void		CopySharedDirectoryList(CStringList& out);
+	static void		ReplaceSharedDirectoryList(const CStringList& in);
+	static bool		AddSharedDirectoryIfAbsent(const CString& dir);
+	static INT_PTR	GetSharedDirectoryCount();
 	static CStringList addresses_list;
 	static bool		m_bKeepUnavailableFixedSharedDirs;
 
@@ -698,9 +703,10 @@ public:
 	static bool		IsShareableDirectory(const CString& rstrDir);
 		static bool		IsInstallationDirectory(const CString& rstrDir);
 
-		// UI helpers for shared directories expansion/collapse (do not persist).
+		// Shared directory normalization helpers.
 		static void		ExpandSharedDirsForUI();
-		static void		CollapseSharedDirsToRoots();
+		static void		CollapseSharedDirsToRoots(CStringList& sharedDirs);
+		static void		CollapseSharedDirsToRoots(CStringList& sharedDirs, const CStringList* pExcludedSharedDirs);
 
 	static bool		Save();
 	static void		SaveCats();
@@ -846,35 +852,35 @@ public:
 	static bool		GetDownloadCheckerAutoMarkAsBlacklisted() { return m_bDownloadCheckerAutoMarkAsBlacklisted; }
 	static void		SetDownloadCheckerAutoMarkAsBlacklisted(bool in) { m_bDownloadCheckerAutoMarkAsBlacklisted = in; }
 
-	static int		m_iFileInspector;
-	static bool		m_bFileInspectorFake;
-	static bool		m_bFileInspectorDRM;
-	static int		m_iFileInspectorCheckPeriod;
-	static int		m_iFileInspectorCompletedThreshold;
-	static int		m_iFileInspectorZeroPercentageThreshold;
-	static int		m_iFileInspectorCompressionThreshold;
-	static bool		m_bFileInspectorBypassZeroPercentage;
-	static int		m_iFileInspectorCompressionThresholdToBypassZero;
-	static int		GetFileInspector() { return m_iFileInspector; };
-	static void		SetFileInspector(int in) { m_iFileInspector = in; }
-	static bool		GetFileInspectorFake() { return m_bFileInspectorFake; }
-	static void		SetFileInspectorFake(bool in) { m_bFileInspectorFake = in; }
-	static bool		GetFileInspectorDRM() { return m_bFileInspectorDRM; }
-	static void		SetFileInspectorDRM(bool in) { m_bFileInspectorDRM = in; }
-	static bool		m_bFileInspectorInvalidExt;
-	static bool		IsFileInspectorInvalidExt() { return m_bFileInspectorInvalidExt; }
-	static int		GetFileInspectorCheckPeriod() { return m_iFileInspectorCheckPeriod; };
-	static void		SetFileInspectorCheckPeriod(int in) { m_iFileInspectorCheckPeriod = in; }
-	static int		GetFileInspectorCompletedThreshold() { return m_iFileInspectorCompletedThreshold; };
-	static void		SetFileInspectorCompletedThreshold(int in) { m_iFileInspectorCompletedThreshold = in; }
-	static int		GetFileInspectorZeroPercentageThreshold() { return m_iFileInspectorZeroPercentageThreshold; };
-	static void		SetFileInspectorZeroPercentageThreshold(int in) { m_iFileInspectorZeroPercentageThreshold = in; }
-	static int		GetFileInspectorCompressionThreshold() { return m_iFileInspectorCompressionThreshold; };
-	static void		SetFileInspectorCompressionThreshold(int in) { m_iFileInspectorCompressionThreshold = in; }
-	static bool		GetFileInspectorBypassZeroPercentage() { return m_bFileInspectorBypassZeroPercentage; }
-	static void		SetFileInspectorBypassZeroPercentage(bool in) { m_bFileInspectorBypassZeroPercentage = in; }
-	static int		GetFileInspectorCompressionThresholdToBypassZero() { return m_iFileInspectorCompressionThresholdToBypassZero; };
-	static void		SetFileInspectorCompressionThresholdToBypassZero(int in) { m_iFileInspectorCompressionThresholdToBypassZero = in; }
+	static int		m_iDownloadInspector;
+	static bool		m_bDownloadInspectorFake;
+	static bool		m_bDownloadInspectorDRM;
+	static int		m_iDownloadInspectorCheckPeriod;
+	static int		m_iDownloadInspectorCompletedThreshold;
+	static int		m_iDownloadInspectorZeroPercentageThreshold;
+	static int		m_iDownloadInspectorCompressionThreshold;
+	static bool		m_bDownloadInspectorBypassZeroPercentage;
+	static int		m_iDownloadInspectorCompressionThresholdToBypassZero;
+	static int		GetDownloadInspector() { return m_iDownloadInspector; };
+	static void		SetDownloadInspector(int in) { m_iDownloadInspector = in; }
+	static bool		GetDownloadInspectorFake() { return m_bDownloadInspectorFake; }
+	static void		SetDownloadInspectorFake(bool in) { m_bDownloadInspectorFake = in; }
+	static bool		GetDownloadInspectorDRM() { return m_bDownloadInspectorDRM; }
+	static void		SetDownloadInspectorDRM(bool in) { m_bDownloadInspectorDRM = in; }
+	static bool		m_bDownloadInspectorInvalidExt;
+	static bool		IsDownloadInspectorInvalidExt() { return m_bDownloadInspectorInvalidExt; }
+	static int		GetDownloadInspectorCheckPeriod() { return m_iDownloadInspectorCheckPeriod; };
+	static void		SetDownloadInspectorCheckPeriod(int in) { m_iDownloadInspectorCheckPeriod = in; }
+	static int		GetDownloadInspectorCompletedThreshold() { return m_iDownloadInspectorCompletedThreshold; };
+	static void		SetDownloadInspectorCompletedThreshold(int in) { m_iDownloadInspectorCompletedThreshold = in; }
+	static int		GetDownloadInspectorZeroPercentageThreshold() { return m_iDownloadInspectorZeroPercentageThreshold; };
+	static void		SetDownloadInspectorZeroPercentageThreshold(int in) { m_iDownloadInspectorZeroPercentageThreshold = in; }
+	static int		GetDownloadInspectorCompressionThreshold() { return m_iDownloadInspectorCompressionThreshold; };
+	static void		SetDownloadInspectorCompressionThreshold(int in) { m_iDownloadInspectorCompressionThreshold = in; }
+	static bool		GetDownloadInspectorBypassZeroPercentage() { return m_bDownloadInspectorBypassZeroPercentage; }
+	static void		SetDownloadInspectorBypassZeroPercentage(bool in) { m_bDownloadInspectorBypassZeroPercentage = in; }
+	static int		GetDownloadInspectorCompressionThresholdToBypassZero() { return m_iDownloadInspectorCompressionThresholdToBypassZero; };
+	static void		SetDownloadInspectorCompressionThresholdToBypassZero(int in) { m_iDownloadInspectorCompressionThresholdToBypassZero = in; }
 
 	static bool		m_bGroupKnownAtTheBottom;
 	static bool		GetGroupKnownAtTheBottom() { return m_bGroupKnownAtTheBottom; }
@@ -912,6 +918,7 @@ public:
 	bool GetAutoShareSubdirs() const { return m_bAutoShareSubdirs.load(std::memory_order_acquire); }
 	void SetAutoShareSubdirs(bool enable) { m_bAutoShareSubdirs.store(enable, std::memory_order_release); }
 	static CCriticalSection m_mutPreferences;
+	static CCriticalSection m_csSharedDirList;
 	static std::atomic_bool m_bDontShareExtensions; // thread-safe flag
 	bool GetDontShareExtensions() const { return m_bDontShareExtensions.load(std::memory_order_acquire); }
 	void SetDontShareExtensions(bool enable) { m_bDontShareExtensions.store(enable, std::memory_order_release); }
@@ -1464,6 +1471,8 @@ public:
 	static void		SetMaxGraphDownloadRate(uint32 in) { maxGraphDownloadRate = (in ? in : 96); }
 	static uint32	GetMaxGraphUploadRate(bool bEstimateIfUnlimited);
 	static void		SetMaxGraphUploadRate(uint32 in);
+	static bool		HasMaxUploadLimit();
+	static uint32	GetEffectiveMaxUpload();
 
 	static uint32	GetMaxDownload();
 	static uint64	GetMaxDownloadInBytesPerSec(bool dynamic = false);
@@ -1508,7 +1517,7 @@ public:
 	static void		SetTransferWnd1(UINT uWnd1) { m_uTransferWnd1 = uWnd1; }
 	static UINT		GetTransferWnd2() { return m_uTransferWnd2; }
 	static void		SetTransferWnd2(UINT uWnd2) { m_uTransferWnd2 = uWnd2; }
-	//MORPH START - Added by SiRoB, Splitting Bar [O�]
+	//MORPH START - Added by SiRoB, Splitting Bar [O²]
 	static UINT		GetSplitterbarPositionStat() { return splitterbarPositionStat; }
 	static void		SetSplitterbarPositionStat(UINT pos) { splitterbarPositionStat = pos; }
 	static UINT		GetSplitterbarPositionStat_HL() { return splitterbarPositionStat_HL; }
@@ -1521,7 +1530,7 @@ public:
 	static void		SetSplitterbarPositionIRC(UINT pos) { splitterbarPositionIRC = pos; }
 	static UINT		GetSplitterbarPositionShared() { return splitterbarPositionShared; }
 	static void		SetSplitterbarPositionShared(UINT pos) { splitterbarPositionShared = pos; }
-	//MORPH END   - Added by SiRoB, Splitting Bar [O�]
+	//MORPH END   - Added by SiRoB, Splitting Bar [O²]
 	static UINT		GetStatsMax() { return statsMax; }
 	static bool		UseFlatBar() { return !depth3D; }
 	static int		GetStraightWindowStyles() { return m_iStraightWindowStyles; }
@@ -1688,6 +1697,7 @@ public:
 
 	static bool		ShowRatesOnTitle() { return showRatesInTitle; }
 	static void		LoadCats();
+	static void		ReloadCats();
 	static const CString& GetDateTimeFormat() { return m_strDateTimeFormat; }
 	static const CString& GetDateTimeFormat4Log() { return m_strDateTimeFormat4Log; }
 	static const CString& GetDateTimeFormat4Lists() { return m_strDateTimeFormat4Lists; }
@@ -1701,11 +1711,14 @@ public:
 	static int		GetCatFilter(INT_PTR index);
 	static bool		GetCatFilterNeg(INT_PTR index);
 	static void		SetCatFilterNeg(INT_PTR index, bool val);
+	static CString	GetCatFilterLabel(int filter);
+	static CString	GetCategoryDisplayTitle(INT_PTR index);
 	static Category_Struct* GetCategory(INT_PTR index) { return (index >= 0 && index < catArr.GetCount()) ? catArr[index] : NULL; }
 	static const CString& GetCatPath(INT_PTR index) { return catArr[index]->strIncomingPath; }
 	static DWORD	GetCatColor(INT_PTR index, int nDefault = COLOR_BTNTEXT);
 
 	static bool		GetPreviewOnIconDblClk() { return m_bPreviewOnIconDblClk; }
+	static bool		GetPreviewOnFileNameDblClk() { return m_bPreviewOnFileNameDblClk; }
 	static bool		GetCheckFileOpen() { return m_bCheckFileOpen; }
 	static bool		ShowRatingIndicator() { return indicateratings; }
 	static bool		WatchClipboard4ED2KLinks() { return watchclipboard; }

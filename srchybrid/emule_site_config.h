@@ -56,7 +56,7 @@
 #if _MSC_VER==1400
 
 // NOTE: eMule can not get compiled with VS2005 out of the box because the SDK
-// which is shipped with VS2005 does not contain the �upnp.h� header file - and
+// which is shipped with VS2005 does not contain the 'upnp.h' header file - and
 // this feature is not yet optional for compiling eMule. Thus you need to install
 // an additional more recent SDK when compiling with VS2005.
 //

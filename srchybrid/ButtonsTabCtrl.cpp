@@ -28,6 +28,29 @@
 static char THIS_FILE[] = __FILE__;
 #endif
 
+namespace
+{
+	const CSize s_szButtonTabPadding(11, 4);
+
+	CFont* SelectTabFont(CDC& dc, CFont* pBaseFont, bool bBold, CFont& boldFont)
+	{
+		if (pBaseFont == NULL)
+			return NULL;
+
+		if (!bBold)
+			return dc.SelectObject(pBaseFont);
+
+		LOGFONT lf = {};
+		if (pBaseFont->GetLogFont(&lf) == 0)
+			return dc.SelectObject(pBaseFont);
+
+		lf.lfWeight = FW_BOLD;
+		if (!boldFont.CreateFontIndirect(&lf))
+			return dc.SelectObject(pBaseFont);
+
+		return dc.SelectObject(&boldFont);
+	}
+}
 
 ///////////////////////////////////////////////////////////////////////////////
 // CButtonsTabCtrl
@@ -55,22 +78,32 @@ void CButtonsTabCtrl::DrawItem(LPDRAWITEMSTRUCT lpDIS)
     if (!pDC)
         return;
 
-    // Handle tab control colors for pressed and non-pressed states
-    RECT rcItem(lpDIS->rcItem);
-    CRect rcFullItem(rcItem);
+	// Handle tab control colors for pressed and non-pressed states
+	RECT rcItem(lpDIS->rcItem);
 
-    // Set background color based on the state of the tab (selected or not)
-    if ((lpDIS->itemState & ODS_SELECTED) != 0)
-        pDC->FillSolidRect(&lpDIS->rcItem, GetCustomSysColor(COLOR_ACTIVECAPTION)); // Set selected tab color
-    else
-        pDC->FillSolidRect(&lpDIS->rcItem, GetCustomSysColor(COLOR_WINDOW)); // Set non-selected tabs color
+	// Set background color based on the state of the tab (selected or not)
+	const bool bSelected = (lpDIS->itemState & ODS_SELECTED) != 0;
+	if (bSelected)
+		pDC->FillSolidRect(&lpDIS->rcItem, GetCustomSysColor(COLOR_ACTIVECAPTION)); // Set selected tab color
+	else
+		pDC->FillSolidRect(&lpDIS->rcItem, GetCustomSysColor(COLOR_WINDOW)); // Set non-selected tabs color
 
-    pDC->SetTextColor(GetCustomSysColor(COLOR_BTNTEXT)); // Set text color
-    rcItem.top += 2;
-    pDC->DrawText(szLabel, &rcItem, DT_SINGLELINE | DT_TOP | DT_CENTER); // Draw the text label on the tab
+	CFont boldFont;
+	CFont* pOldFont = SelectTabFont(*pDC, GetFont(), bSelected, boldFont);
+	const COLORREF crOldColor = pDC->SetTextColor(GetCustomSysColor(COLOR_BTNTEXT)); // Set text color
+	const int iOldBkMode = pDC->SetBkMode(TRANSPARENT);
+	rcItem.top += 2;
+	pDC->DrawText(szLabel, &rcItem, DT_SINGLELINE | DT_TOP | DT_CENTER); // Draw the text label on the tab
+	pDC->SetBkMode(iOldBkMode);
+	pDC->SetTextColor(crOldColor);
+	if (pOldFont != NULL)
+		pDC->SelectObject(pOldFont);
 }
 
 void CButtonsTabCtrl::PreSubclassWindow()
 {
-    CTabCtrl::PreSubclassWindow();
+	CTabCtrl::PreSubclassWindow();
+
+	// Reserve extra width so the selected bold caption does not get clipped.
+	SetPadding(s_szButtonTabPadding);
 }

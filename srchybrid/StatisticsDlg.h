@@ -149,7 +149,7 @@ protected:
 	virtual void OnSize(UINT nType, int cx, int cy);
 	virtual void DoDataExchange(CDataExchange *pDX);    // DDX/DDV support
 
-	//MORPH START - Added by SiRoB, Splitting Bar [O�]
+	//MORPH START - Added by SiRoB, Splitting Bar [O²]
 	CSplitterControl m_wndSplitterstat; //bzubzusplitstat
 	CSplitterControl m_wndSplitterstat_HL; //bzubzusplitstat
 	CSplitterControl m_wndSplitterstat_HR; //bzubzusplitstat
@@ -158,7 +158,7 @@ protected:
 	void DoResize_HR(int delta);
 	void initCSize();
 	virtual LRESULT DefWindowProc(UINT message, WPARAM wParam, LPARAM lParam);
-	//MORPH END   - Added by SiRoB, Splitting Bar [O�]
+	//MORPH END   - Added by SiRoB, Splitting Bar [O²]
 	virtual BOOL PreTranslateMessage(MSG *pMsg);
 
 	bool	m_bTreepaneHidden;

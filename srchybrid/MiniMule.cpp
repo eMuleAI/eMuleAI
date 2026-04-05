@@ -109,6 +109,7 @@ CMiniMule::CMiniMule(CWnd *pParent /*=NULL*/)
 	, m_iInInitDialog()
 	, m_iInCallback()
 	, m_bDestroyAfterInitDialog()
+	, m_bDestroyAfterCallback()
 	, m_bResolveImages(true)
 	, m_bRestoreMainWnd()
 	, m_uAutoCloseTimer()
@@ -208,12 +209,12 @@ CString CreateFilePathUrl(LPCTSTR pszFilePath, int nProtocol)
 	// an encoded URL. Basically this works, but if the file path contains special characters
 	// like e.g. Umlaute, the IE control can not open the encoded URL.
 	//
-	// The file path "D:\dir_�#,.-_���#'+~�`�}=])[({&%$!^�\Kopie von ### MiniMule3CyanSnow.htm"
+	// The file path "D:\dir_ä#,.-_öüÄ#'+~Ö`Ü}=])[({&%$!^ß\Kopie von ### MiniMule3CyanSnow.htm"
 	// can get opened successfully by the IE control *without* using any URL encoding.
 	//
 	// Though, regardless of using 'AtlCanonicalizeUrl' or not, there is still one special
 	// case where the IE control can not open the URL. If the file starts with something like
-	//	"c:\#dir\emule.exe". For any unknown reason the sequence "c:\#" causes troubles for
+	//	"c:\#dir\eMuleAI.exe". For any unknown reason the sequence "c:\#" causes troubles for
 	// the IE control. It does not help to escape that sequence. It always fails.
 	//
 	LPCTSTR pszProtocol;
@@ -741,7 +742,9 @@ HRESULT CMiniMule::OnOptions(IHTMLElement* /*pElement*/)
 		KillAutoCloseTimer();
 		if (theApp.emuledlg->ShowPreferences() == -1)
 			MessageBeep(MB_OK);
-		if (GetAutoClose())
+		if (GetDestroyAfterCallback() || !thePrefs.GetEnableMiniMule())
+			PostMessage(WM_CLOSE);
+		else if (GetAutoClose())
 			CreateAutoCloseTimer();
 	}
 	return S_OK;

@@ -199,21 +199,24 @@ void CServerConnect::ConnectionEstablished(CServerSocket *sender)
 
 		// eMule AI: By February 2026, development of the closed-source Lugdunum server had already been discontinued for quite some time. Additionally, open-source
 		// eNode server development also appears to have ceased years ago, even before its final release. However, its developer, who is also the developer of
-		// IronMule Mod which is based on David Xanatos�s IPv6 code, incorporated this part into IronMule with the intention of supporting it on eNode�s server side.
+		// IronMule Mod which is based on David Xanatos's IPv6 code, incorporated this part into IronMule with the intention of supporting it on eNode's server side.
 		// So I decided to include this section with the hope that someone will continue the development of eNode or create another open - source e-server application
-		// that can utilize this feature in its server side source code.�
+		// that can utilize this feature in its server side source code.
 		if (!theApp.GetPublicIPv6().IsNull()) {
 			CTag tagIPv6(CT_MOD_IP_V6, theApp.GetPublicIPv6().Data());
 			tagIPv6.WriteTagToFile(data);
 		}
 
-		uint32 dwCryptFlags = 0;
-		if (thePrefs.IsCryptLayerEnabled())
-			dwCryptFlags |= SRVCAP_SUPPORTCRYPT;
-		if (thePrefs.IsCryptLayerPreferred())
-			dwCryptFlags |= SRVCAP_REQUESTCRYPT;
-		if (thePrefs.IsCryptLayerRequired())
-			dwCryptFlags |= SRVCAP_REQUIRECRYPT;
+			uint32 dwCryptFlags = 0;
+			if (thePrefs.IsCryptLayerEnabled())
+				dwCryptFlags |= SRVCAP_SUPPORTCRYPT;
+			// Keep server callback negotiation conservative when the main server socket is already obfuscated.
+			if (!sender->IsServerCryptEnabledConnection()) {
+				if (thePrefs.IsCryptLayerPreferred())
+					dwCryptFlags |= SRVCAP_REQUESTCRYPT;
+				if (thePrefs.IsCryptLayerRequired())
+					dwCryptFlags |= SRVCAP_REQUIRECRYPT;
+			}
 
 		CTag tagFlags(CT_SERVER_FLAGS, SRVCAP_ZLIB | SRVCAP_NEWTAGS | SRVCAP_LARGEFILES | SRVCAP_UNICODE | dwCryptFlags);
 		tagFlags.WriteTagToFile(data);

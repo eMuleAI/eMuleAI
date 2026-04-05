@@ -17,6 +17,7 @@
 //Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 #include "stdafx.h"
 #include "ToolTipCtrlX.h"
+#include "MuleListCtrl.h"
 #include "OtherFunctions.h"
 #include "emule.h"
 #include "log.h"
@@ -33,6 +34,8 @@ static char THIS_FILE[] = __FILE__;
 
 namespace
 {
+	constexpr UINT_PTR TOOLTIPCTRLX_DEFERRED_HIDE_TIMER_ID = 0x54545831;
+
 	struct TooltipHeaderIcon
 	{
 		CImageList* pImageList;
@@ -165,16 +168,27 @@ IMPLEMENT_DYNAMIC(CToolTipCtrlX, CToolTipCtrl)
 BEGIN_MESSAGE_MAP(CToolTipCtrlX, CToolTipCtrl)
 	ON_WM_SYSCOLORCHANGE()
 	ON_WM_SETTINGCHANGE()
+	ON_WM_TIMER()
 	ON_NOTIFY_REFLECT(NM_CUSTOMDRAW, OnNmCustomDraw)
 	ON_NOTIFY_REFLECT(NM_THEMECHANGED, OnNmThemeChanged)
+	ON_NOTIFY_REFLECT_EX(TTN_POP, OnTTPop)
 	ON_NOTIFY_REFLECT_EX(TTN_SHOW, OnTTShow)
 END_MESSAGE_MAP()
 
 CToolTipCtrlX::CToolTipCtrlX()
 	: m_bCol1Bold(true)
+	, m_dwMinimumVisibleTime(0)
+	, m_dwVisibleSinceTick(0)
+	, m_bDeferVisibleUpdates(true)
+	, m_bHasDeferredTextUpdate(false)
+	, m_bDeferredTextUsesCallback(false)
 	, m_bShowFileIcon()
 	, m_bOwnsWindow(false)
+	, m_bProcessingDeferredMessage(false)
+	, m_uDeferredHideMessage(0)
 {
+	memset(&m_tiDeferredTextUpdate, 0, sizeof(m_tiDeferredTextUpdate));
+	memset(&m_tiDeferredHide, 0, sizeof(m_tiDeferredHide));
 	ResetSystemMetrics();
 	m_dwCol1DrawTextFlags = m_dwCol2DrawTextFlags = DT_LEFT | DFLT_DRAWTEXT_FLAGS;
 }
@@ -215,6 +229,10 @@ BOOL CToolTipCtrlX::SubclassWindow(HWND hWnd)
 
 void CToolTipCtrlX::CleanupWindow()
 {
+	ResetDeferredHide();
+	ResetDeferredTextUpdate();
+	m_dwVisibleSinceTick = 0;
+
 	HWND hWnd = GetSafeHwnd();
 	if (hWnd == NULL)
 		return;
@@ -231,6 +249,129 @@ void CToolTipCtrlX::CleanupWindow()
 	}
 
 	m_bOwnsWindow = false;
+}
+
+bool CToolTipCtrlX::IsTooltipVisible() const
+{
+	return (GetSafeHwnd() != NULL && ::IsWindowVisible(m_hWnd) != FALSE);
+}
+
+bool CToolTipCtrlX::TryGetCurrentToolInfo(TOOLINFO& ti) const
+{
+	memset(&ti, 0, sizeof(ti));
+	ti.cbSize = sizeof(ti);
+	return (::IsWindow(m_hWnd) && GetCurrentTool(&ti) != FALSE && ti.hwnd != NULL);
+}
+
+bool CToolTipCtrlX::IsSameTool(const TOOLINFO& left, const TOOLINFO& right)
+{
+	return left.hwnd == right.hwnd && left.uId == right.uId && ((left.uFlags & TTF_IDISHWND) == (right.uFlags & TTF_IDISHWND));
+}
+
+void CToolTipCtrlX::ResetDeferredTextUpdate()
+{
+	memset(&m_tiDeferredTextUpdate, 0, sizeof(m_tiDeferredTextUpdate));
+	m_strDeferredTextUpdate.Empty();
+	m_bHasDeferredTextUpdate = false;
+	m_bDeferredTextUsesCallback = false;
+}
+
+void CToolTipCtrlX::StoreDeferredTextUpdate(const TOOLINFO& ti)
+{
+	m_tiDeferredTextUpdate = ti;
+	m_tiDeferredTextUpdate.lpszText = NULL;
+	m_bDeferredTextUsesCallback = (ti.lpszText == LPSTR_TEXTCALLBACK);
+	if (m_bDeferredTextUsesCallback)
+		m_strDeferredTextUpdate.Empty();
+	else
+		m_strDeferredTextUpdate = ti.lpszText != NULL ? ti.lpszText : EMPTY;
+	m_bHasDeferredTextUpdate = true;
+}
+
+void CToolTipCtrlX::ApplyDeferredTextUpdate()
+{
+	if (!m_bHasDeferredTextUpdate || !::IsWindow(m_hWnd))
+		return;
+
+	TOOLINFO ti = m_tiDeferredTextUpdate;
+	ti.lpszText = m_bDeferredTextUsesCallback ? LPSTR_TEXTCALLBACK : const_cast<LPTSTR>((LPCTSTR)m_strDeferredTextUpdate);
+
+	m_bProcessingDeferredMessage = true;
+	__super::WindowProc(TTM_UPDATETIPTEXT, 0, reinterpret_cast<LPARAM>(&ti));
+	m_bProcessingDeferredMessage = false;
+
+	ResetDeferredTextUpdate();
+}
+
+void CToolTipCtrlX::ResetDeferredHide()
+{
+	if (::IsWindow(m_hWnd))
+		KillTimer(TOOLTIPCTRLX_DEFERRED_HIDE_TIMER_ID);
+	memset(&m_tiDeferredHide, 0, sizeof(m_tiDeferredHide));
+	m_uDeferredHideMessage = 0;
+}
+
+void CToolTipCtrlX::ScheduleDeferredHide(UINT uMessage, const TOOLINFO* pToolInfo, DWORD dwDelay)
+{
+	ResetDeferredHide();
+	m_uDeferredHideMessage = uMessage;
+	if (pToolInfo != NULL)
+		m_tiDeferredHide = *pToolInfo;
+	if (::IsWindow(m_hWnd))
+		SetTimer(TOOLTIPCTRLX_DEFERRED_HIDE_TIMER_ID, dwDelay > 0 ? dwDelay : 1, NULL);
+}
+
+DWORD CToolTipCtrlX::GetRemainingMinimumVisibleTime() const
+{
+	if (m_dwMinimumVisibleTime == 0 || m_dwVisibleSinceTick == 0)
+		return 0;
+
+	const DWORD dwElapsed = GetTickCount() - m_dwVisibleSinceTick;
+	return (dwElapsed >= m_dwMinimumVisibleTime) ? 0 : (m_dwMinimumVisibleTime - dwElapsed);
+}
+
+LRESULT CToolTipCtrlX::WindowProc(UINT message, WPARAM wParam, LPARAM lParam)
+{
+	if (!m_bProcessingDeferredMessage) {
+		if (message == TTM_TRACKACTIVATE && wParam != FALSE)
+			ResetDeferredHide();
+
+		if (message == TTM_UPDATETIPTEXT && m_bDeferVisibleUpdates && IsTooltipVisible()) {
+			const TOOLINFO* pToolInfo = reinterpret_cast<const TOOLINFO*>(lParam);
+			TOOLINFO tiCurrent = {};
+			if (pToolInfo != NULL && TryGetCurrentToolInfo(tiCurrent) && IsSameTool(*pToolInfo, tiCurrent)) {
+				StoreDeferredTextUpdate(*pToolInfo);
+				return 0;
+			}
+		}
+
+		if (message == TTM_UPDATE && m_bHasDeferredTextUpdate && IsTooltipVisible())
+			return 0;
+
+		if ((message == TTM_POP || (message == TTM_TRACKACTIVATE && wParam == FALSE)) && IsTooltipVisible()) {
+			const DWORD dwDelay = GetRemainingMinimumVisibleTime();
+			if (dwDelay > 0) {
+				const TOOLINFO* pToolInfo = reinterpret_cast<const TOOLINFO*>(lParam);
+				ScheduleDeferredHide(message, pToolInfo, dwDelay);
+				return 0;
+			}
+		}
+	}
+
+	const LRESULT lResult = __super::WindowProc(message, wParam, lParam);
+
+	if (!m_bProcessingDeferredMessage
+		&& m_bHasDeferredTextUpdate
+		&& !IsTooltipVisible()
+		&& (message == TTM_POP
+			|| (message == TTM_TRACKACTIVATE && wParam == FALSE)
+			|| (message == WM_SHOWWINDOW && wParam == FALSE)
+			|| message == WM_WINDOWPOSCHANGED))
+	{
+		ApplyDeferredTextUpdate();
+	}
+
+	return lResult;
 }
 
 void CToolTipCtrlX::ApplyTooltipStyles()
@@ -641,6 +782,19 @@ void EnsureWindowVisible(const RECT &rcScreen, RECT &rc)
 
 BOOL CToolTipCtrlX::OnTTShow(LPNMHDR pNMHDR, LRESULT *pResult)
 {
+	ResetDeferredHide();
+	ApplyDeferredTextUpdate();
+	m_dwVisibleSinceTick = GetTickCount();
+
+	CWnd* pParentWnd = GetParent();
+	if (pParentWnd != NULL && pParentWnd->IsKindOf(RUNTIME_CLASS(CMuleListCtrl))) {
+		CMuleListCtrl* pListCtrl = static_cast<CMuleListCtrl*>(pParentWnd);
+		CToolTipCtrl* pInfoTip = pListCtrl->GetToolTips();
+		if (pInfoTip != NULL && pInfoTip->GetSafeHwnd() == m_hWnd) {
+			if (pListCtrl->HandleNativeInfoTipShow(m_hWnd, pResult))
+				return TRUE;
+		}
+	}
 
 	// Win98/Win2000: The only chance to resize a tooltip window is to do it within the TTN_SHOW notification.
 	if (theApp.m_ullComCtrlVer <= MAKEDLLVERULL(5, 81, 0, 0)) {
@@ -671,6 +825,14 @@ BOOL CToolTipCtrlX::OnTTShow(LPNMHDR pNMHDR, LRESULT *pResult)
 	// Thus it is important that we tell MFC (not the Windows API in that case) to further route this message.
 	*pResult = FALSE;	// Windows API: Perform default positioning
 	return FALSE;		// MFC API.     Perform further routing of this message (to the subclassed tooltip control)
+}
+
+BOOL CToolTipCtrlX::OnTTPop(LPNMHDR, LRESULT *pResult)
+{
+	ResetDeferredHide();
+	m_dwVisibleSinceTick = 0;
+	*pResult = 0;
+	return FALSE;
 }
 
 void CToolTipCtrlX::OnNmCustomDraw(LPNMHDR pNMHDR, LRESULT *pResult)
@@ -719,6 +881,28 @@ void CToolTipCtrlX::OnNmCustomDraw(LPNMHDR pNMHDR, LRESULT *pResult)
 		}
 	}
 	*pResult = CDRF_DODEFAULT;
+}
+
+void CToolTipCtrlX::OnTimer(UINT_PTR nIDEvent)
+{
+	if (nIDEvent == TOOLTIPCTRLX_DEFERRED_HIDE_TIMER_ID) {
+		const UINT uDeferredHideMessage = m_uDeferredHideMessage;
+		const TOOLINFO tiDeferredHide = m_tiDeferredHide;
+		ResetDeferredHide();
+
+		m_bProcessingDeferredMessage = true;
+		if (uDeferredHideMessage == TTM_TRACKACTIVATE)
+			__super::WindowProc(TTM_TRACKACTIVATE, FALSE, reinterpret_cast<LPARAM>(&tiDeferredHide));
+		else if (uDeferredHideMessage == TTM_POP)
+			__super::WindowProc(TTM_POP, 0, 0);
+		m_bProcessingDeferredMessage = false;
+
+		if (!IsTooltipVisible())
+			ApplyDeferredTextUpdate();
+		return;
+	}
+
+	CToolTipCtrl::OnTimer(nIDEvent);
 }
 
 void EnsureMfcThreadToolTipCtrlX(CWnd *pOwner)

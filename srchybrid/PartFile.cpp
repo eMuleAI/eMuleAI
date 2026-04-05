@@ -345,10 +345,12 @@ void CPartFile::Init()
 
 CPartFile::~CPartFile()
 {
-	// Barry - Ensure all buffered data is written
+	// Barry - Ensure all buffered data is written unless shutdown already stopped the writer thread.
 	if ((HANDLE)m_hpartfile != INVALID_HANDLE_VALUE) {
-		// commit file and directory entry
-		FlushBuffer(false, true);
+		const CPartFileWriteThread* pThread = theApp.m_pPartFileWriteThread;
+		const bool bShutdownWithoutWriteThread = theApp.IsClosing() && (!pThread || !pThread->IsRunning());
+		if (!bShutdownWithoutWriteThread)
+			FlushBuffer(false, true);
 		CPartFileWriteThread::RemFile(this);
 		m_hpartfile.Close();
 		// Update met file (with the current directory entry)
@@ -1158,7 +1160,7 @@ EPartFileLoadResult CPartFile::LoadPartFile(LPCTSTR in_directory, LPCTSTR in_fil
 			AddGap(m_hpartfile.GetLength(), (uint64)m_nFileSize - 1);
 		else if (m_hpartfile.GetLength() > (uint64)m_nFileSize) {
 			// Goes both ways - Partfile should never be too large
-			TRACE(_T("Partfile \"%s\" is too large! Truncating %I64u bytes.\n"), (LPCTSTR)GetFileName(), m_hpartfile.GetLength() - (uint64)m_nFileSize);
+			AddDebugLogLine(DLP_LOW, false, _T("Partfile \"%s\" is too large! Truncating %I64u bytes."), (LPCTSTR)EscPercent(GetFileName()), m_hpartfile.GetLength() - (uint64)m_nFileSize);
 			m_hpartfile.SetLength((uint64)m_nFileSize);
 		}
 		// SLUGFILLER: SafeHash
@@ -1245,6 +1247,9 @@ bool CPartFile::SavePartFile(bool bDontOverrideBak)
 	if (!theApp.IsClosing()) // Except app is closing, we'll do all the jobs inside this function without sending them to the thread. Otherwise we'll redirect the call to SavePartFileThreaded.
 		return SavePartFileThreaded(bDontOverrideBak);
 
+	if (!theApp.CanWritePartMetFiles(GetTmpPath()))
+		return false;
+
 	// search part file
 	const CString &searchpath(RemoveFileExtension(m_fullname));
 	CFileFind ff;
@@ -1278,6 +1283,7 @@ bool CPartFile::SavePartFile(bool bDontOverrideBak)
 		CString s;
 		s.Format(GetResString(_T("ERR_SAVEMET")), (LPCTSTR)m_partmetfilename, (LPCTSTR)GetFileName());
 		LogError(_T("%s%s"), (LPCTSTR)EscPercent(s), (LPCTSTR)EscPercent(CExceptionStrDash(fex)));
+		(void)theApp.CanWritePartMetFiles(GetTmpPath(), true);
 		return false;
 	}
 	::setvbuf(file.m_pStream, NULL, _IOFBF, 16384);
@@ -1529,29 +1535,35 @@ bool CPartFile::SavePartFile(bool bDontOverrideBak)
 		// need to close the file before removing it.
 		file.Abort(); //Call 'Abort' instead of 'Close' to avoid ASSERT.
 		(void)_tremove(strTmpFile);
+		(void)theApp.CanWritePartMetFiles(GetTmpPath(), true);
 		return false;
 	}
 
 	// after successfully writing the temporary part.met file...
-	const CString ldst = PreparePathForWin32LongPath(m_fullname);
-	::DeleteFile(ldst);
-	const CString lsrc = PreparePathForWin32LongPath(strTmpFile);
-
-	if (!MoveFileEx(lsrc, ldst, MOVEFILE_REPLACE_EXISTING)) {
+	DWORD dwReplaceError = ERROR_SUCCESS;
+	if (!ReplaceFileAtomically(strTmpFile, m_fullname, &dwReplaceError)) {
+		(void)theApp.CanWritePartMetFiles(GetTmpPath(), true);
 		if (thePrefs.GetVerbose())
-			DebugLogError(_T("Failed to move temporary part.met file \"%s\" to \"%s\" - %s"), (LPCTSTR)EscPercent(strTmpFile), (LPCTSTR)EscPercent(m_fullname), (LPCTSTR)EscPercent(GetErrorMessage(::GetLastError())));
+			DebugLogError(_T("Failed to move temporary part.met file \"%s\" to \"%s\" - %s"),
+				(LPCTSTR)EscPercent(strTmpFile), (LPCTSTR)EscPercent(m_fullname), (LPCTSTR)EscPercent(GetErrorMessage(dwReplaceError)));
 		CString strError;
 		strError.Format(GetResString(_T("ERR_SAVEMET")), (LPCTSTR)EscPercent(m_partmetfilename), (LPCTSTR)EscPercent(GetFileName()));
-		strError.AppendFormat(_T(" - %s"), (LPCTSTR)EscPercent(GetErrorMessage(::GetLastError())));
+		strError.AppendFormat(_T(" - %s"), (LPCTSTR)EscPercent(GetErrorMessage(dwReplaceError)));
 		LogError(_T("%s"), (LPCTSTR)strError);
 		return false;
 	}
 
 
 	// create a backup of the successfully written part.met file
-	if (!::CopyFile(PreparePathForWin32LongPath(m_fullname), PreparePathForWin32LongPath(m_fullname + PARTMET_BAK_EXT), static_cast<BOOL>(bDontOverrideBak)))
-		if (!bDontOverrideBak)
-			DebugLogError(_T("Failed to create backup of %s (%s) - %s"), (LPCTSTR)EscPercent(m_fullname), (LPCTSTR)EscPercent(GetFileName()), (LPCTSTR)EscPercent(GetErrorMessage(::GetLastError())));
+	const CString strBakFile(m_fullname + PARTMET_BAK_EXT);
+	const CString strBakTmpFile(strBakFile + PARTMET_TMP_EXT);
+	DWORD dwBakError = ERROR_SUCCESS;
+	if (!CopyFileToTempAndReplace(m_fullname, strBakFile, strBakTmpFile, bDontOverrideBak, &dwBakError)) {
+		if (!bDontOverrideBak && theApp.CanWritePartMetFiles(GetTmpPath(), true)) {
+			DebugLogError(_T("Failed to create backup of %s (%s) - %s"),
+				(LPCTSTR)EscPercent(m_fullname), (LPCTSTR)EscPercent(GetFileName()), (LPCTSTR)EscPercent(GetErrorMessage(dwBakError)));
+		}
+	}
 
 	return true;
 }
@@ -1564,6 +1576,9 @@ bool CPartFile::SavePartFileThreaded(bool bDontOverrideBak)
 	sSavePartFileLock.Lock(); // Lock is free, lets lock it and do the job.
 
 	if (m_bFlushPartMetInQueue) // We'll submit a command to the thread only if there's no flush part met command in queue
+		return false;
+
+	if (!theApp.CanWritePartMetFiles(GetTmpPath()))
 		return false;
 
 	// Clean up previous tags 
@@ -3369,7 +3384,7 @@ void CPartFile::PerformFileCompleteEnd(DWORD dwResult)
 		thePrefs.Add2DownSessionCompletedFiles();
 		thePrefs.SaveCompletedDownloadsStat();
 
-		// 05-J�n-2004 [bc]: ed2k and Kad are already full of totally wrong and/or not properly
+		// 05-Jun-2004 [bc]: ed2k and Kad are already full of totally wrong and/or not properly
 		// attached meta data. Take the chance to clean any available meta data tags and provide
 		// only tags which were determined by us.
 		UpdateMetaDataTags();
@@ -3675,7 +3690,6 @@ void CPartFile::StopFile(bool bCancel)
 
 	if (!bCancel)
 		FlushBuffer();
-
 
 	UpdateDisplayedInfo(true);
 }
@@ -4652,6 +4666,7 @@ uint32 CPartFile::WriteToBuffer(uint64 transize, const BYTE *data, uint64 start,
 	return static_cast<uint32>(lenData);
 }
 
+
 void CPartFile::FlushBuffer(bool bForceICH, bool bNoAICH)
 {
 	m_nLastBufferFlushTime = ::GetTickCount();
@@ -4662,6 +4677,7 @@ void CPartFile::FlushBuffer(bool bForceICH, bool bNoAICH)
 	try {
 		ULONGLONG cursize = m_hpartfile.GetLength();
 		bool bCheckDiskspace = thePrefs.IsCheckDiskspaceEnabled() && thePrefs.GetMinFreeDiskSpace() && time(NULL) >= theApp.m_tLastDiskSpaceCheckTime + thePrefs.GetFreeDiskSpaceCheckPeriod();
+		CPartFileWriteThread *pThread = theApp.m_pPartFileWriteThread;
 		//Previously full file allocation was performed in a special thread. That thread was writing
 		// 1 byte at the end of file. Overlapped I/O is already in a separate thread, and synchronising
 		// 3 threads could be fun. This fun may be avoided by using overlapped I/O for allocation too,
@@ -4711,7 +4727,6 @@ void CPartFile::FlushBuffer(bool bForceICH, bool bNoAICH)
 			m_iAllocationSize = newsize;
 
 		//pass data to the writing thread
-		CPartFileWriteThread *pThread = theApp.m_pPartFileWriteThread;
 		if (pThread && pThread->IsRunning()) {
 			bool bLocked = false;
 			for (POSITION pos = m_BufferedData_list.GetHeadPosition(); pos != NULL;) {
@@ -5256,7 +5271,7 @@ const bool CPartFile::GetNextRequestedBlockStd(CUpDownClient* sender, Requested_
 	//      completed before starting to download an other one.
 	//
 	// The frequency criterion defines 4 grades of availability: very rare, rare, almost rare,
-	// and common. Inside each grade, the criteria have a specific �weight�, used
+	// and common. Inside each grade, the criteria have a specific 'weight', used
 	// to calculate the priority of chunks. The chunk(s) with the highest
 	// priority (highest=0, lowest=0xffff) is/are selected first.
 	//

@@ -84,12 +84,13 @@ void CUploadListCtrl::Init()
 		tooltip->SetDelayTime(TTDT_INITIAL, SEC2MS(thePrefs.GetToolTipDelay()));
 	}
 
+	// Alignment rule: left for text, dates, and status labels; right for sizes, rates, counts, durations, and percentages.
 	InsertColumn(0,	EMPTY,	LVCFMT_LEFT, DFLT_CLIENTNAME_COL_WIDTH);	//QL_USERNAME
 	InsertColumn(1,	EMPTY,	LVCFMT_LEFT, DFLT_FILENAME_COL_WIDTH);		//FILE
 	InsertColumn(2,	EMPTY,	LVCFMT_RIGHT,DFLT_DATARATE_COL_WIDTH);		//DL_SPEED
 	InsertColumn(3,	EMPTY,	LVCFMT_RIGHT,DFLT_DATARATE_COL_WIDTH);		//DL_TRANSF
-	InsertColumn(4,	EMPTY,	LVCFMT_LEFT, 60);							//WAITED
-	InsertColumn(5,	EMPTY,	LVCFMT_LEFT, 80);							//UPLOADTIME
+	InsertColumn(4,	EMPTY,	LVCFMT_RIGHT, 60);						//WAITED
+	InsertColumn(5,	EMPTY,	LVCFMT_RIGHT, 80);						//UPLOADTIME
 	InsertColumn(6,	EMPTY,	LVCFMT_LEFT, 100);							//STATUS
 	InsertColumn(7,	EMPTY,	LVCFMT_LEFT, DFLT_PARTSTATUS_COL_WIDTH);	//UPSTATUS
 	InsertColumn(8, EMPTY, LVCFMT_LEFT, 90);
@@ -97,15 +98,15 @@ void CUploadListCtrl::Init()
 	InsertColumn(10, EMPTY, LVCFMT_LEFT, 100);
 	InsertColumn(11, EMPTY, LVCFMT_LEFT, 100, 8);
 	InsertColumn(12, EMPTY, LVCFMT_LEFT, 100);
-	InsertColumn(13, EMPTY, LVCFMT_LEFT, 80);
-	InsertColumn(14, EMPTY, LVCFMT_LEFT, 100);
+	InsertColumn(13, EMPTY, LVCFMT_RIGHT, 80);
+	InsertColumn(14, EMPTY, LVCFMT_RIGHT, 100);
 	InsertColumn(15, EMPTY, LVCFMT_LEFT, 100);
 	InsertColumn(16, EMPTY, LVCFMT_LEFT, 100);
 	InsertColumn(17, EMPTY, LVCFMT_LEFT, 100);
 	InsertColumn(18, EMPTY, LVCFMT_LEFT, 100);
-	InsertColumn(19, EMPTY, LVCFMT_LEFT, 100);
-	InsertColumn(20, EMPTY, LVCFMT_LEFT, 100);
-	InsertColumn(21, EMPTY, LVCFMT_LEFT, 60);
+	InsertColumn(19, EMPTY, LVCFMT_RIGHT, 100);
+	InsertColumn(20, EMPTY, LVCFMT_RIGHT, 100);
+	InsertColumn(21, EMPTY, LVCFMT_RIGHT, 60);
 	InsertColumn(22, EMPTY, LVCFMT_LEFT, 100);
 	InsertColumn(23, EMPTY, LVCFMT_RIGHT, 60);
 	InsertColumn(24, EMPTY, LVCFMT_RIGHT, 60);
@@ -389,38 +390,34 @@ void CUploadListCtrl::OnLvnGetDispInfo(LPNMHDR pNMHDR, LRESULT *pResult)
 	*pResult = 0;
 }
 
+bool CUploadListCtrl::GetPersistentInfoTipText(const SPersistentInfoTipContext& context, CString& strText)
+{
+	const CUpDownClient* client = reinterpret_cast<CUpDownClient*>(GetItemData(context.iItem));
+	if (client == NULL)
+		return false;
+
+	strText.Format(GetResString(_T("USERINFO")), client->GetUserName());
+	const CKnownFile* file = theApp.sharedfiles->GetFileByID(client->GetUploadFileID());
+	if (file) {
+		strText.AppendFormat(_T("%s %s\n"), (LPCTSTR)GetResString(_T("SF_REQUESTED")), (LPCTSTR)file->GetFileName());
+		strText.AppendFormat(GetResString(_T("FILESTATS_SESSION")) + GetResString(_T("FILESTATS_TOTAL")),
+			file->statistic.GetAccepts(), file->statistic.GetRequests(), (LPCTSTR)CastItoXBytes(file->statistic.GetTransferred()),
+			file->statistic.GetAllTimeAccepts(), file->statistic.GetAllTimeRequests(), (LPCTSTR)CastItoXBytes(file->statistic.GetAllTimeTransferred()));
+	} else
+		strText += GetResString(_T("REQ_UNKNOWNFILE"));
+
+	strText += TOOLTIP_AUTOFORMAT_SUFFIX_CH;
+	return true;
+}
+
+int CUploadListCtrl::GetDefaultPersistentInfoTipExtraLeftPadding(const SPersistentInfoTipContext& context) const
+{
+	return (context.iSubItem == 11 && theApp.geolite2->ShowCountryFlag()) ? 22 + sm_iIconOffset : 0;
+}
+
 void CUploadListCtrl::OnLvnGetInfoTip(LPNMHDR pNMHDR, LRESULT *pResult)
 {
-	LPNMLVGETINFOTIP pGetInfoTip = reinterpret_cast<LPNMLVGETINFOTIP>(pNMHDR);
-	LVHITTESTINFO hti;
-	if (pGetInfoTip->iSubItem == 0 && ::GetCursorPos(&hti.pt)) {
-		ScreenToClient(&hti.pt);
-		if (SubItemHitTest(&hti) == -1 || hti.iItem != pGetInfoTip->iItem || hti.iSubItem != 0) {
-			// don't show the default label tip for the main item, if the mouse is not over the main item
-			if ((pGetInfoTip->dwFlags & LVGIT_UNFOLDED) == 0 && pGetInfoTip->cchTextMax > 0 && pGetInfoTip->pszText)
-				pGetInfoTip->pszText[0] = _T('\0');
-			return;
-		}
-
-		const CUpDownClient *client = reinterpret_cast<CUpDownClient*>(GetItemData(pGetInfoTip->iItem));
-		if (client && pGetInfoTip->pszText && pGetInfoTip->cchTextMax > 0) {
-			CString strInfo;
-			strInfo.Format(GetResString(_T("USERINFO")), client->GetUserName());
-			const CKnownFile *file = theApp.sharedfiles->GetFileByID(client->GetUploadFileID());
-			if (file) {
-				strInfo.AppendFormat(_T("%s %s\n"), (LPCTSTR)GetResString(_T("SF_REQUESTED")), (LPCTSTR)file->GetFileName());
-				strInfo.AppendFormat(GetResString(_T("FILESTATS_SESSION")) + GetResString(_T("FILESTATS_TOTAL")),
-					file->statistic.GetAccepts(), file->statistic.GetRequests(), (LPCTSTR)CastItoXBytes(file->statistic.GetTransferred()),
-					file->statistic.GetAllTimeAccepts(), file->statistic.GetAllTimeRequests(), (LPCTSTR)CastItoXBytes(file->statistic.GetAllTimeTransferred()));
-			} else
-				strInfo += GetResString(_T("REQ_UNKNOWNFILE"));
-
-			strInfo += TOOLTIP_AUTOFORMAT_SUFFIX_CH;
-			_tcsncpy(pGetInfoTip->pszText, strInfo, pGetInfoTip->cchTextMax);
-			pGetInfoTip->pszText[pGetInfoTip->cchTextMax - 1] = _T('\0');
-		}
-	}
-	*pResult = 0;
+	CMuleListCtrl::OnLvnGetInfoTip(pNMHDR, pResult);
 }
 
 void CUploadListCtrl::OnLvnColumnClick(LPNMHDR pNMHDR, LRESULT *pResult)

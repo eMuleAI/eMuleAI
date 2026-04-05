@@ -72,47 +72,47 @@ History: PJN / 21-04-1999 Added full support for enabling / disabling all the it
 						  5. Custom draw support for color browser items is now configurable via an additional
 						  parameter of the AddColorBrowser method
 		 PJN / 24-09-2002 1. Updated documentation which incorrectly stated that the parent of a check box item
-						  must be a group item as inserted with InsertGroup. Thanks to K�gl Christoph for
+						  must be a group item as inserted with InsertGroup. Thanks to Kügl Christoph for
 						  spotting this.
 						  2. Fixed an issue with "IMPLEMENT_DYNAMIC(CDateTimeCtrl..." not being declared properly.
 						  Some users reported that it worked OK, while others said that my fix was causing link
-						  problems. The problem should be sorted out for good now. Thanks to K�gl Christoph for
+						  problems. The problem should be sorted out for good now. Thanks to Kügl Christoph for
 						  reporting this.
 						  3. Renamed the SetImageListToUse function to "SetImageListResourceIDToUse".
 						  4. Provided a GetImageListResourceIDToUse function to match up with the Set function.
 						  5. Provided a method to allow the user item data to be changed after an item has
 						  been created.
 						  6. Provided some documentation info how to safely use item data in the control.
-						  Thanks to K�gl Christoph for reporting this.
+						  Thanks to Kügl Christoph for reporting this.
 						  7. Fixed a potential memory leak in AddComboBox if the function is invoked twice without
-						  an explicit delete of the item first. Thanks to K�gl Christoph for reporting this.
+						  an explicit delete of the item first. Thanks to Kügl Christoph for reporting this.
 						  8. Fixed some typos in the documentation. It incorrectly stated that the return type of
 						  member functions InsertGroup, InsertCheckBox, and InsertRadioButton is BOOL when in fact
-						  it is HTREEITEM.  Thanks to K�gl Christoph for reporting this.
-						  9. Improved the look of the disabled checked check button. Thanks to K�gl Christoph for
+						  it is HTREEITEM.  Thanks to Kügl Christoph for reporting this.
+						  9. Improved the look of the disabled checked check button. Thanks to Kügl Christoph for
 						  reporting this.
-						  10. Improved the look of the disabled radio button which is selected. Thanks to K�gl
+						  10. Improved the look of the disabled radio button which is selected. Thanks to Kügl
 						  Christoph for reporting this.
 		 PJN / 17-10-2002 1. Added a method to add an "Opaque Browser" to the Tree options control. An
 						  Opaque Browser is where the tree options control allows an end user specified
 						  structure to be edited by the tree options control without it explicitly
 						  knowing what it is editing.
-		 PJN / 25-10-2002 1. Updated the download to include the missing files OpaqueShow.cpp/h. Thanks to K�gl
+		 PJN / 25-10-2002 1. Updated the download to include the missing files OpaqueShow.cpp/h. Thanks to Kügl
 						  Christoph for reporting this.
 						  2. Made the class more const-correct. e.g. the Get... member functions are now const.
-						  Thanks to K�gl Christoph for reporting this. Also updated the documentation for this.
+						  Thanks to Kügl Christoph for reporting this. Also updated the documentation for this.
 						  3. Updated the documentation to refer to the "Opaque Browser" support.
 		 PJN / 28-10-2002 1. Fixed a bug where upon a combo losing focus it will also result in the associated
-						  button control would also be destroyed. Thanks to K�gl Christoph for reporting this
+						  button control would also be destroyed. Thanks to Kügl Christoph for reporting this
 						  problem. Fixed this bug should also fix an intermittent release bug which was occurring
 						  in this area.
-		 PJN / 30-10-2002 1. Made a number of other methods const. Thanks to K�gl Christoph for reporting this.
+		 PJN / 30-10-2002 1. Made a number of other methods const. Thanks to Kügl Christoph for reporting this.
 		 PJN / 15-11-2002 1. Now allows the Field Data separator i.e. ": " to be configured. Please note that the
 						  characters you pick should be avoided in the descriptive text you display for an item
 						  as it is used as the divider between the descriptive text and the actual data to be
-						  edited. Thanks to K�gl Christoph for this update.
+						  edited. Thanks to Kügl Christoph for this update.
 						  2. Fixed an access violation in CTreeOptionsCtrl::OnSelchanged when there is no selected
-						  item in the control. Thanks to K�gl Christoph for this update.
+						  item in the control. Thanks to Kügl Christoph for this update.
 		 PJN / 06-03-2003 1. Fixed a memory leak which can occur when the control is used in a property sheet.
 						  Thanks to David Rainey for reporting this problem.
 						  2. Fixed another memory leak in the destructor of the CTreeOptionsCtrl class when the

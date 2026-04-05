@@ -4,7 +4,6 @@
 #pragma once
 #include "MediaInfo.h"
 #include "ShareableFile.h"
-#include "id3/misc_support.h"
 
 class CKnownFile;
 struct SMediaInfo;
@@ -37,8 +36,6 @@ typedef enum MediaInfo_info_t
 	MediaInfo_Info_Max
 } MediaInfo_info_C;
 
-bool GetMediaInfo(const CShareableFile* pFile, SMediaInfo* mi);
-
 /////////////////////////////////////////////////////////////////////////////
 // CMediaInfoLib
 
@@ -53,14 +50,16 @@ public:
 	bool GetMediaInfo(const CShareableFile* pFile, SMediaInfo* mi);
 
 	// Expose getters for UI formatting needs
+	CString InfoGet(void* Handle, MediaInfo_stream_C StreamKind, int StreamNumber, LPCTSTR Parameter);
 	CString InfoGet(MediaInfo_stream_C StreamKind, int StreamNumber, LPCTSTR Parameter);
+	CString InfoGetNameText(void* Handle, MediaInfo_stream_C StreamKind, int StreamNumber, LPCTSTR Parameter);
+	CString InfoGetNameText(MediaInfo_stream_C StreamKind, int StreamNumber, LPCTSTR Parameter);
+	CString InfoGetI(void* Handle, MediaInfo_stream_C StreamKind, int StreamNumber, size_t Parameter, MediaInfo_info_C KindOfInfo);
 	CString InfoGetI(MediaInfo_stream_C StreamKind, int StreamNumber, size_t Parameter, MediaInfo_info_C KindOfInfo);
 
 protected:
 	// Static MediaInfoLib (C++ API) usage
 	CString Get(void* Handle, MediaInfo_stream_C StreamKind, int StreamNumber, LPCTSTR Parameter, MediaInfo_info_C KindOfInfo, MediaInfo_info_C KindOfSearch);
 	CString GetI(void* Handle, MediaInfo_stream_C StreamKind, size_t StreamNumber, size_t iParameter, MediaInfo_info_C KindOfInfo);
-	wchar_t* ID3_GetStringW(const ID3_Frame* frame, ID3_FieldID fldName, size_t nIndex);
-	wchar_t* ID3_GetStringW(const ID3_Frame* frame, ID3_FieldID fldName);
 	HANDLE m_handle;
 };

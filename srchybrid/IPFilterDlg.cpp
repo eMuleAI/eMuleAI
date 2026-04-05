@@ -49,6 +49,7 @@ enum EIPFilterCols
 	IPFILTER_COL_DESC
 };
 
+// Alignment rule: left for text, dates, and status labels; right for sizes, rates, counts, durations, and percentages.
 static LCX_COLUMN_INIT s_aColumns[] =
 {
 	{ IPFILTER_COL_START,	_T("Start"),		_T("IP_START"),	LVCFMT_LEFT,	-1, 0, ASCENDING,  NONE, _T("255.255.255.255") },

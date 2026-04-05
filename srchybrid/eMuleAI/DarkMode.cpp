@@ -330,18 +330,18 @@ void ApplyThemeToWindow(HWND hWnd, bool bForceRedraw, bool bForceWindowsTheme)
 		DWORD_PTR bbDT = 0;
 		if (!GetWindowSubclass(hWnd, DateTimeSubclassProc, /*uIdSubclass=*/1, &bbDT))
 			SetWindowSubclass(hWnd, DateTimeSubclassProc, /*uIdSubclass=*/1, /*dwRefData=*/0);
-	} else if (wcscmp(className, UPDOWN_CLASS) == 0) { // SpinButton on CTabCtrl pages (Win10 and lower)
+	} else if (wcscmp(className, UPDOWN_CLASS) == 0) { // SpinButton used by overflowing tab controls
 		HWND hParent = GetParent(hWnd);
 		if (hParent) {
 			wchar_t parentClass[256] = {};
-			GetClassName(hParent, parentClass, 255);
-			if (wcscmp(parentClass, WC_TABCONTROLW) == 0) { // Check if parent is of type CTabCtrl
-				if (thePrefs.GetWindowsVersion() <= _WINVER_10_) { // Check if OS version is Windows 10 or lower
-					SetWindowTheme(hWnd, L"", L""); // disable default themed arrows
-					DWORD_PTR bbSpin = 0;
-					if (!GetWindowSubclass(hWnd, SpinButtonSubclassProc, /*uIdSubclass=*/1, &bbSpin)) 
-						SetWindowSubclass(hWnd, SpinButtonSubclassProc, /*uIdSubclass=*/1, /*dwRefData=*/0);
-				}
+			GetClassName(hParent, parentClass, _countof(parentClass));
+			if (wcscmp(parentClass, WC_TABCONTROLW) == 0) {
+				// Use the custom painter on every supported Windows version because the stock dark theme
+				// can render inactive tab-scroll glyphs black until hover.
+				SetWindowTheme(hWnd, L"", L"");
+				DWORD_PTR bbSpin = 0;
+				if (!GetWindowSubclass(hWnd, SpinButtonSubclassProc, /*uIdSubclass=*/1, &bbSpin))
+					SetWindowSubclass(hWnd, SpinButtonSubclassProc, /*uIdSubclass=*/1, /*dwRefData=*/0);
 			}
 		}
 	}
@@ -489,8 +489,8 @@ COLORREF GetCustomSysColor(int nIndex, bool bForceDarkColor)
 		case COLOR_AUTO_BLACKLIST:			return RGB(255, 105, 180); // Lighter Pink
 		case COLOR_SPAM:					return RGB(255, 99, 71); // Lighter Red
 		case COLOR_SERVER_CONNECTED:		return RGB(173, 216, 255); // Light Blue
-		case COLOR_SERVER_FAILED:			return RGB(240, 240, 240); // Lightest Grey
-		case COLOR_SERVER_DEAD:				return RGB(200, 200, 200); // Lighter Grey
+		case COLOR_SERVER_FAILED:			return RGB(204, 204, 204); // Slightly dimmer grey reserved for failed servers
+		case COLOR_SERVER_DEAD:				return RGB(166, 166, 166); // Medium grey reserved for dead servers
 		case COLOR_PROGRESSBAR:				return RGB(70, 130, 180); // Steel Blue
 		case COLOR_SELECTEDTABTOPLINE:		return RGB(113, 96, 232); // Medium Slate Blue
 		case COLOR_TABBORDER:				return RGB(64, 64, 64); // Dark Slate Gray
@@ -520,8 +520,8 @@ COLORREF GetCustomSysColor(int nIndex, bool bForceDarkColor)
 		case COLOR_AUTO_BLACKLIST:			return RGB(255, 20, 147); // Pink
 		case COLOR_SPAM:					return RGB(255, 0, 0); // Red
 		case COLOR_SERVER_CONNECTED:		return RGB(32, 32, 255); // Blue
-		case COLOR_SERVER_FAILED:			return RGB(192, 192, 192); // Light Grey
-		case COLOR_SERVER_DEAD:				return RGB(128, 128, 128); // Grey
+		case COLOR_SERVER_FAILED:			return RGB(128, 128, 128); // Grey
+		case COLOR_SERVER_DEAD:				return RGB(192, 192, 192); // Light Grey
 		case COLOR_MENUXP_SIDEBAR_TEXT:		return RGB(255, 255, 255); // White
 		case COLOR_MENUXP_TITLE_TEXT:		return RGB(255, 255, 255); // White
 		case COLOR_MENUXP_SIDEBAR_GRADIENT_START:	return RGB(0, 0, 0); // Black
@@ -539,6 +539,16 @@ COLORREF GetCustomSysColor(int nIndex, bool bForceDarkColor)
 
 	// If not in dark mode, or no override needed, return default system color
 	return GetSysColor(nIndex);
+}
+
+COLORREF GetServerListTextColor(int nColorIndex, bool bSelected)
+{
+	COLORREF crText = GetCustomSysColor(nColorIndex);
+	if (IsDarkModeEnabled()) {
+		COLORREF crBackground = GetCustomSysColor(bSelected ? COLOR_HIGHLIGHT : COLOR_WINDOW);
+		EnsureReadableTextColors(crText, crBackground, GetCustomSysColor(bSelected ? COLOR_HIGHLIGHTTEXT : COLOR_WINDOWTEXT), crBackground);
+	}
+	return crText;
 }
 
 // Dark mode aware background painting. Falls back or defers as needed.

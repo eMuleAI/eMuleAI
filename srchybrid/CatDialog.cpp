@@ -191,6 +191,11 @@ void CCatDialog::OnBnClickedOk()
 		return;
 	}
 
+	const int iOldFilter = m_myCat->filter;
+	CString strTrimmedTitle(m_myCat->strTitle);
+	strTrimmedTitle.Trim();
+	const bool bSyncTitleWithFilter = strTrimmedTitle.IsEmpty() || strTrimmedTitle == _T("?") || strTrimmedTitle.CompareNoCase(thePrefs.GetCatFilterLabel(iOldFilter)) == 0;
+
 	GetDlgItemText(IDC_REGEXP, m_myCat->regexp);
 	if (m_myCat->regexp.GetLength() > 0) {
 		if (!IsRegExpValid(m_myCat->regexp)) {
@@ -205,6 +210,9 @@ void CCatDialog::OnBnClickedOk()
 		// deactivate regexp
 		m_myCat->filter = 0;
 	}
+
+	if (bSyncTitleWithFilter && iOldFilter != m_myCat->filter)
+		m_myCat->strTitle = thePrefs.GetCatFilterLabel(m_myCat->filter);
 
 	theApp.emuledlg->transferwnd->GetDownloadList()->Invalidate();
 

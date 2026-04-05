@@ -189,6 +189,7 @@ public:
 protected:
 	WINDOWPLACEMENT m_wpFirstRestore;
 	HICON			m_hIcon;
+	HICON			m_hIconSmall;
 	HICON			m_connicons[9];
 	HICON			m_contactIcons[5];
 	HICON			transicons[4];
@@ -275,6 +276,7 @@ protected:
 	void ShowToolPopup(bool toolsonly = false);
 	void ShowEmuleAIPopup();
 	void SetAllIcons();
+	void ApplyMainWindowIcons();
 	bool CanClose();
 	int MapWindowToToolbarButton(CWnd *pWnd) const;
 	CWnd* MapToolbarButtonToWindow(int iButtonID) const;

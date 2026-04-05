@@ -266,11 +266,11 @@ void CPPgSecurity::OnLoadIPFFromURL()
 					zip.Close();
 
 					if (_tremove(theApp.ipfilter->GetDefaultFilePath()) != 0)
-						TRACE(_T("*** Error: Failed to remove default IP filter file \"%s\" - %s\n"), (LPCTSTR)theApp.ipfilter->GetDefaultFilePath(), _tcserror(errno));
+						AddDebugLogLine(DLP_LOW, false, _T("Failed to remove default IP filter file \"%s\" - %s"), (LPCTSTR)theApp.ipfilter->GetDefaultFilePath(), _tcserror(errno));
 					if (_trename(strTempUnzipFilePath, theApp.ipfilter->GetDefaultFilePath()) != 0)
-						TRACE(_T("*** Error: Failed to rename uncompressed IP filter file \"%s\" to default IP filter file \"%s\" - %s\n"), (LPCTSTR)strTempUnzipFilePath, (LPCTSTR)theApp.ipfilter->GetDefaultFilePath(), _tcserror(errno));
+						AddDebugLogLine(DLP_LOW, false, _T("Failed to rename uncompressed IP filter file \"%s\" to default IP filter file \"%s\" - %s"), (LPCTSTR)strTempUnzipFilePath, (LPCTSTR)theApp.ipfilter->GetDefaultFilePath(), _tcserror(errno));
 					if (_tremove(strTempFilePath) != 0)
-						TRACE(_T("*** Error: Failed to remove temporary IP filter file \"%s\" - %s\n"), (LPCTSTR)strTempFilePath, _tcserror(errno));
+						AddDebugLogLine(DLP_LOW, false, _T("Failed to remove temporary IP filter file \"%s\" - %s"), (LPCTSTR)strTempFilePath, _tcserror(errno));
 					bUncompressed = true;
 					bHaveNewFilterFile = true;
 				} else {
@@ -303,11 +303,11 @@ void CPPgSecurity::OnLoadIPFFromURL()
 						rar.Close();
 
 						if (_tremove(theApp.ipfilter->GetDefaultFilePath()) != 0)
-							TRACE(_T("*** Error: Failed to remove default IP filter file \"%s\" - %s\n"), (LPCTSTR)theApp.ipfilter->GetDefaultFilePath(), _tcserror(errno));
+							AddDebugLogLine(DLP_LOW, false, _T("Failed to remove default IP filter file \"%s\" - %s"), (LPCTSTR)theApp.ipfilter->GetDefaultFilePath(), _tcserror(errno));
 						if (_trename(strTempUnzipFilePath, theApp.ipfilter->GetDefaultFilePath()) != 0)
-							TRACE(_T("*** Error: Failed to rename uncompressed IP filter file \"%s\" to default IP filter file \"%s\" - %s\n"), (LPCTSTR)strTempUnzipFilePath, (LPCTSTR)theApp.ipfilter->GetDefaultFilePath(), _tcserror(errno));
+							AddDebugLogLine(DLP_LOW, false, _T("Failed to rename uncompressed IP filter file \"%s\" to default IP filter file \"%s\" - %s"), (LPCTSTR)strTempUnzipFilePath, (LPCTSTR)theApp.ipfilter->GetDefaultFilePath(), _tcserror(errno));
 						if (_tremove(strTempFilePath) != 0)
-							TRACE(_T("*** Error: Failed to remove temporary IP filter file \"%s\" - %s\n"), (LPCTSTR)strTempFilePath, _tcserror(errno));
+							AddDebugLogLine(DLP_LOW, false, _T("Failed to remove temporary IP filter file \"%s\" - %s"), (LPCTSTR)strTempFilePath, _tcserror(errno));
 						bUncompressed = true;
 						bHaveNewFilterFile = true;
 					} else {
@@ -344,11 +344,11 @@ void CPPgSecurity::OnLoadIPFFromURL()
 					gz.Close();
 
 					if (_tremove(theApp.ipfilter->GetDefaultFilePath()) != 0)
-						TRACE(_T("*** Error: Failed to remove default IP filter file \"%s\" - %s\n"), (LPCTSTR)theApp.ipfilter->GetDefaultFilePath(), _tcserror(errno));
+						AddDebugLogLine(DLP_LOW, false, _T("Failed to remove default IP filter file \"%s\" - %s"), (LPCTSTR)theApp.ipfilter->GetDefaultFilePath(), _tcserror(errno));
 					if (_trename(strTempUnzipFilePath, theApp.ipfilter->GetDefaultFilePath()) != 0)
-						TRACE(_T("*** Error: Failed to rename uncompressed IP filter file \"%s\" to default IP filter file \"%s\" - %s\n"), (LPCTSTR)strTempUnzipFilePath, (LPCTSTR)theApp.ipfilter->GetDefaultFilePath(), _tcserror(errno));
+						AddDebugLogLine(DLP_LOW, false, _T("Failed to rename uncompressed IP filter file \"%s\" to default IP filter file \"%s\" - %s"), (LPCTSTR)strTempUnzipFilePath, (LPCTSTR)theApp.ipfilter->GetDefaultFilePath(), _tcserror(errno));
 					if (_tremove(strTempFilePath) != 0)
-						TRACE(_T("*** Error: Failed to remove temporary IP filter file \"%s\" - %s\n"), (LPCTSTR)strTempFilePath, _tcserror(errno));
+						AddDebugLogLine(DLP_LOW, false, _T("Failed to remove temporary IP filter file \"%s\" - %s"), (LPCTSTR)strTempFilePath, _tcserror(errno));
 					bUncompressed = true;
 					bHaveNewFilterFile = true;
 				} else {

@@ -71,6 +71,7 @@ void CIrcChannelListCtrl::Init()
 	SetPrefsKey(_T("IrcChannelListCtrl"));
 	SetExtendedStyle(LVS_EX_FULLROWSELECT | LVS_EX_INFOTIP);
 
+	// Alignment rule: left for text, dates, and status labels; right for sizes, rates, counts, durations, and percentages.
 	InsertColumn(0, EMPTY, LVCFMT_LEFT, 200);	//IRC_NAME
 	InsertColumn(1, EMPTY, LVCFMT_RIGHT, 50);	//UUSERS
 	InsertColumn(2, EMPTY, LVCFMT_LEFT, 350);	//DESCRIPTION

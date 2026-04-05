@@ -72,6 +72,7 @@ void CFriendListCtrl::Init()
 
 	CRect rcWindow;
 	GetWindowRect(rcWindow);
+	// Alignment rule: left for text, dates, and status labels; right for sizes, rates, counts, durations, and percentages.
 	InsertColumn(0, EMPTY, LVCFMT_LEFT, rcWindow.Width() - 4);	//QL_USERNAME
 
 	SetAllIcons();

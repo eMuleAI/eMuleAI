@@ -34,12 +34,17 @@ private:
 
 protected:
 	CToolTipCtrlX	m_tooltip;
+	virtual bool UsePersistentInfoTips() const override { return true; }
+	virtual bool ShouldShowPersistentInfoTip(const SPersistentInfoTipContext& context) override;
+	virtual bool GetPersistentInfoTipText(const SPersistentInfoTipContext& context, CString& strText) override;
+	virtual int GetDefaultPersistentInfoTipExtraLeftPadding(const SPersistentInfoTipContext& context) const override;
 
 	CString CreateSelectedServersURLs();
 	void DeleteSelectedServers();
 
 	void SetSelectedServersPriority(UINT uPriority);
 	void SetAllIcons();
+	void UpdateBoldFont();
 	CString GetItemDisplayText(const CServer *server, int iSubItem) const;
 	static int CALLBACK SortProc(const LPARAM lParam1, const LPARAM lParam2, const LPARAM lParamSort);
 
@@ -47,6 +52,8 @@ protected:
 	virtual void DrawItem(LPDRAWITEMSTRUCT lpDrawItemStruct);
 
 	CImageList imagelist;
+	CFont		m_fontBold;
+	CFont		*m_pFontBold;
 	afx_msg void OnLvnGetDispInfo(NMHDR* pNMHDR, LRESULT* pResult);
 
 	DECLARE_MESSAGE_MAP()

@@ -52,6 +52,7 @@ protected:
 
 	CUpDownClient* m_SelectedClient;
 	CToolTipCtrlX m_tooltipTabs;
+	int m_nTooltipTabIndex;
 
 	CUpDownClient* GetClientForTab(int iTab) const;
 	CString BuildSearchTooltip(int iTab) const;
@@ -59,6 +60,8 @@ protected:
 
 	DECLARE_MESSAGE_MAP()
 	afx_msg void OnContextMenu(CWnd*, CPoint point);
+	afx_msg void OnMouseLeave();
+	afx_msg void OnMouseMove(UINT nFlags, CPoint point);
 	afx_msg void OnSize(UINT nType, int cx, int cy);
 };
 

@@ -83,28 +83,29 @@ void CQueueListCtrl::Init()
 	SetPrefsKey(_T("QueueListCtrl"));
 	SetExtendedStyle(LVS_EX_FULLROWSELECT | LVS_EX_INFOTIP);
 
+	// Alignment rule: left for text, dates, and status labels; right for sizes, rates, counts, durations, and percentages.
 	InsertColumn(0, EMPTY,	LVCFMT_LEFT, DFLT_CLIENTNAME_COL_WIDTH);	//QL_USERNAME
 	InsertColumn(1, EMPTY,	LVCFMT_LEFT, DFLT_FILENAME_COL_WIDTH);		//FILE
 	InsertColumn(2, EMPTY,	LVCFMT_LEFT, DFLT_PRIORITY_COL_WIDTH);		//FILEPRIO
-	InsertColumn(3, EMPTY,	LVCFMT_LEFT,  60);							//QL_RATING
-	InsertColumn(4, EMPTY,	LVCFMT_LEFT,  60);							//SCORE
-	InsertColumn(5, EMPTY,	LVCFMT_LEFT,  60);							//ASKED
-	InsertColumn(6, EMPTY,	LVCFMT_LEFT, 110);							//LASTSEEN
-	InsertColumn(7, EMPTY,	LVCFMT_LEFT, 110);							//ENTERQUEUE
+	InsertColumn(3, EMPTY,	LVCFMT_RIGHT,  60);						//QL_RATING
+	InsertColumn(4, EMPTY,	LVCFMT_RIGHT,  60);						//SCORE
+	InsertColumn(5, EMPTY,	LVCFMT_RIGHT,  60);						//ASKED
+	InsertColumn(6, EMPTY,	LVCFMT_RIGHT, 110);						//LASTSEEN
+	InsertColumn(7, EMPTY,	LVCFMT_RIGHT, 110);						//ENTERQUEUE
 	InsertColumn(8, EMPTY, LVCFMT_LEFT, DFLT_PARTSTATUS_COL_WIDTH);	//UPSTATUS
 	InsertColumn(9, EMPTY, LVCFMT_LEFT,  90);
 	InsertColumn(10, EMPTY, LVCFMT_LEFT, DFLT_HASH_COL_WIDTH);
 	InsertColumn(11, EMPTY, LVCFMT_LEFT, 100);
 	InsertColumn(12, EMPTY, LVCFMT_LEFT, 100, 13);
 	InsertColumn(13, EMPTY, LVCFMT_LEFT, 100);
-	InsertColumn(14, EMPTY, LVCFMT_LEFT, 80);
-	InsertColumn(15, EMPTY, LVCFMT_LEFT, 100);
+	InsertColumn(14, EMPTY, LVCFMT_RIGHT, 80);
+	InsertColumn(15, EMPTY, LVCFMT_RIGHT, 100);
 	InsertColumn(16, EMPTY, LVCFMT_LEFT, 100);
 	InsertColumn(17, EMPTY, LVCFMT_LEFT, 100);
 	InsertColumn(18, EMPTY, LVCFMT_LEFT, 100);
 	InsertColumn(19, EMPTY, LVCFMT_LEFT, 100);
-	InsertColumn(20, EMPTY, LVCFMT_LEFT, 100);
-	InsertColumn(21, EMPTY, LVCFMT_LEFT, 100);
+	InsertColumn(20, EMPTY, LVCFMT_RIGHT, 100);
+	InsertColumn(21, EMPTY, LVCFMT_RIGHT, 100);
 	InsertColumn(22, EMPTY, LVCFMT_LEFT, 100);
 	InsertColumn(23, EMPTY, LVCFMT_RIGHT, 60);
 	InsertColumn(24, EMPTY, LVCFMT_RIGHT, 60);
@@ -384,6 +385,20 @@ const CString CQueueListCtrl::GetItemDisplayText(CUpDownClient* client, const in
 		break;
 	}
 	return sText;
+}
+
+int CQueueListCtrl::GetDefaultPersistentInfoTipExtraLeftPadding(const SPersistentInfoTipContext& context) const
+{
+	if (!theApp.geolite2->ShowCountryFlag())
+		return 0;
+
+	if (context.iSubItem == 12)
+		return 22 + sm_iIconOffset;
+
+	if (context.iSubItem == 0 && IsColumnHidden(12))
+		return 20 + sm_iSubItemInset;
+
+	return 0;
 }
 
 void CQueueListCtrl::OnLvnGetDispInfo(LPNMHDR pNMHDR, LRESULT *pResult)

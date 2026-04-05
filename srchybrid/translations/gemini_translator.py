@@ -29,7 +29,7 @@ GEMINI_MODEL_NAME = "gemini-2.5-flash"
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 SRCHYBRID_DIR = os.path.abspath(os.path.join(SCRIPT_DIR, '..'))
 MAP_FILE_PATH = os.path.join(SCRIPT_DIR, "translations.map")
-COMPILER_PATH = os.path.abspath(os.path.join(SCRIPT_DIR, '..', '..', 'TranslationCompiler', 'Release', 'x64', 'TranslationCompiler.exe'))
+COMPILER_PATH = os.path.abspath(os.path.join(SCRIPT_DIR, '..', '..', '_Build', 'TranslationCompiler', 'Release', 'x64', 'TranslationCompiler.exe'))
 RESUME_POINT_FILE = os.path.join(SCRIPT_DIR, "gemini_translator_resume.txt")
 REF_FILE = os.path.join(SCRIPT_DIR, "used_keys_reference.txt")
 
@@ -49,6 +49,9 @@ PROTECTED_BRAND_TOKENS = {
     "MaxMind",
     "GeoLite",
     "GeoLite City"
+}
+TRANSLATABLE_ALL_UPPERCASE_TOKENS = {
+    "OK"
 }
 
 TOKEN_SCAN_PATTERN = re.compile(r'[A-Za-z][A-Za-z0-9+._-]*')
@@ -139,6 +142,9 @@ def should_protect_token(token):
 
     if token in PROTECTED_BRAND_TOKENS:
         return True
+
+    if token in TRANSLATABLE_ALL_UPPERCASE_TOKENS:
+        return False
 
     has_upper = any(ch.isupper() for ch in token)
     has_lower = any(ch.islower() for ch in token)
@@ -279,6 +285,57 @@ def uppercase_first_cased_character(text):
         return text[:idx] + upper_ch + text[idx + 1:]
 
     return text
+
+def has_any_cased_characters(text):
+    if not isinstance(text, str) or not text:
+        return False
+
+    for ch in text:
+        if ch.isalpha() and ch.upper() != ch.lower():
+            return True
+
+    return False
+
+def is_all_cased_characters_upper(text):
+    if not isinstance(text, str) or not text:
+        return False
+
+    has_cased_chars = False
+    for ch in text:
+        if not ch.isalpha():
+            continue
+
+        upper_ch = ch.upper()
+        lower_ch = ch.lower()
+        if upper_ch == lower_ch:
+            continue
+
+        has_cased_chars = True
+        if ch != upper_ch:
+            return False
+
+    return has_cased_chars
+
+def normalize_translated_ok_label(en_text, translated_text):
+    if not isinstance(en_text, str) or not isinstance(translated_text, str):
+        return translated_text
+
+    if en_text.strip() != "OK":
+        return translated_text
+
+    leading_ws_len = len(translated_text) - len(translated_text.lstrip())
+    trailing_ws_len = len(translated_text) - len(translated_text.rstrip())
+    start_idx = leading_ws_len
+    end_idx = len(translated_text) - trailing_ws_len if trailing_ws_len else len(translated_text)
+    body = translated_text[start_idx:end_idx]
+    if not body or body.upper() == "OK":
+        return translated_text
+
+    if not has_any_cased_characters(body) or not is_all_cased_characters_upper(body):
+        return translated_text
+
+    normalized_body = uppercase_first_cased_character(body.lower())
+    return translated_text[:start_idx] + normalized_body + translated_text[end_idx:]
 
 def extract_ascii_leading_words(text, max_words=3):
     if not isinstance(text, str) or not text:
@@ -466,7 +523,8 @@ def repair_leaked_terminal_punctuation(en_text, translated_text, placeholder_pai
 
 def cleanup_translated_text(en_text, translated_text, placeholder_pairs):
     cleaned_text = strip_copied_english_leading_fragments(en_text, translated_text)
-    return repair_leaked_terminal_punctuation(en_text, cleaned_text, placeholder_pairs)
+    cleaned_text = repair_leaked_terminal_punctuation(en_text, cleaned_text, placeholder_pairs)
+    return normalize_translated_ok_label(en_text, cleaned_text)
 
 def has_escape_or_punctuation_leak_issue(en_text, translated_text, placeholder_pairs):
     if has_copied_english_leading_fragments(en_text, translated_text):
@@ -611,6 +669,9 @@ def check_and_translate_with_gemini(key_name, en_text, lang_dict):
     prompt_en_text_block = build_prompt_text_block("ORIGINAL ENGLISH TEXT", en_text, prompt_en_text)
     prompt_lang_dict = build_prompt_lang_dict(en_text, lang_dict, protected_placeholders)
     protected_placeholders_json = get_protected_placeholders_prompt_block(protected_placeholders)
+    ok_translation_guidance = ""
+    if re.search(r'(?<![A-Za-z0-9_])OK(?![A-Za-z0-9_])', en_text):
+        ok_translation_guidance = "14. IMPORTANT: The English token `OK` is a normal UI/status word, not a locked brand or technical acronym. Translate it when the target language normally uses a translated form, and if you translate it, use natural target-language capitalization instead of unnecessary full uppercase.\n"
 
     prompt = f"""
 You are a professional translator and translation quality controller for the eMule software.
@@ -633,6 +694,7 @@ Rules:
 11. NEVER keep a partial English lead-in at the beginning of any translated paragraph or line. If the source segment starts with English words like "Do", "Do you", "Please", or "Use", translate them fully instead of leaving them in English.
 12. IMPORTANT: If the source string contains escaped line breaks such as \\n, \\r\\n, or \\r, the next word begins a new translated line or paragraph. For example, `Found.\\n\\nDo you want...` means the `Do you want...` sentence must also be translated fully.
 13. IMPORTANT: Locked placeholders protect only the special term itself, not the punctuation around it. If English has a pattern like `MaxMind.\\n\\nCopy...`, the period ends the sentence, but it does NOT have to stay immediately after the protected term in the target language if the sentence structure changes.
+{ok_translation_guidance}
 
 LOCKED PLACEHOLDERS JSON:
 {protected_placeholders_json}
@@ -696,6 +758,9 @@ def fix_translation_with_gemini(key_name, lang_code, faulty_text, error_message,
     prompt_en_text_block = build_prompt_text_block("Original English Text", en_text, prompt_en_text)
     prompt_faulty_text_block = build_prompt_text_block("Faulty Translation", sanitized_faulty_text, prompt_faulty_text)
     protected_placeholders_json = get_protected_placeholders_prompt_block(protected_placeholders)
+    ok_translation_guidance = ""
+    if re.search(r'(?<![A-Za-z0-9_])OK(?![A-Za-z0-9_])', en_text):
+        ok_translation_guidance = "9. The English token `OK` is translatable when the target language normally uses a translated UI/status form. If you translate it, use natural capitalization instead of unnecessary full uppercase.\n"
 
     prompt = f"""
 You are a professional translator and translation quality controller for the eMule software.
@@ -720,6 +785,7 @@ Rules:
 7. RETURN ONLY JSON formatted response in the following format:
    {{"corrected_translation": "your_fixed_translation_string_here"}}
 8. Do NOT add any explanations or conversations outside the JSON block. Return pure JSON string only.
+{ok_translation_guidance}
 
 LOCKED PLACEHOLDERS JSON:
 {protected_placeholders_json}
@@ -749,7 +815,7 @@ LOCKED PLACEHOLDERS JSON:
         en_trailing = en_trailing_match.group(0) if en_trailing_match else ""
         
         corrected_restored = restore_protected_placeholders(corrected, protected_placeholders)
-        corrected_cleaned = strip_copied_english_leading_fragments(en_text, corrected_restored)
+        corrected_cleaned = cleanup_translated_text(en_text, corrected_restored, protected_placeholders)
         clean_t = re.sub(r'(\\n|\n|\s)+$', '', corrected_cleaned)
         return clean_t + en_trailing
         

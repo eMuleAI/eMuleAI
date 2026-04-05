@@ -194,9 +194,10 @@ BOOL CConnectionWizardDlg::OnInitDialog()
 	SetDlgItemInt(IDC_WIZ_TRUEDOWNLOAD_BOX, 0, FALSE);
 	SetDlgItemInt(IDC_WIZ_TRUEUPLOAD_BOX, 0, FALSE);
 
+	// Alignment rule: left for text, dates, and status labels; right for sizes, rates, counts, durations, and percentages.
 	m_provider.InsertColumn(0, GetResString(_T("TYPE")), LVCFMT_LEFT, 150);
-	m_provider.InsertColumn(1, GetResString(_T("WIZ_DOWN")), LVCFMT_LEFT, 85);
-	m_provider.InsertColumn(2, GetResString(_T("WIZ_UP")), LVCFMT_LEFT, 85);
+	m_provider.InsertColumn(1, GetResString(_T("WIZ_DOWN")), LVCFMT_RIGHT, 85);
+	m_provider.InsertColumn(2, GetResString(_T("WIZ_UP")), LVCFMT_RIGHT, 85);
 	m_provider.SetExtendedStyle(LVS_EX_FULLROWSELECT | LVS_EX_INFOTIP);
 
 	m_provider.InsertItem(0, GetResString(_T("UNKNOWN")));

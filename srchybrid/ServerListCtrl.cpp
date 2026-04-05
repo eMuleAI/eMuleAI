@@ -56,9 +56,34 @@ BEGIN_MESSAGE_MAP(CServerListCtrl, CMuleListCtrl)
 END_MESSAGE_MAP()
 
 CServerListCtrl::CServerListCtrl()
+	: m_pImageList(NULL)
+	, m_pFontBold(NULL)
 {
 	SetGeneralPurposeFind(true);
 	SetSkinKey(_T("ServersLv"));
+}
+
+void CServerListCtrl::UpdateBoldFont()
+{
+	m_pFontBold = &theApp.m_fontDefaultBold;
+
+	if (m_fontBold.m_hObject != NULL)
+		m_fontBold.DeleteObject();
+
+	if (!thePrefs.GetUseSystemFontForMainControls())
+		return;
+
+	CFont *pFont = GetFont();
+	if (pFont == NULL)
+		return;
+
+	LOGFONT lfFont;
+	if (!pFont->GetLogFont(&lfFont))
+		return;
+
+	lfFont.lfWeight = FW_BOLD;
+	if (m_fontBold.CreateFontIndirect(&lfFont))
+		m_pFontBold = &m_fontBold;
 }
 
 bool CServerListCtrl::Init()
@@ -73,6 +98,7 @@ bool CServerListCtrl::Init()
 		tooltip->SetDelayTime(TTDT_AUTOPOP, SEC2MS(20));
 	}
 
+	// Alignment rule: left for text, dates, and status labels; right for sizes, rates, counts, durations, and percentages.
 	InsertColumn(0,	 EMPTY,	LVCFMT_LEFT,	150);			//SL_SERVERNAME
 	InsertColumn(1,	 EMPTY,	LVCFMT_LEFT,	140);			//IP
 	InsertColumn(2,	 EMPTY,	LVCFMT_LEFT,	150);			//DESCRIPTION
@@ -94,6 +120,7 @@ bool CServerListCtrl::Init()
 		InsertColumn(15, EMPTY, LVCFMT_LEFT, 100);
 
 	SetAllIcons();
+	UpdateBoldFont();
 	Localize();
 	LoadSettings();
 
@@ -110,6 +137,7 @@ void CServerListCtrl::OnSysColorChange()
 {
 	CMuleListCtrl::OnSysColorChange();
 	SetAllIcons();
+	UpdateBoldFont();
 }
 
 void CServerListCtrl::SetAllIcons()
@@ -217,16 +245,26 @@ void CServerListCtrl::DrawItem(LPDRAWITEMSTRUCT lpDrawItemStruct)
 	const CServer *pConnectedServer = theApp.serverconnect->GetCurrentServer();
 	// the server which we are connected to, always has a valid numerical IP member assigned,
 	// therefore we do not need to call CServer::IsEqual which would be expensive
+	const bool bConnectedServer = pConnectedServer != NULL
+		&& pConnectedServer->GetIP() == pServer->GetIP()
+		&& pConnectedServer->GetPort() == pServer->GetPort();
+
 	// Set selected item background color
-	if ((lpDrawItemStruct->itemState & ODS_SELECTED) != 0)
+	const bool bSelected = (lpDrawItemStruct->itemState & ODS_SELECTED) != 0;
+	if (bSelected)
 		dc.FillSolidRect(rcItem, GetCustomSysColor(COLOR_HIGHLIGHT));
 
-	if (pConnectedServer && pConnectedServer->GetIP() == pServer->GetIP() && pConnectedServer->GetPort() == pServer->GetPort())
-		dc.SetTextColor(GetCustomSysColor(COLOR_SERVER_CONNECTED)); // Blue
+	int nTextColorIndex = bSelected ? COLOR_HIGHLIGHTTEXT : COLOR_WINDOWTEXT;
+	if (bConnectedServer)
+		nTextColorIndex = COLOR_SERVER_CONNECTED;
 	else if (pServer->GetFailedCount() >= thePrefs.GetDeadServerRetries())
-		dc.SetTextColor(GetCustomSysColor(COLOR_SERVER_DEAD)); // Light Grey
+		nTextColorIndex = COLOR_SERVER_DEAD;
 	else if (pServer->GetFailedCount() >= 2)
-		dc.SetTextColor(GetCustomSysColor(COLOR_SERVER_FAILED)); // Gray
+		nTextColorIndex = COLOR_SERVER_FAILED;
+
+	dc.SetTextColor(GetServerListTextColor(nTextColorIndex, bSelected));
+	if (bConnectedServer && m_pFontBold != NULL)
+		dc.SelectObject(m_pFontBold);
 
 	const CHeaderCtrl *pHeaderCtrl = GetHeaderCtrl();
 	int iCount = pHeaderCtrl->GetItemCount();
@@ -450,8 +488,8 @@ BOOL CServerListCtrl::OnCommand(WPARAM wParam, LPARAM)
 			int iItem = GetNextItem(-1, LVIS_SELECTED | LVIS_FOCUSED);
 			if (iItem > -1) {
 				const CServer *pServer = reinterpret_cast<CServer*>(GetItemData(iItem));
-				if (!thePrefs.IsCryptLayerRequired() || pServer->SupportsObfuscationTCP() || !pServer->TriedCrypt())
-					theApp.serverconnect->ConnectToServer(reinterpret_cast<CServer*>(GetItemData(iItem)), false, false, true);
+					if (!thePrefs.IsCryptLayerRequired() || pServer->SupportsObfuscationTCP() || !pServer->TriedCrypt())
+						theApp.serverconnect->ConnectToServer(reinterpret_cast<CServer*>(GetItemData(iItem)));
 			}
 		}
 		theApp.emuledlg->ShowConnectionState();
@@ -589,7 +627,7 @@ void CServerListCtrl::OnNmDblClk(LPNMHDR, LRESULT*)
 {
 	int iItem = GetNextItem(-1, LVIS_SELECTED | LVIS_FOCUSED);
 	if (iItem >= 0) {
-		theApp.serverconnect->ConnectToServer(reinterpret_cast<CServer*>(GetItemData(iItem)), false, false, true);
+		theApp.serverconnect->ConnectToServer(reinterpret_cast<CServer*>(GetItemData(iItem)));
 		theApp.emuledlg->ShowConnectionState();
 	}
 }
@@ -766,67 +804,63 @@ void CServerListCtrl::ShowServerCount()
 	theApp.emuledlg->serverwnd->SetDlgItemText(IDC_SERVLIST_TEXT, sCount);
 }
 
-void CServerListCtrl::OnLvnGetInfoTip(LPNMHDR pNMHDR, LRESULT *pResult)
+bool CServerListCtrl::ShouldShowPersistentInfoTip(const SPersistentInfoTipContext& context)
 {
-	LPNMLVGETINFOTIP pGetInfoTip = reinterpret_cast<LPNMLVGETINFOTIP>(pNMHDR);
-	LVHITTESTINFO hti;
-	if (pGetInfoTip->iSubItem == 0 && ::GetCursorPos(&hti.pt)) {
-		ScreenToClient(&hti.pt);
-		bool bOverMainItem = (SubItemHitTest(&hti) != -1 && hti.iItem == pGetInfoTip->iItem && hti.iSubItem == 0);
+	if (!CMuleListCtrl::ShouldShowPersistentInfoTip(context))
+		return false;
 
-		// those tooltips are very nice for debugging/testing but pretty annoying for general usage
-		// enable tooltips only if Ctrl is currently pressed
-		// Low noise mode: show tooltips at least two selected servers only
-		bool bShowInfoTip = bOverMainItem && GetSelectedCount() > 1 && GetKeyState(VK_CONTROL) < 0;
-		if (bShowInfoTip) {
-			// Don't show the tooltip if the mouse cursor is not over at least one of the selected items
-			bool bInfoTipItemIsPartOfMultiSelection = false;
-			for (POSITION pos = GetFirstSelectedItemPosition(); pos != NULL;)
-				if (GetNextSelectedItem(pos) == pGetInfoTip->iItem) {
-					bInfoTipItemIsPartOfMultiSelection = true;
-					break;
-				}
-
-			if (!bInfoTipItemIsPartOfMultiSelection)
-				bShowInfoTip = false;
-		}
-
-		if (!bShowInfoTip) {
-			if (!bOverMainItem) {
-				// don't show the default label tip for the main item, if the mouse is not over the main item
-				if ((pGetInfoTip->dwFlags & LVGIT_UNFOLDED) == 0 && pGetInfoTip->cchTextMax > 0 && pGetInfoTip->pszText[0] != _T('\0'))
-					pGetInfoTip->pszText[0] = _T('\0');
-			}
-			return;
-		}
-
-		int iSelected = 0;
-		ULONGLONG ulTotalUsers = 0;
-		ULONGLONG ulTotalLowIdUsers = 0;
-		ULONGLONG ulTotalFiles = 0;
+	bool bShowInfoTip = GetSelectedCount() > 1 && GetKeyState(VK_CONTROL) < 0;
+	if (bShowInfoTip) {
+		bool bInfoTipItemIsPartOfMultiSelection = false;
 		for (POSITION pos = GetFirstSelectedItemPosition(); pos != NULL;) {
-			const CServer *pServer = reinterpret_cast<CServer*>(GetItemData(GetNextSelectedItem(pos)));
-			if (pServer) {
-				++iSelected;
-				ulTotalUsers += pServer->GetUsers();
-				ulTotalFiles += pServer->GetFiles();
-				ulTotalLowIdUsers += pServer->GetLowIDUsers();
+			if (GetNextSelectedItem(pos) == context.iItem) {
+				bInfoTipItemIsPartOfMultiSelection = true;
+				break;
 			}
 		}
+		if (!bInfoTipItemIsPartOfMultiSelection)
+			bShowInfoTip = false;
+	}
 
-		if (iSelected > 0) {
-			CString strInfo(GetResString(_T("FSTAT_SERVERS")));
-			strInfo.AppendFormat(_T(": %i\r\n%s: %s\r\n%s: %s\r\n%s: %s") TOOLTIP_AUTOFORMAT_SUFFIX
-				, iSelected
-				, (LPCTSTR)GetResString(_T("UUSERS")), (LPCTSTR)CastItoIShort(ulTotalUsers)
-				, (LPCTSTR)GetResString(_T("IDLOW")), (LPCTSTR)CastItoIShort(ulTotalLowIdUsers)
-				, (LPCTSTR)GetResString(_T("PW_FILES")), (LPCTSTR)CastItoIShort(ulTotalFiles)
-			);
-			_tcsncpy(pGetInfoTip->pszText, strInfo, pGetInfoTip->cchTextMax);
-			pGetInfoTip->pszText[pGetInfoTip->cchTextMax - 1] = _T('\0');
+	return bShowInfoTip;
+}
+
+bool CServerListCtrl::GetPersistentInfoTipText(const SPersistentInfoTipContext& /*context*/, CString& strText)
+{
+	int iSelected = 0;
+	ULONGLONG ulTotalUsers = 0;
+	ULONGLONG ulTotalLowIdUsers = 0;
+	ULONGLONG ulTotalFiles = 0;
+	for (POSITION pos = GetFirstSelectedItemPosition(); pos != NULL;) {
+		const CServer* pServer = reinterpret_cast<CServer*>(GetItemData(GetNextSelectedItem(pos)));
+		if (pServer) {
+			++iSelected;
+			ulTotalUsers += pServer->GetUsers();
+			ulTotalFiles += pServer->GetFiles();
+			ulTotalLowIdUsers += pServer->GetLowIDUsers();
 		}
 	}
-	*pResult = 0;
+
+	if (iSelected <= 0)
+		return false;
+
+	strText.Format(_T("%s: %i\r\n%s: %s\r\n%s: %s\r\n%s: %s") TOOLTIP_AUTOFORMAT_SUFFIX
+		, (LPCTSTR)GetResString(_T("FSTAT_SERVERS"))
+		, iSelected
+		, (LPCTSTR)GetResString(_T("UUSERS")), (LPCTSTR)CastItoIShort(ulTotalUsers)
+		, (LPCTSTR)GetResString(_T("IDLOW")), (LPCTSTR)CastItoIShort(ulTotalLowIdUsers)
+		, (LPCTSTR)GetResString(_T("PW_FILES")), (LPCTSTR)CastItoIShort(ulTotalFiles));
+	return true;
+}
+
+int CServerListCtrl::GetDefaultPersistentInfoTipExtraLeftPadding(const SPersistentInfoTipContext& context) const
+{
+	return (context.iSubItem == 15 && theApp.geolite2->ShowCountryFlag()) ? 22 + sm_iIconOffset : 0;
+}
+
+void CServerListCtrl::OnLvnGetInfoTip(LPNMHDR pNMHDR, LRESULT *pResult)
+{
+	CMuleListCtrl::OnLvnGetInfoTip(pNMHDR, pResult);
 }
 
 int CServerListCtrl::Undefined_at_bottom(const uint32 i1, const uint32 i2)

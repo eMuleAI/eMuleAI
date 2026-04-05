@@ -541,21 +541,17 @@ bool CRoutingZone::Add(CContact *pContact, bool &bUpdate, bool &bOutIPVerified)
 				}
 
 			} else {
-#ifdef _DEBUG
-				// just for outlining, get removed anyway
-				//debug logging stuff - remove later
 				if (pContact->GetUDPKey().GetKeyValue(theApp.GetPublicIPv4()) == 0) {
 					if (pContact->GetVersion() >= KADEMLIA_VERSION6_49aBETA && pContact->GetType() < 2)
-						TRACE2(_T("Updating > 0.49a + type < 2 contact without valid key stored %s"), (LPCTSTR)ipstr(pContact->GetNetIP()));
+						AddDebugLogLine(DLP_LOW, false, _T("Updating > 0.49a + type < 2 contact without valid key stored %s"), (LPCTSTR)ipstr(pContact->GetNetIP()));
 				} else
-					TRACE2(_T("Updating contact, passed key check %s"), (LPCTSTR)ipstr(pContact->GetNetIP()));
+					AddDebugLogLine(DLP_LOW, false, _T("Updating contact, passed key check %s"), (LPCTSTR)ipstr(pContact->GetNetIP()));
 
 				if (pContactUpdate->GetVersion() >= KADEMLIA_VERSION1_46c && pContactUpdate->GetVersion() < KADEMLIA_VERSION6_49aBETA) {
 					ASSERT(!pContactUpdate->GetReceivedHelloPacket());
-					TRACE2(_T("Accepted update for legacy kad2 contact, because of first HELLO (%s -> %s, %u -> %u)")
+					AddDebugLogLine(DLP_LOW, false, _T("Accepted update for legacy kad2 contact, because of first HELLO (%s -> %s, %u -> %u)")
 						, (LPCTSTR)ipstr(pContactUpdate->GetNetIP()), (LPCTSTR)ipstr(pContact->GetNetIP()), pContactUpdate->GetVersion(), pContact->GetVersion());
 				}
-#endif
 				// All other nodes (Kad1, Kad2 > 0.49a with UDPKey checked or not set, first hello updates) are allowed to do full updates
 				if (m_pBin->ChangeContactIPAddress(pContactUpdate, pContact->GetIPAddress())
 					&& pContact->GetVersion() >= pContactUpdate->GetVersion()) // do not let Kad1 responses overwrite Kad2 ones

@@ -53,6 +53,7 @@ void ApplyThemeToWindow(HWND hWnd, bool bForceRedraw, bool bForceWindowsTheme);
 BOOL HandleEraseBkgnd(HWND hWnd, CDC* pDC);
 HBRUSH HandleCtlColor(HWND hWnd, CDC* pDC, HWND hChild, UINT nCtlColor);
 COLORREF GetCustomSysColor(int nIndex, bool bForceDarkColor = false);
+COLORREF GetServerListTextColor(int nColorIndex, bool bSelected);
 COLORREF GetIrcColorByIndex(int nIndex);
 const COLORREF* GetIrcColorTable();
 UINT GetIrcColorTableSize();

@@ -42,7 +42,7 @@ void CMiniDumper::Enable(LPCTSTR pszAppName, bool bShowErrors, LPCTSTR pszDumpDi
 	_tcsncpy(m_szAppName, pszAppName, _countof(m_szAppName));
 	m_szAppName[_countof(m_szAppName) - 1] = _T('\0');
 
-	// eMule may not have the permission to create a DMP file in the directory where the "emule.exe" is located.
+	// eMule may not have the permission to create a DMP file in the directory where the "eMuleAI.exe" is located.
 	// Need to pre-determine a valid directory.
 	_tcsncpy(m_szDumpDir, pszDumpDir, _countof(m_szDumpDir));
 	m_szDumpDir[_countof(m_szDumpDir) - 2] = _T('\0');

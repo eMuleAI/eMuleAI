@@ -1703,8 +1703,8 @@ void CKademliaUDPListener::Process_KADEMLIA_FINDSERVINGBUDDY_REQ(const byte *pby
 
 	// If we already serve too many buddies, ignore.
 	if (theApp.clientlist->GetServedBuddyCount() >= thePrefs.GetMaxServedBuddies()) { 
-		if (thePrefs.GetDebugClientKadUDPLevel() > 0) 
-			TRACE(_T("Kad: Served buddy capacity full (%i/%i), rejecting from %s:%hu."), (int)theApp.clientlist->GetServedBuddyCount(), (int)thePrefs.GetMaxServedBuddies(), (LPCTSTR)ipstr(htonl(uIP)), uUDPPort);
+		if (thePrefs.GetLogNatTraversalEvents())
+			AddDebugLogLine(DLP_LOW, false, _T("Kad: Served buddy capacity full (%i/%i), rejecting from %s:%hu."), (int)theApp.clientlist->GetServedBuddyCount(), (int)thePrefs.GetMaxServedBuddies(), (LPCTSTR)ipstr(htonl(uIP)), uUDPPort);
 
 		return; 
 	}
@@ -1742,8 +1742,8 @@ void CKademliaUDPListener::Process_KADEMLIA_FINDSERVINGBUDDY_REQ(const byte *pby
 	if (theApp.clientlist->GetServedBuddyCount() >= 1) {
 		const bool bSenderNatT = (byReqConnectOpts & 0x80) != 0;
 		if (!bSenderNatT) {
-			if (thePrefs.GetDebugClientKadUDPLevel() > 0)
-				TRACE(_T("Kad: Rejecting served buddy (no NAT-T) from %s:%hu.\n"), (LPCTSTR)ipstr(htonl(uIP)), uUDPPort);
+			if (thePrefs.GetLogNatTraversalEvents())
+				AddDebugLogLine(DLP_LOW, false, _T("Kad: Rejecting served buddy (no NAT-T) from %s:%hu."), (LPCTSTR)ipstr(htonl(uIP)), uUDPPort);
 			return; // Do not accept, do not respond
 		}
 	}
@@ -1847,7 +1847,8 @@ void CKademliaUDPListener::Process_KADEMLIA_CALLBACK_REQ(const byte* pbyPacketDa
 
 		if (pTarget->socket == NULL) {
 			// Do not throw here; TCP may not be established yet. Skip gracefully.
-			TRACE(_T("KadCB: Target serving buddy socket not ready, skipping.\n"));
+			if (thePrefs.GetLogNatTraversalEvents())
+				AddDebugLogLine(DLP_LOW, false, _T("KadCB: Target serving buddy socket not ready, skipping."));
 			return;
 		}
 		CSafeMemFile fileIO2(uLenPacket + 6);

@@ -65,6 +65,7 @@ public:
 protected:
 	void SetAllIcons();
 	CString GetItemDisplayText(const CUpDownClient *client, int iSubItem) const;
+	virtual int GetDefaultPersistentInfoTipExtraLeftPadding(const SPersistentInfoTipContext& context) const override;
 	static LPARAM	m_pSortParam;
 	int 			m_iDataSize;
 	const static bool SortFunc(const CUpDownClient* first, const CUpDownClient* second);

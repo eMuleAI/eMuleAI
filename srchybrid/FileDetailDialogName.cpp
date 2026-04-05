@@ -86,8 +86,9 @@ BOOL CFileDetailDialogName::OnInitDialog()
 
 	m_listFileNames.SetPrefsKey(_T("FileDetailDlgName"));
 	m_listFileNames.SetExtendedStyle(LVS_EX_FULLROWSELECT | LVS_EX_INFOTIP);
+	// Alignment rule: left for text, dates, and status labels; right for sizes, rates, counts, durations, and percentages.
 	m_listFileNames.InsertColumn(0, GetResString(_T("DL_FILENAME")), LVCFMT_LEFT, /*DFLT_FILENAME_COL_WIDTH*/450);
-	m_listFileNames.InsertColumn(1, GetResString(_T("DL_SOURCES")), LVCFMT_LEFT, 60);
+	m_listFileNames.InsertColumn(1, GetResString(_T("DL_SOURCES")), LVCFMT_RIGHT, 60);
 	m_listFileNames.LoadSettings();
 
 	m_listFileNames.SetSortArrow();

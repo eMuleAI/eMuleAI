@@ -45,6 +45,7 @@ enum EMetaDataCols
 	META_DATA_COL_VALUE
 };
 
+// Alignment rule: left for text, dates, and status labels; right for sizes, rates, counts, durations, and percentages.
 static LCX_COLUMN_INIT s_aColumns[] =
 {
 	{ META_DATA_COL_NAME,	_T("Name"),	 _T("SW_NAME"), LVCFMT_LEFT, -1, 0, ASCENDING,  NONE, _T("Temporary file MMMMM") },

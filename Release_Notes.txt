@@ -1,8 +1,68 @@
-VERSION HISTORY
+
 ================================================================
+1) VERSION HISTORY
+================================================================
+v1.3
+Fixed crash problems observed on older CPUs.
+Fixed an issue causing upload speed slowdown.
+Fixed an issue where obfuscated server logins could require multiple attempts even on fully obfuscation-capable server lists.
+Fixed an issue where duplicate shared files could be rehashed on startup and fail to appear in Duplicate Files or File History after being detected.
+Fixed an issue where uploads could temporarily disappear from the Transfers window while shared files were being reloaded or newly hashed.
+Fixed long UI freezes before hashing when adding or reloading large shared folders with automatic subdirectory sharing enabled.
+Fixed failed servers not being clearly distinguished in dark mode and restored their proper color coding in light mode.
+Fixed flickering and inconsistent tooltips across list views.
+Fixed the OK, Cancel, Apply, and Help buttons in the Options window using a different language than the selected application language.
+Fixed an issue that could crop the Options banner image on some systems.
+Fixed a formatting bug that could append random translated text to file-open error messages when automatic hashing hit a locked file.
+Fixed an issue where some clients could appear with incorrect eMule version numbers after being restored from client history. (Note: To fully clear old incorrect entries while testing the new build, delete clienthistory.met.)
+Fixed a crash that could occur when using the Close All Search Results button while search tabs were still open.
+Fixed an issue where completed downloads could remain in bold in the Transfers list after finishing.
+Fixed an issue where the toolbar speedometer could be hidden on some systems even when there was enough visible space to display it.
+Fixed an issue where the Uploading list in split view could remain too narrow after switching views while the Transfers window was small.
+Fixed search tab tooltips to show the tab currently under the mouse instead of the active tab.
+Fixed shared files search tabs to keep client notes separate from stale or unnecessary result counters.
+Fixed an issue where entering valid values for ReAsk Time for File Sources could be rejected or saved incorrectly in Options.
+Fixed Shared Files list sorting so files now reposition correctly when live request, accepted request, or transferred counters change.
+Fixed download list expand/collapse hit testing so column resizing and horizontal scrolling no longer break row toggling.
+Fixed a crash that could occur while updating the Shared Files status counters.
+Fixed an issue where the Content tab could show incorrect or missing video/audio codec information for media files.
+Fixed an issue where importing settings from an older eMule installation could leave download categories empty after migration.
+Fixed an issue where shared subfolders could fail to show an expand button in the Shared Files tree.
+Fixed an issue where the eMule AI taskbar icon could occasionally change to a generic Windows icon after long runtime.
+Fixed the status bar so download, upload, and connection status texts resize more intelligently and no longer get cut off in some languages.
+Fixed content tab flickering during active transfers, improved media info refresh stability, and now show “-” instead of “Waiting...” for unsupported file types.
+Fixed duplicate “Found known shared files” log entries during shared file discovery.
+Fixed inconsistent known shared file counts between the initial startup scan and later refreshes.
+Fixed an issue where moving a shared file between shared folders could break active uploads until the shared files list caught up with the new path.
+Fixed an issue where removing main toolbar buttons, such as the eMule AI button, could be lost after restarting the app.
+Fixed Download Inspector continuing to run periodic scans while set to Disable; manual runs remain available.
+Fixed an issue where the Restore last main window option could reopen Transfers instead of the Server tab after restart.
+Fixed an issue where the Transfers window could show an extra horizontal scrollbar at smaller window sizes.
+Fixed the Shared Files details panel so the Statistics and Content tabs keep the correct height on affected systems.
+Fixed an issue where the search tab scroll arrows could render black in dark mode until hovered.
+Fixed blurry rendering in the Obtained Parts columns in the Transfers window while preserving the 3D bar style.
+Replaced legacy ID3Lib integration with MediaInfoLib for cleaner media metadata handling and simpler maintenance.
+Improved list view responsiveness during bulk operations by batching expensive selection and scroll state restores.
+Improved shutdown safety by skipping part metadata saves on low temporary disk space and updating backup metadata atomically.
+Improved automatic shared-file hashing to briefly wait for files that are still being copied or moved, reducing false open failures on newly discovered files.
+Improved category labels so empty or "?" titles now automatically show the correct localized filter name while custom titles remain unchanged.
+Highlighted the active category tab in bold for easier identification.
+Highlighted the currently connected server in bold in the Server list.
+Added an option to preview downloads by double-clicking anywhere in the file name column.
+Added a User Interface Tweaks option to show or hide the Download Toolbar in the Transfers window.
+Changed the Enable Import Parts option to persist across restarts by saving and restoring it from preferences.ini.
+Reset the default value of the "Options -> Display -> Download list double-click to expand” option to its original setting.
+Improved the Downloads counter to show active downloads relative to the currently visible items.
+Renamed the File Inspector feature to Download Inspector across the UI, logs, settings keys, and documentation.
+Standardized list column alignment for consistency: text/date/status columns are left-aligned, while numeric columns are right-aligned.
+Changed the default color of the Statistics -> System tray icon speed bar to lime green.
+MiniMule now closes immediately when you disable it in Settings, so you no longer need to hide it manually one last time.
+Added indentation to the left side of the status bar.
+Added a dedicated eD2K Links... menu entry while keeping Copy eD2K Links as an optional separate shortcut.
+Centralized build settings to make project configuration more consistent and easier to maintain.
+Renamed the main project and executable to eMuleAI and moved the solution files to the repository root.
 
 v1.2
-Fixed an issue where obfuscated server logins could require multiple attempts even on fully obfuscation-capable server lists.
 Fixed the “Shared eD2K | Kad” column in the Files window.
 Fixed an issue where the download list didn’t refresh immediately after applying a category filter.
 Fixed a crash caused the Download Clients list.
@@ -16,14 +76,10 @@ Added the "Ratio" and "Session Ratio" columns to the Upload, Queue, and Files li
 Fixed the “Enter an integer between 1 and 2147483647.” validation error that could appear only in certain languages (e.g., Chinese/Korean) when leaving the eMule AI options page.
 
 v1.0
-Initial public release. See the "New Features / Improvements / Bug Fixes" section below for details.
-
-
-
-NEW FEATURES / IMPROVEMENTS / BUG FIXES
+Initial public release. See the New Features, Improvements and Bug Fixes sections below for details.
 
 ================================================================
-1) NEW FEATURES
+2) NEW FEATURES
 ================================================================
 
 1. Protection Panel
@@ -166,7 +222,7 @@ It helps restore supported legacy eMule configuration files into eMule AI with d
 This option allows local/private addresses even when an IP filter is active—useful on home/lab networks.
 
 ================================================================
-2) IMPROVEMENTS
+3) IMPROVEMENTS
 ================================================================
 
 1. Long Path Support
@@ -281,7 +337,7 @@ Avoids accidental command executions from toolbar double-clicks.
 Skips redundant saves/re-sorts when a category remains the same.
 
 ================================================================
-3) BUG FIXES
+4) BUG FIXES
 ================================================================
 
 1. 0.70b: File-Request Handling

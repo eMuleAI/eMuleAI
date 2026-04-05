@@ -46,13 +46,9 @@
 #include "emuledlg.h"
 #include "SharedFilesWnd.h"
 #include "MediaInfo.h"
-#include "id3/tag.h"
-#include "id3/misc_support.h"
 #include "uploaddiskiothread.h"
 #include "eMuleAI/MediaInfoLib.h"
 #include "OtherFunctions.h"
-
-extern wchar_t* ID3_GetStringW(const ID3_Frame *frame, ID3_FieldID fldName);
 
 #ifdef _DEBUG
 #define new DEBUG_NEW
@@ -63,12 +59,44 @@ static char THIS_FILE[] = __FILE__;
 namespace
 {
 	CBarShader* g_pKnownFileShareStatusBar = NULL;
+	const UINT kHashOpenRetryCount = 10;
+	const DWORD kHashOpenRetryDelayMs = 500;
 
 	CBarShader& BB_GetKnownFileShareStatusBar()
 	{
 		if (g_pKnownFileShareStatusBar == NULL)
 			g_pKnownFileShareStatusBar = new CBarShader(16);
 		return *g_pKnownFileShareStatusBar;
+	}
+
+	bool IsRetryableHashOpenError(DWORD dwError)
+	{
+		return dwError == ERROR_SHARING_VIOLATION || dwError == ERROR_LOCK_VIOLATION;
+	}
+
+	FILE* OpenFileStreamSharedReadForHashing(const CString& path, DWORD& rwLastError)
+	{
+		rwLastError = ERROR_SUCCESS;
+		for (UINT uAttempt = 0; uAttempt <= kHashOpenRetryCount; ++uAttempt) {
+			FILE* pFile = OpenFileStreamSharedReadLongPath(path, false);
+			if (pFile != NULL)
+				return pFile;
+
+			rwLastError = ::GetLastError();
+			if (!IsRetryableHashOpenError(rwLastError) || uAttempt == kHashOpenRetryCount || theApp.IsClosing())
+				return NULL;
+
+			// A shared file may still be in the middle of a move/copy operation. Give it a short grace period before failing hashing.
+			::Sleep(kHashOpenRetryDelayMs);
+		}
+		return NULL;
+	}
+
+	void LogFileOpenFailure(const CString& path, DWORD dwError)
+	{
+		if (dwError == ERROR_SUCCESS)
+			dwError = ERROR_OPEN_FAILED;
+		LogError(GetResString(_T("ERR_FILEOPEN")), (LPCTSTR)EscPercent(path), (LPCTSTR)EscPercent(GetErrorMessage(dwError)));
 	}
 }
 
@@ -384,10 +412,11 @@ bool CKnownFile::CreateFromFile(LPCTSTR in_directory, LPCTSTR in_filename, LPVOI
 	strFilePathTmp += in_filename;
 	strFilePath = strFilePathTmp;
 	SetFilePath(strFilePath);
-	FILE* file = OpenFileStreamSharedReadLongPath(strFilePath, false);
+	DWORD dwOpenError = ERROR_SUCCESS;
+	FILE* file = OpenFileStreamSharedReadForHashing(strFilePath, dwOpenError);
 
 	if (!file) {
-		LogError(GetResString(_T("ERR_FILEOPEN")) + _T(" - %s"), (LPCTSTR)EscPercent(strFilePath), (LPCTSTR)EscPercent(GetErrorMessage(GetLastError())));
+		LogFileOpenFailure(strFilePath, dwOpenError);
 		return false;
 	}
 
@@ -529,7 +558,7 @@ bool CKnownFile::CreateAICHHashSetOnly()
 
 	FILE *file = _tfsopen(GetFilePath(), _T("rbS"), _SH_DENYNO); // can not use _SH_DENYWR because we may access a completing part file
 	if (!file) {
-		LogError(GetResString(_T("ERR_FILEOPEN")) + _T(" - %s"), (LPCTSTR)EscPercent(GetFilePath()), EMPTY, (LPCTSTR)EscPercent(_tcserror(errno)));
+		LogError(GetResString(_T("ERR_FILEOPEN")), (LPCTSTR)EscPercent(GetFilePath()), (LPCTSTR)EscPercent(_tcserror(errno)));
 		return false;
 	}
 	// we are reading the file data later in 8K blocks, adjust the internal file stream buffer accordingly
@@ -1264,7 +1293,7 @@ void CKnownFile::RemoveMetaDataTags(UINT uTagType)
 		{ FT_MEDIA_CODEC,   TAGTYPE_STRING }
 	};
 
-	// 05-J�n-2004 [bc]: ed2k and Kad are already full of totally wrong and/or not properly attached meta data.
+	// 05-Jun-2004 [bc]: ed2k and Kad are already full of totally wrong and/or not properly attached meta data.
 	// Take the chance to clean any available meta data tags and provide only tags which were determined by us.
 	// Remove all meta tags. Never ever trust the meta tags received from other clients or servers.
 	for (unsigned j = 0; j < _countof(_aEmuleMetaTags); ++j)
