@@ -21,6 +21,8 @@
 #include "MenuCmds.h"
 #include "UserMsgs.h"
 #include "eMuleAI/DarkMode.h"
+#include <uxtheme.h>
+#include <vssym32.h>
 
 #ifdef _DEBUG
 #define new DEBUG_NEW
@@ -62,42 +64,89 @@ END_MESSAGE_MAP()
 
 void CButtonsTabCtrl::DrawItem(LPDRAWITEMSTRUCT lpDIS)
 {
-    int nTabIndex = lpDIS->itemID;
-    if (nTabIndex < 0)
-        return;
+	int nTabIndex = lpDIS->itemID;
+	if (nTabIndex < 0)
+		return;
 
-    TCHAR szLabel[256];
-    TC_ITEM tci;
-    tci.mask = TCIF_TEXT;
-    tci.pszText = szLabel;
-    tci.cchTextMax = _countof(szLabel);
-    if (!GetItem(nTabIndex, &tci))
-        return;
+	TCHAR szLabel[256];
+	TC_ITEM tci;
+	tci.mask = TCIF_TEXT;
+	tci.pszText = szLabel;
+	tci.cchTextMax = _countof(szLabel);
+	if (!GetItem(nTabIndex, &tci))
+		return;
 
-    CDC* pDC = CDC::FromHandle(lpDIS->hDC);
-    if (!pDC)
-        return;
+	CDC* pDC = CDC::FromHandle(lpDIS->hDC);
+	if (!pDC)
+		return;
 
-	// Handle tab control colors for pressed and non-pressed states
 	RECT rcItem(lpDIS->rcItem);
-
-	// Set background color based on the state of the tab (selected or not)
 	const bool bSelected = (lpDIS->itemState & ODS_SELECTED) != 0;
-	if (bSelected)
-		pDC->FillSolidRect(&lpDIS->rcItem, GetCustomSysColor(COLOR_ACTIVECAPTION)); // Set selected tab color
-	else
-		pDC->FillSolidRect(&lpDIS->rcItem, GetCustomSysColor(COLOR_WINDOW)); // Set non-selected tabs color
 
-	CFont boldFont;
-	CFont* pOldFont = SelectTabFont(*pDC, GetFont(), bSelected, boldFont);
-	const COLORREF crOldColor = pDC->SetTextColor(GetCustomSysColor(COLOR_BTNTEXT)); // Set text color
+	if (IsDarkModeEnabled()) {
+		if (bSelected)
+			pDC->FillSolidRect(&lpDIS->rcItem, GetCustomSysColor(COLOR_ACTIVECAPTION));
+		else
+			pDC->FillSolidRect(&lpDIS->rcItem, GetCustomSysColor(COLOR_WINDOW));
+
+		CFont boldFont;
+		CFont* pOldFont = SelectTabFont(*pDC, GetFont(), bSelected, boldFont);
+		const COLORREF crOldColor = pDC->SetTextColor(GetCustomSysColor(COLOR_BTNTEXT));
+		const int iOldBkMode = pDC->SetBkMode(TRANSPARENT);
+		rcItem.top += 2;
+		pDC->DrawText(szLabel, &rcItem, DT_SINGLELINE | DT_TOP | DT_CENTER);
+		pDC->SetBkMode(iOldBkMode);
+		pDC->SetTextColor(crOldColor);
+		if (pOldFont != NULL)
+			pDC->SelectObject(pOldFont);
+		return;
+	}
+
+	CRect rcFullItem(rcItem);
+	HTHEME hTheme = NULL;
+	const bool bHotTracked = pDC->GetTextColor() == ::GetSysColor(COLOR_HOTLIGHT);
+
+	// Reuse the native push-button theme so light mode matches the stock eMule tabs.
+	if (IsThemeActive() && IsAppThemed()) {
+		hTheme = OpenThemeData(m_hWnd, L"BUTTON");
+		if (hTheme != NULL) {
+			rcFullItem.InflateRect(2, 2);
+
+			int iStateId = PBS_NORMAL;
+			if (bSelected)
+				iStateId = PBS_PRESSED;
+			else if (bHotTracked)
+				iStateId = PBS_HOT;
+
+			CRect rcTopBorder(rcFullItem);
+			rcTopBorder.bottom = rcTopBorder.top + 2;
+			pDC->FillSolidRect(&rcTopBorder, ::GetSysColor(COLOR_BTNFACE));
+
+			if (IsThemeBackgroundPartiallyTransparent(hTheme, BP_PUSHBUTTON, iStateId))
+				DrawThemeParentBackground(m_hWnd, pDC->GetSafeHdc(), &rcFullItem);
+			DrawThemeBackground(hTheme, pDC->GetSafeHdc(), BP_PUSHBUTTON, iStateId, &rcFullItem, NULL);
+		}
+	}
+
+	if (hTheme == NULL)
+		pDC->FillSolidRect(&lpDIS->rcItem, ::GetSysColor(COLOR_BTNFACE));
+
 	const int iOldBkMode = pDC->SetBkMode(TRANSPARENT);
+	COLORREF crOldColor = CLR_NONE;
+	if (bHotTracked)
+		crOldColor = pDC->SetTextColor(::GetSysColor(COLOR_BTNTEXT));
+
 	rcItem.top += 2;
-	pDC->DrawText(szLabel, &rcItem, DT_SINGLELINE | DT_TOP | DT_CENTER); // Draw the text label on the tab
+	pDC->DrawText(szLabel, &rcItem, DT_SINGLELINE | DT_TOP | DT_CENTER);
+
+	if (crOldColor != CLR_NONE)
+		pDC->SetTextColor(crOldColor);
 	pDC->SetBkMode(iOldBkMode);
-	pDC->SetTextColor(crOldColor);
-	if (pOldFont != NULL)
-		pDC->SelectObject(pOldFont);
+
+	if (hTheme != NULL) {
+		pDC->ExcludeClipRect(&rcFullItem);
+		CloseThemeData(hTheme);
+	}
 }
 
 void CButtonsTabCtrl::PreSubclassWindow()

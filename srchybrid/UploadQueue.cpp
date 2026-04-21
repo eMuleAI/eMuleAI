@@ -413,7 +413,7 @@ void CUploadQueue::Process()
 
 			RemoveFromUploadQueue(cur_client, _T("Uploading to client with stale socket/handshake (CUploadQueue::Process)"), true, true);
 			if (cur_client->Disconnected(_T("CUploadQueue::Process stale upload slot")))
-				delete cur_client;
+				CUpDownClient::SafeDelete(cur_client);
 			continue;
 		}
 
@@ -729,7 +729,7 @@ void CUploadQueue::AddClientToQueue(CUpDownClient *client, bool bIgnoreTimelimit
 					AddProtectionLogLine(false, (LPCTSTR)GetResString(_T("SAMEUSERHASH")), (LPCTSTR)EscPercent(client->GetUserName()), (LPCTSTR)EscPercent(cur_client->GetUserName()), _T("Both"));
 				RemoveFromWaitingQueue(pos2, true);
 				if (!cur_client->socket && cur_client->Disconnected(_T("AddClientToQueue - same userhash 2")))
-					delete cur_client;
+					CUpDownClient::SafeDelete(cur_client);
 				return;
 			}
 			//client has a valid secure hash, add him and remove the other one
@@ -737,7 +737,7 @@ void CUploadQueue::AddClientToQueue(CUpDownClient *client, bool bIgnoreTimelimit
 				AddProtectionLogLine(false, (LPCTSTR)GetResString(_T("SAMEUSERHASH")), (LPCTSTR)EscPercent(client->GetUserName()), (LPCTSTR)EscPercent(cur_client->GetUserName()), (LPCTSTR)EscPercent(cur_client->GetUserName()));
 			RemoveFromWaitingQueue(pos2, true);
 			if (!cur_client->socket && cur_client->Disconnected(_T("AddClientToQueue - same userhash 1")))
-				delete cur_client;
+				CUpDownClient::SafeDelete(cur_client);
 		} else if (client->GetIP() == cur_client->GetIP()) {
 			// same IP, different port, different userhash
 			++cSameIP;
@@ -1247,6 +1247,10 @@ VOID CALLBACK CUploadQueue::UploadTimer(HWND /*hwnd*/, UINT /*uMsg*/, UINT_PTR /
 					istats = 0;
 					theApp.emuledlg->statisticswnd->ShowStatistics();
 				}
+
+			// Refresh the cached queue text at a bounded rate when the transfers window is visible.
+			if (theApp.emuledlg->activewnd == theApp.emuledlg->transferwnd && theApp.emuledlg->IsWindowVisible())
+				theApp.emuledlg->transferwnd->InvalidateQueueCount(false);
 
 			theApp.uploadqueue->UpdateDatarates();
 

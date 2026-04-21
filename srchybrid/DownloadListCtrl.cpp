@@ -55,6 +55,8 @@
 #include "ClientList.h"
 #include "eMuleAI/DarkMode.h"
 #include "ListViewSearchDlg.h"
+#include "SafeFile.h"
+#include <limits>
 
 #ifdef _DEBUG
 #define new DEBUG_NEW
@@ -76,6 +78,104 @@ namespace
 {
 	const EListStateField kDownloadListViewState = static_cast<EListStateField>(LSF_SELECTION | LSF_SCROLL);
 	const DWORD kDownloadListSetItemCountFlags = LVSICF_NOSCROLL | LVSICF_NOINVALIDATEALL;
+
+	UINT GetSharePermissionMenuItem(const CKnownFile* pFile)
+	{
+		if (pFile == NULL)
+			return 0;
+
+		switch (pFile->GetPermissions()) {
+		case -1:
+			return MP_PERMDEFAULT;
+		case PERM_ALL:
+			return MP_PERMALL;
+		case PERM_FRIENDS:
+			return MP_PERMFRIENDS;
+		case PERM_NOONE:
+			return MP_PERMNONE;
+		default:
+			ASSERT(false);
+			return 0;
+		}
+	}
+
+	CString GetSharePermissionLabel(const int iPermission)
+	{
+		switch (iPermission) {
+		case PERM_ALL:
+			return GetResString(_T("SHARE_PERMISSION_EVERYBODY"));
+		case PERM_FRIENDS:
+			return GetResString(_T("SHARE_PERMISSION_FRIENDSONLY"));
+		case PERM_NOONE:
+			return GetResString(_T("SHARE_PERMISSION_HIDDEN"));
+		default:
+			return CString();
+		}
+	}
+
+	void UpdateSharePermissionMenuChecks(CMenu& menu, UINT uCheckedItem)
+	{
+		static const UINT s_auPermissionMenuItems[] = { MP_PERMDEFAULT, MP_PERMNONE, MP_PERMFRIENDS, MP_PERMALL };
+		for (size_t i = 0; i < _countof(s_auPermissionMenuItems); ++i)
+			menu.CheckMenuItem(s_auPermissionMenuItems[i], MF_BYCOMMAND | ((s_auPermissionMenuItems[i] == uCheckedItem) ? MF_CHECKED : MF_UNCHECKED));
+	}
+
+	CString GetAutoRenameToMajorityNameLabel(const bool bUseInvertPrefix)
+	{
+		CString strLabel(GetResString(_T("DOWNLOAD_INSPECTOR_AUTO_RENAME_TO_MAJORITY_NAME")));
+		if (bUseInvertPrefix)
+			strLabel = GetResString(_T("INVERT")) + _T(" ") + strLabel;
+		return strLabel;
+	}
+
+	bool IsAutoRenameToMajorityNameModeEnabled()
+	{
+		return thePrefs.GetDownloadInspector() > 0;
+	}
+
+	int FindMenuCommandPosition(CMenu& menu, const UINT uCommand)
+	{
+		const int iMenuItemCount = menu.GetMenuItemCount();
+		for (int iMenuItem = 0; iMenuItem < iMenuItemCount; ++iMenuItem) {
+			if (menu.GetMenuItemID(iMenuItem) == uCommand)
+				return iMenuItem;
+		}
+
+		return -1;
+	}
+
+	void SyncAutoRenameToMajorityNameMenuItem(CMenuXP& menu)
+	{
+		const int iAutoRenameMenuPosition = FindMenuCommandPosition(menu, MP_AUTORENAMETOMAJORITYNAME);
+		if (!IsAutoRenameToMajorityNameModeEnabled()) {
+			if (iAutoRenameMenuPosition != -1)
+				menu.RemoveMenu(MP_AUTORENAMETOMAJORITYNAME, MF_BYCOMMAND);
+			return;
+		}
+
+		if (iAutoRenameMenuPosition != -1)
+			return;
+
+		const int iCommentsMenuPosition = FindMenuCommandPosition(menu, MP_VIEWFILECOMMENTS);
+		if (iCommentsMenuPosition == -1)
+			return;
+
+		menu.InsertMenu(iCommentsMenuPosition + 1, MF_BYPOSITION | MF_STRING, MP_AUTORENAMETOMAJORITYNAME, GetResString(_T("DOWNLOAD_INSPECTOR_AUTO_RENAME_TO_MAJORITY_NAME")), _T("EDIT"));
+	}
+
+	CObject* CreateClientDetailWalkerToken(const CUpDownClient* pClient)
+	{
+		if (pClient == NULL || theApp.clientlist == NULL)
+			return NULL;
+
+		CUpDownClient* pTrackedClient = theApp.clientlist->AcquireTrackedClientByPointer(pClient);
+		if (pTrackedClient == NULL)
+			return NULL;
+
+		const ClientRuntimeID uRuntimeID = pTrackedClient->GetRuntimeID();
+		pTrackedClient->ReleaseRuntimeReference();
+		return uRuntimeID != 0 ? reinterpret_cast<CObject*>((static_cast<ULONG_PTR>(uRuntimeID) << 1) | 1) : NULL;
+	}
 
 	int GetBitmapWidth(CBitmap& bitmap)
 	{
@@ -200,6 +300,7 @@ CDownloadListCtrl::CDownloadListCtrl()
 	, m_availableCommandsDirty(true)
 	, pDownloadInspectorThread()
 	, m_dwLastDetection()
+	, m_tNextAutoDeleteScan(time(NULL) + MIN2S(10))
 	, m_bRightClicked()
 	, m_iDataSize(-1)
 	, m_uListedFilesCount()
@@ -738,7 +839,11 @@ void CDownloadListCtrl::DrawFileItem(CDC *dc, int nColumn, LPCRECT lpRect, UINT 
 			const DWORD curTick = ::GetTickCount();
 			if (curTick >= pCtrlItem->dwUpdated + DLC_BARUPDATE || cx != iWidth || !pCtrlItem->dwUpdated) {
 				RECT statusRect = { rcDraw.left, rcDraw.top, rcDraw.left + iWidth, rcDraw.top + iHeight };
-				pPartFile->DrawStatusBar(dc, &statusRect, thePrefs.UseFlatBar());
+				const bool bUseFlatBar = thePrefs.UseFlatBar();
+				const int iSavedDC = bUseFlatBar ? dc->SaveDC() : 0; // Keep row text background state isolated only for flat bar drawing.
+				pPartFile->DrawStatusBar(dc, &statusRect, bUseFlatBar);
+				if (iSavedDC != 0)
+					dc->RestoreDC(iSavedDC);
 				pCtrlItem->dwUpdated = curTick + (rand() & 0x7f);
 			}
 
@@ -961,7 +1066,11 @@ void CDownloadListCtrl::DrawSourceItem(CDC *dc, int nColumn, LPCRECT lpRect, UIN
 			const DWORD curTick = ::GetTickCount();
 			if (curTick >= pCtrlItem->dwUpdated + DLC_BARUPDATE || cx != iWidth || !pCtrlItem->dwUpdated) {
 				RECT statusRect = { rcDraw.left, rcDraw.top, rcDraw.left + iWidth, rcDraw.top + iHeight };
-				pClient->DrawStatusBar(dc, &statusRect, (pCtrlItem->type == UNAVAILABLE_SOURCE), thePrefs.UseFlatBar());
+				const bool bUseFlatBar = thePrefs.UseFlatBar();
+				const int iSavedDC = bUseFlatBar ? dc->SaveDC() : 0; // Keep row text background state isolated only for flat bar drawing.
+				pClient->DrawStatusBar(dc, &statusRect, (pCtrlItem->type == UNAVAILABLE_SOURCE), bUseFlatBar);
+				if (iSavedDC != 0)
+					dc->RestoreDC(iSavedDC);
 				pCtrlItem->dwUpdated = curTick + (rand() & 0x7f);
 			}
 		}
@@ -1262,6 +1371,9 @@ void CDownloadListCtrl::OnLvnItemActivate(LPNMHDR pNMHDR, LRESULT *pResult)
 
 void CDownloadListCtrl::OnContextMenu(CWnd*, CPoint point)
 {
+	SyncAutoRenameToMajorityNameMenuItem(m_FileMenu);
+	const bool bShowAutoRenameToMajorityNameMenu = IsAutoRenameToMajorityNameModeEnabled();
+
 	int iSel = GetNextItem(-1, LVIS_SELECTED);
 	if (iSel >= 0) {
 		const CtrlItem_Struct* content = reinterpret_cast<CtrlItem_Struct*>(GetItemData(iSel));
@@ -1281,6 +1393,9 @@ void CDownloadListCtrl::OnContextMenu(CWnd*, CPoint point)
 			int iFilesDoPauseOnPreview = 0;
 			int iFilesInCats = 0;
 			int iFilesToImport = 0;
+			int iFilesAutoRenameToMajorityName = 0;
+			int iFilesAutoRenameToMajorityNameApplicable = 0;
+			UINT uPermMenuItem = 0;
 			UINT uPrioMenuItem = 0;
 			const CPartFile *file1 = NULL;
 
@@ -1305,6 +1420,10 @@ void CDownloadListCtrl::OnContextMenu(CWnd*, CPoint point)
 				iFilesDoPauseOnPreview += static_cast<int>(pFile->IsPausingOnPreview());
 				iFilesInCats += static_cast<int>(!pFile->HasDefaultCategory());
 				iFilesToImport += static_cast<int>(pFile->GetFileOp() == PFOP_IMPORTPARTS);
+				if (pFile->GetStatus() != PS_COMPLETE && pFile->GetStatus() != PS_COMPLETING) {
+					++iFilesAutoRenameToMajorityNameApplicable;
+					iFilesAutoRenameToMajorityName += static_cast<int>(pFile->IsAutoRenameToMajorityNameEnabled());
+				}
 
 				UINT uCurPrioMenuItem;
 				if (pFile->IsAutoDownPriority())
@@ -1331,10 +1450,23 @@ void CDownloadListCtrl::OnContextMenu(CWnd*, CPoint point)
 					uPrioMenuItem = uCurPrioMenuItem;
 				} else if (uPrioMenuItem != uCurPrioMenuItem)
 					uPrioMenuItem = 0;
+
+				const UINT uCurPermMenuItem = GetSharePermissionMenuItem(pFile);
+				if (file1 == pFile)
+					uPermMenuItem = uCurPermMenuItem;
+				else if (uPermMenuItem != uCurPermMenuItem)
+					uPermMenuItem = 0;
 			}
 
+			m_FileMenu.EnableMenuItem((UINT)m_PermMenu.m_hMenu, iSelectedItems > 0 ? MF_ENABLED : MF_GRAYED);
+			CString strDefaultPermission(GetResString(_T("DEFAULT")));
+			const CString strGlobalPermission(GetSharePermissionLabel(thePrefs.GetSharePermissions()));
+			if (!strGlobalPermission.IsEmpty())
+				strDefaultPermission.AppendFormat(_T(" (%s)"), (LPCTSTR)strGlobalPermission);
+			m_PermMenu.SetMenuText(MP_PERMDEFAULT, strDefaultPermission);
+			UpdateSharePermissionMenuChecks(m_PermMenu, uPermMenuItem);
 			m_FileMenu.EnableMenuItem((UINT)m_PrioMenu.m_hMenu, iFilesNotDone > 0 ? MF_ENABLED : MF_GRAYED);
-			m_PrioMenu.CheckMenuRadioItem(MP_PRIOLOW, MP_PRIOAUTO, uPrioMenuItem, 0);
+			m_PrioMenu.CheckMenuRadioItem(MP_PRIOLOW, MP_PRIOAUTO, uPrioMenuItem, MF_BYCOMMAND);
 
 			// enable commands if there is at least one item which can be used for the action
 			m_FileMenu.EnableMenuItem(MP_CANCEL, iFilesToCancel > 0 ? MF_ENABLED : MF_GRAYED);
@@ -1358,6 +1490,12 @@ void CDownloadListCtrl::OnContextMenu(CWnd*, CPoint point)
 			else
 				m_FileMenu.SetDefaultItem(UINT_MAX);
 			m_FileMenu.EnableMenuItem(MP_VIEWFILECOMMENTS, (iSelectedItems >= 1 /*&& iFilesNotDone == 1*/) ? MF_ENABLED : MF_GRAYED);
+			if (bShowAutoRenameToMajorityNameMenu) {
+				const bool bAutoRenameToMajorityNameMixed = iFilesAutoRenameToMajorityNameApplicable > 1 && iFilesAutoRenameToMajorityName > 0 && iFilesAutoRenameToMajorityName < iFilesAutoRenameToMajorityNameApplicable;
+				m_FileMenu.SetMenuText(MP_AUTORENAMETOMAJORITYNAME, GetAutoRenameToMajorityNameLabel(bAutoRenameToMajorityNameMixed));
+				m_FileMenu.EnableMenuItem(MP_AUTORENAMETOMAJORITYNAME, iFilesAutoRenameToMajorityNameApplicable > 0 ? MF_ENABLED : MF_GRAYED);
+				m_FileMenu.CheckMenuItem(MP_AUTORENAMETOMAJORITYNAME, MF_BYCOMMAND | ((!bAutoRenameToMajorityNameMixed && iFilesAutoRenameToMajorityNameApplicable > 0 && iFilesAutoRenameToMajorityName == iFilesAutoRenameToMajorityNameApplicable) ? MF_CHECKED : MF_UNCHECKED));
+			}
 			if (thePrefs.m_bImportParts) {
 				m_FileMenu.RemoveMenu(MP_IMPORTPARTS, MF_BYCOMMAND);
 				m_FileMenu.InsertMenu(MP_IMPORTPARTS, MF_STRING | MF_BYPOSITION, MP_IMPORTPARTS, (iFilesToImport > 0) ? GetResString(_T("IMPORTPARTS_STOP")) : GetResString(_T("IMPORTPARTS")), _T("FILEIMPORTPARTS"));
@@ -1465,6 +1603,7 @@ void CDownloadListCtrl::OnContextMenu(CWnd*, CPoint point)
 		}
 	} else { // nothing selected
 		int total;
+		m_FileMenu.EnableMenuItem((UINT)m_PermMenu.m_hMenu, MF_GRAYED);
 		m_FileMenu.EnableMenuItem((UINT)m_PrioMenu.m_hMenu, MF_GRAYED);
 		m_FileMenu.EnableMenuItem(MP_CANCEL, MF_GRAYED);
 		m_FileMenu.EnableMenuItem(MP_CANCEL_FORGET, MF_GRAYED);
@@ -1478,6 +1617,11 @@ void CDownloadListCtrl::OnContextMenu(CWnd*, CPoint point)
 
 		m_FileMenu.EnableMenuItem(MP_METINFO, MF_GRAYED);
 		m_FileMenu.EnableMenuItem(MP_VIEWFILECOMMENTS, MF_GRAYED);
+		if (bShowAutoRenameToMajorityNameMenu) {
+			m_FileMenu.SetMenuText(MP_AUTORENAMETOMAJORITYNAME, GetAutoRenameToMajorityNameLabel(false));
+			m_FileMenu.EnableMenuItem(MP_AUTORENAMETOMAJORITYNAME, MF_GRAYED);
+			m_FileMenu.CheckMenuItem(MP_AUTORENAMETOMAJORITYNAME, MF_BYCOMMAND | MF_UNCHECKED);
+		}
 		if (thePrefs.m_bImportParts)
 			m_FileMenu.EnableMenuItem(MP_IMPORTPARTS, MF_GRAYED);
 
@@ -1586,7 +1730,7 @@ CMenuXP* CDownloadListCtrl::GetPrioMenu()
 			}
 		}
 	}
-	m_PrioMenu.CheckMenuRadioItem(MP_PRIOLOW, MP_PRIOAUTO, uPrioMenuItem, 0);
+	m_PrioMenu.CheckMenuRadioItem(MP_PRIOLOW, MP_PRIOAUTO, uPrioMenuItem, MF_BYCOMMAND);
 	return &m_PrioMenu;
 }
 
@@ -1629,6 +1773,34 @@ BOOL CDownloadListCtrl::OnCommand(WPARAM wParam, LPARAM)
 			bool m_bAddToCanceledMet = true;
 
 			switch (wParam) {
+			case MP_PERMDEFAULT:
+			case MP_PERMNONE:
+			case MP_PERMFRIENDS:
+			case MP_PERMALL:
+				SetRedraw(false);
+				while (!selectedList.IsEmpty()) {
+					CPartFile* partfile = selectedList.RemoveHead();
+					if (partfile == NULL)
+						continue;
+
+					switch (wParam) {
+					case MP_PERMDEFAULT:
+						partfile->SetPermissions(-1);
+						break;
+					case MP_PERMNONE:
+						partfile->SetPermissions(PERM_NOONE);
+						break;
+					case MP_PERMFRIENDS:
+						partfile->SetPermissions(PERM_FRIENDS);
+						break;
+					default:
+						partfile->SetPermissions(PERM_ALL);
+						break;
+					}
+				}
+				SetRedraw(true);
+				Invalidate();
+				break;
 			case MP_CANCEL_FORGET:
 				m_bAddToCanceledMet = false;
 			case MP_CANCEL:
@@ -1776,14 +1948,15 @@ BOOL CDownloadListCtrl::OnCommand(WPARAM wParam, LPARAM)
 			case MPG_F2:
 				if (GetKeyState(VK_CONTROL) < 0 || selectedCount > 1) {
 					// when ctrl is pressed -> filename cleanup
-					if (IDYES == LocMessageBox(_T("MANUAL_FILENAMECLEANUP"), MB_YESNO, 0))
-						while (!selectedList.IsEmpty()) {
-							CPartFile *partfile = selectedList.RemoveHead();
-							if (partfile->IsPartFile()) {
-								HideSources(partfile);
-								partfile->SetFileName(CleanupFilename(partfile->GetFileName()));
+						if (IDYES == LocMessageBox(_T("MANUAL_FILENAMECLEANUP"), MB_YESNO, 0))
+							while (!selectedList.IsEmpty()) {
+								CPartFile *partfile = selectedList.RemoveHead();
+								if (partfile->IsPartFile()) {
+									HideSources(partfile);
+									partfile->SetAutoRenameToMajorityName(false);
+									partfile->SetFileName(CleanupFilename(partfile->GetFileName()));
+								}
 							}
-						}
 				} else {
 					if (file->GetStatus() != PS_COMPLETE && file->GetStatus() != PS_COMPLETING) {
 						InputBox inputbox;
@@ -1791,6 +1964,7 @@ BOOL CDownloadListCtrl::OnCommand(WPARAM wParam, LPARAM)
 						inputbox.SetEditFilenameMode();
 						if (inputbox.DoModal() == IDOK && !inputbox.GetInput().IsEmpty() && IsValidEd2kString(inputbox.GetInput())) {
 							HideSources(file);
+							file->SetAutoRenameToMajorityName(false);
 							file->SetFileName(inputbox.GetInput(), true);
 							file->UpdateDisplayedInfo();
 							file->SavePartFile();
@@ -1929,6 +2103,19 @@ BOOL CDownloadListCtrl::OnCommand(WPARAM wParam, LPARAM)
 			case MP_VIEWFILECOMMENTS:
 				ShowFileDialog(IDD_COMMENTLST);
 				break;
+			case MP_AUTORENAMETOMAJORITYNAME:
+				if (!IsAutoRenameToMajorityNameModeEnabled())
+					break;
+				SetRedraw(false);
+				while (!selectedList.IsEmpty()) {
+					CPartFile* partfile = selectedList.RemoveHead();
+					if (partfile == NULL || partfile->GetStatus() == PS_COMPLETE || partfile->GetStatus() == PS_COMPLETING)
+						continue;
+					partfile->ToggleAutoRenameToMajorityName();
+				}
+				SetRedraw(true);
+				Invalidate();
+				break;
 			case MP_IMPORTPARTS:
 				if (!file->m_bMD4HashsetNeeded) //log "no hashset"?
 					file->ImportParts();
@@ -1991,10 +2178,14 @@ BOOL CDownloadListCtrl::OnCommand(WPARAM wParam, LPARAM)
 				} else if (wParam >= MP_PREVIEW_APP_MIN && wParam <= MP_PREVIEW_APP_MAX)
 					thePreviewApps.RunApp(file, (UINT)wParam);
 			}
-		} else if (content != NULL) {
-			CUpDownClient *client = static_cast<CUpDownClient*>(content->value);
+			} else if (content != NULL) {
+				CUpDownClient *client = static_cast<CUpDownClient*>(content->value);
+				auto RefreshQueueCountAfterManualPunishment = []() {
+					if (theApp.emuledlg != NULL && theApp.emuledlg->transferwnd != NULL)
+						theApp.emuledlg->transferwnd->InvalidateQueueCount(true);
+				};
 
-			switch (wParam) {
+				switch (wParam) {
 			case MP_SHOWLIST:
 				{
 					CUpDownClient* NewClient = theApp.emuledlg->transferwnd->GetClientList()->ArchivedToActive(client);
@@ -2017,45 +2208,58 @@ BOOL CDownloadListCtrl::OnCommand(WPARAM wParam, LPARAM)
 			case MPG_ALTENTER:
 				ShowClientDialog(client);
 				break;
-			case MP_PUNISMENT_IPUSERHASHBAN:
-				theApp.shield->SetPunishment(client,GetResString(_T("PUNISHMENT_REASON_MANUAL_IP_BAN")), PR_MANUAL, P_IPUSERHASHBAN);
-				break;
-			case MP_PUNISMENT_USERHASHBAN:
-				theApp.shield->SetPunishment(client,GetResString(_T("PUNISHMENT_REASON_MANUAL_USER_HASH_BAN")), PR_MANUAL, P_USERHASHBAN);
-				break;
-			case MP_PUNISMENT_UPLOADBAN:
-				theApp.shield->SetPunishment(client,GetResString(_T("PUNISHMENT_REASON_MANUAL_UPLOAD_BAN")), PR_MANUAL, P_UPLOADBAN);
-				break;
-			case MP_PUNISMENT_SCOREX01:
-				theApp.shield->SetPunishment(client,GetResString(_T("PUNISHMENT_REASON_MANUAL_SCORE_REDUCING")), PR_MANUAL, P_SCOREX01);
-				break;
-			case MP_PUNISMENT_SCOREX02:
-				theApp.shield->SetPunishment(client,GetResString(_T("PUNISHMENT_REASON_MANUAL_SCORE_REDUCING")), PR_MANUAL, P_SCOREX02);
-				break;
-			case MP_PUNISMENT_SCOREX03:
-				theApp.shield->SetPunishment(client,GetResString(_T("PUNISHMENT_REASON_MANUAL_SCORE_REDUCING")), PR_MANUAL, P_SCOREX03);
-				break;
-			case MP_PUNISMENT_SCOREX04:
-				theApp.shield->SetPunishment(client,GetResString(_T("PUNISHMENT_REASON_MANUAL_SCORE_REDUCING")), PR_MANUAL, P_SCOREX04);
-				break;
-			case MP_PUNISMENT_SCOREX05:
-				theApp.shield->SetPunishment(client,GetResString(_T("PUNISHMENT_REASON_MANUAL_SCORE_REDUCING")), PR_MANUAL, P_SCOREX05);
-				break;
-			case MP_PUNISMENT_SCOREX06:
-				theApp.shield->SetPunishment(client,GetResString(_T("PUNISHMENT_REASON_MANUAL_SCORE_REDUCING")), PR_MANUAL, P_SCOREX06);
-				break;
-			case MP_PUNISMENT_SCOREX07:
-				theApp.shield->SetPunishment(client,GetResString(_T("PUNISHMENT_REASON_MANUAL_SCORE_REDUCING")), PR_MANUAL, P_SCOREX07);
-				break;
-			case MP_PUNISMENT_SCOREX08:
-				theApp.shield->SetPunishment(client,GetResString(_T("PUNISHMENT_REASON_MANUAL_SCORE_REDUCING")), PR_MANUAL, P_SCOREX08);
-				break;
-			case MP_PUNISMENT_SCOREX09:
-				theApp.shield->SetPunishment(client,GetResString(_T("PUNISHMENT_REASON_MANUAL_SCORE_REDUCING")), PR_MANUAL, P_SCOREX09);
-				break;
-			case MP_PUNISMENT_NONE:
-				theApp.shield->SetPunishment(client,GetResString(_T("PUNISHMENT_REASON_MANUAL_CANCELATION")), PR_MANUAL, P_NOPUNISHMENT);
-				break;
+				case MP_PUNISMENT_IPUSERHASHBAN:
+					theApp.shield->SetPunishment(client,GetResString(_T("PUNISHMENT_REASON_MANUAL_IP_BAN")), PR_MANUAL, P_IPUSERHASHBAN);
+					RefreshQueueCountAfterManualPunishment();
+					break;
+				case MP_PUNISMENT_USERHASHBAN:
+					theApp.shield->SetPunishment(client,GetResString(_T("PUNISHMENT_REASON_MANUAL_USER_HASH_BAN")), PR_MANUAL, P_USERHASHBAN);
+					RefreshQueueCountAfterManualPunishment();
+					break;
+				case MP_PUNISMENT_UPLOADBAN:
+					theApp.shield->SetPunishment(client,GetResString(_T("PUNISHMENT_REASON_MANUAL_UPLOAD_BAN")), PR_MANUAL, P_UPLOADBAN);
+					RefreshQueueCountAfterManualPunishment();
+					break;
+				case MP_PUNISMENT_SCOREX01:
+					theApp.shield->SetPunishment(client,GetResString(_T("PUNISHMENT_REASON_MANUAL_SCORE_REDUCING")), PR_MANUAL, P_SCOREX01);
+					RefreshQueueCountAfterManualPunishment();
+					break;
+				case MP_PUNISMENT_SCOREX02:
+					theApp.shield->SetPunishment(client,GetResString(_T("PUNISHMENT_REASON_MANUAL_SCORE_REDUCING")), PR_MANUAL, P_SCOREX02);
+					RefreshQueueCountAfterManualPunishment();
+					break;
+				case MP_PUNISMENT_SCOREX03:
+					theApp.shield->SetPunishment(client,GetResString(_T("PUNISHMENT_REASON_MANUAL_SCORE_REDUCING")), PR_MANUAL, P_SCOREX03);
+					RefreshQueueCountAfterManualPunishment();
+					break;
+				case MP_PUNISMENT_SCOREX04:
+					theApp.shield->SetPunishment(client,GetResString(_T("PUNISHMENT_REASON_MANUAL_SCORE_REDUCING")), PR_MANUAL, P_SCOREX04);
+					RefreshQueueCountAfterManualPunishment();
+					break;
+				case MP_PUNISMENT_SCOREX05:
+					theApp.shield->SetPunishment(client,GetResString(_T("PUNISHMENT_REASON_MANUAL_SCORE_REDUCING")), PR_MANUAL, P_SCOREX05);
+					RefreshQueueCountAfterManualPunishment();
+					break;
+				case MP_PUNISMENT_SCOREX06:
+					theApp.shield->SetPunishment(client,GetResString(_T("PUNISHMENT_REASON_MANUAL_SCORE_REDUCING")), PR_MANUAL, P_SCOREX06);
+					RefreshQueueCountAfterManualPunishment();
+					break;
+				case MP_PUNISMENT_SCOREX07:
+					theApp.shield->SetPunishment(client,GetResString(_T("PUNISHMENT_REASON_MANUAL_SCORE_REDUCING")), PR_MANUAL, P_SCOREX07);
+					RefreshQueueCountAfterManualPunishment();
+					break;
+				case MP_PUNISMENT_SCOREX08:
+					theApp.shield->SetPunishment(client,GetResString(_T("PUNISHMENT_REASON_MANUAL_SCORE_REDUCING")), PR_MANUAL, P_SCOREX08);
+					RefreshQueueCountAfterManualPunishment();
+					break;
+				case MP_PUNISMENT_SCOREX09:
+					theApp.shield->SetPunishment(client,GetResString(_T("PUNISHMENT_REASON_MANUAL_SCORE_REDUCING")), PR_MANUAL, P_SCOREX09);
+					RefreshQueueCountAfterManualPunishment();
+					break;
+				case MP_PUNISMENT_NONE:
+					theApp.shield->SetPunishment(client,GetResString(_T("PUNISHMENT_REASON_MANUAL_CANCELATION")), PR_MANUAL, P_NOPUNISHMENT);
+					RefreshQueueCountAfterManualPunishment();
+					break;
 			case MP_BOOT:
 				if (client->GetKadPort() && client->GetKadVersion() >= KADEMLIA_VERSION2_47a)
 					Kademlia::CKademlia::Bootstrap(client->GetIPv4().ToUInt32(true), client->GetKadPort());
@@ -2508,6 +2712,8 @@ void CDownloadListCtrl::CreateMenus()
 {
 	if (m_PreviewMenu)
 		VERIFY(m_PreviewMenu.DestroyMenu());
+	if (m_PermMenu)
+		VERIFY(m_PermMenu.DestroyMenu());
 	if (m_PrioMenu)
 		VERIFY(m_PrioMenu.DestroyMenu());
 	if (m_SourcesMenu)
@@ -2525,6 +2731,13 @@ void CDownloadListCtrl::CreateMenus()
 	m_PrioMenu.AppendMenu(MF_STRING, MP_PRIONORMAL, GetResString(_T("PRIONORMAL")));
 	m_PrioMenu.AppendMenu(MF_STRING, MP_PRIOHIGH, GetResString(_T("PRIOHIGH")));
 	m_PrioMenu.AppendMenu(MF_STRING, MP_PRIOAUTO, GetResString(_T("PRIOAUTO")));
+
+	m_PermMenu.CreateMenu();
+	m_PermMenu.AppendMenu(MF_STRING, MP_PERMDEFAULT, GetResString(_T("DEFAULT")));
+	m_PermMenu.AppendMenu(MF_STRING, MP_PERMNONE, GetResString(_T("SHARE_PERMISSION_HIDDEN")));
+	m_PermMenu.AppendMenu(MF_STRING, MP_PERMFRIENDS, GetResString(_T("SHARE_PERMISSION_FRIENDSONLY")));
+	m_PermMenu.AppendMenu(MF_STRING, MP_PERMALL, GetResString(_T("SHARE_PERMISSION_EVERYBODY")));
+	m_FileMenu.AppendMenu(MF_STRING | MF_POPUP, (UINT_PTR)m_PermMenu.m_hMenu, GetResString(_T("SHARE_PERMISSION_GROUP")), _T("FRIEND"));
 
 	CString sPrio;
 	sPrio.Format(_T("%s (%s)"), (LPCTSTR)GetResString(_T("PRIORITY")), (LPCTSTR)GetResString(_T("DOWNLOAD")));
@@ -2546,6 +2759,8 @@ void CDownloadListCtrl::CreateMenus()
 
 	m_FileMenu.AppendMenu(MF_STRING, MP_METINFO, GetResString(_T("DL_INFO")), _T("FILEINFO"));
 	m_FileMenu.AppendMenu(MF_STRING, MP_VIEWFILECOMMENTS, GetResString(_T("CMT_SHOWALL")), _T("FILECOMMENTS"));
+	if (IsAutoRenameToMajorityNameModeEnabled())
+		m_FileMenu.AppendMenu(MF_STRING, MP_AUTORENAMETOMAJORITYNAME, GetResString(_T("DOWNLOAD_INSPECTOR_AUTO_RENAME_TO_MAJORITY_NAME")), _T("EDIT"));
 	if (thePrefs.m_bImportParts)
 		m_FileMenu.AppendMenu(MF_STRING | MF_GRAYED, MP_IMPORTPARTS, GetResString(_T("IMPORTPARTS")), _T("FILEIMPORTPARTS"));
 	m_FileMenu.AppendMenu(MF_SEPARATOR);
@@ -3128,11 +3343,18 @@ CObject* CDownloadListListCtrlItemWalk::GetPrevSelectableItem()
 			while (--iItem >= 0) {
 				const CtrlItem_Struct* ctrl_item = reinterpret_cast<CtrlItem_Struct*>(m_pDownloadListCtrl->GetItemData(iItem));
 				if (ctrl_item != NULL && (ctrl_item->type == m_eItemType || (m_eItemType != FILE_TYPE && ctrl_item->type != FILE_TYPE))) {
+					CObject* pItem = reinterpret_cast<CObject*>(ctrl_item->value);
+					if (m_eItemType != FILE_TYPE) {
+						pItem = CreateClientDetailWalkerToken(reinterpret_cast<CUpDownClient*>(ctrl_item->value));
+						if (pItem == NULL)
+							continue;
+					}
+
 					m_pDownloadListCtrl->SetItemState(iCurSelItem, 0, LVIS_SELECTED | LVIS_FOCUSED);
 					m_pDownloadListCtrl->SetItemState(iItem, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
 					m_pDownloadListCtrl->SetSelectionMark(iItem);
 					m_pDownloadListCtrl->EnsureVisible(iItem, FALSE);
-					return reinterpret_cast<CObject*>(ctrl_item->value);
+					return pItem;
 				}
 			}
 		}
@@ -3156,11 +3378,18 @@ CObject* CDownloadListListCtrlItemWalk::GetNextSelectableItem()
 			while (++iItem < iItemCount) {
 				const CtrlItem_Struct* ctrl_item = reinterpret_cast<CtrlItem_Struct*>(m_pDownloadListCtrl->GetItemData(iItem));
 				if (ctrl_item != NULL && (ctrl_item->type == m_eItemType || (m_eItemType != FILE_TYPE && ctrl_item->type != FILE_TYPE))) {
+					CObject* pItem = reinterpret_cast<CObject*>(ctrl_item->value);
+					if (m_eItemType != FILE_TYPE) {
+						pItem = CreateClientDetailWalkerToken(reinterpret_cast<CUpDownClient*>(ctrl_item->value));
+						if (pItem == NULL)
+							continue;
+					}
+
 					m_pDownloadListCtrl->SetItemState(iCurSelItem, 0, LVIS_SELECTED | LVIS_FOCUSED);
 					m_pDownloadListCtrl->SetItemState(iItem, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
 					m_pDownloadListCtrl->SetSelectionMark(iItem);
 					m_pDownloadListCtrl->EnsureVisible(iItem, FALSE);
-					return reinterpret_cast<CObject*>(ctrl_item->value);
+					return pItem;
 				}
 			}
 		}
@@ -3285,6 +3514,7 @@ bool CDownloadListCtrl::ReportAvailableCommands(CList<int> &liAvailableCommands)
 			int iFilesToOpen = 0;
 			int iFilesToPreview = 0;
 			int iFilesToCancel = 0;
+			int iFilesNotDone = 0;
 			for (POSITION pos = GetFirstSelectedItemPosition(); pos != NULL;) {
 				int iIdxSel = GetNextSelectedItem(pos);
 				const CtrlItem_Struct* pItemData = reinterpret_cast<CtrlItem_Struct*>(GetItemData(iIdxSel));
@@ -3300,6 +3530,7 @@ bool CDownloadListCtrl::ReportAvailableCommands(CList<int> &liAvailableCommands)
 				++iSelectedItems;
 
 				iFilesToCancel += static_cast<int>(pFile->GetStatus() != PS_COMPLETING);
+				iFilesNotDone += static_cast<int>(pFile->GetStatus() != PS_COMPLETE && pFile->GetStatus() != PS_COMPLETING);
 				iFilesToStop += static_cast<int>(pFile->CanStopFile());
 				iFilesToPause += static_cast<int>(pFile->CanPauseFile());
 				iFilesToResume += static_cast<int>(pFile->CanResumeFile());
@@ -3339,6 +3570,8 @@ bool CDownloadListCtrl::ReportAvailableCommands(CList<int> &liAvailableCommands)
 			if (iSelectedItems > 0) {
 				liAvailableCommands.AddTail(MP_METINFO);
 				liAvailableCommands.AddTail(MP_VIEWFILECOMMENTS);
+				if (IsAutoRenameToMajorityNameModeEnabled() && iFilesNotDone > 0)
+					liAvailableCommands.AddTail(MP_AUTORENAMETOMAJORITYNAME);
 				liAvailableCommands.AddTail(MP_SHOWED2KLINK);
 				liAvailableCommands.AddTail(MP_NEWCAT);
 				liAvailableCommands.AddTail(MP_PRIOLOW);
@@ -3380,12 +3613,253 @@ static inline bool GetDRM(const LPCTSTR pszFilePath)
 	return false;
 }
 
+namespace
+{
+	const uint64 kAutoDeleteBytesPerMb = 1024ui64 * 1024ui64;
+	const time_t kAutoDeleteSecondsPerDay = 24 * 60 * 60;
+	const time_t kAutoDeleteBusyRetryDelay = MIN2S(10);
+	const time_t kAutoDeleteFallbackInterval = HR2S(24);
+	const time_t kAutoDeleteSettingsChangeDelay = 60;
+	const time_t kAutoDeleteNoRecheck = (std::numeric_limits<time_t>::max)();
+	const UINT_PTR kDownloadInspectorThreadForce = 0x1;
+	const UINT_PTR kDownloadInspectorThreadAutoDeleteDue = 0x2;
+	volatile LONG g_lDownloadInspectorAutoDeleteGeneration = 0;
+
+	struct DownloadInspectorAutoDeleteEvaluation
+	{
+		DownloadInspectorAutoDeleteEvaluation()
+			: bDateGroupMatch(false)
+			, bAmountGroupMatch(false)
+			, bMatched(false)
+			, tNextCheck(kAutoDeleteNoRecheck)
+		{
+		}
+
+		bool bDateGroupMatch;
+		bool bAmountGroupMatch;
+		bool bMatched;
+		time_t tNextCheck;
+		CString strReason;
+	};
+
+	bool HasDownloadInspectorAutoDeleteDateCriteriaEnabled()
+	{
+		return thePrefs.IsDownloadInspectorAutoDeleteAddedBeforeEnabled()
+			|| thePrefs.IsDownloadInspectorAutoDeleteLastSeenCompleteBeforeEnabled()
+			|| thePrefs.IsDownloadInspectorAutoDeleteLastReceivedBeforeEnabled();
+	}
+
+	bool HasDownloadInspectorAutoDeleteAmountCriteriaEnabled()
+	{
+		return thePrefs.IsDownloadInspectorAutoDeleteDownloadedLessThanPercentEnabled()
+			|| thePrefs.IsDownloadInspectorAutoDeleteDownloadedLessThanMbEnabled();
+	}
+
+	bool IsDownloadInspectorAutoDeleteScanEnabled()
+	{
+		return thePrefs.GetDownloadInspector() > 0
+			&& thePrefs.IsDownloadInspectorAutoDeleteEnabled()
+			&& HasDownloadInspectorAutoDeleteDateCriteriaEnabled()
+			&& HasDownloadInspectorAutoDeleteAmountCriteriaEnabled();
+	}
+
+	LONG GetDownloadInspectorAutoDeleteGeneration()
+	{
+		return ::InterlockedCompareExchange(&g_lDownloadInspectorAutoDeleteGeneration, 0, 0);
+	}
+
+	bool IsDownloadInspectorAutoDeleteGenerationCurrent(const LONG lGeneration)
+	{
+		return GetDownloadInspectorAutoDeleteGeneration() == lGeneration;
+	}
+
+	void ResetDownloadInspectorAutoDeleteStateForGeneration(CPartFile* file, const LONG lGeneration)
+	{
+		if (file == NULL)
+			return;
+		file->m_tLastAutoDeleteEvaluation = 0;
+		file->m_tNextAutoDeleteCheck = 0;
+		file->m_tLastSeenCompleteForAutoDelete = 0;
+		file->m_bAutoDeletePendingWhileBusy = false;
+		file->m_lAutoDeleteStateGeneration = lGeneration;
+	}
+
+	void UpdateEarliestAutoDeleteRecheck(time_t& rtCurrentEarliest, const time_t tCandidate)
+	{
+		if (tCandidate <= 0 || tCandidate == kAutoDeleteNoRecheck)
+			return;
+		if (rtCurrentEarliest == kAutoDeleteNoRecheck || tCandidate < rtCurrentEarliest)
+			rtCurrentEarliest = tCandidate;
+	}
+
+	void AppendAutoDeleteReason(CString& rstrReasons, const CString& strReason)
+	{
+		if (strReason.IsEmpty())
+			return;
+		if (!rstrReasons.IsEmpty())
+			rstrReasons += _T("; ");
+		rstrReasons += strReason;
+	}
+
+	uint32 GetAutoDeleteAgeInDays(const time_t tReference, const time_t tNow)
+	{
+		if (tReference <= 0 || tNow <= tReference)
+			return 0;
+		return static_cast<uint32>((tNow - tReference) / kAutoDeleteSecondsPerDay);
+	}
+
+	bool EvaluateAutoDeleteDateCriterion(const time_t tReference, const int iThresholdDays, const time_t tNow, uint32& ruiAgeDays, time_t& rtNextCheck)
+	{
+		ruiAgeDays = 0;
+		rtNextCheck = kAutoDeleteNoRecheck;
+		if (tReference <= 0)
+			return false;
+
+		ruiAgeDays = GetAutoDeleteAgeInDays(tReference, tNow);
+		if (ruiAgeDays >= static_cast<uint32>(iThresholdDays))
+			return true;
+
+		const time_t tThresholdTime = tReference + static_cast<time_t>(iThresholdDays) * kAutoDeleteSecondsPerDay;
+		if (tThresholdTime > tReference)
+			rtNextCheck = tThresholdTime;
+		return false;
+	}
+
+	bool DoesAutoDeleteLessThanThresholdMatch(const uint64 uValue, const uint64 uThreshold)
+	{
+		return uThreshold == 0 ? uValue == 0 : uValue < uThreshold;
+	}
+
+	bool DoesAutoDeleteLessThanThresholdMatch(const double fValue, const int iThreshold)
+	{
+		return iThreshold == 0 ? fValue <= 0.0 : fValue < static_cast<double>(iThreshold);
+	}
+
+	bool IsAutoDeleteBusyState(const CPartFile* file)
+	{
+		if (file == NULL)
+			return true;
+		if (file->m_bPreviewing || file->GetFileOp() != PFOP_NONE)
+			return true;
+		switch (file->GetStatus()) {
+		case PS_WAITINGFORHASH:
+		case PS_HASHING:
+		case PS_COMPLETING:
+			return true;
+		default:
+			return false;
+		}
+	}
+
+	DownloadInspectorAutoDeleteEvaluation EvaluateDownloadInspectorAutoDelete(const CPartFile* file, const time_t tNow)
+	{
+		DownloadInspectorAutoDeleteEvaluation result;
+		if (file == NULL)
+			return result;
+
+		const uint64 uCompletedSize = file->GetCompletedSize();
+		const uint64 uFileSize = file->GetFileSize();
+		const double fCompletedPercent = uFileSize > 0 ? (static_cast<double>(uCompletedSize) * 100.0 / static_cast<double>(uFileSize)) : 0.0;
+		time_t tEarliestDateRecheck = kAutoDeleteNoRecheck;
+
+		if (thePrefs.IsDownloadInspectorAutoDeleteAddedBeforeEnabled()) {
+			uint32 uAgeDays = 0;
+			time_t tNextCheck = kAutoDeleteNoRecheck;
+			if (EvaluateAutoDeleteDateCriterion(file->GetCrFileDate(), thePrefs.GetDownloadInspectorAutoDeleteAddedBeforeDays(), tNow, uAgeDays, tNextCheck)) {
+				result.bDateGroupMatch = true;
+				CString strCurrentReason;
+				strCurrentReason.Format(GetResString(_T("DOWNLOAD_INSPECTOR_AUTO_DELETE_REASON_ADDED")), uAgeDays, thePrefs.GetDownloadInspectorAutoDeleteAddedBeforeDays());
+				AppendAutoDeleteReason(result.strReason, strCurrentReason);
+			} else
+				UpdateEarliestAutoDeleteRecheck(tEarliestDateRecheck, tNextCheck);
+		}
+
+		if (thePrefs.IsDownloadInspectorAutoDeleteLastSeenCompleteBeforeEnabled()) {
+			uint32 uAgeDays = 0;
+			time_t tNextCheck = kAutoDeleteNoRecheck;
+			const time_t tLastSeenComplete = (file->lastseencomplete != 0) ? static_cast<time_t>(file->lastseencomplete.GetTime()) : 0;
+			if (EvaluateAutoDeleteDateCriterion(tLastSeenComplete, thePrefs.GetDownloadInspectorAutoDeleteLastSeenCompleteBeforeDays(), tNow, uAgeDays, tNextCheck)) {
+				result.bDateGroupMatch = true;
+				CString strCurrentReason;
+				strCurrentReason.Format(GetResString(_T("DOWNLOAD_INSPECTOR_AUTO_DELETE_REASON_LAST_SEEN_COMPLETE")), uAgeDays, thePrefs.GetDownloadInspectorAutoDeleteLastSeenCompleteBeforeDays());
+				AppendAutoDeleteReason(result.strReason, strCurrentReason);
+			} else
+				UpdateEarliestAutoDeleteRecheck(tEarliestDateRecheck, tNextCheck);
+		}
+
+		if (thePrefs.IsDownloadInspectorAutoDeleteLastReceivedBeforeEnabled()) {
+			uint32 uAgeDays = 0;
+			time_t tNextCheck = kAutoDeleteNoRecheck;
+			if (EvaluateAutoDeleteDateCriterion(file->GetLastReceptionDate(), thePrefs.GetDownloadInspectorAutoDeleteLastReceivedBeforeDays(), tNow, uAgeDays, tNextCheck)) {
+				result.bDateGroupMatch = true;
+				CString strCurrentReason;
+				strCurrentReason.Format(GetResString(_T("DOWNLOAD_INSPECTOR_AUTO_DELETE_REASON_LAST_RECEIVED")), uAgeDays, thePrefs.GetDownloadInspectorAutoDeleteLastReceivedBeforeDays());
+				AppendAutoDeleteReason(result.strReason, strCurrentReason);
+			} else
+				UpdateEarliestAutoDeleteRecheck(tEarliestDateRecheck, tNextCheck);
+		}
+
+		if (thePrefs.IsDownloadInspectorAutoDeleteDownloadedLessThanPercentEnabled()
+			&& DoesAutoDeleteLessThanThresholdMatch(fCompletedPercent, thePrefs.GetDownloadInspectorAutoDeleteDownloadedLessThanPercent())) {
+			result.bAmountGroupMatch = true;
+			CString strCurrentReason;
+			strCurrentReason.Format(GetResString(_T("DOWNLOAD_INSPECTOR_AUTO_DELETE_REASON_PERCENT")), fCompletedPercent, thePrefs.GetDownloadInspectorAutoDeleteDownloadedLessThanPercent());
+			AppendAutoDeleteReason(result.strReason, strCurrentReason);
+		}
+
+		if (thePrefs.IsDownloadInspectorAutoDeleteDownloadedLessThanMbEnabled()
+			&& DoesAutoDeleteLessThanThresholdMatch(uCompletedSize, static_cast<uint64>(thePrefs.GetDownloadInspectorAutoDeleteDownloadedLessThanMb()) * kAutoDeleteBytesPerMb)) {
+			result.bAmountGroupMatch = true;
+			CString strCurrentReason;
+			strCurrentReason.Format(GetResString(_T("DOWNLOAD_INSPECTOR_AUTO_DELETE_REASON_MB")), (LPCTSTR)CastItoXBytes(uCompletedSize), thePrefs.GetDownloadInspectorAutoDeleteDownloadedLessThanMb());
+			AppendAutoDeleteReason(result.strReason, strCurrentReason);
+		}
+
+		result.bMatched = result.bDateGroupMatch && result.bAmountGroupMatch;
+		if (result.bMatched || !result.bAmountGroupMatch)
+			result.tNextCheck = kAutoDeleteNoRecheck;
+		else
+			result.tNextCheck = tEarliestDateRecheck;
+
+		return result;
+	}
+
+	bool AppendAutoDeleteEd2kLinkToBackupFile(const CString& strEd2kLink)
+	{
+		if (strEd2kLink.IsEmpty())
+			return false;
+		try {
+			CSafeBufferedFile file;
+			const CString strFilePath = thePrefs.GetMuleDirectory(EMULE_CONFIGDIR) + _T("download_inspector.txt");
+			if (!file.Open(strFilePath, CFile::modeCreate | CFile::modeNoTruncate | CFile::modeWrite | CFile::shareDenyWrite | CFile::typeBinary))
+				return false;
+			file.SeekToEnd();
+			const CUnicodeToUTF8 utf8Line(strEd2kLink + _T("\r\n"));
+			file.Write((LPCSTR)utf8Line, utf8Line.GetLength());
+			CommitAndClose(file);
+			return true;
+		} catch (...) {
+			TRACE(_T("Download inspector: Failed to append eD2k backup link.\n"));
+			return false;
+		}
+	}
+}
+
 void CDownloadListCtrl::DownloadInspector(const bool bForce)
 {
-	if (!bForce && thePrefs.GetDownloadInspector() <= 0)
-		return; // Disabled mode blocks periodic scans, manual runs stay available.
+	const bool bHasLegacyInspectorWork = thePrefs.IsDownloadInspectorInvalidExt() || thePrefs.GetDownloadInspectorFake() || thePrefs.GetDownloadInspectorDRM();
+	const bool bHasAutoDeleteWork = IsDownloadInspectorAutoDeleteScanEnabled();
+	if (!bHasLegacyInspectorWork && !bHasAutoDeleteWork)
+		return;
 
-	if (theApp.IsClosing() || (!bForce && m_dwLastDetection != 0 && (::GetTickCount() - m_dwLastDetection < thePrefs.GetDownloadInspectorCheckPeriod() * 60000/*minutes*/)))
+	if (!bForce && thePrefs.GetDownloadInspector() <= 0)
+		return;
+
+	const DWORD dwNow = ::GetTickCount();
+	const bool bLegacyInspectorDue = bForce || (bHasLegacyInspectorWork && (m_dwLastDetection == 0 || (dwNow - m_dwLastDetection >= static_cast<DWORD>(thePrefs.GetDownloadInspectorCheckPeriod() * 60000/*minutes*/))));
+	const time_t tNow = time(NULL);
+	const bool bAutoDeleteDue = bForce || (bHasAutoDeleteWork && m_tNextAutoDeleteScan != 0 && tNow >= m_tNextAutoDeleteScan);
+	if (theApp.IsClosing() || (!bLegacyInspectorDue && !bAutoDeleteDue))
 		return;
 
 	if (pDownloadInspectorThread != NULL) {
@@ -3398,216 +3872,290 @@ void CDownloadListCtrl::DownloadInspector(const bool bForce)
 	}
 
 	AddLogLine(false, GetResString(_T("DOWNLOAD_INSPECTOR_STARTED")));
-	pDownloadInspectorThread = AfxBeginThread(DownloadInspectorProc, (LPVOID)bForce, THREAD_PRIORITY_IDLE);
-	m_dwLastDetection = ::GetTickCount();
+	UINT_PTR uThreadFlags = 0;
+	if (bForce)
+		uThreadFlags |= kDownloadInspectorThreadForce;
+	if (bAutoDeleteDue)
+		uThreadFlags |= kDownloadInspectorThreadAutoDeleteDue;
+	pDownloadInspectorThread = AfxBeginThread(DownloadInspectorProc, reinterpret_cast<LPVOID>(uThreadFlags), THREAD_PRIORITY_IDLE);
+	if (bLegacyInspectorDue)
+		m_dwLastDetection = dwNow;
+}
+
+void CDownloadListCtrl::ResetDownloadInspectorAutoDeleteState()
+{
+	// Invalidate the cached auto-delete schedule. The worker thread will
+	// lazily rebuild per-file state for the next active generation.
+	::InterlockedIncrement(&g_lDownloadInspectorAutoDeleteGeneration);
+	if (!IsDownloadInspectorAutoDeleteScanEnabled()) {
+		m_tNextAutoDeleteScan = 0;
+		return;
+	}
+
+	m_tNextAutoDeleteScan = time(NULL) + kAutoDeleteSettingsChangeDelay;
 }
 
 UINT AFX_CDECL CDownloadListCtrl::DownloadInspectorProc(LPVOID pParam)
 {
-	DbgSetThreadName("FakeDRMInvalidExt");
-	bool m_bForce = static_cast<bool>(pParam);
-	bool m_bFileFound = false;
+	DbgSetThreadName("DownloadInspector");
+	const UINT_PTR uThreadFlags = reinterpret_cast<UINT_PTR>(pParam);
+	const bool bForce = (uThreadFlags & kDownloadInspectorThreadForce) != 0;
+	const bool bAutoDeleteGloballyDue = bForce || (uThreadFlags & kDownloadInspectorThreadAutoDeleteDue) != 0;
+	const LONG lAutoDeleteGeneration = GetDownloadInspectorAutoDeleteGeneration();
+	bool bFileFound = false;
+	time_t tEarliestAutoDeleteScan = kAutoDeleteNoRecheck;
 	CTypedPtrList<CPtrList, PartFileOperationMsgParams*> renamelist;
 	CTypedPtrList<CPtrList, PartFileOperationMsgParams*> removelist;
+	CDownloadListCtrl* pDownloadList = theApp.emuledlg->transferwnd->GetDownloadList();
 
-	for (ListItems::const_iterator it = theApp.emuledlg->transferwnd->GetDownloadList()->m_ListItems.begin(); it != theApp.emuledlg->transferwnd->GetDownloadList()->m_ListItems.end(); ++it) {
+	auto UpdateAutoDeleteScheduleCandidate = [&](const CPartFile* file) {
+		if (!bAutoDeleteGloballyDue || file == NULL || !IsDownloadInspectorAutoDeleteGenerationCurrent(lAutoDeleteGeneration))
+			return;
+		UpdateEarliestAutoDeleteRecheck(tEarliestAutoDeleteScan, file->m_tNextAutoDeleteCheck);
+	};
+
+	for (ListItems::const_iterator it = pDownloadList->m_ListItems.begin(); it != pDownloadList->m_ListItems.end(); ++it) {
 		const CtrlItem_Struct* cur_item = it->second;
-		// Since loop take to much time on long donwload lists, we use lock losely here. Main instance can remove items from  list, 
-		// so there is a possibility of having exceptions with this way. So we need to use try catch block here.
 		try {
 			if (cur_item == NULL || cur_item->type != FILE_TYPE)
 				continue;
 
-			CPartFile* file = static_cast<CPartFile*>(cur_item->value);
-			if (!file->IsPartFile())
-				continue;
+				CPartFile* file = static_cast<CPartFile*>(cur_item->value);
+				if (!file->IsPartFile())
+					continue;
+				if (file->m_lAutoDeleteStateGeneration != lAutoDeleteGeneration)
+					ResetDownloadInspectorAutoDeleteStateForGeneration(file, lAutoDeleteGeneration);
 
-			if (!m_bForce && file->GetFileDate() < file->m_tLastChecked) // File has not been modified since last check
-				continue;
+				const time_t tNow = time(NULL);
+				const bool bFileChangedSinceLastCheck = file->GetFileDate() >= file->m_tLastChecked;
+				const bool bContentCheckNeeded = bForce || bFileChangedSinceLastCheck;
+				const bool bAutoDeleteScanEnabled = bAutoDeleteGloballyDue && IsDownloadInspectorAutoDeleteGenerationCurrent(lAutoDeleteGeneration) && IsDownloadInspectorAutoDeleteScanEnabled();
+				const time_t tLastSeenComplete = file->lastseencomplete != 0 ? static_cast<time_t>(file->lastseencomplete.GetTime()) : 0;
+				const bool bAutoDeleteNeverEvaluated = file->m_tLastAutoDeleteEvaluation == 0;
+				const bool bAutoDeleteFileChangedSinceLastEvaluation = file->GetFileDate() >= file->m_tLastAutoDeleteEvaluation;
+				// lastseencomplete can change without touching the part file mtime.
+				const bool bAutoDeleteMetadataChangedSinceLastEvaluation = thePrefs.IsDownloadInspectorAutoDeleteLastSeenCompleteBeforeEnabled()
+					&& tLastSeenComplete != file->m_tLastSeenCompleteForAutoDelete;
+				const bool bAutoDeleteRetryAfterBusy = file->m_bAutoDeletePendingWhileBusy && !IsAutoDeleteBusyState(file);
+				const bool bAutoDeleteScheduledCheckDue = file->m_tNextAutoDeleteCheck != kAutoDeleteNoRecheck && (file->m_tNextAutoDeleteCheck == 0 || file->m_tNextAutoDeleteCheck <= tNow);
+				const bool bAutoDeleteCheckDue = bAutoDeleteScanEnabled && (bForce || bAutoDeleteNeverEvaluated || bAutoDeleteRetryAfterBusy || (!file->m_bAutoDeletePendingWhileBusy && (bAutoDeleteFileChangedSinceLastEvaluation || bAutoDeleteMetadataChangedSinceLastEvaluation)) || bAutoDeleteScheduledCheckDue);
+				if (!bContentCheckNeeded && !bAutoDeleteCheckDue) {
+					UpdateAutoDeleteScheduleCandidate(file);
+					continue;
+				}
 
 			CString cLogMsg;
 
-			if (thePrefs.IsDownloadInspectorInvalidExt() && (uint64)file->GetCompletedSize()) {
-				// Try to find valid file type
+			if (bContentCheckNeeded && thePrefs.IsDownloadInspectorInvalidExt() && (uint64)file->GetCompletedSize()) {
 				EFileType bycontent = GetFileTypeEx(file, false, true);
 				if (bycontent != FILETYPE_UNKNOWN) {
-					// Current file type
 					const CString& fname(file->GetFileName());
 					LPCTSTR pDot = ::PathFindExtension(fname);
-					CString szExt(pDot + static_cast<int>(*pDot != _T('\0'))); //skip the dot
+					CString szExt(pDot + static_cast<int>(*pDot != _T('\0')));
 					szExt.MakeUpper();
-					// Check if current file type is invalid
 					if (IsExtensionTypeOf(bycontent, szExt) != 1) {
-						CString m_strOldFileName, m_strNewFileName, m_strNewExtension;
-						m_strNewExtension = GetFileTypeName(bycontent);
-						if (m_strNewExtension == "MPEG Audio")
-							m_strNewExtension = "mp3";
-						else if (m_strNewExtension == "ISO/NRG")
-							m_strNewExtension = "iso";
-						else if (m_strNewExtension == "MPEG Video")
-							m_strNewExtension = "mpg";
-						else if (m_strNewExtension == "Microsoft Media Audio/Video")
-							m_strNewExtension = "wm";
-						else if (m_strNewExtension == "WIN/DOS EXE")
-							m_strNewExtension = "exe";
+						CString strOldFileName, strNewFileName, strNewExtension;
+						strNewExtension = GetFileTypeName(bycontent);
+						if (strNewExtension == "MPEG Audio")
+							strNewExtension = "mp3";
+						else if (strNewExtension == "ISO/NRG")
+							strNewExtension = "iso";
+						else if (strNewExtension == "MPEG Video")
+							strNewExtension = "mpg";
+						else if (strNewExtension == "Microsoft Media Audio/Video")
+							strNewExtension = "wm";
+						else if (strNewExtension == "WIN/DOS EXE")
+							strNewExtension = "exe";
 						else
-							m_strNewExtension = m_strNewExtension.MakeLower();
-						m_strOldFileName = file->GetFileName();
-						m_strNewFileName = m_strOldFileName;
-						// Get base file name if file has an extension.
-						// Some files can have a dot inside filename but no real extension, so limit extension lenght with 4 
-						if (szExt != "" && szExt.GetLength() < 5)
-							::PathRemoveExtension(m_strNewFileName.GetBuffer(m_strNewFileName.GetLength()));
-						m_strNewFileName.Format(_T("%s.%s"), m_strNewFileName, m_strNewExtension); // Add new extension
+							strNewExtension = strNewExtension.MakeLower();
+						strOldFileName = file->GetFileName();
+						strNewFileName = strOldFileName;
+						if (szExt != _T("") && szExt.GetLength() < 5)
+							::PathRemoveExtension(strNewFileName.GetBuffer(strNewFileName.GetLength()));
+						strNewFileName.Format(_T("%s.%s"), strNewFileName, strNewExtension);
 
 						if (thePrefs.GetDownloadInspector() == 2) {
-							cLogMsg.Format(GetResString(_T("INVALID_FILE_EXTENSION_REPLACED_MESSAGE")), (LPCTSTR)EscPercent(m_strOldFileName), (LPCTSTR)EscPercent(m_strNewFileName));
+							cLogMsg.Format(GetResString(_T("INVALID_FILE_EXTENSION_REPLACED_MESSAGE")), (LPCTSTR)EscPercent(strOldFileName), (LPCTSTR)EscPercent(strNewFileName));
 							PartFileOperationMsgParams* params = new PartFileOperationMsgParams;
 							params->pFile = file;
-							params->strNewFileName = m_strNewFileName;
+							params->strNewFileName = strNewFileName;
 							params->cLogMsg = cLogMsg;
 							renamelist.AddTail(params);
-						} else { // This will work for GetDownloadInspector == 0 or 1, so toolbar button will be able log even when GetDownloadInspector is disabled.
-							cLogMsg.Format(GetResString(_T("INVALID_FILE_EXTENSION_REPLACED_MESSAGE2")), (LPCTSTR)EscPercent(file->GetFileName()), m_strNewExtension);
+						} else {
+							cLogMsg.Format(GetResString(_T("INVALID_FILE_EXTENSION_REPLACED_MESSAGE2")), (LPCTSTR)EscPercent(file->GetFileName()), strNewExtension);
 							theApp.QueueLogLine(true, (LPCTSTR)EscPercent(cLogMsg));
 						}
 					}
 				}
 			}
 
-			// There is no need to check GetDownloadInspectorCompletedThreshold for DRM detection, so we'll do this as first step.
-			if (thePrefs.GetDownloadInspectorDRM() && (uint64)file->GetCompletedSize()) {
-				file->m_bPreviewing = true; //To prevent the part file from vanishing while copying, a lock on m_FileCompleteMutex might be better than currently used m_bPreviewing flag
-				bool m_bDRMFound = GetDRM(file->GetFilePath());
+			if (bContentCheckNeeded && thePrefs.GetDownloadInspectorDRM() && (uint64)file->GetCompletedSize()) {
+				file->m_bPreviewing = true;
+				const bool bDRMFound = GetDRM(file->GetFilePath());
 				file->m_bPreviewing = false;
-				if (m_bDRMFound) {
-					m_bFileFound = true;
+				if (bDRMFound) {
+					bFileFound = true;
 					if (thePrefs.GetDownloadInspector() == 2) {
 						cLogMsg.Format(GetResString(_T("DOWNLOAD_INSPECTOR_DELETE_MESSAGE3")), (LPCTSTR)EscPercent(file->GetFileName()));
 						PartFileOperationMsgParams* params = new PartFileOperationMsgParams;
 						params->pFile = file;
 						params->cLogMsg = cLogMsg;
 						removelist.AddTail(params);
-					} else { // This will work for GetDownloadInspector == 0 or 1, so toolbar button will be able log even when GetDownloadInspector is disabled.
+					} else {
 						cLogMsg.Format(GetResString(_T("DOWNLOAD_INSPECTOR_LOG_MESSAGE3")), (LPCTSTR)EscPercent(file->GetFileName()));
 						theApp.QueueLogLine(true, (LPCTSTR)EscPercent(cLogMsg));
 					}
 
-					file->m_tLastChecked = time(NULL); // File checks completed successfully. We can update file's last checked time with current time.
-
-					if (theApp.IsClosing()) // This check is needed by long download lists
+					file->m_tLastChecked = tNow;
+					file->m_tNextAutoDeleteCheck = kAutoDeleteNoRecheck;
+					UpdateAutoDeleteScheduleCandidate(file);
+					if (theApp.IsClosing())
 						return 1;
-					else
-						continue;
-				}
-			}
-
-			if (!thePrefs.GetDownloadInspectorFake() || (uint64)file->GetCompletedSize() / 1024 < thePrefs.GetDownloadInspectorCompletedThreshold()) {
-				file->m_tLastChecked = time(NULL); // File checks completed successfully. We can update file's last checked time with current time.
-				if (theApp.IsClosing()) // This check is needed by long download lists
-					return 1;
-				else
-					continue; // If the received bytes are less than the defined value, continue with the next file
-			}
-
-			int m_iCompressionPercentage = file->GetCompressionGain() * 100.0 / file->GetTransferred();
-			if (m_iCompressionPercentage < thePrefs.GetDownloadInspectorCompressionThreshold()) {
-				file->m_tLastChecked = time(NULL); // File checks completed successfully. We can update file's last checked time with current time.
-				if (theApp.IsClosing()) // This check is needed by long download lists
-					return 1;
-				else
-					continue; // If the compression is less than the defined value, continue with the next file
-			}
-
-			bool m_bBypassZeroPercentage = false;
-			bool m_bAllZero = true;
-			long double m_ldTotalCount = 0;
-			long double m_ldZeroCount = 0;
-
-			if (!thePrefs.GetDownloadInspectorBypassZeroPercentage() || m_iCompressionPercentage < thePrefs.GetDownloadInspectorCompressionThresholdToBypassZero()) {
-				if (thePrefs.GetDownloadInspectorZeroPercentageThreshold() == 100 && GetFileTypeEx(file, false, true) != FILETYPE_UNKNOWN) {  //File type signature area will be included in the calculation, so don't check if GetDownloadInspectorZeroPercentageThreshold != 100.
-					file->m_tLastChecked = time(NULL); // File checks completed successfully. We can update file's last checked time with current time.
-					if (theApp.IsClosing()) // This check is needed by long download lists
-						return 1;
-					else
-						continue; // If this file has a valid file type signature, continue with the next file.
-				}
-
-				CArray<Gap_Struct>* filled = new CArray<Gap_Struct>;
-				file->GetFilledArray(*filled);
-				if (filled->IsEmpty()) {
-					file->m_tLastChecked = time(NULL); // File checks completed successfully. We can update file's last checked time with current time.
-					delete filled;
 					continue;
 				}
+			}
 
-				file->m_bPreviewing = true; //To prevent the part file from vanishing while copying, a lock on m_FileCompleteMutex might be better than currently used m_bPreviewing flag
-				try {
-					// Loop through the filled areas and copy data
-					for (INT_PTR i = 0; i < filled->GetCount(); ++i) {
-						const Gap_Struct& fill = (*filled)[i];
-						for (uint64 uStart = fill.start; uStart < fill.end;) { //last valid byte was at fill.end-1
-							m_ldTotalCount++;
-							OVERLAPPED ovr = { 0, 0, {{ LODWORD(uStart), HIDWORD(uStart)}} };
-							OVERLAPPED ovw = ovr;
-							BYTE buffer[16384];
-							DWORD lenData = (DWORD)min(uStart - fill.end, sizeof buffer);
-							DWORD dwRead;
-							if (!::ReadFile((HANDLE)file->m_hpartfile, buffer, lenData, &dwRead, &ovr))
-								CFileException::ThrowOsError((LONG)::GetLastError(), file->GetFileName());
-							size_t len = sizeof(buffer) / sizeof(buffer[0]); // Get the size of array			
-							bool result = std::all_of(buffer, buffer + len, [](bool elem) {	return elem == 0; }); // Check if all elements of array arr are zero
-							if (!result) { // A non full zero array found.
-								m_bAllZero = false;
-								if (thePrefs.GetDownloadInspectorZeroPercentageThreshold() == 100)
-									break;
+			if (bContentCheckNeeded && thePrefs.GetDownloadInspectorFake() && (uint64)file->GetCompletedSize() / 1024 >= thePrefs.GetDownloadInspectorCompletedThreshold()) {
+				const uint64 uTransferred = file->GetTransferred();
+				const int iCompressionPercentage = uTransferred > 0 ? static_cast<int>(file->GetCompressionGain() * 100.0 / uTransferred) : 0;
+				if (iCompressionPercentage >= thePrefs.GetDownloadInspectorCompressionThreshold()) {
+					bool bBypassZeroPercentage = false;
+					bool bAllZero = true;
+					long double ldTotalCount = 0;
+					long double ldZeroCount = 0;
+
+					if (!thePrefs.GetDownloadInspectorBypassZeroPercentage() || iCompressionPercentage < thePrefs.GetDownloadInspectorCompressionThresholdToBypassZero()) {
+						if (!(thePrefs.GetDownloadInspectorZeroPercentageThreshold() == 100 && GetFileTypeEx(file, false, true) != FILETYPE_UNKNOWN)) {
+							CArray<Gap_Struct> filled;
+							file->GetFilledArray(filled);
+							if (!filled.IsEmpty()) {
+								file->m_bPreviewing = true;
+								try {
+									for (INT_PTR i = 0; i < filled.GetCount(); ++i) {
+										const Gap_Struct& fill = filled[i];
+										for (uint64 uStart = fill.start; uStart < fill.end;) {
+											ldTotalCount++;
+											OVERLAPPED ovr = { 0, 0, {{ LODWORD(uStart), HIDWORD(uStart)}} };
+											BYTE buffer[16384];
+											const DWORD lenData = static_cast<DWORD>(min(fill.end - uStart, static_cast<uint64>(sizeof buffer)));
+											DWORD dwRead = 0;
+											if (!::ReadFile((HANDLE)file->m_hpartfile, buffer, lenData, &dwRead, &ovr))
+												CFileException::ThrowOsError((LONG)::GetLastError(), file->GetFileName());
+											if (dwRead == 0)
+												break;
+											const bool bZeroBuffer = std::all_of(buffer, buffer + dwRead, [](BYTE elem) { return elem == 0; });
+											if (!bZeroBuffer) {
+												bAllZero = false;
+												if (thePrefs.GetDownloadInspectorZeroPercentageThreshold() == 100)
+													break;
+											} else
+												ldZeroCount++;
+											ASSERT(uStart + dwRead <= fill.end);
+											uStart += dwRead;
+										}
+										if (!bAllZero && thePrefs.GetDownloadInspectorZeroPercentageThreshold() == 100)
+											break;
+									}
+								} catch (CFileException* error) {
+									bAllZero = false;
+									error->Delete();
+								} catch (...) {
+									bAllZero = false;
+									ASSERT(0);
+								}
+								file->m_bPreviewing = false;
 							} else
-								m_ldZeroCount++;
-							ASSERT(dwRead && dwRead < fill.end);
-							uStart += dwRead;
+								bAllZero = false;
+						} else
+							bAllZero = false;
+					} else
+						bBypassZeroPercentage = true;
+
+					const long double ldZeroPercentage = ldTotalCount > 0 ? (ldZeroCount / ldTotalCount) * 100.0 : 0.0;
+					if (bBypassZeroPercentage || bAllZero || ldZeroPercentage >= thePrefs.GetDownloadInspectorZeroPercentageThreshold()) {
+						bFileFound = true;
+						if (thePrefs.GetDownloadInspector() == 2) {
+							if (!bBypassZeroPercentage)
+								cLogMsg.Format(GetResString(_T("DOWNLOAD_INSPECTOR_DELETE_MESSAGE")), iCompressionPercentage, (uint64)file->GetCompletedSize() / 1024, ldZeroPercentage, (LPCTSTR)EscPercent(file->GetFileName()));
+							else
+								cLogMsg.Format(GetResString(_T("DOWNLOAD_INSPECTOR_DELETE_MESSAGE2")), iCompressionPercentage, (uint64)file->GetCompletedSize() / 1024, (LPCTSTR)EscPercent(file->GetFileName()));
+							PartFileOperationMsgParams* params = new PartFileOperationMsgParams;
+							params->pFile = file;
+							params->cLogMsg = cLogMsg;
+							removelist.AddTail(params);
+						} else {
+							if (!bBypassZeroPercentage)
+								cLogMsg.Format(GetResString(_T("DOWNLOAD_INSPECTOR_LOG_MESSAGE")), iCompressionPercentage, (uint64)file->GetCompletedSize() / 1024, ldZeroPercentage, (LPCTSTR)EscPercent(file->GetFileName()));
+							else
+								cLogMsg.Format(GetResString(_T("DOWNLOAD_INSPECTOR_LOG_MESSAGE2")), iCompressionPercentage, (uint64)file->GetCompletedSize() / 1024, (LPCTSTR)EscPercent(file->GetFileName()));
+							theApp.QueueLogLine(true, (LPCTSTR)EscPercent(cLogMsg));
 						}
+
+						file->m_tLastChecked = tNow;
+						file->m_tNextAutoDeleteCheck = kAutoDeleteNoRecheck;
+						UpdateAutoDeleteScheduleCandidate(file);
+						if (theApp.IsClosing())
+							return 1;
+						continue;
 					}
-				} catch (CFileException* error) {
-					m_bAllZero = false; // since we didn't complete operation we should set this to false
-					error->Delete();
-				} catch (...) {
-					m_bAllZero = false; // since we didn't complete operation we should set this to false
-					ASSERT(0);
-				}
-				file->m_bPreviewing = false;
-				delete filled;
-			} else 
-				m_bBypassZeroPercentage = true;
-
-			long double m_ldZeroPercentage = (m_ldZeroCount / m_ldTotalCount) * 100.0;
-			if (m_bBypassZeroPercentage || m_bAllZero || m_ldZeroPercentage >= thePrefs.GetDownloadInspectorZeroPercentageThreshold()) {
-				m_bFileFound = true;
-				if (thePrefs.GetDownloadInspector() == 2) {
-					if (!m_bBypassZeroPercentage)
-						cLogMsg.Format(GetResString(_T("DOWNLOAD_INSPECTOR_DELETE_MESSAGE")), m_iCompressionPercentage, (uint64)file->GetCompletedSize() / 1024, m_ldZeroPercentage, (LPCTSTR)EscPercent(file->GetFileName()));
-					else
-						cLogMsg.Format(GetResString(_T("DOWNLOAD_INSPECTOR_DELETE_MESSAGE2")), m_iCompressionPercentage, (uint64)file->GetCompletedSize() / 1024, (LPCTSTR)EscPercent(file->GetFileName()));
-
-					PartFileOperationMsgParams* params = new PartFileOperationMsgParams;
-					params->pFile = file;
-					params->cLogMsg = cLogMsg;
-					removelist.AddTail(params);
-				} else { // This will work for GetDownloadInspector == 0 or 1, so toolbar button will be able log even when GetDownloadInspector is disabled.
-					if (!m_bBypassZeroPercentage)
-						cLogMsg.Format(GetResString(_T("DOWNLOAD_INSPECTOR_LOG_MESSAGE")), m_iCompressionPercentage, (uint64)file->GetCompletedSize() / 1024, m_ldZeroPercentage, (LPCTSTR)EscPercent(file->GetFileName()));
-					else
-						cLogMsg.Format(GetResString(_T("DOWNLOAD_INSPECTOR_LOG_MESSAGE2")), m_iCompressionPercentage, (uint64)file->GetCompletedSize() / 1024, (LPCTSTR)EscPercent(file->GetFileName()));
-					theApp.QueueLogLine(true, (LPCTSTR)EscPercent(cLogMsg));
 				}
 			}
 
-			file->m_tLastChecked = time(NULL); // File checks completed successfully. We can update file's last checked time with current time.
+				if (bAutoDeleteCheckDue) {
+					if (IsDownloadInspectorAutoDeleteGenerationCurrent(lAutoDeleteGeneration)) {
+						const DownloadInspectorAutoDeleteEvaluation evaluation = EvaluateDownloadInspectorAutoDelete(file, tNow);
+						if (IsDownloadInspectorAutoDeleteGenerationCurrent(lAutoDeleteGeneration)) {
+							file->m_tLastAutoDeleteEvaluation = tNow;
+							file->m_tLastSeenCompleteForAutoDelete = tLastSeenComplete;
+							if (evaluation.bMatched) {
+								bFileFound = true;
+							if (thePrefs.GetDownloadInspector() == 2) {
+								if (IsAutoDeleteBusyState(file)) {
+									if (!file->m_bAutoDeletePendingWhileBusy) {
+										cLogMsg.Format(GetResString(_T("DOWNLOAD_INSPECTOR_AUTO_DELETE_SKIP_BUSY_MESSAGE")), (LPCTSTR)EscPercent(file->GetFileName()), (LPCTSTR)evaluation.strReason);
+										theApp.QueueLogLine(true, (LPCTSTR)EscPercent(cLogMsg));
+									}
+									file->m_bAutoDeletePendingWhileBusy = true;
+									file->m_tNextAutoDeleteCheck = tNow + kAutoDeleteBusyRetryDelay;
+								} else {
+									cLogMsg.Format(GetResString(_T("DOWNLOAD_INSPECTOR_AUTO_DELETE_DELETE_MESSAGE")), (LPCTSTR)EscPercent(file->GetFileName()), (LPCTSTR)evaluation.strReason);
+									PartFileOperationMsgParams* params = new PartFileOperationMsgParams;
+									params->pFile = file;
+									params->cLogMsg = cLogMsg;
+									params->bAppendAutoDeleteEd2kLink = thePrefs.IsDownloadInspectorAutoDeleteBackupEd2kLinksEnabled();
+									params->bAddToCanceledMet = !thePrefs.IsDownloadInspectorAutoDeleteDontMarkAsCanceledEnabled();
+									params->bAutoDeleteOperation = true;
+									params->lAutoDeleteGeneration = lAutoDeleteGeneration;
+									params->strAutoDeleteReason = evaluation.strReason;
+									if (params->bAppendAutoDeleteEd2kLink)
+										params->strAutoDeleteEd2kLink = file->GetED2kLink();
+									removelist.AddTail(params);
+									file->m_bAutoDeletePendingWhileBusy = false;
+									file->m_tNextAutoDeleteCheck = kAutoDeleteNoRecheck;
+								}
+							} else {
+								cLogMsg.Format(GetResString(_T("DOWNLOAD_INSPECTOR_AUTO_DELETE_LOG_MESSAGE")), (LPCTSTR)EscPercent(file->GetFileName()), (LPCTSTR)evaluation.strReason);
+								theApp.QueueLogLine(true, (LPCTSTR)EscPercent(cLogMsg));
+								file->m_bAutoDeletePendingWhileBusy = false;
+								file->m_tNextAutoDeleteCheck = kAutoDeleteNoRecheck;
+							}
+						} else {
+							file->m_bAutoDeletePendingWhileBusy = false;
+							file->m_tNextAutoDeleteCheck = evaluation.tNextCheck;
+						}
+					} else {
+						file->m_bAutoDeletePendingWhileBusy = false;
+						file->m_tNextAutoDeleteCheck = 0;
+					}
+				}
+			}
 
-			if (theApp.IsClosing()) // This check is needed by long download lists
+			file->m_tLastChecked = tNow;
+			UpdateAutoDeleteScheduleCandidate(file);
+			if (theApp.IsClosing())
 				return 1;
-
 		} catch (const std::exception& e) {
-			theApp.QueueDebugLogLine(true, _T("CDownloadListCtrl::DownloadInspectorProc: Exception caught: %s", (LPCTSTR)EscPercent(e.what())));
+			theApp.QueueDebugLogLine(true, _T("CDownloadListCtrl::DownloadInspectorProc: Exception caught: %hs"), e.what());
 			continue;
 		} catch (...) {
 			theApp.QueueDebugLogLine(true, _T("CDownloadListCtrl::DownloadInspectorProc: Unknown exception caught"));
@@ -3618,20 +4166,38 @@ UINT AFX_CDECL CDownloadListCtrl::DownloadInspectorProc(LPVOID pParam)
 	for (POSITION pos = renamelist.GetHeadPosition(); pos != NULL && !theApp.IsClosing();) {
 		POSITION currentPos = pos;
 		PartFileOperationMsgParams* pItem = renamelist.GetNext(pos);
-		theApp.emuledlg->transferwnd->GetDownloadList()->SendMessage(UM_INVALIDEXTENSIONFOUND, 0, (LPARAM)pItem); // Send message to main thread for the actions.
+		theApp.emuledlg->transferwnd->GetDownloadList()->SendMessage(UM_INVALIDEXTENSIONFOUND, 0, (LPARAM)pItem);
 		renamelist.RemoveAt(currentPos);
-		delete pItem; // Free memory
+		delete pItem;
 	}
 
 	for (POSITION pos = removelist.GetHeadPosition(); pos != NULL && !theApp.IsClosing();) {
 		POSITION currentPos = pos;
 		PartFileOperationMsgParams* pItem = removelist.GetNext(pos);
-		theApp.emuledlg->transferwnd->GetDownloadList()->SendMessage(UM_EMPTYFAKEFILEFOUND, 0, (LPARAM)pItem); // Send message to main thread for the actions.
+		theApp.emuledlg->transferwnd->GetDownloadList()->SendMessage(UM_EMPTYFAKEFILEFOUND, 0, (LPARAM)pItem);
 		removelist.RemoveAt(currentPos);
-		delete pItem; // Free memory
+		delete pItem;
 	}
 
-	if (m_bFileFound)
+	if (bAutoDeleteGloballyDue && pDownloadList != NULL && IsDownloadInspectorAutoDeleteGenerationCurrent(lAutoDeleteGeneration)) {
+		tEarliestAutoDeleteScan = kAutoDeleteNoRecheck;
+		for (ListItems::const_iterator it = pDownloadList->m_ListItems.begin(); it != pDownloadList->m_ListItems.end(); ++it) {
+			const CtrlItem_Struct* cur_item = it->second;
+			if (cur_item == NULL || cur_item->type != FILE_TYPE)
+				continue;
+
+			const CPartFile* file = static_cast<const CPartFile*>(cur_item->value);
+			if (file != NULL && file->IsPartFile())
+				UpdateEarliestAutoDeleteRecheck(tEarliestAutoDeleteScan, file->m_tNextAutoDeleteCheck);
+		}
+
+		if (IsDownloadInspectorAutoDeleteScanEnabled())
+			pDownloadList->m_tNextAutoDeleteScan = tEarliestAutoDeleteScan != kAutoDeleteNoRecheck ? tEarliestAutoDeleteScan : time(NULL) + kAutoDeleteFallbackInterval;
+		else
+			pDownloadList->m_tNextAutoDeleteScan = 0;
+	}
+
+	if (bFileFound)
 		theApp.QueueLogLine(true, GetResString(_T("DOWNLOAD_INSPECTOR_COMPLETED_FOUND")));
 	else
 		theApp.QueueLogLine(true, GetResString(_T("DOWNLOAD_INSPECTOR_COMPLETED_NOT_FOUND")));
@@ -3651,33 +4217,62 @@ LRESULT CDownloadListCtrl::OnInvalidExtensionFound(WPARAM wParam, LPARAM lParam)
 
 LRESULT CDownloadListCtrl::OnEmptyFakeFileFound(WPARAM wParam, LPARAM lParam)
 {
-	PartFileOperationMsgParams* params = reinterpret_cast<PartFileOperationMsgParams*>(lParam); // Get parameters
+	PartFileOperationMsgParams* params = reinterpret_cast<PartFileOperationMsgParams*>(lParam);
+	if (params == NULL || params->pFile == NULL)
+		return 0;
+
+	if (params->bAutoDeleteOperation) {
+		if (!IsDownloadInspectorAutoDeleteGenerationCurrent(params->lAutoDeleteGeneration)
+			|| !thePrefs.IsDownloadInspectorAutoDeleteEnabled()
+			|| thePrefs.GetDownloadInspector() != 2)
+			return 0;
+
+		if (IsAutoDeleteBusyState(params->pFile)) {
+			if (!params->strAutoDeleteReason.IsEmpty()) {
+				CString cLogMsg;
+				cLogMsg.Format(GetResString(_T("DOWNLOAD_INSPECTOR_AUTO_DELETE_SKIP_BUSY_MESSAGE")), (LPCTSTR)EscPercent(params->pFile->GetFileName()), (LPCTSTR)params->strAutoDeleteReason);
+				AddLogLine(true, (LPCTSTR)EscPercent(cLogMsg));
+			}
+			params->pFile->m_bAutoDeletePendingWhileBusy = true;
+			params->pFile->m_tNextAutoDeleteCheck = time(NULL) + kAutoDeleteBusyRetryDelay;
+			return 0;
+		}
+	}
+
 	theApp.emuledlg->transferwnd->GetDownloadList()->SetRedraw(false);
-	theApp.emuledlg->transferwnd->GetDownloadList()->HideSources(params->pFile); // Hide sources of the file to be deleted
+	theApp.emuledlg->transferwnd->GetDownloadList()->HideSources(params->pFile);
 	switch (params->pFile->GetStatus()) {
 	case PS_WAITINGFORHASH:
 	case PS_HASHING:
 	case PS_COMPLETING:
 		break;
-	case PS_COMPLETE: {
-		bool delsucc = ShellDeleteFile(params->pFile->GetFilePath());
-		if (delsucc)
+		case PS_COMPLETE: {
+			const CString strFilePath = params->pFile->GetFilePath();
+			const bool bDeleteSucceeded = ShellDeleteFile(strFilePath);
+			if (!bDeleteSucceeded) {
+				CString strError;
+				strError.Format(GetResString(_T("ERR_DELFILE")) + _T("\r\n\r\n%s"), (LPCTSTR)strFilePath, (LPCTSTR)GetErrorMessage(::GetLastError()));
+				CDarkMode::MessageBox(strError);
+				break;
+			}
 			theApp.sharedfiles->RemoveFile(params->pFile, true);
-		else {
-			CString strError;
-			strError.Format(GetResString(_T("ERR_DELFILE")) + _T("\r\n\r\n%s"), (LPCTSTR)params->pFile->GetFilePath(), (LPCTSTR)GetErrorMessage(::GetLastError()));
-			CDarkMode::MessageBox(strError);
-		}
-		theApp.emuledlg->transferwnd->GetDownloadList()->RemoveFile(params->pFile);
+			theApp.emuledlg->transferwnd->GetDownloadList()->RemoveFile(params->pFile);
+				if (params->bAppendAutoDeleteEd2kLink)
+					AppendAutoDeleteEd2kLinkToBackupFile(params->strAutoDeleteEd2kLink);
+			AddLogLine(true, (LPCTSTR)EscPercent(params->cLogMsg));
+			break;
+	}
+	default: {
+		const UINT uCategory = params->pFile->GetCategory();
+		const CString strPartMetPath = params->pFile->GetFullName();
+		const CString strPartFilePath = RemoveFileExtension(strPartMetPath);
+		if (uCategory)
+			theApp.downloadqueue->StartNextFileIfPrefs(uCategory);
+		params->pFile->DeletePartFile(params->bAddToCanceledMet);
+		if (params->bAppendAutoDeleteEd2kLink && !::PathFileExists(strPartMetPath) && !::PathFileExists(strPartFilePath))
+			AppendAutoDeleteEd2kLinkToBackupFile(params->strAutoDeleteEd2kLink);
 		AddLogLine(true, (LPCTSTR)EscPercent(params->cLogMsg));
 		break;
-	}
-	default:
-		if (params->pFile->GetCategory())
-			theApp.downloadqueue->StartNextFileIfPrefs(params->pFile->GetCategory());
-	case PS_PAUSED: {
-		params->pFile->DeletePartFile();
-		AddLogLine(true, (LPCTSTR)EscPercent(params->cLogMsg));
 	}
 	}
 	theApp.emuledlg->transferwnd->GetDownloadList()->SetRedraw(true);

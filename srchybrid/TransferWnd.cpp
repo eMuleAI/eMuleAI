@@ -85,6 +85,7 @@ BEGIN_MESSAGE_MAP(CTransferWnd, CResizableFormView)
 	ON_MESSAGE(UM_DELAYED_EVALUATE, OnChangeFilter)
 	ON_MESSAGE(UM_INVALIDATE_CAT_TAB_INFO, OnInvalidateCatTabInfo)
 	ON_MESSAGE(UM_UPDATE_CAT_TAB_TITLES, OnUpdateCatTabTitlesIfDirty)
+	ON_MESSAGE(UM_UPDATE_QUEUE_COUNT, OnUpdateQueueCount)
 	ON_CBN_SELCHANGE(IDC_FILETYPE, OnFileTypeChange)
 	ON_CBN_SELENDOK(IDC_FILETYPE, OnFileTypeChange)
 	ON_BN_CLICKED(IDC_CHECK_PREVIEW, OnBnClickedPreview)
@@ -111,6 +112,10 @@ CTransferWnd::CTransferWnd(CWnd* /*pParent =NULL*/)
 	, m_bIsDragging()
 	, downloadlistactive()
 	, m_bLayoutInited()
+	, m_iLastKnownQueueCount(0)
+	, m_uCachedBannedCount(0)
+	, m_dwLastQueueCountBannedRefreshTick(0)
+	, m_bQueueCountDirty(true)
 	, m_nFilterColumnDownloadList()
 	, m_nFilterColumnUploadList()
 	, m_nFilterColumnDownloadClients()
@@ -196,8 +201,7 @@ void CTransferWnd::OnInitialUpdate()
 	// show & cat-tabs
 	m_dlTab.m_bDownloadCategoryStyle = true;
 	m_dlTab.ModifyStyle(0, TCS_OWNERDRAWFIXED);
-	// Reserve a few extra pixels for bold active category captions without changing tab widths dynamically.
-	m_dlTab.SetPadding(CSize(11, 4));
+	m_dlTab.SetPadding(CSize(12, 4));
 	Category_Struct *cat0 = thePrefs.GetCategory(0);
 	cat0->strIncomingPath = thePrefs.GetMuleDirectory(EMULE_INCOMINGDIR);
 	cat0->care4all = true;
@@ -245,6 +249,7 @@ void CTransferWnd::OnInitialUpdate()
 	CheckDlgButton(IDC_CHECK_BADCLIENT, thePrefs.m_uBadClientCheckState);
 
 	GetDlgItem(IDC_QUEUE_REFRESH_BUTTON)->ShowWindow(SW_HIDE);
+	UpdateQueueCountDisplay(true);
 
 	InitWindowStyles(this); //Moved down
 	VerifyCatTabSize();
@@ -257,9 +262,62 @@ void CTransferWnd::OnInitialUpdate()
 
 void CTransferWnd::ShowQueueCount(INT_PTR number)
 {
-	CString buffer;
-	buffer.Format(_T("%u (%u %s)"), (unsigned)number, (unsigned)theApp.clientlist->GetBannedCount(), (LPCTSTR)GetResString(_T("BANNED")).MakeLower());
-	SetDlgItemText(IDC_QUEUECOUNT, buffer);
+	if (GetCurrentThreadId() != g_uMainThreadId) {
+		if (m_hWnd != NULL)
+			PostMessage(UM_UPDATE_QUEUE_COUNT, static_cast<WPARAM>(number), 0);
+		return;
+	}
+
+	m_iLastKnownQueueCount = number;
+	m_bQueueCountDirty = true;
+	UpdateQueueCountDisplay(false);
+}
+
+void CTransferWnd::InvalidateQueueCount(bool bForceImmediateUpdate)
+{
+	if (GetCurrentThreadId() != g_uMainThreadId) {
+		if (m_hWnd != NULL)
+			PostMessage(UM_UPDATE_QUEUE_COUNT, static_cast<WPARAM>(m_iLastKnownQueueCount), bForceImmediateUpdate ? 1 : 0);
+		return;
+	}
+
+	m_bQueueCountDirty = true;
+	if (bForceImmediateUpdate)
+		m_dwLastQueueCountBannedRefreshTick = 0;
+	UpdateQueueCountDisplay(bForceImmediateUpdate);
+}
+
+bool CTransferWnd::IsQueueCountDisplayVisible() const
+{
+	if (m_hWnd == NULL || !::IsWindow(m_hWnd) || !IsWindowVisible())
+		return false;
+	const CWnd* pTransferFrame = GetParentFrame();
+	if (theApp.emuledlg == NULL || pTransferFrame == NULL || theApp.emuledlg->activewnd != pTransferFrame || !theApp.emuledlg->IsWindowVisible() || theApp.emuledlg->IsIconic())
+		return false;
+	const CWnd* pQueueCountCtrl = GetDlgItem(IDC_QUEUECOUNT);
+	return pQueueCountCtrl != NULL && ::IsWindow(pQueueCountCtrl->m_hWnd) && pQueueCountCtrl->IsWindowVisible();
+}
+
+void CTransferWnd::UpdateQueueCountDisplay(bool bForceBannedCountRefresh)
+{
+	if (!IsQueueCountDisplayVisible())
+		return;
+
+	const DWORD dwNow = ::GetTickCount();
+	if (bForceBannedCountRefresh || m_dwLastQueueCountBannedRefreshTick == 0 || dwNow >= m_dwLastQueueCountBannedRefreshTick + SEC2MS(1)) {
+		m_uCachedBannedCount = static_cast<UINT>(theApp.clientlist != NULL ? theApp.clientlist->GetBannedCount() : 0);
+		m_dwLastQueueCountBannedRefreshTick = dwNow;
+	}
+
+	CString strQueueCountText;
+	CString strBannedLabel = GetResString(_T("BANNED"));
+	strBannedLabel.MakeLower();
+	strQueueCountText.Format(_T("%u (%u %s)"), static_cast<unsigned>(m_iLastKnownQueueCount), m_uCachedBannedCount, (LPCTSTR)strBannedLabel);
+	if (m_bQueueCountDirty || strQueueCountText != m_strLastQueueCountText) {
+		SetDlgItemText(IDC_QUEUECOUNT, strQueueCountText);
+		m_strLastQueueCountText = strQueueCountText;
+	}
+	m_bQueueCountDirty = false;
 }
 
 void CTransferWnd::DoDataExchange(CDataExchange *pDX)
@@ -853,6 +911,7 @@ void CTransferWnd::SwitchUploadList()
 		ASSERT(0);
 	}
 	UpdateListCount();
+	UpdateQueueCountDisplay(false);
 }
 
 void CTransferWnd::ShowWnd2(EWnd2 uWnd2)
@@ -896,6 +955,7 @@ void CTransferWnd::ShowWnd2(EWnd2 uWnd2)
 		SetWnd2Icon(w2iUploading);
 	}
 	UpdateListCount();
+	UpdateQueueCountDisplay(false);
 }
 
 void CTransferWnd::SetWnd2(EWnd2 uWnd2)
@@ -1033,6 +1093,8 @@ void CTransferWnd::OnHoverDownloadList(LPNMHDR, LRESULT *pResult)
 void CTransferWnd::OnTcnSelchangeDltab(LPNMHDR, LRESULT *pResult)
 {
 	downloadlistctrl.ChangeCategory(m_dlTab.GetCurSel());
+	VerifyCatTabSize();
+	UpdateTabToolTips();
 	*pResult = 0;
 }
 
@@ -1446,6 +1508,16 @@ LRESULT CTransferWnd::OnUpdateCatTabTitlesIfDirty(WPARAM wParam, LPARAM lParam)
 	return 0;
 }
 
+LRESULT CTransferWnd::OnUpdateQueueCount(WPARAM wParam, LPARAM lParam)
+{
+	m_iLastKnownQueueCount = static_cast<INT_PTR>(wParam);
+	m_bQueueCountDirty = true;
+	if (lParam != 0)
+		m_dwLastQueueCountBannedRefreshTick = 0;
+	UpdateQueueCountDisplay(lParam != 0);
+	return 0;
+}
+
 void CTransferWnd::EditCatTabLabel(int index)
 {
 	EditCatTabLabel(index, thePrefs.GetCategoryDisplayTitle(index));
@@ -1855,6 +1927,7 @@ void CTransferWnd::ShowList(uint32 dwListIDC)
 	GetDlgItem(IDC_CHECK_BADCLIENT)->ShowWindow((dwListIDC == IDC_CLIENTLIST) ? SW_SHOW : SW_HIDE);
 
 	AddOrReplaceAnchor(this, dwListIDC, TOP_LEFT, BOTTOM_RIGHT);
+	UpdateQueueCountDisplay(false);
 }
 
 void CTransferWnd::ShowSplitWindow(bool bReDraw)
@@ -1947,6 +2020,7 @@ void CTransferWnd::ShowSplitWindow(bool bReDraw)
 	GetDlgItem(IDC_QUEUE_REFRESH_BUTTON)->ShowWindow((m_uWnd2 == wnd2OnQueue) ? SW_SHOW : SW_HIDE);
 
 	UpdateListCount();
+	UpdateQueueCountDisplay(false);
 }
 
 void CTransferWnd::OnDisableList()
@@ -2202,6 +2276,8 @@ void CTransferWnd::OnPaint()
 
 	// Another small work around: Init/Redraw the layout as soon as we have our real windows size
 	// as the initial size is far below the minimum and will mess things up which expect this size
+	UpdateQueueCountDisplay(false);
+
 	if (!m_bLayoutInited && rcWnd.Height() > 400) {
 		m_bLayoutInited = true;
 		if (m_dwShowListIDC == IDC_DOWNLOADLIST + IDC_UPLOADLIST)

@@ -17,11 +17,10 @@
 //Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 #pragma once
 
-#define MOD_NAME		_T("AI") 
-#define MOD_VERSION		_T("AI v1.3") 
+#define MOD_NAME		_T("AI")
 #define MOD_MAIN_VER	1
-#define MOD_MIN_VER		3
-#define MOD_FLOAT_VER	1.3
+#define MOD_MIN_VER		4
+#define MOD_VERSION		MOD_NAME _T(" v") _CRT_WIDE(_CRT_STRINGIZE(MOD_MAIN_VER)) _T(".") _CRT_WIDE(_CRT_STRINGIZE(MOD_MIN_VER)) //#define MOD_VERSION		_T("AI v1.4")
 #define MOD_REPO_BASE_URL _T("https://github.com/eMuleAI/eMuleAI")
 #define MOD_PAGES_BASE_URL _T("https://eMuleAI.github.io")
 
@@ -489,6 +488,15 @@
 #define  FT_CATEGORY			 0x53	// <uint32>
 #define	 FT_ATTRANSFERREDHI		 0x54	// <uint32>
 #define	 FT_MAXSOURCES			 0x55	// <uint32>
+#define FT_POWERSHARE			"ZZUL_POWERSHARE"
+#define FT_POWERSHARE_LIMIT		"POWERSHARE_LIMIT"
+#define FT_SPREADBAR			"Spreadbar"
+#define FT_HIDEOS				"HIDEOS"
+#define FT_SELECTIVE_CHUNK		"SELECT_CHUNK"
+#define FT_SHAREONLYTHENEED		"SHARE_ONLY_THE_NEED"
+#define FT_SPREADSTART			0x70
+#define FT_SPREADEND			0x71
+#define FT_SPREADCOUNT			0x72
 #define	 FT_MEDIA_ARTIST		 0xD0	// <string>
 #define	TAG_MEDIA_ARTIST		"\xD0"	// <string>
 #define	 FT_MEDIA_ALBUM			 0xD1	// <string>

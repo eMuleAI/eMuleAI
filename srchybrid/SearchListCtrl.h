@@ -1,4 +1,4 @@
-//This file is part of eMule AI
+﻿//This file is part of eMule AI
 //Copyright (C)2002-2026 Merkur ( strEmail.Format("%s@%s", "devteam", "emule-project.net") / https://www.emule-project.net )
 //Copyright (C)2026 eMule AI
 //
@@ -83,6 +83,7 @@ public:
 
 protected:
 	CMenuXP	m_SearchFileMenu;
+	CMenuXP	m_PreviewMenu;
 	CSearchList	*searchlist;
 	CToolTipCtrlX m_tooltip;
 	CImageList	m_ImageList;

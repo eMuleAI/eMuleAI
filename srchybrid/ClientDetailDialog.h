@@ -74,14 +74,19 @@ class CClientDetailDialog : public CListViewWalkerPropertySheet
 public:
 	explicit CClientDetailDialog(CUpDownClient *pClient, CListCtrlItemWalk *pListCtrl = NULL);
 	explicit CClientDetailDialog(const CSimpleArray<CUpDownClient*> *paClients, CListCtrlItemWalk *pListCtrl = NULL);
+	virtual ~CClientDetailDialog();
 	virtual BOOL OnInitDialog();
 
 
 protected:
 	CClientDetailPage m_wndClient;
 	CClosableTabCtrl m_tabDark;
+	CPtrArray m_aOwnedRuntimeTokens;
 
 	void Construct();
+	void AddRuntimeToken(CUpDownClient *pClient);
+	void AddTrackedRuntimeToken(CUpDownClient *pClient);
+	void DestroyOwnedRuntimeTokens();
 
 	DECLARE_MESSAGE_MAP()
 	afx_msg void OnDestroy();

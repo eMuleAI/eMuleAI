@@ -28,6 +28,7 @@
 #include "SearchParams.h"
 #include "ClosableTabCtrl.h"
 #include "PreviewDlg.h"
+#include "Preview.h"
 #include "UpDownClient.h"
 #include "ClientList.h"
 #include "MemDC.h"
@@ -78,6 +79,31 @@ namespace
 	void UpdateSearchListItemCount(CListCtrl& listCtrl, const size_t itemCount)
 	{
 		listCtrl.SetItemCountEx(static_cast<int>(itemCount), kSearchListSetItemCountFlags);
+	}
+
+
+	void RebuildPreviewMenu(CMenuXP& menu, const CPartFile* file, bool bEnablePreview, bool bEnablePauseOnPreview, bool bPauseOnPreviewChecked, bool bEnablePreviewParts, bool bPreviewPartsChecked)
+	{
+		while (menu.GetMenuItemCount() > 0)
+			menu.RemoveMenu(0, MF_BYPOSITION);
+
+		CString strPrimaryCommand = thePrefs.GetVideoPlayer();
+		if (file != NULL) {
+			const int iPreviewApp = thePreviewApps.GetPreviewApp(file);
+			if (iPreviewApp >= 0)
+				strPrimaryCommand = thePreviewApps.GetPreviewAppCmd(iPreviewApp);
+		}
+
+		const CString strPrimaryLabel = thePreviewApps.GetPreviewAppDisplayNameByCommand(strPrimaryCommand);
+		menu.AppendODMenu(MF_STRING | (bEnablePreview ? MF_ENABLED : MF_GRAYED), MP_PREVIEW, new CMenuXPText(MP_PREVIEW, strPrimaryLabel.IsEmpty() ? GetResString(_T("DL_PREVIEW")) : strPrimaryLabel, thePreviewApps.GetPreviewCommandIcon(strPrimaryCommand)));
+		thePreviewApps.GetAllMenuEntries(menu, file, strPrimaryCommand);
+		menu.AppendMenu(MF_SEPARATOR);
+		if (!thePrefs.GetPreviewPrio()) {
+			menu.AppendMenu(MF_STRING | (bEnablePreviewParts ? MF_ENABLED : MF_GRAYED), MP_TRY_TO_GET_PREVIEW_PARTS, GetResString(_T("DL_TRY_TO_GET_PREVIEW_PARTS")));
+			menu.CheckMenuItem(MP_TRY_TO_GET_PREVIEW_PARTS, bPreviewPartsChecked ? MF_CHECKED : MF_UNCHECKED);
+		}
+		menu.AppendMenu(MF_STRING | (bEnablePauseOnPreview ? MF_ENABLED : MF_GRAYED), MP_PAUSEONPREVIEW, GetResString(_T("PAUSEONPREVIEW")));
+		menu.CheckMenuItem(MP_PAUSEONPREVIEW, bPauseOnPreviewChecked ? MF_CHECKED : MF_UNCHECKED);
 	}
 }
 
@@ -549,22 +575,20 @@ void CSearchListCtrl::UpdateTabHeader(uint32 nResultsID, CString strClientHash, 
 				CString strTabLabel(pSearchParams->strSearchTitle);
 
 				if (pSearchParams->bClientSharedFiles && (thePrefs.GetRemoteSharedFilesUserHash() || thePrefs.GetRemoteSharedFilesClientNote()) && !pSearchParams->m_strClientHash.IsEmpty()) {
-					CUpDownClient* m_TabClient = NULL;
 					CString m_strClientHash = pSearchParams->m_strClientHash;
 					uchar m_uchClientHash[MDX_DIGEST_SIZE];
 					if (strmd4(m_strClientHash, m_uchClientHash)) {
-						if (thePrefs.GetClientHistory()) // Look up client history map
-							theApp.clientlist->m_ArchivedClientsMap.Lookup(m_strClientHash, m_TabClient);
+						CUpDownClient* pTabClient = theApp.clientlist != NULL
+							? theApp.clientlist->AcquireTrackedClientByUserHash(m_uchClientHash, thePrefs.GetClientHistory())
+							: NULL;
+						if (pTabClient != NULL) {
+							if (thePrefs.GetRemoteSharedFilesUserHash() && !isnulmd4(pTabClient->GetUserHash()))
+								strTabLabel = md4str(pTabClient->GetUserHash()); // Replace search title with client hash
 
-						if (m_TabClient == NULL) // This is not a archived client. Now look up recent client list
-							m_TabClient = theApp.clientlist->FindClientByUserHash(m_uchClientHash);
+							if (thePrefs.GetRemoteSharedFilesClientNote() && !pTabClient->m_strClientNote.IsEmpty())
+								strTabLabel.AppendFormat(_T(" [%s]"), (LPCTSTR)pTabClient->m_strClientNote); // Append client note
 
-						if (m_TabClient != NULL) {
-							if (thePrefs.GetRemoteSharedFilesUserHash() && !isnulmd4(m_TabClient->GetUserHash()))
-								strTabLabel = md4str(m_TabClient->GetUserHash()); // Replace search title with client hash
-
-							if (thePrefs.GetRemoteSharedFilesClientNote() && !m_TabClient->m_strClientNote.IsEmpty())
-								strTabLabel.AppendFormat(_T(" [%s]"), (LPCTSTR)m_TabClient->m_strClientNote); // Append client note
+							pTabClient->ReleaseRuntimeReference();
 						}
 					}
 				}
@@ -812,6 +836,13 @@ void CSearchListCtrl::OnContextMenu(CWnd*, CPoint point)
 	int iSelected = 0;
 	int iToDownload = 0;
 	int iToPreview = 0;
+	int iDownloadListMatches = 0;
+	int iFilesToPreview = 0;
+	int iFilesCanPauseOnPreview = 0;
+	int iFilesDoPauseOnPreview = 0;
+	int iFilesPreviewType = 0;
+	int iFilesGetPreviewParts = 0;
+	const CPartFile* pSingleDownloadFile = NULL;
 	bool bContainsNotSpamFile = false;
 	bool m_bContainsNotManualBlacklistedFile = false;
 	bool m_bAllInDownloadList = true;
@@ -821,8 +852,19 @@ void CSearchListCtrl::OnContextMenu(CWnd*, CPoint point)
 			++iSelected;
 			iToPreview += static_cast<int>(pFile->IsPreviewPossible());
 			iToDownload += static_cast<int>(!theApp.downloadqueue->IsFileExisting(pFile->GetFileHash(), false));
-			if (!theApp.downloadqueue->GetFileByID(pFile->GetFileHash()))
+			const CPartFile* pDownloadFile = theApp.downloadqueue->GetFileByID(pFile->GetFileHash());
+			if (pDownloadFile == NULL)
 				m_bAllInDownloadList = false;
+			else {
+				++iDownloadListMatches;
+				iFilesPreviewType += static_cast<int>(pDownloadFile->IsPreviewableFileType());
+				iFilesToPreview += static_cast<int>(pDownloadFile->IsReadyForPreview());
+				iFilesCanPauseOnPreview += static_cast<int>(pDownloadFile->IsPreviewableFileType() && !pDownloadFile->IsReadyForPreview() && pDownloadFile->CanPauseFile());
+				iFilesDoPauseOnPreview += static_cast<int>(pDownloadFile->IsPausingOnPreview());
+				iFilesGetPreviewParts += static_cast<int>(pDownloadFile->GetPreviewPrio());
+				if (iSelected == 1)
+					pSingleDownloadFile = pDownloadFile;
+			}
 			if (!pFile->GetManualBlacklisted())
 				m_bContainsNotManualBlacklistedFile = true;
 			if (!pFile->IsConsideredSpam(false))
@@ -841,6 +883,9 @@ void CSearchListCtrl::OnContextMenu(CWnd*, CPoint point)
 
 	m_SearchFileMenu.EnableMenuItem(MP_CANCEL, iSelected > 0 && m_bAllInDownloadList ? MF_ENABLED : MF_GRAYED);
 	m_SearchFileMenu.EnableMenuItem(MP_CANCEL_FORGET, iSelected > 0 && m_bAllInDownloadList ? MF_ENABLED : MF_GRAYED);
+	const bool bEnableDownloadOnlyMenu = (iSelected > 0 && m_bAllInDownloadList && iDownloadListMatches == iSelected);
+	RebuildPreviewMenu(m_PreviewMenu, (bEnableDownloadOnlyMenu && iSelected == 1) ? pSingleDownloadFile : NULL, bEnableDownloadOnlyMenu && iSelected == 1 && iFilesToPreview == 1, bEnableDownloadOnlyMenu && iFilesCanPauseOnPreview > 0, bEnableDownloadOnlyMenu && iSelected > 0 && iFilesDoPauseOnPreview == iSelected, bEnableDownloadOnlyMenu && iSelected == 1 && iFilesPreviewType == 1 && iFilesToPreview == 0 && iDownloadListMatches == 1, bEnableDownloadOnlyMenu && iSelected == 1 && iFilesGetPreviewParts == 1);
+	m_SearchFileMenu.EnableMenuItem((UINT)m_PreviewMenu.m_hMenu, bEnableDownloadOnlyMenu && m_PreviewMenu.HasEnabledItems() ? MF_ENABLED : MF_GRAYED);
 
 	m_SearchFileMenu.EnableMenuItem(MP_CMT, iSelected > 0 ? MF_ENABLED : MF_GRAYED);
 	m_SearchFileMenu.EnableMenuItem(MP_CUT, iSelected > 0 ? MF_ENABLED : MF_GRAYED);
@@ -851,7 +896,7 @@ void CSearchListCtrl::OnContextMenu(CWnd*, CPoint point)
 	m_SearchFileMenu.EnableMenuItem(MP_REMOVEALL, theApp.emuledlg->searchwnd->CanDeleteSearches() ? MF_ENABLED : MF_GRAYED);
 	m_SearchFileMenu.EnableMenuItem(MP_SEARCHRELATED, iSelected > 0 && theApp.emuledlg->searchwnd->CanSearchRelatedFiles() ? MF_ENABLED : MF_GRAYED);
 	UINT uInsertedMenuItem = 0;
-	if (iToPreview == 1) {
+	if (iToPreview == 1 && !(iSelected == 1 && m_bAllInDownloadList)) {
 		if (m_SearchFileMenu.InsertMenu(MP_FIND, MF_STRING | MF_ENABLED, MP_PREVIEW, GetResString(_T("DL_PREVIEW")), _T("Preview")))
 			uInsertedMenuItem = MP_PREVIEW;
 	}
@@ -902,10 +947,22 @@ BOOL CSearchListCtrl::OnCommand(WPARAM wParam, LPARAM)
 	}
 
 	CTypedPtrList<CPtrList, CSearchFile*> selectedList;
+	CTypedPtrList<CPtrList, CPartFile*> selectedDownloadList;
+	CPartFile* pSingleDownloadFile = NULL;
 	for (POSITION pos = GetFirstSelectedItemPosition(); pos != NULL;) {
 		int index = GetNextSelectedItem(pos);
-		if (index >= 0)
-			selectedList.AddTail(reinterpret_cast<CSearchFile*>(GetItemData(index)));
+		if (index >= 0) {
+			CSearchFile* pSearchFile = reinterpret_cast<CSearchFile*>(GetItemData(index));
+			selectedList.AddTail(pSearchFile);
+			if (pSearchFile != NULL) {
+				CPartFile* pDownloadFile = theApp.downloadqueue->GetFileByID(pSearchFile->GetFileHash());
+				if (pDownloadFile != NULL) {
+					selectedDownloadList.AddTail(pDownloadFile);
+					if (selectedDownloadList.GetCount() == 1)
+						pSingleDownloadFile = pDownloadFile;
+				}
+			}
+		}
 	}
 
 	if (!selectedList.IsEmpty()) {
@@ -1081,7 +1138,15 @@ BOOL CSearchListCtrl::OnCommand(WPARAM wParam, LPARAM)
 				sheet.DoModal();
 			}
 			return TRUE;
+		case MP_TRY_TO_GET_PREVIEW_PARTS:
+			if (selectedDownloadList.GetCount() == 1 && pSingleDownloadFile != NULL)
+				pSingleDownloadFile->SetPreviewPrio(!pSingleDownloadFile->GetPreviewPrio());
+			return TRUE;
 		case MP_PREVIEW:
+			if (selectedDownloadList.GetCount() == 1 && pSingleDownloadFile != NULL) {
+				pSingleDownloadFile->PreviewFile();
+				return TRUE;
+			}
 			if (file) {
 				if (file->GetPreviews().GetSize() > 0) {
 					// already have previews
@@ -1094,6 +1159,31 @@ BOOL CSearchListCtrl::OnCommand(WPARAM wParam, LPARAM)
 					newclient->SendPreviewRequest(*file);
 					// add to res - later
 					AddLogLine(true, _T("Preview Requested - Please wait"));
+				}
+			}
+			return TRUE;
+		case MP_PREVIEW1:
+		case MP_PREVIEW2:
+		case MP_PREVIEW3:
+		case MP_PREVIEW4:
+		case MP_PREVIEW5:
+		case MP_PREVIEW6:
+		case MP_PREVIEW7:
+		case MP_PREVIEW8:
+		case MP_PREVIEW9:
+		case MP_PREVIEW10:
+			if (selectedDownloadList.GetCount() == 1 && pSingleDownloadFile != NULL)
+				pSingleDownloadFile->PreviewFile((UINT)wParam - MP_PREVIEW1);
+			return TRUE;
+		case MP_PAUSEONPREVIEW:
+			{
+				bool bAllPausedOnPreview = true;
+				for (POSITION pos = selectedDownloadList.GetHeadPosition(); pos != NULL && bAllPausedOnPreview;)
+					bAllPausedOnPreview = selectedDownloadList.GetNext(pos)->IsPausingOnPreview();
+				while (!selectedDownloadList.IsEmpty()) {
+					CPartFile* pPartFile = selectedDownloadList.RemoveHead();
+					if (pPartFile->IsPreviewableFileType() && !pPartFile->IsReadyForPreview())
+						pPartFile->SetPauseOnPreview(!bAllPausedOnPreview);
 				}
 			}
 			return TRUE;
@@ -1148,6 +1238,11 @@ BOOL CSearchListCtrl::OnCommand(WPARAM wParam, LPARAM)
 			}
 			return TRUE;
 		default:
+			if (wParam >= MP_PREVIEW_APP_MIN && wParam <= MP_PREVIEW_APP_MAX) {
+				if (selectedDownloadList.GetCount() == 1 && pSingleDownloadFile != NULL)
+					thePreviewApps.RunApp(pSingleDownloadFile, (UINT)wParam);
+				return TRUE;
+			}
 			if (wParam >= MP_WEBURL && wParam <= MP_WEBURL + 256) {
 				for (POSITION pos = selectedList.GetHeadPosition(); pos != NULL;) {
 					file = selectedList.GetNext(pos);
@@ -1185,6 +1280,8 @@ void CSearchListCtrl::CreateMenus()
 {
 	if (m_SearchFileMenu)
 		VERIFY(m_SearchFileMenu.DestroyMenu());
+	if (m_PreviewMenu)
+		VERIFY(m_PreviewMenu.DestroyMenu());
 
 	m_SearchFileMenu.CreatePopupMenu();
 	m_SearchFileMenu.AddMenuSidebar(GetResString(_T("FILE")));
@@ -1200,12 +1297,15 @@ void CSearchListCtrl::CreateMenus()
 		m_SearchFileMenu.AppendMenu(MF_STRING, MP_BYPASSDOWNLOADCHECKPAUSED, GetResString(_T("DOWNLOAD_BYPASS_DOWNLOAD_CHECKER_PAUSED")), _T("Resume"));
 	}
 
-	m_SearchFileMenu.AppendMenu(MF_STRING, MP_CANCEL, GetResString(_T("CANCEL_DOWNLOAD")), _T("DELETE"));
-	m_SearchFileMenu.AppendMenu(MF_STRING, MP_CANCEL_FORGET, GetResString(_T("CANCEL_FORGET_DOWNLOAD")), _T("DELETE_FORGET"));
-
 	if (thePrefs.IsExtControlsEnabled())
 		m_SearchFileMenu.AppendMenu(MF_STRING, MP_DETAIL, GetResString(_T("SHOWDETAILS")), _T("FileInfo"));
 	m_SearchFileMenu.AppendMenu(MF_STRING, MP_CMT, GetResString(_T("CMT_ADD")), _T("FILECOMMENTS"));
+	m_SearchFileMenu.AppendMenu(MF_SEPARATOR);
+	m_SearchFileMenu.AppendMenu(MF_STRING, MP_CANCEL, GetResString(_T("CANCEL_DOWNLOAD")), _T("DELETE"));
+	m_SearchFileMenu.AppendMenu(MF_STRING, MP_CANCEL_FORGET, GetResString(_T("CANCEL_FORGET_DOWNLOAD")), _T("DELETE_FORGET"));
+	m_PreviewMenu.CreateMenu();
+	RebuildPreviewMenu(m_PreviewMenu, NULL, false, false, false, false, false);
+	m_SearchFileMenu.AppendMenu(MF_STRING | MF_POPUP, (UINT_PTR)m_PreviewMenu.m_hMenu, GetResString(_T("PREVIEWWITH")), _T("PREVIEW"));
 	m_SearchFileMenu.AppendMenu(MF_SEPARATOR);
 	m_SearchFileMenu.AppendMenu(MF_STRING, MP_CUT, GetResString(_T("COPY_FILE_NAMES")), _T("FILERENAME"));
 	m_SearchFileMenu.AppendMenu(MF_STRING, MP_GETED2KLINK, GetResString(_T("DL_LINK1")), _T("ED2KLink"));

@@ -46,6 +46,7 @@
 #include "Exceptions.h"
 #include "StringConversion.h"
 #include "UserMsgs.h"
+#include "ClientListCtrl.h"
 #include "Log.h"
 #include "UpDownClient.h" 
 #include "ClientList.h"
@@ -55,6 +56,18 @@
 #include "InputBox.h"
 #include "ClientDetailDialog.h"
 #include "eMuleAI/DarkMode.h"
+
+namespace
+{
+	const int kSearchResultsFilterDefaultLeft = -18;
+	const int kSearchResultsFilterMinGapFromComplete = 4;
+	const int kSearchResultsFilterRightMargin = 4;
+
+	enum
+	{
+		WM_SEARCHRESULTSWND_DEFERRED_REFRESH = WM_APP + 4061
+	};
+}
 
 #ifdef _DEBUG
 #define new DEBUG_NEW
@@ -85,6 +98,36 @@ enum ESearchResultImage
 
 namespace
 {
+	class CScopedSearchClientRef
+	{
+	public:
+		explicit CScopedSearchClientRef(ClientRuntimeID uRuntimeID)
+			: m_pClient(uRuntimeID != 0 && theApp.clientlist != NULL ? theApp.clientlist->AcquireTrackedClientByRuntimeID(uRuntimeID) : NULL)
+		{
+		}
+
+		~CScopedSearchClientRef()
+		{
+			Release();
+		}
+
+		CUpDownClient* Get() const
+		{
+			return m_pClient;
+		}
+
+		void Release()
+		{
+			if (m_pClient != NULL) {
+				m_pClient->ReleaseRuntimeReference();
+				m_pClient = NULL;
+			}
+		}
+
+	private:
+		CUpDownClient* m_pClient;
+	};
+
 	UINT_PTR GetSearchSelectorToolId()
 	{
 		return 1;
@@ -192,6 +235,8 @@ BEGIN_MESSAGE_MAP(CSearchResultsWnd, CResizableFormView)
 	ON_NOTIFY(TBN_DROPDOWN, IDC_SEARCHLST_ICO, OnSearchListMenuBtnDropDown)
 	ON_NOTIFY(UM_TABMOVED, IDC_TAB1, OnTabMovement)
 	ON_BN_CLICKED(IDC_CHECK_COMPLETE, OnBnClickedComplete)
+	ON_WM_SIZE()
+	ON_MESSAGE(WM_SEARCHRESULTSWND_DEFERRED_REFRESH, OnDeferredSearchListRefresh)
 END_MESSAGE_MAP()
 
 CSearchResultsWnd::CSearchResultsWnd(CWnd* /*pParent*/)
@@ -210,9 +255,10 @@ CSearchResultsWnd::CSearchResultsWnd(CWnd* /*pParent*/)
 	, m_uMergeFromSearchID()
 	, m_bMergeFromSearchIDHasBeenSet()
 	, m_astrFilterTemp()
-	, m_nFilterColumnLastApplied()
 	, m_bColumnDiff(false)
+	, m_bDeferredSearchListRefreshPending(false)
 	, m_strFullFilterExpr()
+	, m_nFilterColumnLastApplied()
 {
 }
 
@@ -254,6 +300,7 @@ void CSearchResultsWnd::OnInitialUpdate()
 	searchselect.InitToolTips();
 
 	ShowSearchSelector(false); //set anchors for IDC_SEARCHLIST
+	EnsureFilterControlLayout();
 
 	AddOrReplaceAnchor(this, m_btnSearchListMenu, TOP_LEFT);
 	AddOrReplaceAnchor(this, IDC_FILTER, TOP_RIGHT);
@@ -274,6 +321,51 @@ void CSearchResultsWnd::OnInitialUpdate()
 	CheckDlgButton(IDC_CHECK_COMPLETE, thePrefs.m_uCompleteCheckState);
 
 	InitWindowStyles(this); //Moved down
+}
+
+void CSearchResultsWnd::EnsureFilterControlLayout()
+{
+	if (!::IsWindow(m_hWnd) || !::IsWindow(m_ctlFilter.GetSafeHwnd()))
+		return;
+
+	CWnd* pCompleteCheck = GetDlgItem(IDC_CHECK_COMPLETE);
+	if (pCompleteCheck == NULL)
+		return;
+
+	CRect rcClient;
+	GetClientRect(&rcClient);
+
+	CRect rcFilter;
+	m_ctlFilter.GetWindowRect(&rcFilter);
+	ScreenToClient(&rcFilter);
+
+	CRect rcCompleteCheck;
+	pCompleteCheck->GetWindowRect(&rcCompleteCheck);
+	ScreenToClient(&rcCompleteCheck);
+
+	const int iMinLeft = rcCompleteCheck.right + kSearchResultsFilterMinGapFromComplete;
+	const int iMaxRight = rcClient.right - kSearchResultsFilterRightMargin;
+	const int iNewLeft = max(kSearchResultsFilterDefaultLeft, iMinLeft);
+	const int iNewWidth = iMaxRight - iNewLeft;
+	if (iNewWidth <= 0)
+		return;
+
+	if (rcFilter.left == iNewLeft && rcFilter.Width() == iNewWidth)
+		return;
+
+	m_ctlFilter.SetWindowPos(NULL, iNewLeft, rcFilter.top, iNewWidth, rcFilter.Height(), SWP_NOOWNERZORDER | SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
+void CSearchResultsWnd::OnSize(UINT nType, int cx, int cy)
+{
+	CResizableFormView::OnSize(nType, cx, cy);
+	UNREFERENCED_PARAMETER(cx);
+	UNREFERENCED_PARAMETER(cy);
+
+	if (nType == SIZE_MINIMIZED || !::IsWindow(m_hWnd) || !::IsWindow(m_ctlFilter.GetSafeHwnd()))
+		return;
+
+	EnsureFilterControlLayout();
 }
 
 BOOL CSearchResultsWnd::PreTranslateMessage(MSG *pMsg)
@@ -622,36 +714,55 @@ void CSearchResultsWnd::DownloadSelected(bool bPaused, bool bBypassDownloadCheck
 	}
 
 	if (!selectedList.IsEmpty()) {
+		bool bNeedsSearchListRefresh = false;
 		CSearchFile* sel_file = selectedList.GetHead();
 		for (POSITION pos = selectedList.GetHeadPosition(); pos != NULL;) {
 			sel_file = selectedList.GetNext(pos);
-			if (sel_file) {
-				// get parent
-				CSearchFile* parent = sel_file->GetListParent();
-				if (parent == NULL)
-					parent = sel_file;
+			if (sel_file == NULL)
+				continue;
 
-				if (parent->IsComplete() == 0 && parent->GetSourceCount() >= 50) {
-					CString strMsg;
-					strMsg.Format(GetResString(_T("ASKDLINCOMPLETE")), (LPCTSTR)sel_file->GetFileName());
-					if (!thePrefs.GetDownloadCheckerSkipIncompleteFileConfirmation() && CDarkMode::MessageBox(strMsg, MB_ICONQUESTION | MB_YESNO | MB_DEFBUTTON2) != IDYES)
-						continue;
-				}
+			// get parent
+			CSearchFile* parent = sel_file->GetListParent();
+			if (parent == NULL)
+				parent = sel_file;
 
-				// create new DL queue entry with all properties of parent (e.g. already received sources!)
-				// but with the filename of the selected listview item.
-				CSearchFile tempFile(parent);
-				tempFile.SetAFileName(sel_file->GetFileName());
-				tempFile.SetStrTagValue(FT_FILENAME, sel_file->GetFileName());
-				theApp.downloadqueue->AddSearchToDownload(&tempFile, bPaused, GetSelectedCat(), bBypassDownloadChecker);
+			if (parent->IsComplete() == 0 && parent->GetSourceCount() >= 50) {
+				CString strMsg;
+				strMsg.Format(GetResString(_T("ASKDLINCOMPLETE")), (LPCTSTR)sel_file->GetFileName());
+				if (!thePrefs.GetDownloadCheckerSkipIncompleteFileConfirmation() && CDarkMode::MessageBox(strMsg, MB_ICONQUESTION | MB_YESNO | MB_DEFBUTTON2) != IDYES)
+					continue;
+			}
 
-				theApp.searchlist->SetSearchItemKnownType(parent);
+			// create new DL queue entry with all properties of parent (e.g. already received sources!)
+			// but with the filename of the selected listview item.
+			CSearchFile tempFile(parent);
+			tempFile.SetAFileName(sel_file->GetFileName());
+			tempFile.SetStrTagValue(FT_FILENAME, sel_file->GetFileName());
+			theApp.downloadqueue->AddSearchToDownload(&tempFile, bPaused, GetSelectedCat(), bBypassDownloadChecker);
 
-				// update parent and all children
-				searchlistctrl.UpdateSources(parent, true);
+			theApp.searchlist->SetSearchItemKnownType(parent);
+			bNeedsSearchListRefresh = true;
+		}
+
+		if (bNeedsSearchListRefresh && !m_bDeferredSearchListRefreshPending) {
+			// Defer the visual refresh until the current command/context-menu processing unwinds.
+			// Reloading the search list synchronously from inside a heavy multi-selection download
+			// command re-enters list-view/UI code while the popup menu loop is still active.
+			m_bDeferredSearchListRefreshPending = true;
+			if (!PostMessage(WM_SEARCHRESULTSWND_DEFERRED_REFRESH, 0, 0)) {
+				m_bDeferredSearchListRefreshPending = false;
+				searchlistctrl.ReloadList(true, static_cast<EListStateField>(LSF_SELECTION | LSF_SCROLL));
 			}
 		}
 	}
+}
+
+LRESULT CSearchResultsWnd::OnDeferredSearchListRefresh(WPARAM, LPARAM)
+{
+	m_bDeferredSearchListRefreshPending = false;
+	if (::IsWindow(searchlistctrl.m_hWnd))
+		searchlistctrl.ReloadList(true, static_cast<EListStateField>(LSF_SELECTION | LSF_SCROLL));
+	return 0;
 }
 
 void CSearchResultsWnd::OnSysColorChange()
@@ -1473,6 +1584,8 @@ bool CSearchResultsWnd::CreateNewTab(SSearchParams *pParams, bool bActiveIcon, b
 	}
 	searchselect.m_bShowCloseButton = thePrefs.GetShowCloseButtonOnSearchTabs();
 	int itemnr = searchselect.InsertItem(INT_MAX, &ti);
+	if (itemnr < 0)
+		return false;
 	if (!searchselect.IsWindowVisible())
 		ShowSearchSelector(true);
 	LRESULT lResult;
@@ -1568,6 +1681,7 @@ void CSearchResultsWnd::DeleteAllSearches()
 			Kademlia::CSearchManager::StopSearch(params->dwSearchID, false);
 			listSearchParamsToDelete.AddTail(params);
 		}
+	Kademlia::CSearchManager::StopAllKeywordSearches();
 	NoTabItems();
 
 	while (!listSearchParamsToDelete.IsEmpty())
@@ -1856,7 +1970,7 @@ BEGIN_MESSAGE_MAP(CSearchResultsSelector, CClosableTabCtrl)
 END_MESSAGE_MAP()
 
 CSearchResultsSelector::CSearchResultsSelector()
-	: m_SelectedClient()
+	: m_uSelectedClientRuntimeID(0)
 	, m_nTooltipTabIndex(-1)
 {
 }
@@ -1925,29 +2039,31 @@ void CSearchResultsSelector::OnMouseMove(UINT nFlags, CPoint point)
 	CClosableTabCtrl::OnMouseMove(nFlags, point);
 }
 
-CUpDownClient* CSearchResultsSelector::GetClientForTab(int iTab) const
+ClientRuntimeID CSearchResultsSelector::GetClientRuntimeIDForTab(int iTab) const
 {
 	TCITEM ti = {};
 	ti.mask = TCIF_PARAM;
 	if (!GetItem(iTab, &ti) || ti.lParam == NULL)
-		return NULL;
+		return 0;
 
 	const SSearchParams* pParams = reinterpret_cast<const SSearchParams*>(ti.lParam);
 	if (!pParams->bClientSharedFiles || pParams->m_strClientHash.IsEmpty())
-		return NULL;
+		return 0;
 
 	uchar aucClientHash[MDX_DIGEST_SIZE];
 	if (!strmd4(pParams->m_strClientHash, aucClientHash))
-		return NULL;
+		return 0;
 
-	CUpDownClient* pClient = NULL;
-	if (thePrefs.GetClientHistory())
-		theApp.clientlist->m_ArchivedClientsMap.Lookup(pParams->m_strClientHash, pClient);
+	if (theApp.clientlist == NULL)
+		return 0;
 
+	CUpDownClient* pClient = theApp.clientlist->AcquireTrackedClientByUserHash(aucClientHash, thePrefs.GetClientHistory());
 	if (pClient == NULL)
-		pClient = theApp.clientlist->FindClientByUserHash(aucClientHash);
+		return 0;
 
-	return pClient;
+	const ClientRuntimeID uRuntimeID = pClient->GetRuntimeID();
+	pClient->ReleaseRuntimeReference();
+	return uRuntimeID;
 }
 
 CString CSearchResultsSelector::BuildSearchTooltip(int iTab) const
@@ -2031,7 +2147,8 @@ CString CSearchResultsSelector::BuildSearchTooltip(int iTab) const
 
 CString CSearchResultsSelector::BuildSharedFilesTooltip(int iTab) const
 {
-	CUpDownClient* pClient = GetClientForTab(iTab);
+	CScopedSearchClientRef clientRef(GetClientRuntimeIDForTab(iTab));
+	CUpDownClient* pClient = clientRef.Get();
 	if (pClient == NULL)
 		return CString();
 
@@ -2169,94 +2286,146 @@ BOOL CSearchResultsSelector::OnCommand(WPARAM wParam, LPARAM lParam)
 		return TRUE;
 	}
 	case MP_SHOWLIST:
-		theApp.emuledlg->transferwnd->GetClientList()->ArchivedToActive(m_SelectedClient)->RequestSharedFileList();
-		return TRUE;
 	case MP_MESSAGE:
-		theApp.emuledlg->chatwnd->StartSession(theApp.emuledlg->transferwnd->GetClientList()->ArchivedToActive(m_SelectedClient));
-		return TRUE;
 	case MP_ADDFRIEND:
-		theApp.friendlist->AddFriend(m_SelectedClient);
-		return TRUE;
 	case MP_DETAIL:
-	{
-		CClientDetailDialog dialog(m_SelectedClient, NULL);
-		dialog.DoModal();
-		return TRUE;
-	}
 	case MP_BOOT:
-		if (m_SelectedClient->GetKadPort() && m_SelectedClient->GetKadVersion() >= KADEMLIA_VERSION2_47a)
-			Kademlia::CKademlia::Bootstrap(m_SelectedClient->GetIPv4().ToUInt32(true), m_SelectedClient->GetKadPort());
-		return TRUE;
 	case MP_SHOWLIST_AUTO_QUERY:
-	{
-		m_SelectedClient->SetAutoQuerySharedFiles(true);
-		CUpDownClient* NewClient = theApp.emuledlg->transferwnd->GetClientList()->ArchivedToActive(m_SelectedClient);
-		if (NewClient && (m_SelectedClient == NewClient || theApp.clientlist->IsValidClient(NewClient)))
-			NewClient->RequestSharedFileList();
-		return TRUE;
-	}
 	case MP_ACTIVATE_AUTO_QUERY:
-		m_SelectedClient->SetAutoQuerySharedFiles(true);
-		return TRUE;
 	case MP_DEACTIVATE_AUTO_QUERY:
-		m_SelectedClient->SetAutoQuerySharedFiles(false);
-		return TRUE;
 	case MP_EDIT_NOTE:
-	{
-		InputBox inputbox;
-		CString m_strLabel;
-		m_strLabel.Format(_T("User: %s\nHash: %s"), m_SelectedClient->GetUserName(), md4str(m_SelectedClient->GetUserHash()));
-		inputbox.SetLabels(GetResString(_T("EDIT_CLIENT_NOTE")), m_strLabel, m_SelectedClient->m_strClientNote);
-		inputbox.DoModal();
-		if (!inputbox.WasCancelled() && !inputbox.GetInput().IsEmpty()) {
-			m_SelectedClient->m_strClientNote = inputbox.GetInput();
-			theApp.emuledlg->transferwnd->GetClientList()->RefreshClient(m_SelectedClient);
-			theApp.emuledlg->transferwnd->GetUploadList()->RefreshClient(m_SelectedClient);
-			theApp.emuledlg->transferwnd->GetQueueList()->RefreshClient(m_SelectedClient);
-			theApp.emuledlg->transferwnd->GetDownloadClientsList()->RefreshClient(m_SelectedClient);
-			theApp.emuledlg->searchwnd->m_pwndResults->searchlistctrl.UpdateTabHeader(0, md4str(m_SelectedClient->GetUserHash()), false);
-		}
-		return TRUE;
-	}
 	case MP_PUNISMENT_IPUSERHASHBAN:
-		theApp.shield->SetPunishment(m_SelectedClient,GetResString(_T("PUNISHMENT_REASON_MANUAL_IP_BAN")), PR_MANUAL, P_IPUSERHASHBAN);
-		return TRUE;
 	case MP_PUNISMENT_USERHASHBAN:
-		theApp.shield->SetPunishment(m_SelectedClient,GetResString(_T("PUNISHMENT_REASON_MANUAL_USER_HASH_BAN")), PR_MANUAL, P_USERHASHBAN);
-		return TRUE;
 	case MP_PUNISMENT_UPLOADBAN:
-		theApp.shield->SetPunishment(m_SelectedClient,GetResString(_T("PUNISHMENT_REASON_MANUAL_UPLOAD_BAN")), PR_MANUAL, P_UPLOADBAN);
-		return TRUE;
 	case MP_PUNISMENT_SCOREX01:
-		theApp.shield->SetPunishment(m_SelectedClient,GetResString(_T("PUNISHMENT_REASON_MANUAL_SCORE_REDUCING")), PR_MANUAL, P_SCOREX01);
-		return TRUE;
 	case MP_PUNISMENT_SCOREX02:
-		theApp.shield->SetPunishment(m_SelectedClient,GetResString(_T("PUNISHMENT_REASON_MANUAL_SCORE_REDUCING")), PR_MANUAL, P_SCOREX02);
-		return TRUE;
 	case MP_PUNISMENT_SCOREX03:
-		theApp.shield->SetPunishment(m_SelectedClient,GetResString(_T("PUNISHMENT_REASON_MANUAL_SCORE_REDUCING")), PR_MANUAL, P_SCOREX03);
-		return TRUE;
 	case MP_PUNISMENT_SCOREX04:
-		theApp.shield->SetPunishment(m_SelectedClient,GetResString(_T("PUNISHMENT_REASON_MANUAL_SCORE_REDUCING")), PR_MANUAL, P_SCOREX04);
-		return TRUE;
 	case MP_PUNISMENT_SCOREX05:
-		theApp.shield->SetPunishment(m_SelectedClient,GetResString(_T("PUNISHMENT_REASON_MANUAL_SCORE_REDUCING")), PR_MANUAL, P_SCOREX05);
-		return TRUE;
 	case MP_PUNISMENT_SCOREX06:
-		theApp.shield->SetPunishment(m_SelectedClient,GetResString(_T("PUNISHMENT_REASON_MANUAL_SCORE_REDUCING")), PR_MANUAL, P_SCOREX06);
-		return TRUE;
 	case MP_PUNISMENT_SCOREX07:
-		theApp.shield->SetPunishment(m_SelectedClient,GetResString(_T("PUNISHMENT_REASON_MANUAL_SCORE_REDUCING")), PR_MANUAL, P_SCOREX07);
-		return TRUE;
 	case MP_PUNISMENT_SCOREX08:
-		theApp.shield->SetPunishment(m_SelectedClient,GetResString(_T("PUNISHMENT_REASON_MANUAL_SCORE_REDUCING")), PR_MANUAL, P_SCOREX08);
-		return TRUE;
 	case MP_PUNISMENT_SCOREX09:
-		theApp.shield->SetPunishment(m_SelectedClient,GetResString(_T("PUNISHMENT_REASON_MANUAL_SCORE_REDUCING")), PR_MANUAL, P_SCOREX09);
-		return TRUE;
 	case MP_PUNISMENT_NONE:
-		theApp.shield->SetPunishment(m_SelectedClient,GetResString(_T("PUNISHMENT_REASON_MANUAL_CANCELATION")), PR_NOTBADCLIENT, P_NOPUNISHMENT);
-		return TRUE;
+	{
+		CScopedSearchClientRef clientRef(m_uSelectedClientRuntimeID);
+		CUpDownClient* pSelectedClient = clientRef.Get();
+		if (pSelectedClient == NULL)
+			return TRUE;
+
+		switch (wParam) {
+		case MP_SHOWLIST:
+		{
+			CUpDownClient* pActiveClient = theApp.emuledlg->transferwnd->GetClientList()->ArchivedToActive(pSelectedClient);
+			if (pActiveClient != NULL)
+				pActiveClient->RequestSharedFileList();
+			return TRUE;
+		}
+		case MP_MESSAGE:
+		{
+			CUpDownClient* pActiveClient = theApp.emuledlg->transferwnd->GetClientList()->ArchivedToActive(pSelectedClient);
+			if (pActiveClient != NULL)
+				theApp.emuledlg->chatwnd->StartSession(pActiveClient);
+			return TRUE;
+		}
+		case MP_ADDFRIEND:
+			theApp.friendlist->AddFriend(pSelectedClient);
+			return TRUE;
+		case MP_DETAIL:
+		{
+			CClientDetailDialog dialog(pSelectedClient, NULL);
+			clientRef.Release();
+			dialog.DoModal();
+			return TRUE;
+		}
+		case MP_BOOT:
+			if (pSelectedClient->GetKadPort() && pSelectedClient->GetKadVersion() >= KADEMLIA_VERSION2_47a)
+				Kademlia::CKademlia::Bootstrap(pSelectedClient->GetIPv4().ToUInt32(true), pSelectedClient->GetKadPort());
+			return TRUE;
+		case MP_SHOWLIST_AUTO_QUERY:
+		{
+			pSelectedClient->SetAutoQuerySharedFiles(true);
+			CUpDownClient* pActiveClient = theApp.emuledlg->transferwnd->GetClientList()->ArchivedToActive(pSelectedClient);
+			if (pActiveClient != NULL && (pActiveClient == pSelectedClient || theApp.clientlist->IsValidClient(pActiveClient)))
+				pActiveClient->RequestSharedFileList();
+			return TRUE;
+		}
+		case MP_ACTIVATE_AUTO_QUERY:
+			pSelectedClient->SetAutoQuerySharedFiles(true);
+			return TRUE;
+		case MP_DEACTIVATE_AUTO_QUERY:
+			pSelectedClient->SetAutoQuerySharedFiles(false);
+			return TRUE;
+		case MP_EDIT_NOTE:
+		{
+			const CString strUserName = pSelectedClient->GetUserName() != NULL ? pSelectedClient->GetUserName() : _T("?");
+			const CString strUserHash = md4str(pSelectedClient->GetUserHash());
+			const CString strCurrentNote = pSelectedClient->m_strClientNote;
+			clientRef.Release();
+
+			InputBox inputbox;
+			CString m_strLabel;
+			m_strLabel.Format(_T("User: %s\nHash: %s"), (LPCTSTR)strUserName, (LPCTSTR)strUserHash);
+			inputbox.SetLabels(GetResString(_T("EDIT_CLIENT_NOTE")), m_strLabel, strCurrentNote);
+			inputbox.DoModal();
+			if (inputbox.WasCancelled() || inputbox.GetInput().IsEmpty())
+				return TRUE;
+
+			CScopedSearchClientRef updateClientRef(m_uSelectedClientRuntimeID);
+			CUpDownClient* pUpdateClient = updateClientRef.Get();
+			if (pUpdateClient == NULL)
+				return TRUE;
+
+			pUpdateClient->m_strClientNote = inputbox.GetInput();
+			theApp.emuledlg->transferwnd->GetClientList()->RefreshClient(pUpdateClient, -1, CClientListCtrl::kSortImpactNote);
+			theApp.emuledlg->transferwnd->GetUploadList()->RefreshClient(pUpdateClient);
+			theApp.emuledlg->transferwnd->GetQueueList()->RefreshClient(pUpdateClient);
+			theApp.emuledlg->transferwnd->GetDownloadClientsList()->RefreshClient(pUpdateClient);
+			theApp.emuledlg->searchwnd->m_pwndResults->searchlistctrl.UpdateTabHeader(0, md4str(pUpdateClient->GetUserHash()), false);
+			return TRUE;
+		}
+		case MP_PUNISMENT_IPUSERHASHBAN:
+			theApp.shield->SetPunishment(pSelectedClient,GetResString(_T("PUNISHMENT_REASON_MANUAL_IP_BAN")), PR_MANUAL, P_IPUSERHASHBAN);
+			return TRUE;
+		case MP_PUNISMENT_USERHASHBAN:
+			theApp.shield->SetPunishment(pSelectedClient,GetResString(_T("PUNISHMENT_REASON_MANUAL_USER_HASH_BAN")), PR_MANUAL, P_USERHASHBAN);
+			return TRUE;
+		case MP_PUNISMENT_UPLOADBAN:
+			theApp.shield->SetPunishment(pSelectedClient,GetResString(_T("PUNISHMENT_REASON_MANUAL_UPLOAD_BAN")), PR_MANUAL, P_UPLOADBAN);
+			return TRUE;
+		case MP_PUNISMENT_SCOREX01:
+			theApp.shield->SetPunishment(pSelectedClient,GetResString(_T("PUNISHMENT_REASON_MANUAL_SCORE_REDUCING")), PR_MANUAL, P_SCOREX01);
+			return TRUE;
+		case MP_PUNISMENT_SCOREX02:
+			theApp.shield->SetPunishment(pSelectedClient,GetResString(_T("PUNISHMENT_REASON_MANUAL_SCORE_REDUCING")), PR_MANUAL, P_SCOREX02);
+			return TRUE;
+		case MP_PUNISMENT_SCOREX03:
+			theApp.shield->SetPunishment(pSelectedClient,GetResString(_T("PUNISHMENT_REASON_MANUAL_SCORE_REDUCING")), PR_MANUAL, P_SCOREX03);
+			return TRUE;
+		case MP_PUNISMENT_SCOREX04:
+			theApp.shield->SetPunishment(pSelectedClient,GetResString(_T("PUNISHMENT_REASON_MANUAL_SCORE_REDUCING")), PR_MANUAL, P_SCOREX04);
+			return TRUE;
+		case MP_PUNISMENT_SCOREX05:
+			theApp.shield->SetPunishment(pSelectedClient,GetResString(_T("PUNISHMENT_REASON_MANUAL_SCORE_REDUCING")), PR_MANUAL, P_SCOREX05);
+			return TRUE;
+		case MP_PUNISMENT_SCOREX06:
+			theApp.shield->SetPunishment(pSelectedClient,GetResString(_T("PUNISHMENT_REASON_MANUAL_SCORE_REDUCING")), PR_MANUAL, P_SCOREX06);
+			return TRUE;
+		case MP_PUNISMENT_SCOREX07:
+			theApp.shield->SetPunishment(pSelectedClient,GetResString(_T("PUNISHMENT_REASON_MANUAL_SCORE_REDUCING")), PR_MANUAL, P_SCOREX07);
+			return TRUE;
+		case MP_PUNISMENT_SCOREX08:
+			theApp.shield->SetPunishment(pSelectedClient,GetResString(_T("PUNISHMENT_REASON_MANUAL_SCORE_REDUCING")), PR_MANUAL, P_SCOREX08);
+			return TRUE;
+		case MP_PUNISMENT_SCOREX09:
+			theApp.shield->SetPunishment(pSelectedClient,GetResString(_T("PUNISHMENT_REASON_MANUAL_SCORE_REDUCING")), PR_MANUAL, P_SCOREX09);
+			return TRUE;
+		case MP_PUNISMENT_NONE:
+			theApp.shield->SetPunishment(pSelectedClient,GetResString(_T("PUNISHMENT_REASON_MANUAL_CANCELATION")), PR_NOTBADCLIENT, P_NOPUNISHMENT);
+			return TRUE;
+		}
+		break;
+	}
 	}
 
 	return CClosableTabCtrl::OnCommand(wParam, lParam);
@@ -2291,58 +2460,48 @@ void CSearchResultsSelector::OnContextMenu(CWnd*, CPoint point)
 			uint32 m_uSearchID = reinterpret_cast<SSearchParams*>(item.lParam)->dwSearchID;
 			const SSearchParams* pParams = theApp.emuledlg->searchwnd->m_pwndResults->GetSearchResultsParams(m_uSearchID);
 			if (pParams && pParams->bClientSharedFiles) {
-				m_SelectedClient = NULL;
+				m_uSelectedClientRuntimeID = GetClientRuntimeIDForTab(cur_sel);
+				CScopedSearchClientRef selectedClientRef(m_uSelectedClientRuntimeID);
+				CUpDownClient* pSelectedClient = selectedClientRef.Get();
+				if (pSelectedClient != NULL) {
+					const bool is_ed2k = pSelectedClient->IsEd2kClient();
+					ClientMenu.AppendMenu(MF_STRING | MF_ENABLED, MP_DETAIL, GetResString(_T("SHOWDETAILS")), _T("CLIENTDETAILS"));
+					ClientMenu.AppendMenu(MF_STRING | ((is_ed2k && !pSelectedClient->IsFriend()) ? MF_ENABLED : MF_GRAYED), MP_ADDFRIEND, GetResString(_T("ADDFRIEND")), _T("ADDFRIEND"));
+					ClientMenu.AppendMenu(MF_STRING | (is_ed2k ? MF_ENABLED : MF_GRAYED), MP_MESSAGE, GetResString(_T("SEND_MSG")), _T("SENDMESSAGE"));
+					ClientMenu.AppendMenu(MF_STRING | ((is_ed2k && pSelectedClient->GetViewSharedFilesSupport()) ? MF_ENABLED : MF_GRAYED), MP_SHOWLIST, GetResString(_T("VIEWFILES")), _T("VIEWFILES"));
 
-				CString m_strClientHash = pParams->m_strClientHash;
-				uchar m_uchClientHash[MDX_DIGEST_SIZE];
-				if (strmd4(m_strClientHash, m_uchClientHash)) {
-					if (thePrefs.GetClientHistory()) // Look up client history map
-						theApp.clientlist->m_ArchivedClientsMap.Lookup(m_strClientHash, m_SelectedClient);
+					ClientMenu.AppendMenu(MF_STRING | ((is_ed2k && pSelectedClient->GetViewSharedFilesSupport() && (pSelectedClient->m_bIsArchived || !pSelectedClient->socket || !pSelectedClient->socket->IsConnected())) ? MF_ENABLED : MF_GRAYED), MP_SHOWLIST_AUTO_QUERY, GetResString(_T("VIEW_FILES_ACTIVATE_AUTO_QUERY")), _T("CLOCKGREEN"));
+					if (m_uSelectedClientRuntimeID == 0)
+						ClientMenu.AppendMenu(MF_STRING | MF_GRAYED, MP_ACTIVATE_AUTO_QUERY, GetResString(_T("ACTIVATE_AUTO_QUERY")), _T("CLOCKBLUE"));
+					else if (pSelectedClient->m_bAutoQuerySharedFiles)
+						ClientMenu.AppendMenu(MF_STRING | MF_ENABLED, MP_DEACTIVATE_AUTO_QUERY, GetResString(_T("DEACTIVATE_AUTO_QUERY")), _T("CLOCKRED"));
+					else
+						ClientMenu.AppendMenu(MF_STRING | ((is_ed2k && pSelectedClient->GetViewSharedFilesSupport() && (pSelectedClient->m_bIsArchived || !pSelectedClient->socket || !pSelectedClient->socket->IsConnected())) ? MF_ENABLED : MF_GRAYED), MP_ACTIVATE_AUTO_QUERY, GetResString(_T("ACTIVATE_AUTO_QUERY")), _T("CLOCKBLUE"));
 
-					if (m_SelectedClient == NULL) // This is not a archived client. Now look up recent client list
-						m_SelectedClient = theApp.clientlist->FindClientByUserHash(m_uchClientHash);
+					ClientMenu.AppendMenu(MF_STRING | MF_ENABLED, MP_EDIT_NOTE, GetResString(_T("EDIT_CLIENT_NOTE")), _T("RENAME"));
 
-					if (m_SelectedClient != NULL) {
-						const bool is_ed2k = m_SelectedClient && m_SelectedClient->IsEd2kClient();
-						ClientMenu.AppendMenu(MF_STRING | (m_SelectedClient ? MF_ENABLED : MF_GRAYED), MP_DETAIL, GetResString(_T("SHOWDETAILS")), _T("CLIENTDETAILS"));
-						ClientMenu.AppendMenu(MF_STRING | ((is_ed2k && !m_SelectedClient->IsFriend()) ? MF_ENABLED : MF_GRAYED), MP_ADDFRIEND, GetResString(_T("ADDFRIEND")), _T("ADDFRIEND"));
-						ClientMenu.AppendMenu(MF_STRING | (is_ed2k ? MF_ENABLED : MF_GRAYED), MP_MESSAGE, GetResString(_T("SEND_MSG")), _T("SENDMESSAGE"));
-						ClientMenu.AppendMenu(MF_STRING | ((is_ed2k && m_SelectedClient->GetViewSharedFilesSupport()) ? MF_ENABLED : MF_GRAYED), MP_SHOWLIST, GetResString(_T("VIEWFILES")), _T("VIEWFILES"));
-
-						ClientMenu.AppendMenu(MF_STRING | ((is_ed2k && m_SelectedClient->GetViewSharedFilesSupport() && (m_SelectedClient->m_bIsArchived || !m_SelectedClient->socket || !m_SelectedClient->socket->IsConnected())) ? MF_ENABLED : MF_GRAYED), MP_SHOWLIST_AUTO_QUERY, GetResString(_T("VIEW_FILES_ACTIVATE_AUTO_QUERY")), _T("CLOCKGREEN"));
-						if (m_SelectedClient == NULL)
-							ClientMenu.AppendMenu(MF_STRING | MF_GRAYED, MP_ACTIVATE_AUTO_QUERY, GetResString(_T("ACTIVATE_AUTO_QUERY")), _T("CLOCKBLUE"));
-						else if (m_SelectedClient->m_bAutoQuerySharedFiles)
-							ClientMenu.AppendMenu(MF_STRING | MF_ENABLED, MP_DEACTIVATE_AUTO_QUERY, GetResString(_T("DEACTIVATE_AUTO_QUERY")), _T("CLOCKRED"));
-						else
-							ClientMenu.AppendMenu(MF_STRING | ((is_ed2k && m_SelectedClient->GetViewSharedFilesSupport() && (m_SelectedClient->m_bIsArchived || !m_SelectedClient->socket || !m_SelectedClient->socket->IsConnected())) ? MF_ENABLED : MF_GRAYED), MP_ACTIVATE_AUTO_QUERY, GetResString(_T("ACTIVATE_AUTO_QUERY")), _T("CLOCKBLUE"));
-
-						ClientMenu.AppendMenu(MF_STRING | (m_SelectedClient ? MF_ENABLED : MF_GRAYED), MP_EDIT_NOTE, GetResString(_T("EDIT_CLIENT_NOTE")), _T("RENAME"));
-
-						ClientMenu.AppendMenu(MF_STRING | MF_SEPARATOR);
-						CMenuXP m_PunishmentMenu;
-						m_PunishmentMenu.CreateMenu();
-						m_PunishmentMenu.AppendMenu(MF_STRING, MP_PUNISMENT_IPUSERHASHBAN, GetResString(_T("IP_USER_HASH_BAN")));
-						m_PunishmentMenu.AppendMenu(MF_STRING, MP_PUNISMENT_USERHASHBAN, GetResString(_T("USER_HASH_BAN")));
-						m_PunishmentMenu.AppendMenu(MF_STRING, MP_PUNISMENT_UPLOADBAN, GetResString(_T("UPLOAD_BAN")));
-						m_PunishmentMenu.AppendMenu(MF_STRING, MP_PUNISMENT_SCOREX01, GetResString(_T("SCORE_01")));
-						m_PunishmentMenu.AppendMenu(MF_STRING, MP_PUNISMENT_SCOREX02, GetResString(_T("SCORE_02")));
-						m_PunishmentMenu.AppendMenu(MF_STRING, MP_PUNISMENT_SCOREX03, GetResString(_T("SCORE_03")));
-						m_PunishmentMenu.AppendMenu(MF_STRING, MP_PUNISMENT_SCOREX04, GetResString(_T("SCORE_04")));
-						m_PunishmentMenu.AppendMenu(MF_STRING, MP_PUNISMENT_SCOREX05, GetResString(_T("SCORE_05")));
-						m_PunishmentMenu.AppendMenu(MF_STRING, MP_PUNISMENT_SCOREX06, GetResString(_T("SCORE_06")));
-						m_PunishmentMenu.AppendMenu(MF_STRING, MP_PUNISMENT_SCOREX07, GetResString(_T("SCORE_07")));
-						m_PunishmentMenu.AppendMenu(MF_STRING, MP_PUNISMENT_SCOREX08, GetResString(_T("SCORE_08")));
-						m_PunishmentMenu.AppendMenu(MF_STRING, MP_PUNISMENT_SCOREX09, GetResString(_T("SCORE_09")));
-						m_PunishmentMenu.AppendMenu(MF_STRING, MP_PUNISMENT_NONE, GetResString(_T("NO_PUNISHMENT")));
-						ClientMenu.EnableMenuItem((UINT)m_PunishmentMenu.m_hMenu, MF_ENABLED);
-						int m_PunishmentMenuItem = MP_PUNISMENT_IPUSERHASHBAN + m_SelectedClient->m_uPunishment;
-						m_PunishmentMenu.CheckMenuRadioItem(MP_PUNISMENT_IPUSERHASHBAN, MP_PUNISMENT_NONE, m_PunishmentMenuItem, 0);
-						ClientMenu.AppendMenu(MF_STRING | MF_POPUP, (UINT_PTR)m_PunishmentMenu.m_hMenu, GetResString(_T("PUNISHMENT")), _T("PUNISHMENT"));
-					}
-					menu.EnableMenuItem((UINT)ClientMenu.m_hMenu, MF_ENABLED);
+					ClientMenu.AppendMenu(MF_STRING | MF_SEPARATOR);
+					CMenuXP m_PunishmentMenu;
+					m_PunishmentMenu.CreateMenu();
+					m_PunishmentMenu.AppendMenu(MF_STRING, MP_PUNISMENT_IPUSERHASHBAN, GetResString(_T("IP_USER_HASH_BAN")));
+					m_PunishmentMenu.AppendMenu(MF_STRING, MP_PUNISMENT_USERHASHBAN, GetResString(_T("USER_HASH_BAN")));
+					m_PunishmentMenu.AppendMenu(MF_STRING, MP_PUNISMENT_UPLOADBAN, GetResString(_T("UPLOAD_BAN")));
+					m_PunishmentMenu.AppendMenu(MF_STRING, MP_PUNISMENT_SCOREX01, GetResString(_T("SCORE_01")));
+					m_PunishmentMenu.AppendMenu(MF_STRING, MP_PUNISMENT_SCOREX02, GetResString(_T("SCORE_02")));
+					m_PunishmentMenu.AppendMenu(MF_STRING, MP_PUNISMENT_SCOREX03, GetResString(_T("SCORE_03")));
+					m_PunishmentMenu.AppendMenu(MF_STRING, MP_PUNISMENT_SCOREX04, GetResString(_T("SCORE_04")));
+					m_PunishmentMenu.AppendMenu(MF_STRING, MP_PUNISMENT_SCOREX05, GetResString(_T("SCORE_05")));
+					m_PunishmentMenu.AppendMenu(MF_STRING, MP_PUNISMENT_SCOREX06, GetResString(_T("SCORE_06")));
+					m_PunishmentMenu.AppendMenu(MF_STRING, MP_PUNISMENT_SCOREX07, GetResString(_T("SCORE_07")));
+					m_PunishmentMenu.AppendMenu(MF_STRING, MP_PUNISMENT_SCOREX08, GetResString(_T("SCORE_08")));
+					m_PunishmentMenu.AppendMenu(MF_STRING, MP_PUNISMENT_SCOREX09, GetResString(_T("SCORE_09")));
+					m_PunishmentMenu.AppendMenu(MF_STRING, MP_PUNISMENT_NONE, GetResString(_T("NO_PUNISHMENT")));
+					ClientMenu.EnableMenuItem((UINT)m_PunishmentMenu.m_hMenu, MF_ENABLED);
+					int m_PunishmentMenuItem = MP_PUNISMENT_IPUSERHASHBAN + pSelectedClient->m_uPunishment;
+					m_PunishmentMenu.CheckMenuRadioItem(MP_PUNISMENT_IPUSERHASHBAN, MP_PUNISMENT_NONE, m_PunishmentMenuItem, 0);
+					ClientMenu.AppendMenu(MF_STRING | MF_POPUP, (UINT_PTR)m_PunishmentMenu.m_hMenu, GetResString(_T("PUNISHMENT")), _T("PUNISHMENT"));
 				}
-				menu.AppendMenu(MF_STRING | MF_POPUP | (m_SelectedClient ? MF_ENABLED : MF_GRAYED), (UINT_PTR)ClientMenu.m_hMenu, GetResString(_T("CLIENT")), _T("StatsClients"));
+				menu.AppendMenu(MF_STRING | MF_POPUP | (m_uSelectedClientRuntimeID != 0 ? MF_ENABLED : MF_GRAYED), (UINT_PTR)ClientMenu.m_hMenu, GetResString(_T("CLIENT")), _T("StatsClients"));
 				menu.AppendMenu(MF_STRING | MF_SEPARATOR);
 			} else
 				menu.AppendMenu(MF_STRING, MP_RESTORESEARCHPARAMS, GetResString(_T("RESTORESEARCHPARAMS")), _T("RELOAD"));

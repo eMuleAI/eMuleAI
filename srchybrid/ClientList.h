@@ -20,6 +20,7 @@
 #include "eMuleAI/GeoLite2.h"
 #include "eMuleAI/Address.h"
 #include <list>
+#include <unordered_map>
 
 class CClientReqSocket;
 class CUpDownClient;
@@ -186,7 +187,7 @@ public:
 	void	AddBannedClient(CString strKey, time_t tInserted = time(NULL));
 	bool	IsBannedClient(CString strKey) const;
 	void	RemoveBannedClient(CString strKey);
-	INT_PTR	GetBannedCount() const						{ return m_bannedList.GetCount(); }
+	INT_PTR	GetBannedCount() const;
 	void	RemoveAllBannedClients();
 
 	void CClientList::CancelCategoryPunishments(uint8 uBadClientCategory) const; 
@@ -281,8 +282,17 @@ public:
 	void	RemoveConnectingClient(const CUpDownClient *pToRemove);
 
 	void	Process();
-	bool	IsValidClient(CUpDownClient *tocheck) const;
-	bool	IsClientActive(const CUpDownClient *tocheck) const;
+			bool	IsValidClient(CUpDownClient *tocheck) const;
+			bool	IsClientActive(const CUpDownClient *tocheck) const;
+			CCriticalSection& GetTrackedClientRuntimeMapsLock() const { return m_csTrackedClientRuntimeMaps; }
+			void	ServicePendingDeleteClients();
+			void	DetachClientFromRuntimeMaps(const CUpDownClient* pClient);
+			void	FinalizeDeletePendingClientByRuntimeID(DWORD uRuntimeID);
+			CUpDownClient* AcquireTrackedClientByPointer(const CUpDownClient* pClient) const;
+			CUpDownClient* AcquireTrackedClientByUserHash(const uchar* clienthash, bool bPreferArchived = false) const;
+			CUpDownClient* AcquireTrackedClientByRuntimeID(DWORD uRuntimeID) const;
+			CUpDownClient* AcquireArchivedClientByUserHash(const uchar* clienthash) const;
+			CUpDownClient* FindArchivedClientByUserHash(const uchar* clienthash) const;
 	void	Debug_SocketDeleted(CClientReqSocket *deleted) const;
 
 	void	CleanUp(CPartFile* pDeletedFile);
@@ -324,9 +334,15 @@ public:
 protected:
 	void	ProcessConnectingClientsList();
 	void	CollectClientStatsFromClient(CClientStatsSnapshot& snapshot, const CUpDownClient* curClient) const;
+	void	RebuildArchivedRuntimeMap() const;
+	void	RegisterArchivedClient(CUpDownClient* pArchivedClient);
+	void	UnregisterArchivedClient(const CUpDownClient* pArchivedClient);
 	CList<CString, CString&> liMODsTypes;
 
 private:
+	mutable CCriticalSection m_csTrackedClientRuntimeMaps;
+	std::unordered_map<DWORD, CUpDownClient*> m_ActiveClientsByRuntimeID;
+	mutable std::unordered_map<DWORD, CUpDownClient*> m_ArchivedClientsByRuntimeID;
 	CMap<CUpDownClient*, CUpDownClient*, CUpDownClient*, CUpDownClient*> m_ServedBuddyMap;
 	CUpDownClientPtrList m_KadList;
 	//CMap<uint32, uint32, DWORD, DWORD> m_bannedList;

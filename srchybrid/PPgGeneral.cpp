@@ -202,7 +202,7 @@ BOOL CPPgGeneral::OnInitDialog()
 		return a.disp.CompareNoCase(b.disp) < 0;
 	});
 
-	int idx = m_language.AddString(_T("System (default)"));
+	int idx = m_language.AddString(GetResString(_T("PW_LANG_SYSTEM_DEFAULT")));
 	m_langCodes.Add(_T("system"));
 	(void)idx;
 

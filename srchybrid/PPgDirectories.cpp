@@ -251,7 +251,7 @@ BOOL CPPgDirectories::OnApply()
 			if (oldpath.Left(sOldIncoming.GetLength()).CompareNoCase(sOldIncoming) == 0) {
 				if (!bAskedOnce) {
 					bAskedOnce = true;
-					if (LocMessageBox(_T("UPDATECATINCOMINGDIRS"), MB_YESNO, 0) == IDNO)
+					if (LocMessageBox(_T("UPDATECATINCOMINGDIRS"), MB_YESNO, 0) != IDYES)
 						break;
 				}
 				thePrefs.GetCategory(cat)->strIncomingPath = thePrefs.GetMuleDirectory(EMULE_INCOMINGDIR) + oldpath.Mid(sOldIncoming.GetLength());
@@ -292,6 +292,7 @@ void CPPgDirectories::Localize()
 		SetDlgItemText(IDC_INCOMING_FRM, GetResString(_T("PW_INCOMING")));
 		SetDlgItemText(IDC_TEMP_FRM, GetResString(_T("PW_TEMP")));
 		SetDlgItemText(IDC_SHARED_FRM, GetResString(_T("PW_SHARED")));
+		SetDlgItemText(IDC_UNCADD, GetResString(_T("PW_ADD_UNC_SHARE")));
 	}
 }
 

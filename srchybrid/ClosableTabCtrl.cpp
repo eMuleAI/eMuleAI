@@ -21,7 +21,6 @@
 #include "OtherFunctions.h"
 #include "MenuCmds.h"
 #include "UserMsgs.h"
-#include <algorithm>
 #include "eMuleAI/DarkMode.h"
 #include "eMuleAI/MenuXP.h"
 
@@ -37,23 +36,36 @@ static char THIS_FILE[] = __FILE__;
 
 namespace
 {
-	CFont* SelectTabFont(CDC& dc, CFont* pBaseFont, bool bBold, CFont& boldFont)
+	constexpr LONG kDownloadCategorySelectedTabFontHeightDelta = 1;
+
+	CFont* SelectTabFont(CDC& dc, CFont* pBaseFont, bool bBold, LONG lHeightDelta, CFont& adjustedFont)
 	{
 		if (pBaseFont == NULL)
 			return NULL;
 
-		if (!bBold)
+		if (!bBold && lHeightDelta == 0)
 			return dc.SelectObject(pBaseFont);
 
 		LOGFONT lf = {};
 		if (pBaseFont->GetLogFont(&lf) == 0)
 			return dc.SelectObject(pBaseFont);
 
-		lf.lfWeight = FW_BOLD;
-		if (!boldFont.CreateFontIndirect(&lf))
+		if (bBold)
+			lf.lfWeight = FW_BOLD;
+
+		if (lHeightDelta > 0) {
+			if (lf.lfHeight < 0)
+				lf.lfHeight += lHeightDelta;
+			else if (lf.lfHeight > lHeightDelta)
+				lf.lfHeight -= lHeightDelta;
+			else if (lf.lfHeight > 0)
+				lf.lfHeight = 1;
+		}
+
+		if (!adjustedFont.CreateFontIndirect(&lf))
 			return dc.SelectObject(pBaseFont);
 
-		return dc.SelectObject(&boldFont);
+		return dc.SelectObject(&adjustedFont);
 	}
 }
 
@@ -334,9 +346,10 @@ void CClosableTabCtrl::OnPaint()
 				rcItemText.left += 20; // Move the text position to the right of the icon
 		}
 
-		// Emphasize the active download category tab without affecting other tabs.
-		CFont boldFont;
-		CFont* pOldFont = SelectTabFont(dc, GetFont(), m_bDownloadCategoryStyle && bSelected, boldFont);
+		// Keep the selected category tab close to the classic look while compensating bold width slightly.
+		const bool bCompactSelectedCategoryTab = m_bDownloadCategoryStyle && bSelected;
+		CFont adjustedFont;
+		CFont* pOldFont = SelectTabFont(dc, GetFont(), bCompactSelectedCategoryTab, bCompactSelectedCategoryTab ? kDownloadCategorySelectedTabFontHeightDelta : 0, adjustedFont);
 		int iOldBkMode = dc.SetBkMode(TRANSPARENT);
 		COLORREF crOldColor;
 
@@ -420,8 +433,9 @@ void CClosableTabCtrl::DrawItem(LPDRAWITEMSTRUCT lpDIS)
 	bool bSelected = (lpDIS->itemState & ODS_SELECTED) != 0;
 
 	pDC->FillSolidRect(rcItem, GetSysColor(COLOR_BTNFACE));
-	CFont boldFont;
-	CFont* pOldFont = SelectTabFont(*pDC, GetFont(), m_bDownloadCategoryStyle && bSelected, boldFont);
+	const bool bCompactSelectedCategoryTab = m_bDownloadCategoryStyle && bSelected;
+	CFont adjustedFont;
+	CFont* pOldFont = SelectTabFont(*pDC, GetFont(), bCompactSelectedCategoryTab, bCompactSelectedCategoryTab ? kDownloadCategorySelectedTabFontHeightDelta : 0, adjustedFont);
 	int iOldBkMode = pDC->SetBkMode(TRANSPARENT);
 	COLORREF crOldColor;
 

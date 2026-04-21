@@ -28,6 +28,7 @@ class CPublishKeywordList;
 class CSafeMemFile;
 class CServer;
 class CCollection;
+struct ImportOperationContext;
 typedef CMap<CCKey, const CCKey&, CKnownFile*, CKnownFile*> CKnownFilesMap;
 class CSharedFileListSearchThread;
 
@@ -109,6 +110,7 @@ public:
 	INT_PTR	GetHashingCount()						{ return waitingforhash_list.GetCount() + currentlyhashing_list.GetCount(); }
 	void	NotifyShowFilesCount() const;
 	bool	ProbablyHaveSingleSharedFiles() const;
+	bool	CanClientBrowseSharedFile(const CKnownFile *file, const CUpDownClient *client) const;
 
 	void	HashFailed(UnknownFile_Struct *hashed);	// SLUGFILLER: SafeHash
 	void	FileHashingFinished(CKnownFile *file);
@@ -209,11 +211,13 @@ public:
 	virtual BOOL InitInstance();
 	virtual int	Run();
 	void	SetValues(CSharedFileList *pOwner, LPCTSTR directory, LPCTSTR filename, LPCTSTR strSharedDir, CPartFile *partfile = NULL);
+	void	SetImportOperationContext(ImportOperationContext* pContext);
 	bool	ImportParts();
 	uint16	SetPartToImport(LPCTSTR import);
 private:
 	CSharedFileList	*m_pOwner;
 	CPartFile	*m_partfile;
+	ImportOperationContext* m_pImportOperationContext;
 	CString		m_strDirectory;
 	CString		m_strFilename;
 	CString		m_strSharedDir;

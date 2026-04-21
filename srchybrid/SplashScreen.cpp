@@ -76,8 +76,7 @@ namespace
 			_T("Dirus\n")
 			_T("Barry\n")
 			_T("zz\n")
-			_T("Some Support\n")
-			_T("fox88")
+			_T("Some Support")
 		},
 		{
 			_T("EMULE_AI_SPECIAL_THANKS_HEADING_MODDERS"),
@@ -91,6 +90,7 @@ namespace
 			_T("SLUGFILLER\n")
 			_T("SiRoB\n")
 			_T("khaos\n")
+			_T("fox88\n")
 			_T("Enig123\n")
 			_T("TAHO\n")
 			_T("Pretender\n")

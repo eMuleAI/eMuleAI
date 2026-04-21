@@ -322,6 +322,7 @@ void CFileDetailDialogName::RenameFile()
 		GetDlgItemText(IDC_FILENAME, strNewFileName);
 		if (!strNewFileName.Trim().IsEmpty() && IsValidEd2kString(strNewFileName)) {
 			CPartFile *file = static_cast<CPartFile*>((*m_paFiles)[0]);
+			file->SetAutoRenameToMajorityName(false);
 			file->SetFileName(strNewFileName, true);
 			file->UpdateDisplayedInfo();
 			file->SavePartFile();

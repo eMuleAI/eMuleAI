@@ -33,6 +33,29 @@ public:
 	using ListStateHelper::SaveListState;
 	using ListStateHelper::RestoreListState;
 
+	enum ERefreshSortImpact
+	{
+		kSortImpactNone = 0x00000000,
+		kSortImpactUserName = 0x00000001,
+		kSortImpactUploadState = 0x00000002,
+		kSortImpactTransferredUp = 0x00000004,
+		kSortImpactDownloadState = 0x00000008,
+		kSortImpactTransferredDown = 0x00000010,
+		kSortImpactSoftware = 0x00000020,
+		kSortImpactClientStatus = 0x00000040,
+		kSortImpactHash = 0x00000080,
+		kSortImpactIpPort = 0x00000100,
+		kSortImpactGeolocation = 0x00000200,
+		kSortImpactSharedFiles = 0x00000400,
+		kSortImpactFriend = 0x00000800,
+		kSortImpactIdType = 0x00001000,
+		kSortImpactPunishment = 0x00002000,
+		kSortImpactFirstSeen = 0x00004000,
+		kSortImpactLastSeen = 0x00008000,
+		kSortImpactNote = 0x00010000,
+		kSortImpactAll = 0x7FFFFFFF
+	};
+
 	DECLARE_DYNAMIC(CClientListCtrl)
 
 	//CImageList	*m_pImageList;
@@ -44,7 +67,7 @@ public:
 	void	Init();
 	void	AddClient(CUpDownClient* client);
 	void	RemoveClient(CUpDownClient *client);
-	void	RefreshClient(CUpDownClient* client, const int iIndex = -1);
+	void	RefreshClient(CUpDownClient* client, const int iIndex = -1, const uint32 uSortImpactFlags = kSortImpactAll);
 	void	ReloadList(const bool bOnlySort, const EListStateField LsfFlag);
 	void	RebuildListedItemsMap();
 	virtual DWORD_PTR GetVirtualItemData(int iItem) const override { return (iItem < 0 || static_cast<size_t>(iItem) >= m_ListedItemsVector.size() ? 0 : reinterpret_cast<DWORD_PTR>(m_ListedItemsVector[iItem])); } // Return null if index invalid, otherwise return the pointer
@@ -54,6 +77,7 @@ public:
 	void	LoadArchive(CUpDownClient* client, const CString strCallingMethod);
 	CUpDownClient* ArchivedToActive(CUpDownClient* client);
 	std::vector<CUpDownClient*> m_ListedItemsVector; // This vector is used to list, iterate and sort clients.
+	std::vector<DWORD> m_ListedItemRuntimeIDs; // Parallel immutable runtime IDs for stale-safe resolution.
 	typedef	CMap<CUpDownClient*, CUpDownClient*, int, int&> CListedItemsMap;
 	CListedItemsMap m_ListedItemsMap; // This map is used to lookup client index.
 	void	Hide()					{ ShowWindow(SW_HIDE); }
@@ -61,9 +85,17 @@ public:
 	void	Localize();
 	void	ShowSelectedUserDetails();
 	bool	IsFilteredOut(const CUpDownClient* client);
+	virtual CObject* GetNextSelectableItem() override;
+	virtual CObject* GetPrevSelectableItem() override;
 
 protected:
 	void SetAllIcons();
+	void AddClientInternal(CUpDownClient* client);
+	void RemoveClientInternal(CUpDownClient* client);
+	void RemoveClientByPointer(CUpDownClient* client, DWORD uClientRuntimeID, DWORD uArchivedRuntimeID);
+	void RefreshClientInternal(CUpDownClient* client, const int iIndex = -1, const uint32 uSortImpactFlags = kSortImpactAll);
+	bool IsSortOrderAffectedByRefresh(const uint32 uSortImpactFlags) const;
+	bool RepositionUpdatedClient(int iIndex);
 	CString GetItemDisplayText(const CUpDownClient *client, int iSubItem) const;
 	virtual int GetDefaultPersistentInfoTipExtraLeftPadding(const SPersistentInfoTipContext& context) const override;
 	static LPARAM	m_pSortParam;
@@ -86,4 +118,15 @@ protected:
 	afx_msg void OnNmDblClk(LPNMHDR, LRESULT *pResult);
 	afx_msg void OnSysColorChange();
 	afx_msg void OnNMClick(NMHDR* pNMHDR, LRESULT* pResult);
+	afx_msg void OnDestroy();
+	afx_msg LRESULT OnUiAddClient(WPARAM wParam, LPARAM lParam);
+	afx_msg LRESULT OnUiRemoveClient(WPARAM wParam, LPARAM lParam);
+	afx_msg LRESULT OnUiRefreshClient(WPARAM wParam, LPARAM lParam);
+
+	enum
+	{
+		WM_CLIENTLISTCTRL_ADD_CLIENT = WM_APP + 4060,
+		WM_CLIENTLISTCTRL_REMOVE_CLIENT = WM_APP + 4061,
+		WM_CLIENTLISTCTRL_REFRESH_CLIENT = WM_APP + 4062
+	};
 };

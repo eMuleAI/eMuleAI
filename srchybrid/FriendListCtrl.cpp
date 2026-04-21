@@ -246,6 +246,11 @@ BOOL CFriendListCtrl::OnCommand(WPARAM wParam, LPARAM)
 	if (cur_friend)
 		client = cur_friend->GetLinkedClient(true);
 
+	auto RefreshQueueCountAfterManualPunishment = []() {
+		if (theApp.emuledlg != NULL && theApp.emuledlg->transferwnd != NULL)
+			theApp.emuledlg->transferwnd->InvalidateQueueCount(true);
+	};
+
 	switch (wParam) {
 	case MP_MESSAGE:
 		if (cur_friend)
@@ -336,56 +341,82 @@ BOOL CFriendListCtrl::OnCommand(WPARAM wParam, LPARAM)
 		client->SetClientNote();
 		break;
 	case MP_PUNISMENT_IPUSERHASHBAN:
-		if (client)
+		if (client) {
 			theApp.shield->SetPunishment(client,GetResString(_T("PUNISHMENT_REASON_MANUAL_IP_BAN")), PR_MANUAL, P_IPUSERHASHBAN);
+			RefreshQueueCountAfterManualPunishment();
+		}
 		break;
 	case MP_PUNISMENT_USERHASHBAN:
-		if (client)
+		if (client) {
 			theApp.shield->SetPunishment(client,GetResString(_T("PUNISHMENT_REASON_MANUAL_USER_HASH_BAN")), PR_MANUAL, P_USERHASHBAN);
+			RefreshQueueCountAfterManualPunishment();
+		}
 		break;
 	case MP_PUNISMENT_UPLOADBAN:
-		if (client)
+		if (client) {
 			theApp.shield->SetPunishment(client,GetResString(_T("PUNISHMENT_REASON_MANUAL_UPLOAD_BAN")), PR_MANUAL, P_UPLOADBAN);
+			RefreshQueueCountAfterManualPunishment();
+		}
 		break;
 	case MP_PUNISMENT_SCOREX01:
-		if (client)
+		if (client) {
 			theApp.shield->SetPunishment(client,GetResString(_T("PUNISHMENT_REASON_MANUAL_SCORE_REDUCING")), PR_MANUAL, P_SCOREX01);
+			RefreshQueueCountAfterManualPunishment();
+		}
 		break;
 	case MP_PUNISMENT_SCOREX02:
-		if (client)
+		if (client) {
 			theApp.shield->SetPunishment(client,GetResString(_T("PUNISHMENT_REASON_MANUAL_SCORE_REDUCING")), PR_MANUAL, P_SCOREX02);
+			RefreshQueueCountAfterManualPunishment();
+		}
 		break;
 	case MP_PUNISMENT_SCOREX03:
-		if (client)
+		if (client) {
 			theApp.shield->SetPunishment(client,GetResString(_T("PUNISHMENT_REASON_MANUAL_SCORE_REDUCING")), PR_MANUAL, P_SCOREX03);
+			RefreshQueueCountAfterManualPunishment();
+		}
 		break;
 	case MP_PUNISMENT_SCOREX04:
-		if (client)
+		if (client) {
 			theApp.shield->SetPunishment(client,GetResString(_T("PUNISHMENT_REASON_MANUAL_SCORE_REDUCING")), PR_MANUAL, P_SCOREX04);
+			RefreshQueueCountAfterManualPunishment();
+		}
 		break;
 	case MP_PUNISMENT_SCOREX05:
-		if (client)
+		if (client) {
 			theApp.shield->SetPunishment(client,GetResString(_T("PUNISHMENT_REASON_MANUAL_SCORE_REDUCING")), PR_MANUAL, P_SCOREX05);
+			RefreshQueueCountAfterManualPunishment();
+		}
 		break;
 	case MP_PUNISMENT_SCOREX06:
-		if (client)
+		if (client) {
 			theApp.shield->SetPunishment(client,GetResString(_T("PUNISHMENT_REASON_MANUAL_SCORE_REDUCING")), PR_MANUAL, P_SCOREX06);
+			RefreshQueueCountAfterManualPunishment();
+		}
 		break;
 	case MP_PUNISMENT_SCOREX07:
-		if (client)
+		if (client) {
 			theApp.shield->SetPunishment(client,GetResString(_T("PUNISHMENT_REASON_MANUAL_SCORE_REDUCING")), PR_MANUAL, P_SCOREX07);
+			RefreshQueueCountAfterManualPunishment();
+		}
 		break;
 	case MP_PUNISMENT_SCOREX08:
-		if (client)
+		if (client) {
 			theApp.shield->SetPunishment(client,GetResString(_T("PUNISHMENT_REASON_MANUAL_SCORE_REDUCING")), PR_MANUAL, P_SCOREX08);
+			RefreshQueueCountAfterManualPunishment();
+		}
 		break;
 	case MP_PUNISMENT_SCOREX09:
-		if (client)
+		if (client) {
 			theApp.shield->SetPunishment(client,GetResString(_T("PUNISHMENT_REASON_MANUAL_SCORE_REDUCING")), PR_MANUAL, P_SCOREX09);
+			RefreshQueueCountAfterManualPunishment();
+		}
 		break;
 	case MP_PUNISMENT_NONE:
-		if (client)
+		if (client) {
 			theApp.shield->SetPunishment(client,GetResString(_T("PUNISHMENT_REASON_MANUAL_CANCELATION")), PR_MANUAL, P_NOPUNISHMENT);
+			RefreshQueueCountAfterManualPunishment();
+		}
 		break;
 	case MP_PASTE:
 	{

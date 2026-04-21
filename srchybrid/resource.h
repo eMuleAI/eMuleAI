@@ -520,11 +520,11 @@
 #define IDC_STATIC_DLTOof               2622
 #define IDC_STATIC_AUTOCAT              2623
 #define IDC_STATIC_REGEXP               2624
-#define IDC_FILTERSERVERBYIPFILTER      2626
+#define IDC_FILTER_SERVER_BY_IPFILTER      2626
 #define IDC_STATIC_FILTERLEVEL          2627
 #define IDC_STATIC_IPFILTER             2628
 #define IDC_STATIC_COMMENTS             2629
-#define IDC_FILTERSERVERBYIPFILTER2     2629
+#define IDC_FILTER_SERVER_BY_IPFILTER2     2629
 #define IDC_DONTFILTERPRIVATEIPS        2629
 #define IDC_CLIENTLIST                  2630
 #define IDC_STATIC_UPDATEFROM           2630
@@ -1200,14 +1200,17 @@
 #define IDC_BLACKLIST_PANEL_HELP_TEXTBOX 51349
 #define IDC_NETWORK_INFO_AUTOREFRESH    51350
 #define IDC_NATT_FORCE_PUBLISH          51351
+#define IDC_PERIODDAYS_LABEL            3058
+#define IDC_AUTOUPDATE_IPFILTER         3059
+#define IDC_IPFILTERPERIOD              3060
 
 // Next default values for new objects
 // 
 #ifdef APSTUDIO_INVOKED
 #ifndef APSTUDIO_READONLY_SYMBOLS
-#define _APS_NEXT_RESOURCE_VALUE        1693
+#define _APS_NEXT_RESOURCE_VALUE        1694
 #define _APS_NEXT_COMMAND_VALUE         32773
-#define _APS_NEXT_CONTROL_VALUE         3059
+#define _APS_NEXT_CONTROL_VALUE         3061
 #define _APS_NEXT_SYMED_VALUE           1610
 #endif
 #endif

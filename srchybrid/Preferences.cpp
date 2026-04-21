@@ -213,6 +213,8 @@ CString	CPreferences::strNick;
 uint32	CPreferences::m_minupload;
 uint32	CPreferences::m_maxupload;
 uint32	CPreferences::m_maxdownload;
+uint32	CPreferences::m_lastmaxupload;
+uint32	CPreferences::m_lastmaxdownload;
 LPCSTR	CPreferences::m_pszBindAddrA;
 CStringA CPreferences::m_strBindAddrA;
 LPCWSTR	CPreferences::m_pszBindAddrW;
@@ -517,6 +519,9 @@ bool	CPreferences::msgonlyfriends;
 bool	CPreferences::msgsecure;
 bool	CPreferences::m_bUseChatCaptchas;
 UINT	CPreferences::filterlevel;
+bool	CPreferences::m_bAutoIPFilterUpdate = false;
+int		CPreferences::m_nIPFilterUpdatePeriodDays = 7;
+time_t	CPreferences::m_tLastIPFilterUpdate = 0;
 UINT	CPreferences::m_uFileBufferSize;
 DWORD	CPreferences::m_uFileBufferTimeLimit;
 INT_PTR	CPreferences::m_iQueueSize;
@@ -686,6 +691,7 @@ bool	CPreferences::m_bDownloadCheckerAutoMarkAsBlacklisted;
 int		CPreferences::m_iDownloadInspector;
 bool	CPreferences::m_bDownloadInspectorFake;
 bool	CPreferences::m_bDownloadInspectorDRM;
+bool	CPreferences::m_bDownloadInspectorAutoRenameToMajorityName;
 bool	CPreferences::m_bDownloadInspectorInvalidExt;
 int		CPreferences::m_iDownloadInspectorCheckPeriod;
 int		CPreferences::m_iDownloadInspectorCompletedThreshold;
@@ -693,6 +699,19 @@ int		CPreferences::m_iDownloadInspectorZeroPercentageThreshold;
 int		CPreferences::m_iDownloadInspectorCompressionThreshold;
 bool	CPreferences::m_bDownloadInspectorBypassZeroPercentage;
 int		CPreferences::m_iDownloadInspectorCompressionThresholdToBypassZero;
+bool	CPreferences::m_bDownloadInspectorAutoDeleteEnabled;
+bool	CPreferences::m_bDownloadInspectorAutoDeleteAddedBeforeEnabled;
+int		CPreferences::m_iDownloadInspectorAutoDeleteAddedBeforeDays;
+bool	CPreferences::m_bDownloadInspectorAutoDeleteLastSeenCompleteBeforeEnabled;
+int		CPreferences::m_iDownloadInspectorAutoDeleteLastSeenCompleteBeforeDays;
+bool	CPreferences::m_bDownloadInspectorAutoDeleteLastReceivedBeforeEnabled;
+int		CPreferences::m_iDownloadInspectorAutoDeleteLastReceivedBeforeDays;
+bool	CPreferences::m_bDownloadInspectorAutoDeleteDownloadedLessThanPercentEnabled;
+int		CPreferences::m_iDownloadInspectorAutoDeleteDownloadedLessThanPercent;
+bool	CPreferences::m_bDownloadInspectorAutoDeleteDownloadedLessThanMbEnabled;
+int		CPreferences::m_iDownloadInspectorAutoDeleteDownloadedLessThanMb;
+bool	CPreferences::m_bDownloadInspectorAutoDeleteBackupEd2kLinks;
+bool	CPreferences::m_bDownloadInspectorAutoDeleteDontMarkAsCanceled;
 
 bool	 CPreferences::m_bGroupKnownAtTheBottom;
 int		 CPreferences::m_iSpamThreshold;
@@ -714,6 +733,15 @@ CCriticalSection CPreferences::m_csDontShareExtList;
 CString CPreferences::m_sDontShareExtensionsList;
 bool	CPreferences::m_bAdjustNTFSDaylightFileTime = false; // Official preference: 'true' causes rehashing in XP and above when DST switches on/off
 bool	CPreferences::m_bAllowDSTTimeTolerance;
+bool	CPreferences::m_bSpreadbarSetStatus;
+int		CPreferences::m_iHideOvershares;
+bool	CPreferences::m_bSelectiveShare;
+bool	CPreferences::m_bShareOnlyTheNeed;
+int		CPreferences::m_iPowerShareMode;
+bool	CPreferences::m_bPowerShareInternalPrio;
+int		CPreferences::m_iPowerShareLimit;
+int		CPreferences::m_iSharePermissions;
+bool	CPreferences::m_bSharePermissionColorRows;
 
 bool	CPreferences::m_bEmulateMLDonkey;
 bool	CPreferences::m_bEmulateEdonkey;
@@ -2428,6 +2456,8 @@ void CPreferences::SavePreferences()
 	ini.WriteInt(_T("MinUpload"), m_minupload);
 	ini.WriteInt(_T("MaxUpload"), m_maxupload);
 	ini.WriteInt(_T("MaxDownload"), m_maxdownload);
+	ini.WriteInt(_T("LastMaxUpload"), m_lastmaxupload);
+	ini.WriteInt(_T("LastMaxDownload"), m_lastmaxdownload);
 	ini.WriteInt(_T("MaxConnections"), maxconnections);
 	ini.WriteInt(_T("MaxHalfConnections"), maxhalfconnections);
 	ini.WriteBool(_T("ConditionalTCPAccept"), m_bConditionalTCPAccept);
@@ -2619,6 +2649,9 @@ void CPreferences::SavePreferences()
 	ini.WriteInt(_T("VersionCheckLastAutomatic"), (int)versioncheckLastAutomatic);
 	ini.WriteString(_T("VersionCheckLastKnownVersionOnServer"), versioncheckLastKnownVersionOnServer);
 	ini.WriteInt(_T("FilterLevel"), filterlevel);
+	ini.WriteBool(_T("AutoIPFilterUpdate"), m_bAutoIPFilterUpdate);
+	ini.WriteInt(_T("IPFilterUpdatePeriodDays"), m_nIPFilterUpdatePeriodDays);
+	ini.WriteInt(_T("LastIPFilterUpdate"), (int)m_tLastIPFilterUpdate);
 
 	ini.WriteBool(_T("SecureIdent"), m_bUseSecureIdent);// change the name in future version to enable it by default
 	ini.WriteBool(_T("AdvancedSpamFilter"), m_bAdvancedSpamfilter);
@@ -2775,10 +2808,10 @@ void CPreferences::SavePreferences()
 	ini.WriteBool(L"DownloadCheckerSkipIncompleteFileConfirmation", m_bDownloadCheckerSkipIncompleteFileConfirmation);
 	ini.WriteBool(L"DownloadCheckerMarkAsBlacklisted", m_bDownloadCheckerMarkAsBlacklisted);
 	ini.WriteBool(L"DownloadCheckerAutoMarkAsBlacklisted", m_bDownloadCheckerAutoMarkAsBlacklisted);
-	m_iDownloadInspector = (m_bDownloadInspectorFake || m_bDownloadInspectorFake) ? m_iDownloadInspector : 0; // If none of these checkboxes selected, force 0;
 	ini.WriteInt(L"DownloadInspector", m_iDownloadInspector);
 	ini.WriteBool(L"DownloadInspectorFake", m_bDownloadInspectorFake);
 	ini.WriteBool(L"DownloadInspectorDRM", m_bDownloadInspectorDRM);
+	ini.WriteBool(L"DownloadInspectorAutoRenameToMajorityName", m_bDownloadInspectorAutoRenameToMajorityName);
 	ini.WriteBool(L"DownloadInspectorInvalidExt", m_bDownloadInspectorInvalidExt);
 	ini.WriteInt(L"DownloadInspectorCheckPeriod", m_iDownloadInspectorCheckPeriod);
 	ini.WriteInt(L"DownloadInspectorCompletedThreshold", m_iDownloadInspectorCompletedThreshold);
@@ -2786,6 +2819,19 @@ void CPreferences::SavePreferences()
 	ini.WriteInt(L"DownloadInspectorCompressionThreshold", m_iDownloadInspectorCompressionThreshold);
 	ini.WriteBool(L"DownloadInspectorBypassZeroPercentage", m_bDownloadInspectorBypassZeroPercentage);
 	ini.WriteInt(L"DownloadInspectorCompressionThresholdToBypassZero", m_iDownloadInspectorCompressionThresholdToBypassZero);
+	ini.WriteBool(L"DownloadInspectorAutoDeleteEnabled", m_bDownloadInspectorAutoDeleteEnabled);
+	ini.WriteBool(L"DownloadInspectorAutoDeleteAddedBeforeEnabled", m_bDownloadInspectorAutoDeleteAddedBeforeEnabled);
+	ini.WriteInt(L"DownloadInspectorAutoDeleteAddedBeforeDays", m_iDownloadInspectorAutoDeleteAddedBeforeDays);
+	ini.WriteBool(L"DownloadInspectorAutoDeleteLastSeenCompleteBeforeEnabled", m_bDownloadInspectorAutoDeleteLastSeenCompleteBeforeEnabled);
+	ini.WriteInt(L"DownloadInspectorAutoDeleteLastSeenCompleteBeforeDays", m_iDownloadInspectorAutoDeleteLastSeenCompleteBeforeDays);
+	ini.WriteBool(L"DownloadInspectorAutoDeleteLastReceivedBeforeEnabled", m_bDownloadInspectorAutoDeleteLastReceivedBeforeEnabled);
+	ini.WriteInt(L"DownloadInspectorAutoDeleteLastReceivedBeforeDays", m_iDownloadInspectorAutoDeleteLastReceivedBeforeDays);
+	ini.WriteBool(L"DownloadInspectorAutoDeleteDownloadedLessThanPercentEnabled", m_bDownloadInspectorAutoDeleteDownloadedLessThanPercentEnabled);
+	ini.WriteInt(L"DownloadInspectorAutoDeleteDownloadedLessThanPercent", m_iDownloadInspectorAutoDeleteDownloadedLessThanPercent);
+	ini.WriteBool(L"DownloadInspectorAutoDeleteDownloadedLessThanMbEnabled", m_bDownloadInspectorAutoDeleteDownloadedLessThanMbEnabled);
+	ini.WriteInt(L"DownloadInspectorAutoDeleteDownloadedLessThanMb", m_iDownloadInspectorAutoDeleteDownloadedLessThanMb);
+	ini.WriteBool(L"DownloadInspectorAutoDeleteBackupEd2kLinks", m_bDownloadInspectorAutoDeleteBackupEd2kLinks);
+	ini.WriteBool(L"DownloadInspectorAutoDeleteDontMarkAsCanceled", m_bDownloadInspectorAutoDeleteDontMarkAsCanceled);
 	ini.WriteBool(L"GroupKnownAtTheBottom", m_bGroupKnownAtTheBottom);
 	ini.WriteInt(L"SpamThreshold", m_iSpamThreshold);
 	ini.WriteInt(L"KadSearchKeywordTotal", m_iKadSearchKeywordTotal);
@@ -2801,6 +2847,15 @@ void CPreferences::SavePreferences()
 	ini.WriteString(L"DontShareExtensionsList", m_sDontShareExtensionsList);
 	ini.WriteBool(L"AdjustNTFSDaylightFileTime", m_bAdjustNTFSDaylightFileTime); // Official preference
 	ini.WriteBool(L"AllowDSTTimeTolerance", m_bAllowDSTTimeTolerance);
+	ini.WriteBool(L"SpreadbarSetStatus", m_bSpreadbarSetStatus);
+	ini.WriteInt(L"HideOvershares", m_iHideOvershares);
+	ini.WriteBool(L"SelectiveShare", m_bSelectiveShare);
+	ini.WriteBool(L"ShareOnlyTheNeed", m_bShareOnlyTheNeed);
+	ini.WriteInt(L"PowerShareMode", m_iPowerShareMode);
+	ini.WriteBool(L"PowerShareInternalPrio", m_bPowerShareInternalPrio);
+	ini.WriteInt(L"PowerShareLimit", m_iPowerShareLimit);
+	ini.WriteInt(L"SharePermissions", m_iSharePermissions);
+	ini.WriteBool(L"SharePermissionColorRows", m_bSharePermissionColorRows);
 	ini.WriteBool(L"EmulateMLDonkey", m_bEmulateMLDonkey);
 	ini.WriteBool(L"EmulateEdonkey", m_bEmulateEdonkey);
 	ini.WriteBool(L"EmulateEdonkeyHybrid", m_bEmulateEdonkeyHybrid);
@@ -3178,12 +3233,18 @@ void CPreferences::LoadPreferences()
 		m_maxupload = UNLIMITED;
 	if (m_maxupload > maxGraphUploadRate && m_maxupload != UNLIMITED)
 		m_maxupload = maxGraphUploadRate * 4 / 5;
+	m_lastmaxupload = (uint32)ini.GetInt(_T("LastMaxUpload"), (m_maxupload != UNLIMITED) ? (int)m_maxupload : (int)GetMaxGraphUploadRate(true));
+	if (m_lastmaxupload == 0 || m_lastmaxupload == UNLIMITED)
+		m_lastmaxupload = (m_maxupload != UNLIMITED) ? m_maxupload : GetMaxGraphUploadRate(true);
 
 	m_maxdownload = (uint32)ini.GetInt(_T("MaxDownload"), -1);
 	if (m_maxdownload == 0)
 		m_maxdownload = UNLIMITED;
 	if (m_maxdownload > maxGraphDownloadRate && m_maxdownload != UNLIMITED)
 		m_maxdownload = maxGraphDownloadRate * 9 / 10;
+	m_lastmaxdownload = (uint32)ini.GetInt(_T("LastMaxDownload"), (m_maxdownload != UNLIMITED) ? (int)GetMaxDownload() : (int)maxGraphDownloadRate);
+	if (m_lastmaxdownload == 0 || m_lastmaxdownload == UNLIMITED)
+		m_lastmaxdownload = (m_maxdownload != UNLIMITED) ? GetMaxDownload() : maxGraphDownloadRate;
 	maxconnections = ini.GetInt(_T("MaxConnections"), GetRecommendedMaxConnections());
 	maxhalfconnections = ini.GetInt(_T("MaxHalfConnections"), 50);
 	m_bConditionalTCPAccept = ini.GetBool(_T("ConditionalTCPAccept"), false);
@@ -3310,6 +3371,9 @@ void CPreferences::LoadPreferences()
 	filterserverbyip = ini.GetBool(_T("FilterServersByIP"), false);
 	m_bDontFilterPrivateIPs = ini.GetBool(_T("DontFilterPrivateIPs"), true);
 	filterlevel = ini.GetInt(_T("FilterLevel"), 127);
+	m_bAutoIPFilterUpdate = ini.GetBool(_T("AutoIPFilterUpdate"), false);
+	m_nIPFilterUpdatePeriodDays = max(1, ini.GetInt(_T("IPFilterUpdatePeriodDays"), 7));
+	m_tLastIPFilterUpdate = (time_t)ini.GetInt(_T("LastIPFilterUpdate"), 0);
 	checkDiskspace = ini.GetBool(_T("CheckDiskspace"), true);
 	m_uMinFreeDiskSpace = (UINT)ini.GetInt(_T("MinFreeDiskSpace"), (int)DEFAULT_MIN_FREE_DISK_SPACE);
 	m_uTemp = ini.GetInt(_T("FreeDiskSpaceCheckPeriod"), DISKSPACERECHECKTIME);
@@ -3742,9 +3806,9 @@ void CPreferences::LoadPreferences()
 	m_bDownloadCheckerAutoMarkAsBlacklisted = ini.GetBool(L"DownloadCheckerAutoMarkAsBlacklisted", true);
 	m_bDownloadInspectorFake = ini.GetBool(L"DownloadInspectorFake", ini.GetBool(L"DownloadInspectorFake", true));
 	m_bDownloadInspectorDRM = ini.GetBool(L"DownloadInspectorDRM", ini.GetBool(L"DownloadInspectorDRM", true));
+	m_bDownloadInspectorAutoRenameToMajorityName = ini.GetBool(L"DownloadInspectorAutoRenameToMajorityName", true);
 	m_bDownloadInspectorInvalidExt = ini.GetBool(L"DownloadInspectorInvalidExt", ini.GetBool(L"DownloadInspectorInvalidExt", true));
 	m_iDownloadInspector = ini.GetInt(L"DownloadInspector", ini.GetInt(L"DownloadInspector", 2));
-	m_iDownloadInspector = (m_bDownloadInspectorFake || m_bDownloadInspectorFake) ? m_iDownloadInspector : 0; // If none of these checkboxes selected, force 0;
 	m_iDownloadInspectorCheckPeriod = ini.GetInt(L"DownloadInspectorCheckPeriod", ini.GetInt(L"DownloadInspectorCheckPeriod", 30));
 	if (m_iDownloadInspectorCheckPeriod < 5)
 		m_iDownloadInspectorCheckPeriod = 30;
@@ -3761,6 +3825,29 @@ void CPreferences::LoadPreferences()
 	m_iDownloadInspectorCompressionThresholdToBypassZero = ini.GetInt(L"DownloadInspectorCompressionThresholdToBypassZero", ini.GetInt(L"DownloadInspectorCompressionThresholdToBypassZero", m_iDownloadInspectorCompressionThreshold * 10 < 10000 ? 10000 : m_iDownloadInspectorCompressionThreshold * 10));
 	if (m_iDownloadInspectorCompressionThresholdToBypassZero <= m_iDownloadInspectorCompressionThreshold)
 		m_iDownloadInspectorCompressionThresholdToBypassZero = m_iDownloadInspectorCompressionThreshold * 10 < 10000 ? 10000 : m_iDownloadInspectorCompressionThreshold * 10;
+	m_bDownloadInspectorAutoDeleteEnabled = ini.GetBool(L"DownloadInspectorAutoDeleteEnabled", false);
+	m_bDownloadInspectorAutoDeleteAddedBeforeEnabled = ini.GetBool(L"DownloadInspectorAutoDeleteAddedBeforeEnabled", true);
+	m_iDownloadInspectorAutoDeleteAddedBeforeDays = ini.GetInt(L"DownloadInspectorAutoDeleteAddedBeforeDays", 180);
+	if (m_iDownloadInspectorAutoDeleteAddedBeforeDays < 0)
+		m_iDownloadInspectorAutoDeleteAddedBeforeDays = 180;
+	m_bDownloadInspectorAutoDeleteLastSeenCompleteBeforeEnabled = ini.GetBool(L"DownloadInspectorAutoDeleteLastSeenCompleteBeforeEnabled", true);
+	m_iDownloadInspectorAutoDeleteLastSeenCompleteBeforeDays = ini.GetInt(L"DownloadInspectorAutoDeleteLastSeenCompleteBeforeDays", 180);
+	if (m_iDownloadInspectorAutoDeleteLastSeenCompleteBeforeDays < 0)
+		m_iDownloadInspectorAutoDeleteLastSeenCompleteBeforeDays = 180;
+	m_bDownloadInspectorAutoDeleteLastReceivedBeforeEnabled = ini.GetBool(L"DownloadInspectorAutoDeleteLastReceivedBeforeEnabled", true);
+	m_iDownloadInspectorAutoDeleteLastReceivedBeforeDays = ini.GetInt(L"DownloadInspectorAutoDeleteLastReceivedBeforeDays", 180);
+	if (m_iDownloadInspectorAutoDeleteLastReceivedBeforeDays < 0)
+		m_iDownloadInspectorAutoDeleteLastReceivedBeforeDays = 180;
+	m_bDownloadInspectorAutoDeleteDownloadedLessThanPercentEnabled = ini.GetBool(L"DownloadInspectorAutoDeleteDownloadedLessThanPercentEnabled", true);
+	m_iDownloadInspectorAutoDeleteDownloadedLessThanPercent = ini.GetInt(L"DownloadInspectorAutoDeleteDownloadedLessThanPercent", 5);
+	if (m_iDownloadInspectorAutoDeleteDownloadedLessThanPercent < 0 || m_iDownloadInspectorAutoDeleteDownloadedLessThanPercent > 100)
+		m_iDownloadInspectorAutoDeleteDownloadedLessThanPercent = 5;
+	m_bDownloadInspectorAutoDeleteDownloadedLessThanMbEnabled = ini.GetBool(L"DownloadInspectorAutoDeleteDownloadedLessThanMbEnabled", true);
+	m_iDownloadInspectorAutoDeleteDownloadedLessThanMb = ini.GetInt(L"DownloadInspectorAutoDeleteDownloadedLessThanMb", 1);
+	if (m_iDownloadInspectorAutoDeleteDownloadedLessThanMb < 0)
+		m_iDownloadInspectorAutoDeleteDownloadedLessThanMb = 1;
+	m_bDownloadInspectorAutoDeleteBackupEd2kLinks = ini.GetBool(L"DownloadInspectorAutoDeleteBackupEd2kLinks", true);
+	m_bDownloadInspectorAutoDeleteDontMarkAsCanceled = ini.GetBool(L"DownloadInspectorAutoDeleteDontMarkAsCanceled", true);
 	m_bGroupKnownAtTheBottom = ini.GetBool(_T("GroupKnownAtTheBottom"), true);
 	m_iSpamThreshold = ini.GetInt(L"SpamThreshold ", SEARCH_SPAM_THRESHOLD);
 	m_iKadSearchKeywordTotal = ini.GetInt(L"KadSearchKeywordTotal ", SEARCHKEYWORD_TOTAL);
@@ -3776,6 +3863,23 @@ void CPreferences::LoadPreferences()
 	m_sDontShareExtensionsList = ini.GetString(L"DontShareExtensionsList", L".bt!,.jc!,.bc!,.part,.met,.bak");
 	m_bAdjustNTFSDaylightFileTime = ini.GetBool(_T("AdjustNTFSDaylightFileTime"), true); // Official preference
 	m_bAllowDSTTimeTolerance = ini.GetBool(_T("AllowDSTTimeTolerance"), true);
+	m_bSpreadbarSetStatus = ini.GetBool(L"SpreadbarSetStatus", true);
+	m_iHideOvershares = ini.GetInt(L"HideOvershares", 0);
+	if (m_iHideOvershares < 0)
+		m_iHideOvershares = 0;
+	m_bSelectiveShare = ini.GetBool(L"SelectiveShare", false);
+	m_bShareOnlyTheNeed = ini.GetBool(L"ShareOnlyTheNeed", false);
+	m_iPowerShareMode = ini.GetInt(L"PowerShareMode", 0);
+	if (m_iPowerShareMode < 0 || m_iPowerShareMode > 3)
+		m_iPowerShareMode = 0;
+	m_bPowerShareInternalPrio = ini.GetBool(L"PowerShareInternalPrio", false);
+	m_iPowerShareLimit = ini.GetInt(L"PowerShareLimit", 0);
+	if (m_iPowerShareLimit < 0)
+		m_iPowerShareLimit = 0;
+	m_iSharePermissions = ini.GetInt(L"SharePermissions", 0);
+	if (m_iSharePermissions < 0 || m_iSharePermissions > 2)
+		m_iSharePermissions = 0;
+	m_bSharePermissionColorRows = ini.GetBool(L"SharePermissionColorRows", false);
 	m_bEmulateMLDonkey = ini.GetBool(L"EmulateMLDonkey", true);
 	m_bEmulateEdonkey = ini.GetBool(L"EmulateEdonkey", true);
 	m_bEmulateEdonkeyHybrid = ini.GetBool(L"EmulateEdonkeyHybrid", true);
@@ -4286,6 +4390,18 @@ void CPreferences::SetMaxUpload(uint32 val)
 void CPreferences::SetMaxDownload(uint32 val)
 {
 	m_maxdownload = val ? val : UNLIMITED;
+}
+
+void CPreferences::SetLastMaxUpload(uint32 val)
+{
+	if (val != 0 && val != UNLIMITED)
+		m_lastmaxupload = val;
+}
+
+void CPreferences::SetLastMaxDownload(uint32 val)
+{
+	if (val != 0 && val != UNLIMITED)
+		m_lastmaxdownload = val;
 }
 
 bool CPreferences::HasMaxUploadLimit()

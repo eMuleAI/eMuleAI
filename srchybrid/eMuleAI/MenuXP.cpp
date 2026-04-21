@@ -869,6 +869,23 @@ void CMenuXP::ChangeMenuIcon(UINT_PTR nIDNewItem, LPCTSTR /*lpszNewItem*/, LPCTS
 	}
 }
 
+BOOL CMenuXP::SetMenuText(UINT_PTR nIDNewItem, LPCTSTR lpszNewItem)
+{
+	MENUITEMINFO info = {};
+	info.cbSize = sizeof(MENUITEMINFO);
+	info.fMask = MIIM_DATA | MIIM_FTYPE;
+	if (!GetMenuItemInfo(nIDNewItem, &info, FALSE))
+		return FALSE;
+
+	CMenuXPItem* pData = reinterpret_cast<CMenuXPItem*>(info.dwItemData);
+	if ((info.fType & MFT_OWNERDRAW) != 0 && pData != NULL && pData->IsMyData()) {
+		pData->m_strText = (lpszNewItem != NULL) ? lpszNewItem : _T("");
+		return TRUE;
+	}
+
+	return CMenu::ModifyMenu(nIDNewItem, MF_BYCOMMAND | MF_STRING, nIDNewItem, lpszNewItem);
+}
+
 //Add a gradient sidebar, it must be the first item in a popupmenu
 BOOL CMenuXP::AddSidebar(CMenuXPSidebar *pItem)
 {

@@ -61,6 +61,7 @@ namespace
 
 	static const MigrationFileDef s_akMigrationFiles[] = {
 		{ _T("downloads.txt"), true },
+		{ _T("download_inspector.txt"), true },
 		{ _T("AC_BootstrapIPs.dat"), false },
 		{ _T("AC_BootstrapURLs.dat"), false },
 		{ _T("AC_IPFilterUpdateURLs.dat"), false },

@@ -1,4 +1,4 @@
-//This file is part of eMule AI
+﻿//This file is part of eMule AI
 //Copyright (C)2002-2026 Merkur ( devs@emule-project.net / https://www.emule-project.net )
 //Copyright (C)2026 eMule AI
 //
@@ -71,6 +71,7 @@ public:
 	CTransferWnd& operator=(const CTransferWnd&) = delete;
 
 	void ShowQueueCount(INT_PTR number);
+	void InvalidateQueueCount(bool bForceImmediateUpdate = false);
 	void UpdateListCount();
 	void Localize();
 	void UpdateCatTabTitles(bool force = true);
@@ -130,6 +131,11 @@ protected:
 	bool	m_bIsDragging;
 	bool	downloadlistactive;
 	bool	m_bLayoutInited;
+	INT_PTR	m_iLastKnownQueueCount;
+	UINT	m_uCachedBannedCount;
+	DWORD	m_dwLastQueueCountBannedRefreshTick;
+	bool	m_bQueueCountDirty;
+	CString	m_strLastQueueCountText;
 	CStringArray m_astrFilterTemp;
 	bool	m_bColumnDiff;
 	CString	m_strFullFilterExpr;
@@ -161,6 +167,8 @@ protected:
 	void	EditCatTabLabel(int index, CString newlabel);
 	void	EditCatTabLabel(int index);
 	void	ShowList(uint32 dwListIDC);
+	void	UpdateQueueCountDisplay(bool bForceBannedCountRefresh = false);
+	bool	IsQueueCountDisplayVisible() const;
 	void	SetWnd1Icon(EWnd1Icon iIcon);
 	void	SetWnd2Icon(EWnd2Icon iIcon);
 	void	ShowSplitWindow(bool bReDraw = false);
@@ -193,6 +201,7 @@ protected:
 	DECLARE_MESSAGE_MAP()
 	afx_msg LRESULT OnInvalidateCatTabInfo(WPARAM, LPARAM);
 	afx_msg LRESULT OnUpdateCatTabTitlesIfDirty(WPARAM, LPARAM);
+	afx_msg LRESULT OnUpdateQueueCount(WPARAM, LPARAM);
 	afx_msg BOOL OnHelpInfo(HELPINFO*);
 	afx_msg HBRUSH OnCtlColor(CDC* pDC, CWnd* pWnd, UINT nCtlColor);
 	afx_msg void OnBnClickedChangeView();

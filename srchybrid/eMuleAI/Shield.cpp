@@ -460,7 +460,7 @@ void CShield::CheckClient(CUpDownClient* client)
 
 	const float m_fModVersionNumber = client->GetModVersionNumber(client->GetClientModVer());
 	if (thePrefs.IsDetectModThief() && IsHarderPunishment(client->m_uPunishment, PR_MODTHIEF)) {
-		if ((m_fModVersionNumber == MOD_FLOAT_VER && client->GetClientSoftVer() != MAKE_CLIENT_VERSION(CemuleApp::m_nVersionMjr, CemuleApp::m_nVersionMin, CemuleApp::m_nVersionUpd)) ||
+		if ((m_fModVersionNumber == static_cast<float>(MOD_MAIN_VER) + MOD_MIN_VER / 10.0f && client->GetClientSoftVer() != MAKE_CLIENT_VERSION(CemuleApp::m_nVersionMjr, CemuleApp::m_nVersionMin, CemuleApp::m_nVersionUpd)) ||
 		(m_fModVersionNumber >= 1.4f && CString(client->GetUserName()).Right(client->GetClientModVer().GetLength() + 1) != client->GetClientModVer() + _T("\xBB")))
 			SetPunishment(client, GetResString(_T("PUNISHMENT_REASON_MOD_THIEF")), PR_MODTHIEF);
 		else {

@@ -98,6 +98,8 @@ enum ESharedFilesStatusCodes {
 	S_ACCESS_DENIED
 };
 
+typedef DWORD ClientRuntimeID;
+
 struct Pending_Block_Struct
 {
 	Requested_Block_Struct	*block;
@@ -185,6 +187,25 @@ public:
 	virtual void	ConnectionEstablished();
 	virtual void	OnSocketConnected(int nErrorCode);
 	bool			CheckHandshakeFinished() const;
+	ClientRuntimeID	GetRuntimeID() const							{ return m_uRuntimeID; }
+	ClientRuntimeID	GetArchivedClientRuntimeID() const				{ return m_uArchivedClientRuntimeID; }
+	CUpDownClient*	AcquireArchivedClient() const;
+	bool			TryAcquireRuntimeReference(bool* pbNeedsFinalize = NULL);
+	bool			TryAcquirePendingDeleteFinalizeHold();
+	void			TryFinalizePendingDelete();
+	void			ReleaseRuntimeReference();
+	void			SafeDelete();
+	static void		SafeDelete(CUpDownClient* pClient)				{ if (pClient != NULL) pClient->SafeDelete(); }
+	void			SetArchivedClientLink(CUpDownClient* pArchivedClient)
+	{
+		m_ArchivedClient = pArchivedClient;
+		m_uArchivedClientRuntimeID = (pArchivedClient != NULL) ? pArchivedClient->GetRuntimeID() : 0;
+	}
+	void			ClearArchivedClientLink()
+	{
+		m_ArchivedClient = NULL;
+		m_uArchivedClientRuntimeID = 0;
+	}
 	void			CheckFailedFileIdReqs(const uchar *aucFileHash);
 	uint32			GetUserIDHybrid() const							{ return m_nUserIDHybrid; }
 	void			SetUserIDHybrid(uint32 val)						{ m_nUserIDHybrid = val; }
@@ -355,6 +376,10 @@ public:
 	bool			RequestServingBuddyInfo();
 	DWORD			m_dwLastServingBuddyPullReq;
 	uint8			m_uServingBuddyPullTries;
+	ClientRuntimeID	m_uRuntimeID;
+	volatile LONG	m_lRuntimeReferenceCount;
+	volatile LONG	m_lDeletePending;
+	volatile LONG	m_lDeleteFinalized;
 
 	// eServer Buddy helper methods
 		bool			SupportsEServerBuddy() const					{ return m_bSupportsEServerBuddy; }
@@ -446,9 +471,12 @@ public:
 	void			SetQueueSessionUploadAdded(uint64 uVal)			{ m_addedPayloadQueueSession = uVal; }
 	const bool		ProcessExtendedInfo(CSafeMemFile &packet, CKnownFile* tempreqfile, bool isUDP = false);
 	uint16			GetUpPartCount() const							{ return m_nUpPartCount; }
+	void			SetUpPartCount(uint16 nPartCount)				{ m_nUpPartCount = nPartCount; }
 	void			DrawUpStatusBar(CDC *dc, const CRect &rect, bool onlygreyrect, bool  bFlat) const;
-	bool			IsUpPartAvailable(UINT uPart) const				{ return (m_abyUpPartStatus && uPart < m_nUpPartCount && m_abyUpPartStatus[uPart]);	}
+	bool			IsUpPartAvailable(UINT uPart) const				{ return (m_abyUpPartStatus && uPart < m_nUpPartCount && (m_abyUpPartStatus[uPart] & SC_AVAILABLE) != 0); }
 	uint8*			GetUpPartStatus() const							{ return m_abyUpPartStatus; }
+	uint16			GetSelectedUpChunk() const						{ return m_nSelectedChunk; }
+	void			SetSelectedUpChunk(uint16 nSelectedChunk)		{ m_nSelectedChunk = nSelectedChunk; }
 	float			GetCombinedFilePrioAndCredit();
 	uint8			GetDataCompressionVersion() const { return m_byDataCompVer; }
 
@@ -714,6 +742,7 @@ public:
 	void	WriteToFile(CFileDataIO& file);
 	bool	m_bIsArchived;
 	CUpDownClient* m_ArchivedClient;
+	ClientRuntimeID m_uArchivedClientRuntimeID;
 	/*
 	uint32	m_nConnectIP;	// holds the supposed IP or (after we had a connection) the real IP
 	uint32	m_dwUserIP;		// holds 0 (real IP not yet available) or the real IP (after we had a connection)
@@ -894,6 +923,7 @@ protected:
 	bool		m_bCollectionUploadSlot;
 	uint16		m_nUpPartCount;
 	uint16		m_nUpCompleteSourcesCount;
+	uint16		m_nSelectedChunk;
 
 	uint64		m_nTransferredUp;
 	uint64		m_nCurSessionUp;

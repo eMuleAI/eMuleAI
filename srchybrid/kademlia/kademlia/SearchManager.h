@@ -53,6 +53,7 @@ namespace Kademlia
 		static bool IsSearching(uint32 uSearchID);
 		static void StopSearch(uint32 uSearchID, bool bDelayDelete);
 		static void StopAllSearches();
+		static void StopAllKeywordSearches();
 		// Search for a particular file
 		// Will return unique search id, returns zero if already searching for this file.
 		static CSearch* PrepareLookup(uint32 uType, bool bStart, const CUInt128 &uID);

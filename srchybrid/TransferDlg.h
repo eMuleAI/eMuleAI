@@ -37,6 +37,7 @@ public:
 	//Wrappers
 	void Localize();
 	void ShowQueueCount(INT_PTR number);
+	void InvalidateQueueCount(bool bForceImmediateUpdate = false);
 	void UpdateCatTabTitles(bool force = true);
 	void UpdateCatTabTitlesIfDirty(bool force = false); // wrapper for conditional update
 	void InvalidateCatTabInfo(); // wrapper to mark dirty

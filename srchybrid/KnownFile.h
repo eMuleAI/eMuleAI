@@ -27,6 +27,7 @@ class CAICHHashTree;
 class CAICHRecoveryHashSet;
 class CCollection;
 class CAICHHashAlgo;
+class CSafeMemFile;
 
 typedef CTypedPtrList<CPtrList, CUpDownClient*> CUpDownClientPtrList;
 
@@ -76,9 +77,11 @@ public:
 	// This may be replaced with total complete source known in the network.
 	INT_PTR	GetQueuedCount()							{ return m_ClientUploadList.GetCount(); }
 
+	bool	HideOvershares(CSafeMemFile &file, CUpDownClient *client);
 	void	AddUploadingClient(CUpDownClient *client);
 	void	RemoveUploadingClient(CUpDownClient *client);
 	virtual void	UpdatePartsInfo();
+	void	RefreshUploadingClientPartStatusCache(bool bResetSelectedChunk = false);
 	virtual	void	DrawShareStatusBar(CDC *dc, LPCRECT rect, bool onlygreyrect, bool bFlat) const;
 
 	// comment
@@ -136,6 +139,31 @@ public:
 	void	SetAICHRecoverHashSetAvailable(bool bVal)	{ m_bAICHRecoverHashSetAvailable = bVal; }
 	bool	IsAICHRecoverHashSetAvailable() const		{ return m_bAICHRecoverHashSetAvailable; }
 
+	int		GetPermissions() const						{ return m_iPermissions; }
+	void	SetPermissions(int iNewPermissions);
+
+	void	SetPowerShared(int newValue);
+	bool	GetPowerShared() const;
+	int		GetPowerSharedMode() const					{ return m_iPowerSharedMode; }
+	bool	GetPowerShareAuthorized() const				{ return m_bPowerShareAuthorized; }
+	bool	GetPowerShareAuto() const					{ return m_bPowerShareAuto; }
+	void	SetPowerShareLimit(int newValue);
+	int		GetPowerShareLimit() const					{ return m_iPowerShareLimit; }
+	bool	GetPowerShareLimited() const				{ return m_bPowerShareLimited; }
+	void	UpdatePowerShareLimit(bool authorizePowerShare, bool autoPowerShare, bool limitedPowerShare);
+
+	void	SetSpreadbarSetStatus(int newValue);
+	int		GetSpreadbarSetStatus() const				{ return m_iSpreadbarSetStatus; }
+	void	SetHideOS(int newValue);
+	int		GetHideOS() const							{ return m_iHideOS; }
+	void	SetSelectiveChunk(int newValue);
+	int		GetSelectiveChunk() const					{ return m_iSelectiveChunk; }
+	void	SetHideOSAuthorized(bool newValue)			{ m_bHideOSAuthorized = newValue; }
+	UINT	HideOSInWork() const;
+	void	SetShareOnlyTheNeed(int newValue);
+	int		GetShareOnlyTheNeed() const				{ return m_iShareOnlyTheNeed; }
+	uint16	GetVirtualCompleteSourcesCount() const		{ return m_nVirtualCompleteSourcesCount; }
+
 	static bool	CreateHash(const uchar *pucData, uint32 uSize, uchar *pucHash, CAICHHashTree *pShaHashOut = NULL);
 
 
@@ -148,8 +176,10 @@ public:
 	uint16	m_nCompleteSourcesCount;
 	uint16	m_nCompleteSourcesCountLo;
 	uint16	m_nCompleteSourcesCountHi;
+	uint16	m_nVirtualCompleteSourcesCount;
 	CUpDownClientPtrList m_ClientUploadList;
 	CArray<uint16, uint16> m_AvailPartFrequency;
+	CArray<uint64, uint64> m_PartSentCount;
 	CCollection *m_pCollection;
 	//overlapped disk reads
 	HANDLE		m_hRead;
@@ -169,6 +199,7 @@ protected:
 	bool	GrabImage(const CString &strFileName, uint8 nFramesToGrab, double dStartTime, bool bReduceColor, uint16 nMaxWidth, void *pSender);
 	bool	LoadTagsFromFile(CFileDataIO &file);
 	bool	LoadDateFromFile(CFileDataIO &file);
+	virtual void CalcPartSpread(CArray<uint64, uint64> &partspread, CUpDownClient *client);
 	static void	CreateHash(CFile *pFile, uint64 Length, uchar *pucHash, CAICHHashTree *pShaHashOut = NULL);
 	static bool	CreateHash(FILE *fp, uint64 uSize, uchar *pucHash, CAICHHashTree *pShaHashOut = NULL);
 
@@ -186,4 +217,20 @@ private:
 	bool	m_bAutoUpPriority;
 	bool	m_PublishedED2K;
 	bool	m_bAICHRecoverHashSetAvailable;
+	int		m_iPermissions;
+	int		m_iSpreadbarSetStatus;
+	int		m_iHideOS;
+	int		m_iSelectiveChunk;
+	bool	m_bHideOSAuthorized;
+	int		m_iShareOnlyTheNeed;
+	int		m_iPowerSharedMode;
+	bool	m_bPowerShareAuthorized;
+	bool	m_bPowerShareAuto;
+	bool	m_bPowerShared;
+	int		m_iPowerShareLimit;
+	bool	m_bPowerShareLimited;
 };
+
+#define PERM_ALL		0
+#define PERM_FRIENDS	1
+#define PERM_NOONE		2

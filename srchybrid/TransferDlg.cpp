@@ -188,6 +188,11 @@ void CTransferDlg::ShowQueueCount(INT_PTR number)
 	m_pwndTransfer->ShowQueueCount(number);
 }
 
+void CTransferDlg::InvalidateQueueCount(bool bForceImmediateUpdate)
+{
+	m_pwndTransfer->InvalidateQueueCount(bForceImmediateUpdate);
+}
+
 
 void CTransferDlg::UpdateCatTabTitles(bool force)
 {

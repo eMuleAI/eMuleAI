@@ -69,8 +69,8 @@ void CConnectionWizardDlg::OnBnClickedApply()
 		// change the upload/download to unlimited and don't touch other stuff, keep the default values
 		thePrefs.maxGraphUploadRate = UNLIMITED;
 		thePrefs.maxGraphDownloadRate = 96;
-		thePrefs.m_maxupload = UNLIMITED;
-		thePrefs.m_maxdownload = UNLIMITED;
+		thePrefs.SetMaxUpload(UNLIMITED);
+		thePrefs.SetMaxDownload(UNLIMITED);
 		theApp.emuledlg->statisticswnd->SetARange(false, thePrefs.GetMaxGraphUploadRate(true));
 		theApp.emuledlg->statisticswnd->SetARange(true, thePrefs.maxGraphDownloadRate);
 		theApp.emuledlg->preferenceswnd->m_wndConnection.LoadSettings();
@@ -102,18 +102,20 @@ void CConnectionWizardDlg::OnBnClickedApply()
 	thePrefs.maxGraphUploadRate = upload;
 
 	if (upload > 0 && download > 0) {
-		thePrefs.m_maxupload = upload * 4 / 5;
+		thePrefs.SetMaxUpload(upload * 4 / 5);
 		if (upload < 4 && download > upload * 3) {
-			thePrefs.m_maxdownload = thePrefs.m_maxupload * 3;
+			thePrefs.SetMaxDownload(thePrefs.GetMaxUpload() * 3);
 			download = upload * 3;
 		} else if (upload < 10 && download > upload * 4) {
-			thePrefs.m_maxdownload = thePrefs.m_maxupload * 4;
+			thePrefs.SetMaxDownload(thePrefs.GetMaxUpload() * 4);
 			download = upload * 4;
 		} else if (upload < 20 && download > upload * 5) {
-			thePrefs.m_maxdownload = thePrefs.m_maxupload * 5;
+			thePrefs.SetMaxDownload(thePrefs.GetMaxUpload() * 5);
 			download = upload * 5;
 		} else
-			thePrefs.m_maxdownload = download * 9 / 10;
+			thePrefs.SetMaxDownload(download * 9 / 10);
+		thePrefs.SetLastMaxUpload(thePrefs.GetMaxUpload());
+		thePrefs.SetLastMaxDownload(thePrefs.GetMaxDownload());
 
 		theApp.emuledlg->statisticswnd->SetARange(false, thePrefs.maxGraphUploadRate);
 		theApp.emuledlg->statisticswnd->SetARange(true, thePrefs.maxGraphDownloadRate);

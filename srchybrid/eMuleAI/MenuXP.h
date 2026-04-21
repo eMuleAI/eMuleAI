@@ -161,6 +161,7 @@ public:
 	bool	HasEnabledItems() const;
 
 	void	ChangeMenuIcon(UINT_PTR nIDNewItem, LPCTSTR lpszNewItem, LPCTSTR lpszIconName);
+	BOOL	SetMenuText(UINT_PTR nIDNewItem, LPCTSTR lpszNewItem);
 	BOOL	DestroyMenu();
 
 	BOOL	AddSidebar(CMenuXPSidebar *pItem);

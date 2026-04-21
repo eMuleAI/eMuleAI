@@ -9,6 +9,7 @@
 
 class CIni;
 class CMemoryDC;
+class CMuleListCtrl;
 
 enum EListStateField {
 	LSF_NONE = 0x00,
@@ -371,12 +372,13 @@ public:
 	virtual	BOOL	InitInstance() { return true; }
 	virtual int		Run();
 	void	EndThread();
-	void	SetListCtrl(CListCtrl* listctrl);
+	void	SetListCtrl(CMuleListCtrl* listctrl);
 	void	AddItemToUpdate(const LPARAM item);
 	void	AddItemUpdated(const LPARAM item);
+	bool	IsRunning() const;
 
 private:
-	CListCtrl* m_listctrl;
+	CMuleListCtrl* m_listctrl;
 	CList<update_req_struct> queueditem;
 	CList<LPARAM>	updateditem;
 	CMap<LPARAM, LPARAM, update_info_struct*, update_info_struct*> ListItems;
@@ -384,8 +386,7 @@ private:
 	CCriticalSection	queueditemlocker;
 	CCriticalSection	updateditemlocker;
 	CEvent	newitemEvent;
-	CEvent* threadEndedEvent;
-	bool	doRun;
+	volatile LONG	m_bRun;
 };
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -589,6 +590,8 @@ public:
 	int InsertColumn(int nCol, LPCTSTR lpszColumnHeading, int nFormat = LVCFMT_LEFT, int nWidth = -1, int nSubItem = -1, bool bHiddenByDefault = false);
 
 	HIMAGELIST ApplyImageList(HIMAGELIST himl);
+	void RequestItemUpdateAsync(LPARAM item) const;
+	void ShutdownUpdateThread();
 	void AutoSelectItem();
 	void SetSkinKey(LPCTSTR pszKey)			{ m_strSkinKey = pszKey; }
 	const CString& GetSkinKey() const		{ return m_strSkinKey; }
@@ -634,10 +637,13 @@ protected:
 	afx_msg LRESULT OnMouseHover(WPARAM wParam, LPARAM lParam);
 	afx_msg LRESULT OnMouseLeave(WPARAM wParam, LPARAM lParam);
 	afx_msg LRESULT OnAsyncInvalidate(WPARAM, LPARAM);
+	afx_msg LRESULT OnAsyncUpdateItem(WPARAM, LPARAM);
 	afx_msg void OnTimer(UINT_PTR nIDEvent);
 
-	enum { WM_MULELISTCTRL_INVALIDATE = WM_APP + 4021 };
+	enum { WM_MULELISTCTRL_INVALIDATE = WM_APP + 4021, WM_MULELISTCTRL_UPDATE_ITEM = WM_APP + 4022 };
 	void RequestInvalidateAsync() const;
+	void QueueItemUpdate(LPARAM item) const;
+	void QueueItemUpdated(LPARAM item) const;
 	bool TryGetPersistentInfoTipContext(CPoint point, SPersistentInfoTipContext& context);
 	bool TryGetPersistentInfoTip(CPoint point, SPersistentInfoTipContext& context, CString* pstrText);
 	void EnsureThemeAwareInfoTipCtrl();
@@ -717,7 +723,9 @@ protected:
 	void OnFindStart();
 	void OnFindNext();
 	void OnFindPrev();
+	mutable CCriticalSection m_updatethreadlocker;
 	CUpdateItemThread* m_updatethread;
+	DWORD m_dwLastAsyncSortTick;
 
 private:
 	static int	IndexToOrder(CHeaderCtrl *pHeader, int iIndex);

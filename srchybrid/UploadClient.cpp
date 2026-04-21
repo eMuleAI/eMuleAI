@@ -34,6 +34,7 @@
 #include "DownloadQueue.h"
 #include "emuledlg.h"
 #include "TransferDlg.h"
+#include "ClientListCtrl.h"
 #include "Log.h"
 #include "Collection.h"
 #include "UploadDiskIOThread.h"
@@ -110,6 +111,9 @@ void CUpDownClient::ReleaseBarShaders() noexcept
 
 void CUpDownClient::DrawUpStatusBar(CDC *dc, const CRect &rect, bool onlygreyrect, bool  bFlat) const
 {
+	if (rect.Width() <= 0 || rect.Height() <= 0)
+		return;
+
 	COLORREF crNeither, crNextSending, crBoth, crSending;
 
 	if (GetSlotNumber() <= (UINT)theApp.uploadqueue->GetActiveUploadsCount()
@@ -139,7 +143,7 @@ void CUpDownClient::DrawUpStatusBar(CDC *dc, const CRect &rect, bool onlygreyrec
 		s_UpStatusBar.Fill(crNeither);
 		if (!onlygreyrect && m_abyUpPartStatus)
 			for (UINT i = 0; i < m_nUpPartCount; ++i)
-				if (m_abyUpPartStatus[i])
+				if ((m_abyUpPartStatus[i] & SC_AVAILABLE) != 0)
 					s_UpStatusBar.FillRange(i * PARTSIZE, i * PARTSIZE + PARTSIZE, crBoth);
 
 		UploadingToClient_Struct *pUpClientStruct = theApp.uploadqueue->GetUploadingClientStructByClient(this);
@@ -195,7 +199,7 @@ void CUpDownClient::SetUploadState(EUploadState eNewState)
 
 		// don't add any final cleanups for US_NONE here
 		m_eUploadState = eNewState;
-		theApp.emuledlg->transferwnd->GetClientList()->RefreshClient(this);
+		theApp.emuledlg->transferwnd->GetClientList()->RefreshClient(this, -1, CClientListCtrl::kSortImpactUploadState | CClientListCtrl::kSortImpactClientStatus);
 	}
 }
 
@@ -227,20 +231,29 @@ int CUpDownClient::GetFilePrioAsNumber() const
 	// sometimes a client asks for 2 files and there is no way to decide, which file the
 	// client finally gets. so it could happen that he is queued first because of a
 	// high prio file, but then asks for something completely different.
+	int iFilePriority = 7;
 	switch (currequpfile->GetUpPriority()) {
 	case PR_VERYHIGH:
-		return 18;
+		iFilePriority = 18;
+		break;
 	case PR_HIGH:
-		return 9;
+		iFilePriority = 9;
+		break;
 	case PR_LOW:
-		return 6;
+		iFilePriority = 6;
+		break;
 	case PR_VERYLOW:
-		return 2;
-	//case PR_NORMAL:
-	//default:
-	//	break;
+		iFilePriority = 2;
+		break;
 	}
-	return 7;
+
+	if (currequpfile->GetPowerShared()) {
+		if (thePrefs.IsPowerShareInternalPrioEnabled())
+			return iFilePriority + 18;
+		return 27;
+	}
+
+	return iFilePriority;
 }
 
 /*
@@ -382,10 +395,10 @@ const bool CUpDownClient::ProcessExtendedInfo(CSafeMemFile &data, CKnownFile *te
 		for (UINT done = 0; done < m_nUpPartCount;) {
 			uint8 toread = data.ReadUInt8();
 			for (UINT i = 0; i < 8; ++i) {
-				m_abyUpPartStatus[done] = (toread >> i) & 1;
+				m_abyUpPartStatus[done] = ((toread >> i) & 1) ? SC_AVAILABLE : 0;
 				//We may want to use this for another feature.
 					// Use safe range to avoid end beyond file size for the last (partial) chunk
-					if (shouldbechecked && bPartsNeeded == false && m_abyUpPartStatus[done]
+					if (shouldbechecked && bPartsNeeded == false && (m_abyUpPartStatus[done] & SC_AVAILABLE) != 0
 						&& !((CPartFile*)tempreqfile)->IsCompleteSafe((uint64)done * PARTSIZE, ((uint64)(done + 1) * PARTSIZE) - 1))
 					bPartsNeeded = true;
 				if (++done >= m_nUpPartCount)
@@ -537,6 +550,25 @@ void CUpDownClient::AddReqBlock(Requested_Block_Struct *reqblock, bool bSignalIO
 			DebugLogWarning(_T("AddReqBlock: %s, %s"), (LPCTSTR)GetResString(_T("ERR_INCOMPLETEBLOCK")), (LPCTSTR)EscPercent(DbgGetClientInfo()), (LPCTSTR)EscPercent(srcfile->GetFileName()));
 			delete reqblock;
 			return;
+		}
+
+		const bool bShareOnlyTheNeed = ((srcfile->GetShareOnlyTheNeed() >= 0) ? srcfile->GetShareOnlyTheNeed() : (int)thePrefs.GetShareOnlyTheNeed()) != 0;
+		if (srcfile->HideOSInWork() != 0 || bShareOnlyTheNeed) {
+			if (m_abyUpPartStatus == NULL) {
+				DebugLogWarning(_T("AddReqBlock: Missing upload part status for hidden-chunk protected file, %s, %s"), (LPCTSTR)EscPercent(DbgGetClientInfo()), (LPCTSTR)EscPercent(srcfile->GetFileName()));
+				delete reqblock;
+				return;
+			}
+
+			const UINT uStartPart = (UINT)(reqblock->StartOffset / PARTSIZE);
+			const UINT uEndPart = (UINT)((reqblock->EndOffset - 1) / PARTSIZE);
+			for (UINT uPart = uStartPart; uPart <= uEndPart && uPart < m_nUpPartCount; ++uPart) {
+				if ((m_abyUpPartStatus[uPart] & (SC_HIDDENBYSOTN | SC_HIDDENBYHIDEOS)) != 0) {
+					DebugLogWarning(_T("AddReqBlock: Hidden upload block requested (part %u), %s, %s"), uPart, (LPCTSTR)EscPercent(DbgGetClientInfo()), (LPCTSTR)EscPercent(srcfile->GetFileName()));
+					delete reqblock;
+					return;
+				}
+			}
 		}
 
 		if (reqblock->StartOffset >= reqblock->EndOffset || reqblock->EndOffset > srcfile->GetFileSize()) {
@@ -749,7 +781,7 @@ void CUpDownClient::UpdateUploadingStatisticsData()
 		m_nUpDatarate = 0; // not enough data to calculate trustworthy speed
 
 	theApp.emuledlg->transferwnd->GetUploadList()->RefreshClient(this);
-	theApp.emuledlg->transferwnd->GetClientList()->RefreshClient(this);
+	theApp.emuledlg->transferwnd->GetClientList()->RefreshClient(this, -1, CClientListCtrl::kSortImpactTransferredUp);
 }
 
 void CUpDownClient::SendOutOfPartReqsAndAddToWaitingQueue()

@@ -2,6 +2,33 @@
 ================================================================
 1) VERSION HISTORY
 ================================================================
+v1.4
+Added Shared File Management feature set into Options -> eMule AI -> Share Tweaks, including Share Only The Need, Hide Overshares, PowerShare, default share permissions.
+Added a new criteria-based auto-delete feature to Download Inspector, allowing old low-progress downloads to be logged or safely deleted based on configurable date and amount rules, with optional backup of deleted files’ eD2k links.
+Added Auto rename to majority name to Download Inspector, with a main toggle in Options and a per-download toggle in the Transfers context menu.
+Added automatic IP filter updates in Options -> Security, with an Auto update toggle and a configurable update period in days.
+Improved the Connection options so disabling Upload limit or Download limit now preserves the last configured speed and restores it when the limit is enabled again.
+Improved Shared Files and Search result context menus by grouping download-only actions in a dedicated section, and added the Download list’s Preview With submenu there for files already in the download list.
+Improved the Search tab category buttons in Light mode by fixing a visual style inconsistency.
+Improved Known Clients list responsiveness in very large client histories by avoiding unnecessary re-sorting during frequent active-client refreshes.
+Merged gemini_translator.py and TranslationCompiler under ai_translator.py, added Local API support, and expanded the translator with many new working modes and options.
+Fixed a rare crash that could occur while imported downloads were being hashed and stale sources were being removed from the Download Clients list.
+Fixed a rare crash that could occur when the Download Clients list was refreshed while stale sources were being removed.
+Fixed a rare crash that could occur while imported download data was being processed during AICH recovery and buffered disk writes.
+Fixed a rare crash that could occur while adding many search results to the download list at once, especially under heavier UI and background activity.
+Fixed a rare startup crash that could occur if eMuleAI was launched before the internet connection was fully available.
+Fixed an issue where the Downloading Clients list could keep archived clients visible after their active download source was removed.
+Fixed an issue where rows without a current request file could remain visible in the Downloading Clients list and cause empty file entries or invalid status bar redraws.
+Fixed Downloading Clients and Obtained Parts progress bar rendering so status bars no longer bleed into neighboring columns or appear incorrectly gray in affected redraw cases.
+Fixed an issue where the Downloads list could show gray text backgrounds after horizontal scrolling when the progress bar style was set to fully flat.
+Fixed an issue where changing a client's punishment in Known Clients did not immediately refresh the list or counter while the Bad Client filter was active.
+Fixed the Transfers banned counter so IP and user-hash bans for the same client are no longer counted twice.
+Fixed the issue where incorrect variables appeared in translations in some languages.
+Fixed an issue where using Close All Search Results could leave Kad keyword searches running in the background and block starting the same keyword again.
+Fixed an issue where .part.met.bak could be refreshed from the newly written .part.met, preventing the backup from rescuing downloads when the same save cycle went bad.
+Fixed an issue where pressing ESC in the shared-files delete confirmation could still delete the selected files instead of cancelling.
+Fixed the Client Details dialog by renaming the misleading “Average” upload/download rate labels to “Upload rate” and “Download rate” so they correctly reflect the displayed smoothed transfer rate.
+
 v1.3
 Fixed crash problems observed on older CPUs.
 Fixed an issue causing upload speed slowdown.

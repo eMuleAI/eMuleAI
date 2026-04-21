@@ -66,3 +66,4 @@ srchybrid/translations/__pycache__
 srchybrid/translations/gemini_translator_resume.txt
 /srchybrid/translations/lang_registry.gen.h
 /.codex
+/srchybrid/translations/ai_translator.log

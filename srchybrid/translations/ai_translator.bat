@@ -1,0 +1,2 @@
+python ai_translator.py
+pause

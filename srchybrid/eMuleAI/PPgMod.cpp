@@ -20,6 +20,7 @@
 #include "eMuleAI/GeoLite2.h"
 #include "ClientCredits.h"
 #include "SharedFileList.h"
+#include "KnownFile.h"
 #include "ClientList.h"
 #include "KadContactListCtrl.h"
 #include "KadSearchListCtrl.h"
@@ -183,7 +184,35 @@ CPPgMod::CPPgMod()
 	, m_bDownloadInspectorFake()
 	, m_bDownloadInspectorDRM()
 	, m_htiDownloadInspectorInvalidExt()
+	, m_htiDownloadInspectorAutoRenameToMajorityName()
+	, m_htiDownloadInspectorAutoDelete()
+	, m_htiDownloadInspectorAutoDeleteAddedBefore()
+	, m_htiDownloadInspectorAutoDeleteAddedBeforeDays()
+	, m_htiDownloadInspectorAutoDeleteLastSeenCompleteBefore()
+	, m_htiDownloadInspectorAutoDeleteLastSeenCompleteBeforeDays()
+	, m_htiDownloadInspectorAutoDeleteLastReceivedBefore()
+	, m_htiDownloadInspectorAutoDeleteLastReceivedBeforeDays()
+	, m_htiDownloadInspectorAutoDeleteDownloadedLessThanPercent()
+	, m_htiDownloadInspectorAutoDeleteDownloadedLessThanPercentValue()
+	, m_htiDownloadInspectorAutoDeleteDownloadedLessThanMb()
+	, m_htiDownloadInspectorAutoDeleteDownloadedLessThanMbValue()
+	, m_htiDownloadInspectorAutoDeleteBackupEd2kLinks()
+	, m_htiDownloadInspectorAutoDeleteDontMarkAsCanceled()
 	, m_bDownloadInspectorInvalidExt()
+	, m_bDownloadInspectorAutoRenameToMajorityName()
+	, m_bDownloadInspectorAutoDeleteEnabled()
+	, m_bDownloadInspectorAutoDeleteAddedBeforeEnabled()
+	, m_iDownloadInspectorAutoDeleteAddedBeforeDays()
+	, m_bDownloadInspectorAutoDeleteLastSeenCompleteBeforeEnabled()
+	, m_iDownloadInspectorAutoDeleteLastSeenCompleteBeforeDays()
+	, m_bDownloadInspectorAutoDeleteLastReceivedBeforeEnabled()
+	, m_iDownloadInspectorAutoDeleteLastReceivedBeforeDays()
+	, m_bDownloadInspectorAutoDeleteDownloadedLessThanPercentEnabled()
+	, m_iDownloadInspectorAutoDeleteDownloadedLessThanPercent()
+	, m_bDownloadInspectorAutoDeleteDownloadedLessThanMbEnabled()
+	, m_iDownloadInspectorAutoDeleteDownloadedLessThanMb()
+	, m_bDownloadInspectorAutoDeleteBackupEd2kLinks()
+	, m_bDownloadInspectorAutoDeleteDontMarkAsCanceled()
 	, m_iDownloadInspectorCheckPeriod()
 	, m_iDownloadInspectorCompletedThreshold()
 	, m_iDownloadInspectorZeroPercentageThreshold()
@@ -209,9 +238,10 @@ CPPgMod::CPPgMod()
 	, m_htiDontSavePartOnReconnect()
 	, m_bDontSavePartOnReconnect()
 
-	, m_htiFileHistory()
+	, m_htiFileTweaks()
 	, m_htiFileHistoryShowPart()
 	, m_htiFileHistoryShowShared()
+	, m_htiShareTweaks()
 	, m_htiFileHistoryShowDuplicate()
 	, m_htiAutoShareSubdirs()
 	, m_bFileHistoryShowPart()
@@ -226,6 +256,31 @@ CPPgMod::CPPgMod()
 	, m_bAdjustNTFSDaylightFileTime()
 	, m_htiAllowDSTTimeTolerance()
 	, m_bAllowDSTTimeTolerance()
+	, m_htiSpreadbarSetStatus()
+	, m_htiHideOvershares()
+	, m_htiSelectiveShare()
+	, m_htiShareOnlyTheNeed()
+	, m_htiPowerShareGroup()
+	, m_htiPowerShareDisabled()
+	, m_htiPowerShareActivated()
+	, m_htiPowerShareAuto()
+	, m_htiPowerShareLimited()
+	, m_htiPowerShareLimit()
+	, m_htiPowerShareInternalPrio()
+	, m_htiPermissionsGroup()
+	, m_htiPermissionColorRows()
+	, m_htiPermissionEverybody()
+	, m_htiPermissionFriendsOnly()
+	, m_htiPermissionHidden()
+	, m_bSpreadbarSetStatus()
+	, m_iHideOvershares()
+	, m_bSelectiveShare()
+	, m_bShareOnlyTheNeed()
+	, m_iPowerShareMode()
+	, m_bPowerShareInternalPrio()
+	, m_iPowerShareLimit()
+	, m_iSharePermissions()
+	, m_bSharePermissionColorRows()
 
 	, m_htiEmulator()
 	, m_htiEmulateMLDonkey()
@@ -436,6 +491,9 @@ void CPPgMod::DoDataExchange(CDataExchange *pDX)
 		int iImgESearch = 8;
 		int iImgEServer = 8;
 		int iImgFileHistory = 8;
+		int iImgShareTweaks = 8;
+		int iImgPowerShare = 8;
+		int iImgPermission = 8;
 		int iImgEmulator = 8;
 		int iImgCreditSystem = 8;
 		int iImgClientHistory = 8;
@@ -460,6 +518,9 @@ void CPPgMod::DoDataExchange(CDataExchange *pDX)
 			iImgESearch = piml->Add(CTempIconLoader(_T("SEARCH")));
 			iImgEServer = piml->Add(CTempIconLoader(_T("ESERVER")));
 			iImgFileHistory = piml->Add(CTempIconLoader(_T("FILE")));
+			iImgShareTweaks = piml->Add(CTempIconLoader(_T("SHAREDFILESLIST")));
+			iImgPowerShare = piml->Add(CTempIconLoader(_T("FILEPRIORITY")));
+			iImgPermission = piml->Add(CTempIconLoader(_T("FRIEND")));
 			iImgEmulator = piml->Add(CTempIconLoader(_T("EMULATOR")));
 			iImgCreditSystem = piml->Add(CTempIconLoader(_T("CREDIT"))); // EastShare START - Added by Pretender, CS icon
 			iImgClientHistory = piml->Add(CTempIconLoader(_T("CLIENTSKNOWN")));
@@ -577,6 +638,25 @@ void CPPgMod::DoDataExchange(CDataExchange *pDX)
 		m_htiDownloadInspectorFake = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("DOWNLOAD_INSPECTOR_INCLUDE_FAKE")), m_htiDownloadInspector, m_bDownloadInspectorFake);
 		m_htiDownloadInspectorDRM = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("DOWNLOAD_INSPECTOR_INCLUDE_DRM")), m_htiDownloadInspector, m_bDownloadInspectorDRM);
 		m_htiDownloadInspectorInvalidExt = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("REPLACE_INVALID_FILE_EXTENSION")), m_htiDownloadInspector, m_bDownloadInspectorInvalidExt);
+		m_htiDownloadInspectorAutoRenameToMajorityName = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("DOWNLOAD_INSPECTOR_AUTO_RENAME_TO_MAJORITY_NAME")), m_htiDownloadInspector, m_bDownloadInspectorAutoRenameToMajorityName);
+		m_htiDownloadInspectorAutoDelete = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("DOWNLOAD_INSPECTOR_AUTO_DELETE")), m_htiDownloadInspector, m_bDownloadInspectorAutoDeleteEnabled);
+		m_htiDownloadInspectorAutoDeleteAddedBefore = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("DOWNLOAD_INSPECTOR_AUTO_DELETE_ADDED_BEFORE")), m_htiDownloadInspectorAutoDelete, m_bDownloadInspectorAutoDeleteAddedBeforeEnabled);
+		m_htiDownloadInspectorAutoDeleteAddedBeforeDays = m_ctrlTreeOptions.InsertItem(GetResString(_T("DOWNLOAD_INSPECTOR_AUTO_DELETE_DAYS_THRESHOLD")), TREEOPTSCTRLIMG_EDIT, TREEOPTSCTRLIMG_EDIT, m_htiDownloadInspectorAutoDeleteAddedBefore);
+		m_ctrlTreeOptions.AddEditBox(m_htiDownloadInspectorAutoDeleteAddedBeforeDays, RUNTIME_CLASS(CNumTreeOptionsEdit));
+		m_htiDownloadInspectorAutoDeleteLastSeenCompleteBefore = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("DOWNLOAD_INSPECTOR_AUTO_DELETE_LAST_SEEN_COMPLETE_BEFORE")), m_htiDownloadInspectorAutoDelete, m_bDownloadInspectorAutoDeleteLastSeenCompleteBeforeEnabled);
+		m_htiDownloadInspectorAutoDeleteLastSeenCompleteBeforeDays = m_ctrlTreeOptions.InsertItem(GetResString(_T("DOWNLOAD_INSPECTOR_AUTO_DELETE_DAYS_THRESHOLD")), TREEOPTSCTRLIMG_EDIT, TREEOPTSCTRLIMG_EDIT, m_htiDownloadInspectorAutoDeleteLastSeenCompleteBefore);
+		m_ctrlTreeOptions.AddEditBox(m_htiDownloadInspectorAutoDeleteLastSeenCompleteBeforeDays, RUNTIME_CLASS(CNumTreeOptionsEdit));
+		m_htiDownloadInspectorAutoDeleteLastReceivedBefore = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("DOWNLOAD_INSPECTOR_AUTO_DELETE_LAST_RECEIVED_BEFORE")), m_htiDownloadInspectorAutoDelete, m_bDownloadInspectorAutoDeleteLastReceivedBeforeEnabled);
+		m_htiDownloadInspectorAutoDeleteLastReceivedBeforeDays = m_ctrlTreeOptions.InsertItem(GetResString(_T("DOWNLOAD_INSPECTOR_AUTO_DELETE_DAYS_THRESHOLD")), TREEOPTSCTRLIMG_EDIT, TREEOPTSCTRLIMG_EDIT, m_htiDownloadInspectorAutoDeleteLastReceivedBefore);
+		m_ctrlTreeOptions.AddEditBox(m_htiDownloadInspectorAutoDeleteLastReceivedBeforeDays, RUNTIME_CLASS(CNumTreeOptionsEdit));
+		m_htiDownloadInspectorAutoDeleteDownloadedLessThanPercent = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("DOWNLOAD_INSPECTOR_AUTO_DELETE_DOWNLOADED_LESS_THAN_PERCENT")), m_htiDownloadInspectorAutoDelete, m_bDownloadInspectorAutoDeleteDownloadedLessThanPercentEnabled);
+		m_htiDownloadInspectorAutoDeleteDownloadedLessThanPercentValue = m_ctrlTreeOptions.InsertItem(GetResString(_T("DOWNLOAD_INSPECTOR_AUTO_DELETE_PERCENT_THRESHOLD")), TREEOPTSCTRLIMG_EDIT, TREEOPTSCTRLIMG_EDIT, m_htiDownloadInspectorAutoDeleteDownloadedLessThanPercent);
+		m_ctrlTreeOptions.AddEditBox(m_htiDownloadInspectorAutoDeleteDownloadedLessThanPercentValue, RUNTIME_CLASS(CNumTreeOptionsEdit));
+		m_htiDownloadInspectorAutoDeleteDownloadedLessThanMb = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("DOWNLOAD_INSPECTOR_AUTO_DELETE_DOWNLOADED_LESS_THAN_MB")), m_htiDownloadInspectorAutoDelete, m_bDownloadInspectorAutoDeleteDownloadedLessThanMbEnabled);
+		m_htiDownloadInspectorAutoDeleteDownloadedLessThanMbValue = m_ctrlTreeOptions.InsertItem(GetResString(_T("DOWNLOAD_INSPECTOR_AUTO_DELETE_MB_THRESHOLD")), TREEOPTSCTRLIMG_EDIT, TREEOPTSCTRLIMG_EDIT, m_htiDownloadInspectorAutoDeleteDownloadedLessThanMb);
+		m_ctrlTreeOptions.AddEditBox(m_htiDownloadInspectorAutoDeleteDownloadedLessThanMbValue, RUNTIME_CLASS(CNumTreeOptionsEdit));
+		m_htiDownloadInspectorAutoDeleteBackupEd2kLinks = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("DOWNLOAD_INSPECTOR_AUTO_DELETE_BACKUP_ED2K")), m_htiDownloadInspectorAutoDelete, m_bDownloadInspectorAutoDeleteBackupEd2kLinks);
+		m_htiDownloadInspectorAutoDeleteDontMarkAsCanceled = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("DOWNLOAD_INSPECTOR_AUTO_DELETE_DONT_MARK_AS_CANCELED")), m_htiDownloadInspectorAutoDelete, m_bDownloadInspectorAutoDeleteDontMarkAsCanceled);
 		m_htiDownloadInspectorCheckPeriod = m_ctrlTreeOptions.InsertItem(GetResString(_T("DOWNLOAD_INSPECTOR_CHECK_PERIOD")), TREEOPTSCTRLIMG_EDIT, TREEOPTSCTRLIMG_EDIT, m_htiDownloadInspector);
 		m_ctrlTreeOptions.AddEditBox(m_htiDownloadInspectorCheckPeriod, RUNTIME_CLASS(CNumTreeOptionsEdit));
 		m_htiDownloadInspectorCompletedThreshold = m_ctrlTreeOptions.InsertItem(GetResString(_T("DOWNLOAD_INSPECTOR_DATA_THRESHOLD")), TREEOPTSCTRLIMG_EDIT, TREEOPTSCTRLIMG_EDIT, m_htiDownloadInspector);
@@ -602,16 +682,41 @@ void CPPgMod::DoDataExchange(CDataExchange *pDX)
 		m_htiDontRemoveStaticServers = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("DONT_REMOVE_STATIC_SERVERS")), m_htiServerTweaksGroup, m_bDontRemoveStaticServers);
 		m_htiDontSavePartOnReconnect = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("DONT_SAVE_PART_ON_RECONNECT")), m_htiServerTweaksGroup, m_bDontSavePartOnReconnect);
 
-		m_htiFileHistory = m_ctrlTreeOptions.InsertGroup(GetResString(_T("FILE_SHARE_TWEAKS")), iImgFileHistory, TVI_ROOT);
-		m_htiFileHistoryShowPart = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("FILE_HISTORY_SHOW_PART")), m_htiFileHistory, m_bFileHistoryShowPart);
-		m_htiFileHistoryShowShared = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("FILE_HISTORY_SHOW_SHARED")), m_htiFileHistory, m_bFileHistoryShowShared);
-		m_htiFileHistoryShowDuplicate = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("FILE_HISTORY_SHOW_DUPLICATE")), m_htiFileHistory, m_bFileHistoryShowDuplicate);
-		m_htiAutoShareSubdirs = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("AUTO_SHARE_SUBDIRS")), m_htiFileHistory, m_bAutoShareSubdirs);
-		m_htiDontShareExtensions = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("DONT_SHARE_EXTENSIONS")), m_htiFileHistory, m_bDontShareExtensions);
+		m_htiFileTweaks = m_ctrlTreeOptions.InsertGroup(GetResString(_T("FILE_TWEAKS")), iImgFileHistory, TVI_ROOT);
+		m_htiFileHistoryShowPart = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("FILE_HISTORY_SHOW_PART")), m_htiFileTweaks, m_bFileHistoryShowPart);
+		m_htiFileHistoryShowShared = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("FILE_HISTORY_SHOW_SHARED")), m_htiFileTweaks, m_bFileHistoryShowShared);
+		m_htiShareTweaks = m_ctrlTreeOptions.InsertGroup(GetResString(_T("SHARE_TWEAKS")), iImgShareTweaks, TVI_ROOT);
+		m_htiFileHistoryShowDuplicate = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("FILE_HISTORY_SHOW_DUPLICATE")), m_htiShareTweaks, m_bFileHistoryShowDuplicate);
+		m_htiAutoShareSubdirs = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("AUTO_SHARE_SUBDIRS")), m_htiShareTweaks, m_bAutoShareSubdirs);
+		m_htiDontShareExtensions = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("DONT_SHARE_EXTENSIONS")), m_htiShareTweaks, m_bDontShareExtensions);
 		m_htiDontShareExtensionsList = m_ctrlTreeOptions.InsertItem(GetResString(_T("DONT_SHARE_EXTENSIONS_LIST")), TREEOPTSCTRLIMG_EDIT, TREEOPTSCTRLIMG_EDIT, m_htiDontShareExtensions);
 		m_ctrlTreeOptions.AddEditBox(m_htiDontShareExtensionsList, RUNTIME_CLASS(CTreeOptionsEditEx));
-		m_htiAdjustNTFSDaylightFileTime = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("ADJUSTNTFSDAYLIGHTFILETIME")), m_htiFileHistory, m_bAdjustNTFSDaylightFileTime);
-		m_htiAllowDSTTimeTolerance = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("ALLOWDSTTIMETOLERANCE")), m_htiFileHistory, m_bAllowDSTTimeTolerance);
+		m_htiSpreadbarSetStatus = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("SPREADBAR_DEFAULT_CHECKBOX")), m_htiShareTweaks, m_bSpreadbarSetStatus);
+		m_htiHideOvershares = m_ctrlTreeOptions.InsertItem(GetResString(_T("HIDEOVERSHARES")), TREEOPTSCTRLIMG_EDIT, TREEOPTSCTRLIMG_EDIT, m_htiSpreadbarSetStatus);
+		m_ctrlTreeOptions.AddEditBox(m_htiHideOvershares, RUNTIME_CLASS(CNumTreeOptionsEdit));
+		m_htiSelectiveShare = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("SELECTIVESHARE")), m_htiHideOvershares, m_bSelectiveShare);
+		m_htiShareOnlyTheNeed = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("SHAREONLYTHENEED")), m_htiShareTweaks, m_bShareOnlyTheNeed);
+		m_htiPowerShareGroup = m_ctrlTreeOptions.InsertGroup(GetResString(_T("POWERSHARE")), iImgPowerShare, m_htiShareTweaks);
+		m_htiPowerShareDisabled = m_ctrlTreeOptions.InsertRadioButton(GetResString(_T("POWERSHARE_DISABLED")), m_htiPowerShareGroup, m_iPowerShareMode == 0);
+		m_htiPowerShareActivated = m_ctrlTreeOptions.InsertRadioButton(GetResString(_T("POWERSHARE_ACTIVATED")), m_htiPowerShareGroup, m_iPowerShareMode == 1);
+		m_htiPowerShareAuto = m_ctrlTreeOptions.InsertRadioButton(GetResString(_T("POWERSHARE_AUTO")), m_htiPowerShareGroup, m_iPowerShareMode == 2);
+		m_htiPowerShareLimited = m_ctrlTreeOptions.InsertRadioButton(GetResString(_T("POWERSHARE_LIMITED")), m_htiPowerShareGroup, m_iPowerShareMode == 3);
+		m_htiPowerShareLimit = m_ctrlTreeOptions.InsertItem(GetResString(_T("POWERSHARE_LIMIT")), TREEOPTSCTRLIMG_EDIT, TREEOPTSCTRLIMG_EDIT, m_htiPowerShareLimited);
+		m_ctrlTreeOptions.AddEditBox(m_htiPowerShareLimit, RUNTIME_CLASS(CNumTreeOptionsEdit));
+		m_htiPowerShareInternalPrio = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("POWERSHARE_INTERPRIO")), m_htiPowerShareGroup, m_bPowerShareInternalPrio);
+		m_htiPermissionsGroup = m_ctrlTreeOptions.InsertGroup(GetResString(_T("SHARE_PERMISSION_GROUP")), iImgPermission, m_htiShareTweaks);
+		m_htiPermissionEverybody = m_ctrlTreeOptions.InsertRadioButton(GetResString(_T("SHARE_PERMISSION_EVERYBODY")), m_htiPermissionsGroup, m_iSharePermissions == PERM_ALL);
+		m_htiPermissionFriendsOnly = m_ctrlTreeOptions.InsertRadioButton(GetResString(_T("SHARE_PERMISSION_FRIENDSONLY")), m_htiPermissionsGroup, m_iSharePermissions == PERM_FRIENDS);
+		m_htiPermissionHidden = m_ctrlTreeOptions.InsertRadioButton(GetResString(_T("SHARE_PERMISSION_HIDDEN")), m_htiPermissionsGroup, m_iSharePermissions == PERM_NOONE);
+		m_htiPermissionColorRows = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("SHARE_PERMISSION_COLOR_ROWS")), m_htiPermissionsGroup, m_bSharePermissionColorRows);
+		m_htiAdjustNTFSDaylightFileTime = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("ADJUSTNTFSDAYLIGHTFILETIME")), m_htiFileTweaks, m_bAdjustNTFSDaylightFileTime);
+		m_htiAllowDSTTimeTolerance = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("ALLOWDSTTIMETOLERANCE")), m_htiFileTweaks, m_bAllowDSTTimeTolerance);
+		m_ctrlTreeOptions.Expand(m_htiDontShareExtensions, TVE_EXPAND);
+		m_ctrlTreeOptions.Expand(m_htiSpreadbarSetStatus, TVE_EXPAND);
+		m_ctrlTreeOptions.Expand(m_htiHideOvershares, TVE_EXPAND);
+		m_ctrlTreeOptions.Expand(m_htiPowerShareGroup, TVE_EXPAND);
+		m_ctrlTreeOptions.Expand(m_htiPowerShareLimited, TVE_EXPAND);
+		m_ctrlTreeOptions.Expand(m_htiPermissionsGroup, TVE_EXPAND);
 
 		m_htiEmulator = m_ctrlTreeOptions.InsertGroup(GetResString(_T("EMULATOR")), iImgEmulator, TVI_ROOT);
 		m_htiEmulateMLDonkey = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("EMULATE_MLDONKEY")), m_htiEmulator, m_bEmulateMLDonkey);
@@ -868,8 +973,36 @@ void CPPgMod::DoDataExchange(CDataExchange *pDX)
 	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiDownloadInspectorFake, m_bDownloadInspectorFake);
 	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiDownloadInspectorDRM, m_bDownloadInspectorDRM);
 	DDX_TreeRadio(pDX, IDC_MOD_OPTS, m_htiDownloadInspector, m_iDownloadInspector);
-	m_iDownloadInspector = (m_bDownloadInspectorFake || m_bDownloadInspectorFake) ? m_iDownloadInspector : 0; // If none of these checkboxes selected, force 0;
 	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiDownloadInspectorInvalidExt, m_bDownloadInspectorInvalidExt);
+	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiDownloadInspectorAutoRenameToMajorityName, m_bDownloadInspectorAutoRenameToMajorityName);
+	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiDownloadInspectorAutoDelete, m_bDownloadInspectorAutoDeleteEnabled);
+	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiDownloadInspectorAutoDeleteAddedBefore, m_bDownloadInspectorAutoDeleteAddedBeforeEnabled);
+	if (m_htiDownloadInspectorAutoDeleteAddedBeforeDays) {
+		DDX_TreeEdit(pDX, IDC_MOD_OPTS, m_htiDownloadInspectorAutoDeleteAddedBeforeDays, m_iDownloadInspectorAutoDeleteAddedBeforeDays);
+		DDV_MinMaxInt(pDX, m_iDownloadInspectorAutoDeleteAddedBeforeDays, 0, INT_MAX);
+	}
+	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiDownloadInspectorAutoDeleteLastSeenCompleteBefore, m_bDownloadInspectorAutoDeleteLastSeenCompleteBeforeEnabled);
+	if (m_htiDownloadInspectorAutoDeleteLastSeenCompleteBeforeDays) {
+		DDX_TreeEdit(pDX, IDC_MOD_OPTS, m_htiDownloadInspectorAutoDeleteLastSeenCompleteBeforeDays, m_iDownloadInspectorAutoDeleteLastSeenCompleteBeforeDays);
+		DDV_MinMaxInt(pDX, m_iDownloadInspectorAutoDeleteLastSeenCompleteBeforeDays, 0, INT_MAX);
+	}
+	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiDownloadInspectorAutoDeleteLastReceivedBefore, m_bDownloadInspectorAutoDeleteLastReceivedBeforeEnabled);
+	if (m_htiDownloadInspectorAutoDeleteLastReceivedBeforeDays) {
+		DDX_TreeEdit(pDX, IDC_MOD_OPTS, m_htiDownloadInspectorAutoDeleteLastReceivedBeforeDays, m_iDownloadInspectorAutoDeleteLastReceivedBeforeDays);
+		DDV_MinMaxInt(pDX, m_iDownloadInspectorAutoDeleteLastReceivedBeforeDays, 0, INT_MAX);
+	}
+	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiDownloadInspectorAutoDeleteDownloadedLessThanPercent, m_bDownloadInspectorAutoDeleteDownloadedLessThanPercentEnabled);
+	if (m_htiDownloadInspectorAutoDeleteDownloadedLessThanPercentValue) {
+		DDX_TreeEdit(pDX, IDC_MOD_OPTS, m_htiDownloadInspectorAutoDeleteDownloadedLessThanPercentValue, m_iDownloadInspectorAutoDeleteDownloadedLessThanPercent);
+		DDV_MinMaxInt(pDX, m_iDownloadInspectorAutoDeleteDownloadedLessThanPercent, 0, 100);
+	}
+	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiDownloadInspectorAutoDeleteDownloadedLessThanMb, m_bDownloadInspectorAutoDeleteDownloadedLessThanMbEnabled);
+	if (m_htiDownloadInspectorAutoDeleteDownloadedLessThanMbValue) {
+		DDX_TreeEdit(pDX, IDC_MOD_OPTS, m_htiDownloadInspectorAutoDeleteDownloadedLessThanMbValue, m_iDownloadInspectorAutoDeleteDownloadedLessThanMb);
+		DDV_MinMaxInt(pDX, m_iDownloadInspectorAutoDeleteDownloadedLessThanMb, 0, INT_MAX);
+	}
+	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiDownloadInspectorAutoDeleteBackupEd2kLinks, m_bDownloadInspectorAutoDeleteBackupEd2kLinks);
+	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiDownloadInspectorAutoDeleteDontMarkAsCanceled, m_bDownloadInspectorAutoDeleteDontMarkAsCanceled);
 	if (m_htiDownloadInspectorCheckPeriod) {
 		DDX_TreeEdit(pDX, IDC_MOD_OPTS, m_htiDownloadInspectorCheckPeriod, m_iDownloadInspectorCheckPeriod);
 		DDV_MinMaxInt(pDX, m_iDownloadInspectorCheckPeriod, 5, INT_MAX);
@@ -914,6 +1047,21 @@ void CPPgMod::DoDataExchange(CDataExchange *pDX)
 	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiAutoShareSubdirs, m_bAutoShareSubdirs);
 	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiDontShareExtensions, m_bDontShareExtensions);
 	DDX_TreeEdit(pDX, IDC_MOD_OPTS, m_htiDontShareExtensionsList, m_sDontShareExtensionsList);
+	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiSpreadbarSetStatus, m_bSpreadbarSetStatus);
+	if (m_htiHideOvershares) {
+		DDX_TreeEdit(pDX, IDC_MOD_OPTS, m_htiHideOvershares, m_iHideOvershares);
+		DDV_MinMaxInt(pDX, m_iHideOvershares, 0, INT_MAX);
+	}
+	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiSelectiveShare, m_bSelectiveShare);
+	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiShareOnlyTheNeed, m_bShareOnlyTheNeed);
+	DDX_TreeRadio(pDX, IDC_MOD_OPTS, m_htiPowerShareGroup, m_iPowerShareMode);
+	if (m_htiPowerShareLimit) {
+		DDX_TreeEdit(pDX, IDC_MOD_OPTS, m_htiPowerShareLimit, m_iPowerShareLimit);
+		DDV_MinMaxInt(pDX, m_iPowerShareLimit, 0, INT_MAX);
+	}
+	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiPowerShareInternalPrio, m_bPowerShareInternalPrio);
+	DDX_TreeRadio(pDX, IDC_MOD_OPTS, m_htiPermissionsGroup, m_iSharePermissions);
+	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiPermissionColorRows, m_bSharePermissionColorRows);
 	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiAdjustNTFSDaylightFileTime, m_bAdjustNTFSDaylightFileTime);
 	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiAllowDSTTimeTolerance, m_bAllowDSTTimeTolerance);
 
@@ -1126,6 +1274,20 @@ BOOL CPPgMod::OnInitDialog()
 	m_bDownloadInspectorFake = thePrefs.GetDownloadInspectorFake();
 	m_bDownloadInspectorDRM = thePrefs.GetDownloadInspectorDRM();
 	m_bDownloadInspectorInvalidExt = thePrefs.m_bDownloadInspectorInvalidExt;
+	m_bDownloadInspectorAutoRenameToMajorityName = thePrefs.IsDownloadInspectorAutoRenameToMajorityName();
+	m_bDownloadInspectorAutoDeleteEnabled = thePrefs.IsDownloadInspectorAutoDeleteEnabled();
+	m_bDownloadInspectorAutoDeleteAddedBeforeEnabled = thePrefs.IsDownloadInspectorAutoDeleteAddedBeforeEnabled();
+	m_iDownloadInspectorAutoDeleteAddedBeforeDays = thePrefs.GetDownloadInspectorAutoDeleteAddedBeforeDays();
+	m_bDownloadInspectorAutoDeleteLastSeenCompleteBeforeEnabled = thePrefs.IsDownloadInspectorAutoDeleteLastSeenCompleteBeforeEnabled();
+	m_iDownloadInspectorAutoDeleteLastSeenCompleteBeforeDays = thePrefs.GetDownloadInspectorAutoDeleteLastSeenCompleteBeforeDays();
+	m_bDownloadInspectorAutoDeleteLastReceivedBeforeEnabled = thePrefs.IsDownloadInspectorAutoDeleteLastReceivedBeforeEnabled();
+	m_iDownloadInspectorAutoDeleteLastReceivedBeforeDays = thePrefs.GetDownloadInspectorAutoDeleteLastReceivedBeforeDays();
+	m_bDownloadInspectorAutoDeleteDownloadedLessThanPercentEnabled = thePrefs.IsDownloadInspectorAutoDeleteDownloadedLessThanPercentEnabled();
+	m_iDownloadInspectorAutoDeleteDownloadedLessThanPercent = thePrefs.GetDownloadInspectorAutoDeleteDownloadedLessThanPercent();
+	m_bDownloadInspectorAutoDeleteDownloadedLessThanMbEnabled = thePrefs.IsDownloadInspectorAutoDeleteDownloadedLessThanMbEnabled();
+	m_iDownloadInspectorAutoDeleteDownloadedLessThanMb = thePrefs.GetDownloadInspectorAutoDeleteDownloadedLessThanMb();
+	m_bDownloadInspectorAutoDeleteBackupEd2kLinks = thePrefs.IsDownloadInspectorAutoDeleteBackupEd2kLinksEnabled();
+	m_bDownloadInspectorAutoDeleteDontMarkAsCanceled = thePrefs.IsDownloadInspectorAutoDeleteDontMarkAsCanceledEnabled();
 	m_iDownloadInspectorCheckPeriod = thePrefs.GetDownloadInspectorCheckPeriod();
 	m_iDownloadInspectorCompletedThreshold = thePrefs.GetDownloadInspectorCompletedThreshold();
 	m_iDownloadInspectorZeroPercentageThreshold = thePrefs.GetDownloadInspectorZeroPercentageThreshold();
@@ -1148,6 +1310,15 @@ BOOL CPPgMod::OnInitDialog()
 	m_bAutoShareSubdirs = thePrefs.GetAutoShareSubdirs();
 	m_bDontShareExtensions = thePrefs.GetDontShareExtensions();
 	m_sDontShareExtensionsList = thePrefs.GetDontShareExtensionsList();
+	m_bSpreadbarSetStatus = thePrefs.GetSpreadbarSetStatus();
+	m_iHideOvershares = thePrefs.GetHideOvershares();
+	m_bSelectiveShare = thePrefs.IsSelectiveShareEnabled();
+	m_bShareOnlyTheNeed = thePrefs.GetShareOnlyTheNeed();
+	m_iPowerShareMode = thePrefs.GetPowerShareMode();
+	m_bPowerShareInternalPrio = thePrefs.IsPowerShareInternalPrioEnabled();
+	m_iPowerShareLimit = thePrefs.GetPowerShareLimit();
+	m_iSharePermissions = thePrefs.GetSharePermissions();
+	m_bSharePermissionColorRows = thePrefs.GetSharePermissionColorRows();
 	m_bAdjustNTFSDaylightFileTime = thePrefs.GetAdjustNTFSDaylightFileTime(); // Official preference
 	m_bAllowDSTTimeTolerance = thePrefs.GetAllowDSTTimeTolerance();
 
@@ -1300,13 +1471,23 @@ BOOL CPPgMod::OnApply()
 		theApp.geolite2->Redraw(); // Refresh passive windows
 	}
 
+	const CString strPreviousConnectionCheckerServer = thePrefs.GetConnectionCheckerServer();
+	const bool bConnectionCheckerWasEnabled = thePrefs.GetConnectionChecker();
+	const bool bConnectionCheckerServerChanged = strPreviousConnectionCheckerServer.Compare(m_sConnectionCheckerServer) != 0;
 	thePrefs.SetConnectionCheckerServer(m_sConnectionCheckerServer);
-	if (thePrefs.GetConnectionChecker() && !m_bConnectionChecker) { // Connection Checker is deactivated
+	if (bConnectionCheckerWasEnabled && !m_bConnectionChecker) { // Connection Checker is deactivated
 		thePrefs.SetConnectionChecker(m_bConnectionChecker);
-		theApp.ConChecker->Stop();
-	} else if (!thePrefs.GetConnectionChecker() && m_bConnectionChecker) { // Connection Checker is activated
+		if (!theApp.ConChecker->Stop())
+			AddDebugLogLine(DLP_HIGH, _T("Connection Checker disable request could not stop the worker thread immediately."));
+	} else if (!bConnectionCheckerWasEnabled && m_bConnectionChecker) { // Connection Checker is activated
 		thePrefs.SetConnectionChecker(m_bConnectionChecker);
-		theApp.ConChecker->Start();
+		if (!theApp.ConChecker->Start())
+			AddDebugLogLine(DLP_HIGH, _T("Connection Checker enable request could not start the worker thread."));
+	} else if (bConnectionCheckerWasEnabled && m_bConnectionChecker && bConnectionCheckerServerChanged) {
+		if (!theApp.ConChecker->Stop())
+			AddDebugLogLine(DLP_HIGH, _T("Connection Checker server change could not restart immediately because the current worker thread is still stopping."));
+		else if (!theApp.ConChecker->Start())
+			AddDebugLogLine(DLP_HIGH, _T("Connection Checker server change could not start the worker thread with the updated server."));
 	}
 
 	thePrefs.m_bEnableNatTraversal = m_bEnableNatTraversal;
@@ -1382,16 +1563,47 @@ BOOL CPPgMod::OnApply()
 	thePrefs.SetDownloadCheckerMarkAsBlacklisted(m_bDownloadCheckerMarkAsBlacklisted);
 	thePrefs.SetDownloadCheckerAutoMarkAsBlacklisted(m_bDownloadCheckerAutoMarkAsBlacklisted);
 
-	thePrefs.SetDownloadInspector(m_iDownloadInspector);
+		const bool bDownloadInspectorAutoDeleteSettingsChanged = thePrefs.GetDownloadInspector() != m_iDownloadInspector
+			|| thePrefs.IsDownloadInspectorAutoDeleteEnabled() != m_bDownloadInspectorAutoDeleteEnabled
+			|| thePrefs.IsDownloadInspectorAutoDeleteAddedBeforeEnabled() != m_bDownloadInspectorAutoDeleteAddedBeforeEnabled
+			|| thePrefs.GetDownloadInspectorAutoDeleteAddedBeforeDays() != m_iDownloadInspectorAutoDeleteAddedBeforeDays
+			|| thePrefs.IsDownloadInspectorAutoDeleteLastSeenCompleteBeforeEnabled() != m_bDownloadInspectorAutoDeleteLastSeenCompleteBeforeEnabled
+			|| thePrefs.GetDownloadInspectorAutoDeleteLastSeenCompleteBeforeDays() != m_iDownloadInspectorAutoDeleteLastSeenCompleteBeforeDays
+			|| thePrefs.IsDownloadInspectorAutoDeleteLastReceivedBeforeEnabled() != m_bDownloadInspectorAutoDeleteLastReceivedBeforeEnabled
+			|| thePrefs.GetDownloadInspectorAutoDeleteLastReceivedBeforeDays() != m_iDownloadInspectorAutoDeleteLastReceivedBeforeDays
+			|| thePrefs.IsDownloadInspectorAutoDeleteDownloadedLessThanPercentEnabled() != m_bDownloadInspectorAutoDeleteDownloadedLessThanPercentEnabled
+			|| thePrefs.GetDownloadInspectorAutoDeleteDownloadedLessThanPercent() != m_iDownloadInspectorAutoDeleteDownloadedLessThanPercent
+			|| thePrefs.IsDownloadInspectorAutoDeleteDownloadedLessThanMbEnabled() != m_bDownloadInspectorAutoDeleteDownloadedLessThanMbEnabled
+			|| thePrefs.GetDownloadInspectorAutoDeleteDownloadedLessThanMb() != m_iDownloadInspectorAutoDeleteDownloadedLessThanMb
+			|| thePrefs.IsDownloadInspectorAutoDeleteBackupEd2kLinksEnabled() != m_bDownloadInspectorAutoDeleteBackupEd2kLinks
+			|| thePrefs.IsDownloadInspectorAutoDeleteDontMarkAsCanceledEnabled() != m_bDownloadInspectorAutoDeleteDontMarkAsCanceled;
+
+		thePrefs.SetDownloadInspector(m_iDownloadInspector);
 	thePrefs.SetDownloadInspectorFake(m_bDownloadInspectorFake);
 	thePrefs.SetDownloadInspectorDRM(m_bDownloadInspectorDRM);
 	thePrefs.m_bDownloadInspectorInvalidExt = m_bDownloadInspectorInvalidExt;
+	thePrefs.SetDownloadInspectorAutoRenameToMajorityName(m_bDownloadInspectorAutoRenameToMajorityName);
+	thePrefs.SetDownloadInspectorAutoDeleteEnabled(m_bDownloadInspectorAutoDeleteEnabled);
+	thePrefs.SetDownloadInspectorAutoDeleteAddedBeforeEnabled(m_bDownloadInspectorAutoDeleteAddedBeforeEnabled);
+	thePrefs.SetDownloadInspectorAutoDeleteAddedBeforeDays(m_iDownloadInspectorAutoDeleteAddedBeforeDays);
+	thePrefs.SetDownloadInspectorAutoDeleteLastSeenCompleteBeforeEnabled(m_bDownloadInspectorAutoDeleteLastSeenCompleteBeforeEnabled);
+	thePrefs.SetDownloadInspectorAutoDeleteLastSeenCompleteBeforeDays(m_iDownloadInspectorAutoDeleteLastSeenCompleteBeforeDays);
+	thePrefs.SetDownloadInspectorAutoDeleteLastReceivedBeforeEnabled(m_bDownloadInspectorAutoDeleteLastReceivedBeforeEnabled);
+	thePrefs.SetDownloadInspectorAutoDeleteLastReceivedBeforeDays(m_iDownloadInspectorAutoDeleteLastReceivedBeforeDays);
+	thePrefs.SetDownloadInspectorAutoDeleteDownloadedLessThanPercentEnabled(m_bDownloadInspectorAutoDeleteDownloadedLessThanPercentEnabled);
+	thePrefs.SetDownloadInspectorAutoDeleteDownloadedLessThanPercent(m_iDownloadInspectorAutoDeleteDownloadedLessThanPercent);
+	thePrefs.SetDownloadInspectorAutoDeleteDownloadedLessThanMbEnabled(m_bDownloadInspectorAutoDeleteDownloadedLessThanMbEnabled);
+	thePrefs.SetDownloadInspectorAutoDeleteDownloadedLessThanMb(m_iDownloadInspectorAutoDeleteDownloadedLessThanMb);
+	thePrefs.SetDownloadInspectorAutoDeleteBackupEd2kLinksEnabled(m_bDownloadInspectorAutoDeleteBackupEd2kLinks);
+	thePrefs.SetDownloadInspectorAutoDeleteDontMarkAsCanceledEnabled(m_bDownloadInspectorAutoDeleteDontMarkAsCanceled);
 	thePrefs.SetDownloadInspectorCheckPeriod(m_iDownloadInspectorCheckPeriod);
 	thePrefs.SetDownloadInspectorCompletedThreshold(m_iDownloadInspectorCompletedThreshold);
 	thePrefs.SetDownloadInspectorZeroPercentageThreshold(m_iDownloadInspectorZeroPercentageThreshold);
 	thePrefs.SetDownloadInspectorCompressionThreshold(m_iDownloadInspectorCompressionThreshold);
 	thePrefs.SetDownloadInspectorBypassZeroPercentage(m_bDownloadInspectorBypassZeroPercentage);
 	thePrefs.SetDownloadInspectorCompressionThresholdToBypassZero(m_iDownloadInspectorCompressionThresholdToBypassZero);
+		if (bDownloadInspectorAutoDeleteSettingsChanged && theApp.emuledlg != NULL && theApp.emuledlg->transferwnd != NULL && theApp.emuledlg->transferwnd->GetDownloadList() != NULL)
+			theApp.emuledlg->transferwnd->GetDownloadList()->ResetDownloadInspectorAutoDeleteState();
 
 	thePrefs.SetGroupKnownAtTheBottom(m_bGroupKnownAtTheBottom);
 	thePrefs.SetSpamThreshold(m_iSpamThreshold);
@@ -1403,17 +1615,20 @@ BOOL CPPgMod::OnApply()
 	thePrefs.SetDontRemoveStaticServers(m_bDontRemoveStaticServers);
 	thePrefs.SetDontSavePartOnReconnect(m_bDontSavePartOnReconnect);
 
+	bool bReloadSharedFilesCtrl = false;
+	bool bRefreshShareManagement = false;
+	bool bRefreshUploadChunkStatusCache = false;
 	if (m_bFileHistoryShowPart != thePrefs.GetFileHistoryShowPart()) {
 		thePrefs.SetFileHistoryShowPart(m_bFileHistoryShowPart);
-		theApp.emuledlg->sharedfileswnd->sharedfilesctrl.ReloadList(false, LSF_SELECTION);
+		bReloadSharedFilesCtrl = true;
 	}
 	if (m_bFileHistoryShowShared != thePrefs.GetFileHistoryShowShared()) {
 		thePrefs.SetFileHistoryShowShared(m_bFileHistoryShowShared);
-		theApp.emuledlg->sharedfileswnd->sharedfilesctrl.ReloadList(false, LSF_SELECTION);
+		bReloadSharedFilesCtrl = true;
 	}
 	if (m_bFileHistoryShowDuplicate != thePrefs.GetFileHistoryShowDuplicate()) {
 		thePrefs.SetFileHistoryShowDuplicate(m_bFileHistoryShowDuplicate);
-		theApp.emuledlg->sharedfileswnd->sharedfilesctrl.ReloadList(false, LSF_SELECTION);
+		bReloadSharedFilesCtrl = true;
 	}
 	// AutoShareSubdirs toggle: if changed, force shared files reload (tree + scan)
 	{
@@ -1425,10 +1640,80 @@ BOOL CPPgMod::OnApply()
 				::PostMessage(pDlg->sharedfileswnd->m_hWnd, UM_AUTO_RELOAD_SHARED_FILES, 1, 0);
 		}
 	}
-	thePrefs.SetDontShareExtensions(m_bDontShareExtensions);
+	if (thePrefs.GetDontShareExtensions() != m_bDontShareExtensions) {
+		thePrefs.SetDontShareExtensions(m_bDontShareExtensions);
+		bReloadSharedFilesCtrl = true;
+	} else {
+		thePrefs.SetDontShareExtensions(m_bDontShareExtensions);
+	}
+	if (thePrefs.GetDontShareExtensionsList() != m_sDontShareExtensionsList)
+		bReloadSharedFilesCtrl = true;
 	thePrefs.SetDontShareExtensionsList(m_sDontShareExtensionsList);
+	if (thePrefs.GetSpreadbarSetStatus() != m_bSpreadbarSetStatus) {
+		thePrefs.SetSpreadbarSetStatus(m_bSpreadbarSetStatus);
+		bRefreshShareManagement = true;
+		bRefreshUploadChunkStatusCache = true;
+	}
+	if (thePrefs.GetHideOvershares() != m_iHideOvershares) {
+		thePrefs.SetHideOvershares(m_iHideOvershares);
+		bRefreshShareManagement = true;
+		bRefreshUploadChunkStatusCache = true;
+	}
+	if (thePrefs.IsSelectiveShareEnabled() != m_bSelectiveShare) {
+		thePrefs.SetSelectiveShare(m_bSelectiveShare);
+		bRefreshShareManagement = true;
+		bRefreshUploadChunkStatusCache = true;
+	}
+	if (thePrefs.GetShareOnlyTheNeed() != m_bShareOnlyTheNeed) {
+		thePrefs.SetShareOnlyTheNeed(m_bShareOnlyTheNeed);
+		bRefreshShareManagement = true;
+		bRefreshUploadChunkStatusCache = true;
+	}
+	if (thePrefs.GetPowerShareMode() != m_iPowerShareMode) {
+		thePrefs.SetPowerShareMode(m_iPowerShareMode);
+		bRefreshShareManagement = true;
+	}
+	if (thePrefs.IsPowerShareInternalPrioEnabled() != m_bPowerShareInternalPrio) {
+		thePrefs.SetPowerShareInternalPrio(m_bPowerShareInternalPrio);
+		bRefreshShareManagement = true;
+	}
+	if (thePrefs.GetPowerShareLimit() != m_iPowerShareLimit) {
+		thePrefs.SetPowerShareLimit(m_iPowerShareLimit);
+		bRefreshShareManagement = true;
+	}
+	if (thePrefs.GetSharePermissions() != m_iSharePermissions) {
+		thePrefs.SetSharePermissions(m_iSharePermissions);
+		bRefreshShareManagement = true;
+	}
+	if (thePrefs.GetSharePermissionColorRows() != m_bSharePermissionColorRows) {
+		thePrefs.SetSharePermissionColorRows(m_bSharePermissionColorRows);
+		bReloadSharedFilesCtrl = true;
+	}
 	thePrefs.SetAdjustNTFSDaylightFileTime(m_bAdjustNTFSDaylightFileTime); // Official preference
 	thePrefs.SetAllowDSTTimeTolerance(m_bAllowDSTTimeTolerance);
+	if (bRefreshShareManagement && theApp.sharedfiles != NULL) {
+		CKnownFilesMap sharedFilesMap;
+		theApp.sharedfiles->CopySharedFileMap(sharedFilesMap);
+		POSITION pos = sharedFilesMap.GetStartPosition();
+		while (pos != NULL) {
+			CCKey key;
+			CKnownFile* pKnownFile = NULL;
+			sharedFilesMap.GetNextAssoc(pos, key, pKnownFile);
+			if (pKnownFile != NULL) {
+				pKnownFile->UpdatePartsInfo();
+				if (bRefreshUploadChunkStatusCache)
+					pKnownFile->RefreshUploadingClientPartStatusCache(true);
+			}
+		}
+		bReloadSharedFilesCtrl = true;
+	}
+	if (bReloadSharedFilesCtrl) {
+		CemuleDlg* pDlg = theApp.emuledlg;
+		if (pDlg && pDlg->sharedfileswnd && ::IsWindow(pDlg->sharedfileswnd->m_hWnd)) {
+			pDlg->sharedfileswnd->sharedfilesctrl.ReloadList(false, LSF_SELECTION);
+			pDlg->sharedfileswnd->sharedfilesctrl.UpdateWindow();
+		}
+	}
 
 	thePrefs.m_bEmulateMLDonkey = m_bEmulateMLDonkey;
 	thePrefs.m_bEmulateEdonkey = m_bEmulateEdonkey;
@@ -1740,6 +2025,34 @@ void CPPgMod::Localize()
 		LocalizeItemInfoText(m_htiDownloadInspectorDRM, _T("DOWNLOAD_INSPECTOR_INCLUDE_DRM_INFO"));
 		LocalizeItemText(m_htiDownloadInspectorInvalidExt, _T("REPLACE_INVALID_FILE_EXTENSION"));
 		LocalizeItemInfoText(m_htiDownloadInspectorInvalidExt, _T("REPLACE_INVALID_FILE_EXTENSION_INFO"));
+		LocalizeItemText(m_htiDownloadInspectorAutoRenameToMajorityName, _T("DOWNLOAD_INSPECTOR_AUTO_RENAME_TO_MAJORITY_NAME"));
+		LocalizeItemInfoText(m_htiDownloadInspectorAutoRenameToMajorityName, _T("DOWNLOAD_INSPECTOR_AUTO_RENAME_TO_MAJORITY_NAME_INFO"));
+		LocalizeItemText(m_htiDownloadInspectorAutoDelete, _T("DOWNLOAD_INSPECTOR_AUTO_DELETE"));
+		LocalizeItemInfoText(m_htiDownloadInspectorAutoDelete, _T("DOWNLOAD_INSPECTOR_AUTO_DELETE_INFO"));
+		LocalizeItemText(m_htiDownloadInspectorAutoDeleteAddedBefore, _T("DOWNLOAD_INSPECTOR_AUTO_DELETE_ADDED_BEFORE"));
+		LocalizeItemInfoText(m_htiDownloadInspectorAutoDeleteAddedBefore, _T("DOWNLOAD_INSPECTOR_AUTO_DELETE_ADDED_BEFORE_INFO"));
+		LocalizeEditLabel(m_htiDownloadInspectorAutoDeleteAddedBeforeDays, _T("DOWNLOAD_INSPECTOR_AUTO_DELETE_DAYS_THRESHOLD"));
+		LocalizeItemInfoText(m_htiDownloadInspectorAutoDeleteAddedBeforeDays, _T("DOWNLOAD_INSPECTOR_AUTO_DELETE_ADDED_BEFORE_INFO"));
+		LocalizeItemText(m_htiDownloadInspectorAutoDeleteLastSeenCompleteBefore, _T("DOWNLOAD_INSPECTOR_AUTO_DELETE_LAST_SEEN_COMPLETE_BEFORE"));
+		LocalizeItemInfoText(m_htiDownloadInspectorAutoDeleteLastSeenCompleteBefore, _T("DOWNLOAD_INSPECTOR_AUTO_DELETE_LAST_SEEN_COMPLETE_BEFORE_INFO"));
+		LocalizeEditLabel(m_htiDownloadInspectorAutoDeleteLastSeenCompleteBeforeDays, _T("DOWNLOAD_INSPECTOR_AUTO_DELETE_DAYS_THRESHOLD"));
+		LocalizeItemInfoText(m_htiDownloadInspectorAutoDeleteLastSeenCompleteBeforeDays, _T("DOWNLOAD_INSPECTOR_AUTO_DELETE_LAST_SEEN_COMPLETE_BEFORE_INFO"));
+		LocalizeItemText(m_htiDownloadInspectorAutoDeleteLastReceivedBefore, _T("DOWNLOAD_INSPECTOR_AUTO_DELETE_LAST_RECEIVED_BEFORE"));
+		LocalizeItemInfoText(m_htiDownloadInspectorAutoDeleteLastReceivedBefore, _T("DOWNLOAD_INSPECTOR_AUTO_DELETE_LAST_RECEIVED_BEFORE_INFO"));
+		LocalizeEditLabel(m_htiDownloadInspectorAutoDeleteLastReceivedBeforeDays, _T("DOWNLOAD_INSPECTOR_AUTO_DELETE_DAYS_THRESHOLD"));
+		LocalizeItemInfoText(m_htiDownloadInspectorAutoDeleteLastReceivedBeforeDays, _T("DOWNLOAD_INSPECTOR_AUTO_DELETE_LAST_RECEIVED_BEFORE_INFO"));
+		LocalizeItemText(m_htiDownloadInspectorAutoDeleteDownloadedLessThanPercent, _T("DOWNLOAD_INSPECTOR_AUTO_DELETE_DOWNLOADED_LESS_THAN_PERCENT"));
+		LocalizeItemInfoText(m_htiDownloadInspectorAutoDeleteDownloadedLessThanPercent, _T("DOWNLOAD_INSPECTOR_AUTO_DELETE_DOWNLOADED_LESS_THAN_PERCENT_INFO"));
+		LocalizeEditLabel(m_htiDownloadInspectorAutoDeleteDownloadedLessThanPercentValue, _T("DOWNLOAD_INSPECTOR_AUTO_DELETE_PERCENT_THRESHOLD"));
+		LocalizeItemInfoText(m_htiDownloadInspectorAutoDeleteDownloadedLessThanPercentValue, _T("DOWNLOAD_INSPECTOR_AUTO_DELETE_DOWNLOADED_LESS_THAN_PERCENT_INFO"));
+		LocalizeItemText(m_htiDownloadInspectorAutoDeleteDownloadedLessThanMb, _T("DOWNLOAD_INSPECTOR_AUTO_DELETE_DOWNLOADED_LESS_THAN_MB"));
+		LocalizeItemInfoText(m_htiDownloadInspectorAutoDeleteDownloadedLessThanMb, _T("DOWNLOAD_INSPECTOR_AUTO_DELETE_DOWNLOADED_LESS_THAN_MB_INFO"));
+		LocalizeEditLabel(m_htiDownloadInspectorAutoDeleteDownloadedLessThanMbValue, _T("DOWNLOAD_INSPECTOR_AUTO_DELETE_MB_THRESHOLD"));
+		LocalizeItemInfoText(m_htiDownloadInspectorAutoDeleteDownloadedLessThanMbValue, _T("DOWNLOAD_INSPECTOR_AUTO_DELETE_DOWNLOADED_LESS_THAN_MB_INFO"));
+		LocalizeItemText(m_htiDownloadInspectorAutoDeleteBackupEd2kLinks, _T("DOWNLOAD_INSPECTOR_AUTO_DELETE_BACKUP_ED2K"));
+		LocalizeItemInfoText(m_htiDownloadInspectorAutoDeleteBackupEd2kLinks, _T("DOWNLOAD_INSPECTOR_AUTO_DELETE_BACKUP_ED2K_INFO"));
+		LocalizeItemText(m_htiDownloadInspectorAutoDeleteDontMarkAsCanceled, _T("DOWNLOAD_INSPECTOR_AUTO_DELETE_DONT_MARK_AS_CANCELED"));
+		LocalizeItemInfoText(m_htiDownloadInspectorAutoDeleteDontMarkAsCanceled, _T("DOWNLOAD_INSPECTOR_AUTO_DELETE_DONT_MARK_AS_CANCELED_INFO"));
 		LocalizeEditLabel(m_htiDownloadInspectorCheckPeriod, _T("DOWNLOAD_INSPECTOR_CHECK_PERIOD"));
 		LocalizeItemInfoText(m_htiDownloadInspectorCheckPeriod, _T("DOWNLOAD_INSPECTOR_CHECK_PERIOD_INFO"));
 		LocalizeEditLabel(m_htiDownloadInspectorCompletedThreshold, _T("DOWNLOAD_INSPECTOR_DATA_THRESHOLD"));
@@ -1773,12 +2086,14 @@ void CPPgMod::Localize()
 		LocalizeItemText(m_htiDontSavePartOnReconnect, _T("DONT_SAVE_PART_ON_RECONNECT"));
 		LocalizeItemInfoText(m_htiDontSavePartOnReconnect, _T("DONT_SAVE_PART_ON_RECONNECT_INFO"));
 
-		LocalizeItemText(m_htiFileHistory, _T("FILE_SHARE_TWEAKS"));
-		LocalizeItemInfoText(m_htiFileHistory, _T("FILE_SHARE_TWEAKS_INFO"));
+		LocalizeItemText(m_htiFileTweaks, _T("FILE_TWEAKS"));
+		LocalizeItemInfoText(m_htiFileTweaks, _T("FILE_TWEAKS_INFO"));
 		LocalizeItemText(m_htiFileHistoryShowPart, _T("FILE_HISTORY_SHOW_PART"));
 		LocalizeItemInfoText(m_htiFileHistoryShowPart, _T("FILE_HISTORY_SHOW_PART_INFO"));
 		LocalizeItemText(m_htiFileHistoryShowShared, _T("FILE_HISTORY_SHOW_SHARED"));
 		LocalizeItemInfoText(m_htiFileHistoryShowShared, _T("FILE_HISTORY_SHOW_SHARED_INFO"));
+		LocalizeItemText(m_htiShareTweaks, _T("SHARE_TWEAKS"));
+		LocalizeItemInfoText(m_htiShareTweaks, _T("SHARE_TWEAKS_INFO"));
 		LocalizeItemText(m_htiFileHistoryShowDuplicate, _T("FILE_HISTORY_SHOW_DUPLICATE"));
 		LocalizeItemInfoText(m_htiFileHistoryShowDuplicate, _T("FILE_HISTORY_SHOW_DUPLICATE_INFO"));
 		LocalizeItemText(m_htiAutoShareSubdirs, _T("AUTO_SHARE_SUBDIRS"));
@@ -1787,6 +2102,38 @@ void CPPgMod::Localize()
 		LocalizeItemInfoText(m_htiDontShareExtensions, _T("DONT_SHARE_EXTENSIONS_INFO"));
 		LocalizeEditLabel(m_htiDontShareExtensionsList, _T("DONT_SHARE_EXTENSIONS_LIST"));
 		LocalizeItemInfoText(m_htiDontShareExtensionsList, _T("DONT_SHARE_EXTENSIONS_LIST_INFO"));
+		LocalizeItemText(m_htiSpreadbarSetStatus, _T("SPREADBAR_DEFAULT_CHECKBOX"));
+		LocalizeItemInfoText(m_htiSpreadbarSetStatus, _T("SPREADBAR_DEFAULT_CHECKBOX_INFO"));
+		LocalizeEditLabel(m_htiHideOvershares, _T("HIDEOVERSHARES"));
+		LocalizeItemInfoText(m_htiHideOvershares, _T("HIDEOVERSHARES_INFO"));
+		LocalizeItemText(m_htiSelectiveShare, _T("SELECTIVESHARE"));
+		LocalizeItemInfoText(m_htiSelectiveShare, _T("SELECTIVESHARE_INFO"));
+		LocalizeItemText(m_htiShareOnlyTheNeed, _T("SHAREONLYTHENEED"));
+		LocalizeItemInfoText(m_htiShareOnlyTheNeed, _T("SHAREONLYTHENEED_INFO"));
+		LocalizeItemText(m_htiPowerShareGroup, _T("POWERSHARE"));
+		LocalizeItemInfoText(m_htiPowerShareGroup, _T("POWERSHARE_INFO"));
+		LocalizeItemText(m_htiPowerShareDisabled, _T("POWERSHARE_DISABLED"));
+		LocalizeItemInfoText(m_htiPowerShareDisabled, _T("POWERSHARE_DISABLED_INFO"));
+		LocalizeItemText(m_htiPowerShareActivated, _T("POWERSHARE_ACTIVATED"));
+		LocalizeItemInfoText(m_htiPowerShareActivated, _T("POWERSHARE_ACTIVATED_INFO"));
+		LocalizeItemText(m_htiPowerShareAuto, _T("POWERSHARE_AUTO"));
+		LocalizeItemInfoText(m_htiPowerShareAuto, _T("POWERSHARE_AUTO_INFO"));
+		LocalizeItemText(m_htiPowerShareLimited, _T("POWERSHARE_LIMITED"));
+		LocalizeItemInfoText(m_htiPowerShareLimited, _T("POWERSHARE_LIMITED_INFO"));
+		LocalizeEditLabel(m_htiPowerShareLimit, _T("POWERSHARE_LIMIT"));
+		LocalizeItemInfoText(m_htiPowerShareLimit, _T("POWERSHARE_LIMIT_INFO"));
+		LocalizeItemText(m_htiPowerShareInternalPrio, _T("POWERSHARE_INTERPRIO"));
+		LocalizeItemInfoText(m_htiPowerShareInternalPrio, _T("POWERSHARE_INTERPRIO_INFO"));
+		LocalizeItemText(m_htiPermissionsGroup, _T("SHARE_PERMISSION_GROUP"));
+		LocalizeItemInfoText(m_htiPermissionsGroup, _T("SHARE_PERMISSION_GROUP_INFO"));
+		LocalizeItemText(m_htiPermissionColorRows, _T("SHARE_PERMISSION_COLOR_ROWS"));
+		LocalizeItemInfoText(m_htiPermissionColorRows, _T("SHARE_PERMISSION_COLOR_ROWS_INFO"));
+		LocalizeItemText(m_htiPermissionEverybody, _T("SHARE_PERMISSION_EVERYBODY"));
+		LocalizeItemInfoText(m_htiPermissionEverybody, _T("SHARE_PERMISSION_EVERYBODY_INFO"));
+		LocalizeItemText(m_htiPermissionFriendsOnly, _T("SHARE_PERMISSION_FRIENDSONLY"));
+		LocalizeItemInfoText(m_htiPermissionFriendsOnly, _T("SHARE_PERMISSION_FRIENDSONLY_INFO"));
+		LocalizeItemText(m_htiPermissionHidden, _T("SHARE_PERMISSION_HIDDEN"));
+		LocalizeItemInfoText(m_htiPermissionHidden, _T("SHARE_PERMISSION_HIDDEN_INFO"));
 		LocalizeItemText(m_htiAdjustNTFSDaylightFileTime, _T("ADJUSTNTFSDAYLIGHTFILETIME"));
 		LocalizeItemInfoText(m_htiAdjustNTFSDaylightFileTime, _T("ADJUSTNTFSDAYLIGHTFILETIME_INFO"));
 		LocalizeItemText(m_htiAllowDSTTimeTolerance, _T("ALLOWDSTTIMETOLERANCE"));
@@ -2149,6 +2496,20 @@ void CPPgMod::OnDestroy()
 	m_htiDownloadInspectorFake = NULL;
 	m_htiDownloadInspectorDRM = NULL;
 	m_htiDownloadInspectorInvalidExt = NULL;
+	m_htiDownloadInspectorAutoRenameToMajorityName = NULL;
+	m_htiDownloadInspectorAutoDelete = NULL;
+	m_htiDownloadInspectorAutoDeleteAddedBefore = NULL;
+	m_htiDownloadInspectorAutoDeleteAddedBeforeDays = NULL;
+	m_htiDownloadInspectorAutoDeleteLastSeenCompleteBefore = NULL;
+	m_htiDownloadInspectorAutoDeleteLastSeenCompleteBeforeDays = NULL;
+	m_htiDownloadInspectorAutoDeleteLastReceivedBefore = NULL;
+	m_htiDownloadInspectorAutoDeleteLastReceivedBeforeDays = NULL;
+	m_htiDownloadInspectorAutoDeleteDownloadedLessThanPercent = NULL;
+	m_htiDownloadInspectorAutoDeleteDownloadedLessThanPercentValue = NULL;
+	m_htiDownloadInspectorAutoDeleteDownloadedLessThanMb = NULL;
+	m_htiDownloadInspectorAutoDeleteDownloadedLessThanMbValue = NULL;
+	m_htiDownloadInspectorAutoDeleteBackupEd2kLinks = NULL;
+	m_htiDownloadInspectorAutoDeleteDontMarkAsCanceled = NULL;
 	m_htiDownloadInspectorCheckPeriod = NULL;
 	m_htiDownloadInspectorCompletedThreshold = NULL;
 	m_htiDownloadInspectorZeroPercentageThreshold = NULL;
@@ -2158,6 +2519,20 @@ void CPPgMod::OnDestroy()
 	m_iDownloadInspector = NULL;
 	m_bDownloadInspectorFake = NULL;
 	m_bDownloadInspectorDRM = NULL;
+	m_bDownloadInspectorInvalidExt = NULL;
+	m_bDownloadInspectorAutoRenameToMajorityName = NULL;
+	m_bDownloadInspectorAutoDeleteEnabled = NULL;
+	m_bDownloadInspectorAutoDeleteAddedBeforeEnabled = NULL;
+	m_iDownloadInspectorAutoDeleteAddedBeforeDays = NULL;
+	m_bDownloadInspectorAutoDeleteLastSeenCompleteBeforeEnabled = NULL;
+	m_iDownloadInspectorAutoDeleteLastSeenCompleteBeforeDays = NULL;
+	m_bDownloadInspectorAutoDeleteLastReceivedBeforeEnabled = NULL;
+	m_iDownloadInspectorAutoDeleteLastReceivedBeforeDays = NULL;
+	m_bDownloadInspectorAutoDeleteDownloadedLessThanPercentEnabled = NULL;
+	m_iDownloadInspectorAutoDeleteDownloadedLessThanPercent = NULL;
+	m_bDownloadInspectorAutoDeleteDownloadedLessThanMbEnabled = NULL;
+	m_iDownloadInspectorAutoDeleteDownloadedLessThanMb = NULL;
+	m_bDownloadInspectorAutoDeleteBackupEd2kLinks = NULL;
 	m_iDownloadInspectorCheckPeriod = NULL;
 	m_iDownloadInspectorCompletedThreshold = NULL;
 	m_iDownloadInspectorZeroPercentageThreshold = NULL;
@@ -2176,13 +2551,30 @@ void CPPgMod::OnDestroy()
 	m_htiDontRemoveStaticServers = NULL;
 	m_htiDontSavePartOnReconnect = NULL;
 
-	m_htiFileHistory = NULL;
+	m_htiFileTweaks = NULL;
 	m_htiFileHistoryShowPart = NULL;
 	m_htiFileHistoryShowShared = NULL;
+	m_htiShareTweaks = NULL;
 	m_htiFileHistoryShowDuplicate = NULL;
 	m_htiAutoShareSubdirs = NULL;
 	m_htiDontShareExtensions = NULL;
 	m_htiDontShareExtensionsList = NULL;
+	m_htiSpreadbarSetStatus = NULL;
+	m_htiHideOvershares = NULL;
+	m_htiSelectiveShare = NULL;
+	m_htiShareOnlyTheNeed = NULL;
+	m_htiPowerShareGroup = NULL;
+	m_htiPowerShareDisabled = NULL;
+	m_htiPowerShareActivated = NULL;
+	m_htiPowerShareAuto = NULL;
+	m_htiPowerShareLimited = NULL;
+	m_htiPowerShareLimit = NULL;
+	m_htiPowerShareInternalPrio = NULL;
+	m_htiPermissionsGroup = NULL;
+	m_htiPermissionColorRows = NULL;
+	m_htiPermissionEverybody = NULL;
+	m_htiPermissionFriendsOnly = NULL;
+	m_htiPermissionHidden = NULL;
 	m_htiAdjustNTFSDaylightFileTime = NULL;
 	m_htiAllowDSTTimeTolerance = NULL;
 

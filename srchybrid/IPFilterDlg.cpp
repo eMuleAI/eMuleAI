@@ -452,7 +452,7 @@ void CIPFilterDlg::OnBnClickedDelete()
 {
 	if (m_ipfilter.GetSelectedCount() == 0)
 		return;
-	if (LocMessageBox(_T("DELETEIPFILTERS"), MB_YESNOCANCEL, 0) != IDYES)
+	if (LocMessageBox(_T("DELETE_IPFILTERS"), MB_YESNOCANCEL, 0) != IDYES)
 		return;
 	CWaitCursor curWait;
 

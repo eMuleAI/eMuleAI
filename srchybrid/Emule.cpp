@@ -2826,7 +2826,7 @@ void CemuleApp::BackupMain()
 	bool error = false;
 
 	try {
-		LPCTSTR extensionsToBack[] = { _T("*.ini"), _T("*.dat"), _T("*.met"), _T("*.conf"), _T("*.bak"), _T("downloads.txt") };
+		LPCTSTR extensionsToBack[] = { _T("*.ini"), _T("*.dat"), _T("*.met"), _T("*.conf"), _T("*.bak"), _T("downloads.txt"), _T("download_inspector.txt") };
 		WIN32_FIND_DATA findData;
 		HANDLE hSearch;
 		CString configDir = CString(thePrefs.GetMuleDirectory(EMULE_CONFIGDIR));

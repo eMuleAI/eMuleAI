@@ -18,6 +18,13 @@
 #pragma once
 class CKnownFile;
 
+struct SpreadEntry_Struct
+{
+	uint64 uStart;
+	uint64 uCount;
+};
+typedef CArray<SpreadEntry_Struct, const SpreadEntry_Struct&> CSpreadEntryArray;
+
 class CStatisticFile
 {
 public:
@@ -36,6 +43,11 @@ public:
 	void	AddRequest();
 	void	AddAccepted();
 	void	AddTransferred(uint64 bytes);
+	void	AddBlockTransferred(uint64 start, uint64 end, uint64 count);
+	void	ResetSpreadBar();
+	void	DrawSpreadBar(CDC* dc, LPCRECT rect, bool bFlat) const;
+	void	GetSpreadListSnapshot(CSpreadEntryArray& aEntries) const;
+	float	GetSpreadSortValue() const;
 
 	UINT	GetRequests() const				{ return requested; }
 	UINT	GetAccepts() const				{ return accepted; }
@@ -48,8 +60,10 @@ public:
 	void	SetAllTimeTransferred(uint64 nVal);
 
 	CKnownFile *fileParent;
+	CRBMap<uint64, uint64> spreadlist;
 
 private:
+	mutable CCriticalSection m_mutSpreadList;
 	uint64 alltimetransferred;
 	uint64 transferred;
 	uint32 alltimerequested;

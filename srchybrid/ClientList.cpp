@@ -38,6 +38,7 @@
 #include "emuledlg.h"
 #include "TransferDlg.h"
 #include "serverwnd.h"
+#include <vector>
 #include "Log.h"
 #include "PartFile.h"
 #include "packets.h"
@@ -66,6 +67,34 @@ namespace
 		return false;
 #endif
 	}
+
+	CUpDownClient* AcquireArchivedClientForRuntimeLinkedUse(CUpDownClient* pClient)
+	{
+		if (pClient == NULL || pClient->m_bIsArchived || theApp.clientlist == NULL || !thePrefs.GetClientHistory())
+			return NULL;
+
+		CUpDownClient* pArchivedClient = pClient->AcquireArchivedClient();
+		if (pArchivedClient == NULL && !IsCorruptOrBadUserHash(pClient->GetUserHash())) {
+			pArchivedClient = theApp.clientlist->AcquireArchivedClientByUserHash(pClient->GetUserHash());
+			if (pArchivedClient != NULL)
+				pClient->SetArchivedClientLink(pArchivedClient);
+		}
+
+		if (pArchivedClient == NULL || pArchivedClient == pClient || !pArchivedClient->m_bIsArchived) {
+			if (pArchivedClient != NULL)
+				pArchivedClient->ReleaseRuntimeReference();
+			return NULL;
+		}
+
+		return pArchivedClient;
+	}
+
+	bool IsPendingDeleteReadyForFinalize(const CUpDownClient* pClient)
+	{
+		return pClient != NULL
+			&& ::InterlockedCompareExchange((LONG*)&pClient->m_lDeletePending, 0, 0) != 0
+			&& ::InterlockedCompareExchange((LONG*)&pClient->m_lRuntimeReferenceCount, 0, 0) == 0;
+	}
 }
 
 #define CLIENT_HISTORY_MET_FILENAME	_T("clienthistory.met")
@@ -89,6 +118,8 @@ CClientList::CClientList()
 	, m_bEServerBuddyMagicInFlightProbeValid(false)
 {
 	m_tLastBanCleanUp = m_tLastTrackedCleanUp = m_tLastClientCleanUp = time(NULL);
+	m_ActiveClientsByRuntimeID.reserve(2048);
+	m_ArchivedClientsByRuntimeID.reserve(2048);
 	m_bannedList.InitHashTable(331);
 	m_trackedClientsMap.InitHashTable(2011);
 	m_globDeadSourceList.Init(true);
@@ -439,6 +470,10 @@ void CClientList::AddClient(CUpDownClient *toadd, bool bSkipDupTest)
 	// client instances in this list.
 	if (bSkipDupTest || list.Find(toadd) == NULL) {
 		list.AddTail(toadd);
+		{
+			CSingleLock runtimeMapLock(&m_csTrackedClientRuntimeMaps, TRUE);
+			m_ActiveClientsByRuntimeID[toadd->GetRuntimeID()] = toadd;
+		}
 		theApp.emuledlg->transferwnd->GetClientList()->AddClient(toadd);
 	}
 }
@@ -454,15 +489,18 @@ void CClientList::RemoveClient(CUpDownClient *toremove, LPCTSTR pszReason)
 	if (toremove->m_bIsArchived)
 		return;
 
-	theApp.emuledlg->transferwnd->GetClientList()->SaveArchive(toremove);
-
 	POSITION pos = list.Find(toremove);
 	if (pos) {
+		theApp.emuledlg->transferwnd->GetClientList()->SaveArchive(toremove);
 		theApp.uploadqueue->RemoveFromUploadQueue(toremove, CString(_T("CClientList::RemoveClient: ")) + pszReason);
 		theApp.uploadqueue->RemoveFromWaitingQueue(toremove);
 		theApp.downloadqueue->RemoveSource(toremove);
 		theApp.emuledlg->transferwnd->GetClientList()->RemoveClient(toremove);
 		list.RemoveAt(pos);
+		{
+			CSingleLock runtimeMapLock(&m_csTrackedClientRuntimeMaps, TRUE);
+			m_ActiveClientsByRuntimeID.erase(toremove->GetRuntimeID());
+		}
 	}
 	RemoveFromKadList(toremove);
 	RemoveServedBuddy(toremove);
@@ -475,26 +513,96 @@ void CClientList::RemoveClient(CUpDownClient *toremove, LPCTSTR pszReason)
 	RemoveServedEServerBuddy(toremove);
 }
 
+void CClientList::DetachClientFromRuntimeMaps(const CUpDownClient* pClient)
+{
+	if (pClient == NULL)
+		return;
+
+	CSingleLock runtimeMapLock(&m_csTrackedClientRuntimeMaps, TRUE);
+	const DWORD uRuntimeID = pClient->GetRuntimeID();
+	const auto itActive = m_ActiveClientsByRuntimeID.find(uRuntimeID);
+	if (itActive != m_ActiveClientsByRuntimeID.end() && itActive->second == pClient)
+		m_ActiveClientsByRuntimeID.erase(itActive);
+
+	const auto itArchived = m_ArchivedClientsByRuntimeID.find(uRuntimeID);
+	if (itArchived != m_ArchivedClientsByRuntimeID.end() && itArchived->second == pClient)
+		m_ArchivedClientsByRuntimeID.erase(itArchived);
+}
+
+void CClientList::FinalizeDeletePendingClientByRuntimeID(DWORD uRuntimeID)
+{
+	if (uRuntimeID == 0)
+		return;
+
+	CUpDownClient* pClient = NULL;
+	{
+		CSingleLock runtimeMapLock(&m_csTrackedClientRuntimeMaps, TRUE);
+		const auto itActive = m_ActiveClientsByRuntimeID.find(uRuntimeID);
+		if (itActive != m_ActiveClientsByRuntimeID.end() && itActive->second != NULL && itActive->second->TryAcquirePendingDeleteFinalizeHold())
+			pClient = itActive->second;
+		else {
+			const auto itArchived = m_ArchivedClientsByRuntimeID.find(uRuntimeID);
+			if (itArchived != m_ArchivedClientsByRuntimeID.end() && itArchived->second != NULL && itArchived->second->TryAcquirePendingDeleteFinalizeHold())
+				pClient = itArchived->second;
+		}
+	}
+
+	if (pClient != NULL)
+		pClient->ReleaseRuntimeReference();
+}
+
+void CClientList::ServicePendingDeleteClients()
+{
+	std::vector<DWORD> aPendingDeleteRuntimeIDs;
+	{
+		CSingleLock runtimeMapLock(&m_csTrackedClientRuntimeMaps, TRUE);
+		aPendingDeleteRuntimeIDs.reserve(m_ActiveClientsByRuntimeID.size() + m_ArchivedClientsByRuntimeID.size());
+
+		for (auto it = m_ActiveClientsByRuntimeID.begin(); it != m_ActiveClientsByRuntimeID.end(); ++it) {
+			if (IsPendingDeleteReadyForFinalize(it->second))
+				aPendingDeleteRuntimeIDs.push_back(it->first);
+		}
+
+		for (auto it = m_ArchivedClientsByRuntimeID.begin(); it != m_ArchivedClientsByRuntimeID.end(); ++it) {
+			if (IsPendingDeleteReadyForFinalize(it->second))
+				aPendingDeleteRuntimeIDs.push_back(it->first);
+		}
+	}
+
+	for (size_t i = 0; i < aPendingDeleteRuntimeIDs.size(); ++i)
+		FinalizeDeletePendingClientByRuntimeID(aPendingDeleteRuntimeIDs[i]);
+}
+
 void CClientList::DeleteAll()
 {
 	theApp.uploadqueue->DeleteAll();
 	theApp.downloadqueue->DeleteAll();
-	while (!list.IsEmpty())
-		delete list.RemoveHead(); // recursive: this will call RemoveClient
+	while (!list.IsEmpty()) {
+		CUpDownClient* pClient = list.RemoveHead();
+		theApp.emuledlg->transferwnd->GetClientList()->SaveArchive(pClient);
+		CUpDownClient::SafeDelete(pClient); // recursive: this will call RemoveClient
+	}
+	{
+		CSingleLock runtimeMapLock(&m_csTrackedClientRuntimeMaps, TRUE);
+		m_ActiveClientsByRuntimeID.clear();
+		m_ArchivedClientsByRuntimeID.clear();
+	}
 	liMODsTypes.RemoveAll();
 	if (thePrefs.GetClientHistory())
 		SaveList();
 
+	std::vector<CUpDownClient*> aArchivedClients;
+	aArchivedClients.reserve(static_cast<size_t>(m_ArchivedClientsMap.GetCount()));
 	for (POSITION pos = m_ArchivedClientsMap.GetStartPosition(); pos != NULL;) {
 		CString cur_hash;
 		CUpDownClient* cur_client = NULL;
 		m_ArchivedClientsMap.GetNextAssoc(pos, cur_hash, cur_client);
-		if (cur_client != NULL) {
-			delete cur_client;
-			cur_client = NULL;
-		}
+		if (cur_client != NULL)
+			aArchivedClients.push_back(cur_client);
 	}
 	m_ArchivedClientsMap.RemoveAll();
+	for (size_t i = 0; i < aArchivedClients.size(); ++i)
+		CUpDownClient::SafeDelete(aArchivedClients[i]);
 }
 
 bool CClientList::AttachToAlreadyKnown(CUpDownClient **client, CClientReqSocket *sender)
@@ -584,7 +692,7 @@ bool CClientList::AttachToAlreadyKnown(CUpDownClient **client, CClientReqSocket 
 	}
 	*client = NULL;
 //***	found_client->SetSourceFrom(tocheck->GetSourceFrom());
-	delete tocheck;
+	CUpDownClient::SafeDelete(tocheck);
 	*client = found_client;
 	return true;
 }
@@ -700,6 +808,8 @@ CUpDownClient* CClientList::FindClientByServerID(uint32 uServerIP, uint32 uED2KU
 void CClientList::AddBannedClient(CString strKey, time_t tInserted)
 {
 	m_bannedList[strKey] = tInserted;
+	if (theApp.emuledlg != NULL && theApp.emuledlg->transferwnd != NULL)
+		theApp.emuledlg->transferwnd->InvalidateQueueCount(false);
 }
 
 bool CClientList::IsBannedClient(CString strKey) const
@@ -712,6 +822,78 @@ bool CClientList::IsBannedClient(CString strKey) const
 void CClientList::RemoveBannedClient(CString strKey)
 {
 	m_bannedList.RemoveKey(strKey);
+	if (theApp.emuledlg != NULL && theApp.emuledlg->transferwnd != NULL)
+		theApp.emuledlg->transferwnd->InvalidateQueueCount(false);
+}
+
+INT_PTR CClientList::GetBannedCount() const
+{
+	INT_PTR iBannedClientCount = 0;
+	const time_t tCurrentTime = time(NULL);
+	CMap<CString, LPCTSTR, BYTE, BYTE> representedBanKeys;
+
+	auto IsCountableBanKey = [](const CString& strKey) -> bool {
+		return !strKey.IsEmpty()
+			&& strKey != _T("00000000000000000000000000000000")
+			&& strKey != _T("0.0.0.0")
+			&& strKey != _T("0:0:0:0:0:0:0:0");
+	};
+
+	auto RememberBanKey = [&representedBanKeys, &IsCountableBanKey](const CString& strKey) {
+		if (IsCountableBanKey(strKey))
+			representedBanKeys[strKey] = 1;
+	};
+
+	auto RememberClientBanKeys = [&RememberBanKey](const CUpDownClient* pClient) {
+		if (pClient == NULL)
+			return;
+
+		if (!isnulmd4(pClient->GetUserHash()))
+			RememberBanKey(md4str(pClient->GetUserHash()));
+		if (!pClient->GetConnectIP().IsNull())
+			RememberBanKey(pClient->GetConnectIP().ToStringC());
+	};
+
+	if (thePrefs.GetClientHistory()) {
+		for (POSITION pos = m_ArchivedClientsMap.GetStartPosition(); pos != NULL;) {
+			CString strHash;
+			CUpDownClient* pArchivedClient = NULL;
+			m_ArchivedClientsMap.GetNextAssoc(pos, strHash, pArchivedClient);
+			if (pArchivedClient != NULL && pArchivedClient->IsBanned()) {
+				++iBannedClientCount;
+				RememberClientBanKeys(pArchivedClient);
+			}
+		}
+	}
+
+	for (POSITION pos = list.GetHeadPosition(); pos != NULL;) {
+		CUpDownClient* pClient = list.GetNext(pos);
+		if (pClient == NULL || !pClient->IsBanned())
+			continue;
+
+		bool bAlreadyCountedByArchivedClient = false;
+		if (thePrefs.GetClientHistory() && !IsCorruptOrBadUserHash(pClient->GetUserHash())) {
+			CUpDownClient* pArchivedClient = NULL;
+			if (m_ArchivedClientsMap.Lookup(md4str(pClient->GetUserHash()), pArchivedClient) && pArchivedClient != NULL && pArchivedClient->IsBanned())
+				bAlreadyCountedByArchivedClient = true;
+		}
+
+		if (!bAlreadyCountedByArchivedClient)
+			++iBannedClientCount;
+
+		RememberClientBanKeys(pClient);
+	}
+
+	for (POSITION pos = m_bannedList.GetStartPosition(); pos != NULL;) {
+		CString strKey;
+		time_t tBanTime = 0;
+		BYTE byRemembered = 0;
+		m_bannedList.GetNextAssoc(pos, strKey, tBanTime);
+		if (IsCountableBanKey(strKey) && tCurrentTime < tBanTime + thePrefs.GetClientBanTime() && !representedBanKeys.Lookup(strKey, byRemembered))
+			++iBannedClientCount;
+	}
+
+	return iBannedClientCount;
 }
 
 void CClientList::RemoveAllBannedClients()
@@ -812,6 +994,8 @@ void CClientList::RemoveAllTrackedClients()
 
 void CClientList::Process()
 {
+	ServicePendingDeleteClients();
+
 	///////////////////////////////////////////////////////////////////////////
 	// Cleanup banned client list
 	//
@@ -1063,8 +1247,8 @@ void CClientList::Debug_SocketDeleted(CClientReqSocket *deleted) const
 
 bool CClientList::IsValidClient(CUpDownClient *tocheck) const
 {
-	if (thePrefs.m_iDbgHeap >= 2)
-		ASSERT_VALID(tocheck);
+	if (tocheck == NULL)
+		return false;
 	return list.Find(tocheck) != NULL;
 }
 
@@ -1077,6 +1261,191 @@ bool CClientList::IsClientActive(const CUpDownClient *tocheck) const
 			return true;
 	}
 	return false;
+}
+
+CUpDownClient* CClientList::AcquireTrackedClientByPointer(const CUpDownClient* pClient) const
+{
+	if (pClient == NULL)
+		return NULL;
+
+	CUpDownClient* pDeferredFinalizeClient = NULL;
+	{
+		CSingleLock runtimeMapLock(&m_csTrackedClientRuntimeMaps, TRUE);
+		for (auto it = m_ActiveClientsByRuntimeID.begin(); it != m_ActiveClientsByRuntimeID.end(); ++it) {
+			if (it->second != pClient || it->second == NULL)
+				continue;
+			bool bNeedsFinalize = false;
+			if (it->second->TryAcquireRuntimeReference(&bNeedsFinalize))
+				return it->second;
+			if (pDeferredFinalizeClient == NULL && bNeedsFinalize && it->second->TryAcquirePendingDeleteFinalizeHold())
+				pDeferredFinalizeClient = it->second;
+			break;
+		}
+
+		if (pDeferredFinalizeClient == NULL) {
+			for (auto it = m_ArchivedClientsByRuntimeID.begin(); it != m_ArchivedClientsByRuntimeID.end(); ++it) {
+				if (it->second != pClient || it->second == NULL)
+					continue;
+				bool bNeedsFinalize = false;
+				if (it->second->TryAcquireRuntimeReference(&bNeedsFinalize))
+					return it->second;
+				if (bNeedsFinalize && it->second->TryAcquirePendingDeleteFinalizeHold())
+					pDeferredFinalizeClient = it->second;
+				break;
+			}
+		}
+	}
+
+	if (pDeferredFinalizeClient != NULL)
+		pDeferredFinalizeClient->ReleaseRuntimeReference();
+	return NULL;
+}
+
+CUpDownClient* CClientList::AcquireTrackedClientByUserHash(const uchar* clienthash, bool bPreferArchived) const
+{
+	if (clienthash == NULL || isnulmd4(clienthash) || IsCorruptOrBadUserHash(clienthash))
+		return NULL;
+
+	const CString strHash = md4str(clienthash);
+	CUpDownClient* pDeferredFinalizeClient = NULL;
+	{
+		CSingleLock runtimeMapLock(&m_csTrackedClientRuntimeMaps, TRUE);
+		auto TryAcquireClient = [&pDeferredFinalizeClient](CUpDownClient* pCandidate) -> CUpDownClient*
+		{
+			if (pCandidate == NULL)
+				return NULL;
+
+			bool bNeedsFinalize = false;
+			if (pCandidate->TryAcquireRuntimeReference(&bNeedsFinalize))
+				return pCandidate;
+			if (pDeferredFinalizeClient == NULL && bNeedsFinalize && pCandidate->TryAcquirePendingDeleteFinalizeHold())
+				pDeferredFinalizeClient = pCandidate;
+			return NULL;
+		};
+
+		if (bPreferArchived) {
+			CUpDownClient* pArchivedClient = NULL;
+			if (m_ArchivedClientsMap.Lookup(strHash, pArchivedClient)) {
+				if (CUpDownClient* pTrackedClient = TryAcquireClient(pArchivedClient))
+					return pTrackedClient;
+			}
+		}
+
+		for (auto it = m_ActiveClientsByRuntimeID.begin(); it != m_ActiveClientsByRuntimeID.end(); ++it) {
+			CUpDownClient* pCandidate = it->second;
+			if (pCandidate == NULL || !md4equ(pCandidate->GetUserHash(), clienthash))
+				continue;
+
+			if (CUpDownClient* pTrackedClient = TryAcquireClient(pCandidate))
+				return pTrackedClient;
+		}
+
+		if (!bPreferArchived) {
+			CUpDownClient* pArchivedClient = NULL;
+			if (m_ArchivedClientsMap.Lookup(strHash, pArchivedClient)) {
+				if (CUpDownClient* pTrackedClient = TryAcquireClient(pArchivedClient))
+					return pTrackedClient;
+			}
+		}
+	}
+
+	if (pDeferredFinalizeClient != NULL)
+		pDeferredFinalizeClient->ReleaseRuntimeReference();
+	return NULL;
+}
+
+CUpDownClient* CClientList::AcquireTrackedClientByRuntimeID(DWORD uRuntimeID) const
+{
+	CUpDownClient* pClient = NULL;
+	CUpDownClient* pDeferredFinalizeClient = NULL;
+	{
+		CSingleLock runtimeMapLock(&m_csTrackedClientRuntimeMaps, TRUE);
+		const auto itActive = m_ActiveClientsByRuntimeID.find(uRuntimeID);
+		if (itActive != m_ActiveClientsByRuntimeID.end())
+			pClient = itActive->second;
+		else {
+			const auto itArchived = m_ArchivedClientsByRuntimeID.find(uRuntimeID);
+			if (itArchived != m_ArchivedClientsByRuntimeID.end())
+				pClient = itArchived->second;
+		}
+
+		if (pClient != NULL) {
+			bool bNeedsFinalize = false;
+			if (pClient->TryAcquireRuntimeReference(&bNeedsFinalize))
+				return pClient;
+			if (bNeedsFinalize && pClient->TryAcquirePendingDeleteFinalizeHold())
+				pDeferredFinalizeClient = pClient;
+		}
+	}
+
+	if (pDeferredFinalizeClient != NULL)
+		pDeferredFinalizeClient->ReleaseRuntimeReference();
+	return NULL;
+}
+
+CUpDownClient* CClientList::AcquireArchivedClientByUserHash(const uchar* clienthash) const
+{
+	if (clienthash == NULL || isnulmd4(clienthash) || IsCorruptOrBadUserHash(clienthash))
+		return NULL;
+
+	CUpDownClient* pArchivedClient = NULL;
+	CUpDownClient* pDeferredFinalizeClient = NULL;
+	{
+		CSingleLock runtimeMapLock(&m_csTrackedClientRuntimeMaps, TRUE);
+		if (m_ArchivedClientsMap.Lookup(md4str(clienthash), pArchivedClient) && pArchivedClient != NULL) {
+			bool bNeedsFinalize = false;
+			if (pArchivedClient->TryAcquireRuntimeReference(&bNeedsFinalize))
+				return pArchivedClient;
+			if (bNeedsFinalize && pArchivedClient->TryAcquirePendingDeleteFinalizeHold())
+				pDeferredFinalizeClient = pArchivedClient;
+		}
+	}
+
+	if (pDeferredFinalizeClient != NULL)
+		pDeferredFinalizeClient->ReleaseRuntimeReference();
+	return NULL;
+}
+
+CUpDownClient* CClientList::FindArchivedClientByUserHash(const uchar* clienthash) const
+{
+	if (clienthash == NULL || isnulmd4(clienthash) || IsCorruptOrBadUserHash(clienthash))
+		return NULL;
+
+	CSingleLock runtimeMapLock(&m_csTrackedClientRuntimeMaps, TRUE);
+	CUpDownClient* pArchivedClient = NULL;
+	return m_ArchivedClientsMap.Lookup(md4str(clienthash), pArchivedClient) ? pArchivedClient : NULL;
+}
+
+void CClientList::RebuildArchivedRuntimeMap() const
+{
+	CSingleLock runtimeMapLock(&m_csTrackedClientRuntimeMaps, TRUE);
+	m_ArchivedClientsByRuntimeID.clear();
+	m_ArchivedClientsByRuntimeID.reserve(static_cast<size_t>(m_ArchivedClientsMap.GetCount()) + 16);
+	for (POSITION pos = m_ArchivedClientsMap.GetStartPosition(); pos != NULL;) {
+		CString strHash;
+		CUpDownClient* pArchivedClient = NULL;
+		m_ArchivedClientsMap.GetNextAssoc(pos, strHash, pArchivedClient);
+		if (pArchivedClient != NULL)
+			m_ArchivedClientsByRuntimeID[pArchivedClient->GetRuntimeID()] = pArchivedClient;
+	}
+}
+
+void CClientList::RegisterArchivedClient(CUpDownClient* pArchivedClient)
+{
+	if (pArchivedClient == NULL)
+		return;
+
+	CSingleLock runtimeMapLock(&m_csTrackedClientRuntimeMaps, TRUE);
+	m_ArchivedClientsByRuntimeID[pArchivedClient->GetRuntimeID()] = pArchivedClient;
+}
+
+void CClientList::UnregisterArchivedClient(const CUpDownClient* pArchivedClient)
+{
+	if (pArchivedClient == NULL)
+		return;
+
+	CSingleLock runtimeMapLock(&m_csTrackedClientRuntimeMaps, TRUE);
+	m_ArchivedClientsByRuntimeID.erase(pArchivedClient->GetRuntimeID());
 }
 
 
@@ -1398,7 +1767,7 @@ void CClientList::CleanUpClientList()
 						pCurClient->m_tLastCleanUpCheck = time(NULL);
 					} else {
 						++cDeleted;
-						delete pCurClient;
+						CUpDownClient::SafeDelete(pCurClient);
 						RemoveServedBuddy(pCurClient); // Ensure served buddy unlink before deletion.
 					} 
 				}
@@ -1482,7 +1851,7 @@ void CClientList::ProcessConnectingClientsList()
 			ASSERT(cc.pClient->GetConnectingState() != CCS_NONE);
 			m_liConnectingClients.RemoveAt(pos2);
 			if (cc.pClient->Disconnected(_T("Connection try timeout")))
-				delete cc.pClient;
+				CUpDownClient::SafeDelete(cc.pClient);
 		}
 	}
 }
@@ -1695,6 +2064,7 @@ bool CClientList::LoadList()
 				Record->m_bAutoQuerySharedFiles = true;
 		}
 		file.Close();
+		RebuildArchivedRuntimeMap();
 		if(m_ArchivedClientsMap.GetCount())
 			AddLogLine(false, _T("%lu clients loaded from client history file"), m_ArchivedClientsMap.GetCount());
 		return true;
@@ -1743,11 +2113,13 @@ void CClientList::SaveList()
 
 			// Unexpected case since we already handle this statuses on other places. But remove from the map if found any.
 			if (cur_client == NULL || IsCorruptOrBadUserHash(cur_client->m_achUserHash)) {
-				delete cur_client;
+				UnregisterArchivedClient(cur_client);
 				theApp.clientlist->m_ArchivedClientsMap.RemoveKey(cur_hash);
+				CUpDownClient::SafeDelete(cur_client);
 				pos = oldpos; // If removal is successful restore old position.
 			}
 		}
+		RebuildArchivedRuntimeMap();
 
 		// Write archived clients count to the file.
 		uint32 count = m_ArchivedClientsMap.GetCount();
@@ -1807,18 +2179,23 @@ void CClientList::AutoQuerySharedFiles()
 		if (!cur_client || cur_client->m_bQueryingSharedFiles) // We'll skip this client since it's already being queried at the moment.
 			continue; 
 
-		// If this client is already in history, remove history item from the list.
-		CUpDownClient* ArchivedClient = NULL;
-		if (thePrefs.GetClientHistory() && theApp.clientlist->m_ArchivedClientsMap.Lookup(md4str(cur_client->GetUserHash()), ArchivedClient) && ArchivedClient && !m_ClientsToQueryVector.empty())
-			m_ClientsToQueryVector.erase(std::remove(m_ClientsToQueryVector.begin(), m_ClientsToQueryVector.end(), ArchivedClient), m_ClientsToQueryVector.end());
+		CUpDownClient* pArchivedClient = AcquireArchivedClientForRuntimeLinkedUse(cur_client);
+		if (pArchivedClient != NULL) {
+			if (!m_ClientsToQueryVector.empty())
+				m_ClientsToQueryVector.erase(std::remove(m_ClientsToQueryVector.begin(), m_ClientsToQueryVector.end(), pArchivedClient), m_ClientsToQueryVector.end());
+			pArchivedClient->ReleaseRuntimeReference();
+		}
 
 		// Activate auto query if conditions are met
 		if (!cur_client->m_bAutoQuerySharedFiles && cur_client->m_uSharedFilesStatus == S_NOT_QUERIED && cur_client->GetViewSharedFilesSupport() && cur_client->credits &&
 			((thePrefs.GetRemoteSharedFilesSetAutoQueryDownload() && cur_client->credits->GetDownloadedTotal() / 1048576 >= thePrefs.GetRemoteSharedFilesSetAutoQueryDownloadThreshold()) ||	//1024*1024
 				(thePrefs.GetRemoteSharedFilesSetAutoQueryUpload() && cur_client->credits->GetUploadedTotal() / 1048576 >= thePrefs.GetRemoteSharedFilesSetAutoQueryUploadThreshold()))) {			//1024*1024
 			cur_client->m_bAutoQuerySharedFiles = true;
-			if (cur_client->m_ArchivedClient) // Make sure that if this client has an archived version, it's auto query is disabled.
-				cur_client->m_ArchivedClient->m_bAutoQuerySharedFiles = false;
+			pArchivedClient = AcquireArchivedClientForRuntimeLinkedUse(cur_client);
+			if (pArchivedClient != NULL) { // Make sure that if this client has an archived version, its auto query is disabled.
+				pArchivedClient->m_bAutoQuerySharedFiles = false;
+				pArchivedClient->ReleaseRuntimeReference();
+			}
 		}
 
 		// Don't query a client more than once in the defined minutes. This is needed to prevent shared file query loops when getting SFS_NO_RESPONSE continuously.
@@ -1977,7 +2354,7 @@ void CClientList::ServiceUtpConnectionTimeouts()
 			&& (int)(now - pClient->GetLastTriedToConnectTime()) >= (int)orphanConnectTimeoutMs;
 		if (bOrphanConnectingState) {
 			if (pClient->Disconnected(_T("Connecting lifecycle timeout"))) {
-				delete pClient;
+				CUpDownClient::SafeDelete(pClient);
 				continue;
 			}
 		}

@@ -35,112 +35,157 @@ void DrainPendingConCheckerMessages()
 }
 
 CConChecker::CConChecker(void)
+	: m_pThread(NULL)
+	, m_hStopEvent(::CreateEvent(NULL, TRUE, FALSE, NULL))
+	, m_hNotifyWnd(NULL)
 {
-	m_hThread = NULL;
-	m_hKilled = ::CreateEvent(NULL, FALSE, FALSE, _T("thread_iskilled"));
-	m_bRun = false;
 }
 
 CConChecker::~CConChecker(void)
 {
-	// Cooperative shutdown; avoid TerminateThread on invalid handle
-	m_bRun = false;
-	Stop();
-	if (m_hKilled) {
-		CloseHandle(m_hKilled);
-		m_hKilled = NULL;
+	const bool bStopped = Stop();
+	if (bStopped && m_hStopEvent) {
+		::CloseHandle(m_hStopEvent);
+		m_hStopEvent = NULL;
 	}
 }
 
-const bool CConChecker::Start()
+bool CConChecker::CleanupStoppedThread(bool bLogStopped)
 {
-	if (IsActive())
+	if (m_pThread == NULL)
+		return true;
+
+	HANDLE hThread = m_pThread->m_hThread;
+	if (hThread != NULL && ::WaitForSingleObject(hThread, 0) == WAIT_TIMEOUT)
+		return false;
+
+	delete m_pThread;
+	m_pThread = NULL;
+	DrainPendingConCheckerMessages();
+	m_hNotifyWnd = NULL;
+	m_strConnectionCheckerServer.Empty();
+	if (bLogStopped)
+		AddLogLine(false, GetResString(_T("CONN_CHECK_STOPPED")));
+	return true;
+}
+
+bool CConChecker::Start()
+{
+	if (!CleanupStoppedThread(false))
 		return false;
 
 	theApp.SetConnectionState(CONSTATE_NULL);
 	AddLogLine(false, _T("***"));
 
-	if (thePrefs.GetConnectionChecker()) {
-		AddLogLine(false, GetResString(_T("CONN_CHECK_ACTIVE")));
-		AddLogLine(false, _T("***"));
-	} else {
+	if (m_hStopEvent == NULL)
+		return false;
+
+	if (!thePrefs.GetConnectionChecker()) {
 		AddLogLine(false, GetResString(_T("CONN_CHECK_PASSIVE")));
 		AddLogLine(false, _T("***"));
 		return false;
 	}
 
-	m_bRun = false;
-	if (m_hKilled) // Ensure event is unsignaled before start
-		::ResetEvent(m_hKilled); // Worker will wait on this
-	m_hThread = ::CreateThread(NULL, NULL, (LPTHREAD_START_ROUTINE)ThreadProc, this, CREATE_SUSPENDED, 0);
+	if (theApp.emuledlg == NULL) {
+		AddLogLine(false, GetResString(_T("CONN_CHECK_PASSIVE")));
+		AddLogLine(false, _T("***"));
+		return false;
+	}
 
-	if (m_hThread == NULL)
+	const HWND hWnd = theApp.emuledlg->GetSafeHwnd();
+	if (!::IsWindow(hWnd)) {
+		AddLogLine(false, GetResString(_T("CONN_CHECK_PASSIVE")));
+		AddLogLine(false, _T("***"));
+		return false;
+	}
+
+	m_hNotifyWnd = hWnd;
+	m_strConnectionCheckerServer = thePrefs.GetConnectionCheckerServer();
+	if (m_strConnectionCheckerServer.IsEmpty()) {
+		AddLogLine(false, GetResString(_T("CONN_CHECK_PASSIVE")));
+		AddLogLine(false, _T("***"));
+		return false;
+	}
+
+	if (m_hStopEvent)
+		::ResetEvent(m_hStopEvent);
+
+	CWinThread* pThread = AfxBeginThread(ThreadProc, this, THREAD_PRIORITY_NORMAL, 0, CREATE_SUSPENDED);
+	if (pThread == NULL)
 		return false;
 
-	::SetThreadPriority(m_hThread,THREAD_PRIORITY_NORMAL);
-	::ResumeThread(m_hThread);
-	m_bRun = true;
+	pThread->m_bAutoDelete = FALSE;
+	m_pThread = pThread;
+	AddLogLine(false, GetResString(_T("CONN_CHECK_ACTIVE")));
+	AddLogLine(false, _T("***"));
+	m_pThread->ResumeThread();
 	return true;
 }
 
-const bool CConChecker::Stop()
+bool CConChecker::Stop()
 {
-	m_bRun=false;
-
-	if (m_hThread == NULL)
+	if (m_pThread == NULL)
 		return true;
 
-	// Signal worker to exit and wait for it
-	if (m_hKilled)
-		::SetEvent(m_hKilled);
+	if (m_hStopEvent)
+		::SetEvent(m_hStopEvent);
 
-	DWORD waitRes = ::WaitForSingleObject(m_hThread, 5000); // Wait up to 5 seconds
+	HANDLE hThread = m_pThread->m_hThread;
+	if (hThread != NULL) {
+		const DWORD waitRes = ::WaitForSingleObject(hThread, 6000);
+		if (waitRes == WAIT_TIMEOUT) {
+			AddDebugLogLine(DLP_HIGH, _T("Connection Checker thread stop timed out."));
+			return false;
+		}
+		if (waitRes != WAIT_OBJECT_0) {
+			AddDebugLogLine(DLP_HIGH, _T("Connection Checker thread stop failed. Error=%lu"), ::GetLastError());
+			return false;
+		}
+	}
 
-	DrainPendingConCheckerMessages();
-
-	::CloseHandle(m_hThread);
-	m_hThread = NULL;
-
-	AddLogLine(false, GetResString(_T("CONN_CHECK_STOPPED")));
-	return (waitRes == WAIT_OBJECT_0);
+	return CleanupStoppedThread(true);
 }
 
-const bool CConChecker::IsActive()
+bool CConChecker::IsActive()
 {
-	if (m_hThread == NULL)
+	if (m_pThread == NULL || m_pThread->m_hThread == NULL)
 		return false;
 
-	DWORD dwExitCode = 0;		
-	GetExitCodeThread(m_hThread,&dwExitCode);
-
-	if (dwExitCode == STILL_ACTIVE)
-		return true;
-
-	return false;
+	return ::WaitForSingleObject(m_pThread->m_hThread, 0) == WAIT_TIMEOUT;
 }
 
 UINT CConChecker::ThreadProc(LPVOID pProcParam)
 {
 	CConChecker* pThis = reinterpret_cast<CConChecker*>(pProcParam);
-	const HANDLE hKilled = pThis != NULL ? pThis->m_hKilled : NULL;
+	if (pThis == NULL || pThis->m_hStopEvent == NULL)
+		return 0;
 
-	if (hKilled == NULL)
+	const HANDLE hStopEvent = pThis->m_hStopEvent;
+	const HWND hNotifyWnd = pThis->m_hNotifyWnd;
+	const CString strConnectionCheckerServer = pThis->m_strConnectionCheckerServer;
+	if (!::IsWindow(hNotifyWnd) || strConnectionCheckerServer.IsEmpty())
 		return 0;
 
 #pragma warning(disable:4127) // Disable compiler warning for constant usage in the loop
-	while (::WaitForSingleObject(hKilled, 1000) == WAIT_TIMEOUT) {
+	for (;;) {
+		if (::WaitForSingleObject(hStopEvent, 1000) != WAIT_TIMEOUT)
+			break;
+
 		if (theApp.IsClosing())
 			break;
 
-		const HWND hWnd = theApp.emuledlg != NULL ? theApp.emuledlg->GetSafeHwnd() : NULL;
-		if (!::IsWindow(hWnd))
+		const LPARAM lConnectionState = ::InternetCheckConnection(strConnectionCheckerServer, FLAG_ICC_FORCE_CONNECTION, 0)
+			? CONSTATE_ONLINE
+			: CONSTATE_OFFLINE;
+
+		if (::WaitForSingleObject(hStopEvent, 0) != WAIT_TIMEOUT)
+			break;
+		if (theApp.IsClosing())
+			break;
+		if (!::IsWindow(hNotifyWnd))
 			continue;
 
-		const LPARAM lConnectionState = InternetCheckConnection(thePrefs.GetConnectionCheckerServer(), FLAG_ICC_FORCE_CONNECTION, 0) ? CONSTATE_ONLINE : CONSTATE_OFFLINE;
-		if (theApp.IsClosing())
-			break;
-
-		::PostMessage(hWnd, UWM_CONCHECKER, (WPARAM)2, lConnectionState);
+		::PostMessage(hNotifyWnd, UWM_CONCHECKER, static_cast<WPARAM>(2), lConnectionState);
 	}
 #pragma warning(default:4127)
 

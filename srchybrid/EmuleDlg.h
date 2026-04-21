@@ -140,6 +140,9 @@ public:
 	CString	GetUpDatarateString(UINT uUpDatarate = UINT_MAX);
 	CString	GetDownDatarateString(UINT uDownDatarate = UINT_MAX);
 
+	void KillMainTimer();
+	void StartMainTimer();
+	void CheckScheduledTasks();
 	void StopTimer();
 	void DoVersioncheck(bool manual);
 	void OpenVersionReleasesURL() const;
@@ -252,9 +255,10 @@ protected:
 	void CreateToolbarCmdIconMap();
 	LPCTSTR GetIconFromCmdId(UINT uId);
 
-	// Startup Timer
+	// Main timer reused for startup and scheduled maintenance.
 	UINT_PTR m_hTimer;
 	static void CALLBACK StartupTimer(HWND hwnd, UINT uiMsg, UINT_PTR idEvent, DWORD dwTime) noexcept;
+	static void CALLBACK MainTimer(HWND hwnd, UINT uiMsg, UINT_PTR idEvent, DWORD dwTime) noexcept;
 
 	// UPnP TimeOutTimer
 	UINT_PTR m_hUPnPTimeOutTimer;
@@ -335,6 +339,9 @@ protected:
 	afx_msg LRESULT OnFileCompleted(WPARAM wParam, LPARAM lParam);
 	afx_msg LRESULT OnFileOpProgress(WPARAM wParam, LPARAM lParam);
 	afx_msg LRESULT OnImportPart(WPARAM wParam,LPARAM lParam);
+	afx_msg LRESULT OnImportPartProgress(WPARAM wParam, LPARAM lParam);
+	afx_msg LRESULT OnImportPartFinished(WPARAM wParam, LPARAM lParam);
+	afx_msg LRESULT OnFinalizeDeletePendingClient(WPARAM wParam, LPARAM lParam);
 
 	//Frame grabbing
 	afx_msg LRESULT OnFrameGrabFinished(WPARAM wParam, LPARAM lParam);
@@ -408,6 +415,8 @@ enum EEMuleAppMsgs
 	TM_FINISHEDHASHING = WM_APP + 10,
 	TM_HASHFAILED,
 	TM_IMPORTPART,
+	TM_IMPORTPARTPROGRESS,
+	TM_IMPORTPARTFINISHED,
 	TM_FRAMEGRABFINISHED,
 	TM_FILEALLOCEXC,
 	TM_FILECOMPLETED,

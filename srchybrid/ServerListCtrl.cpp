@@ -319,7 +319,7 @@ void CServerListCtrl::DrawItem(LPDRAWITEMSTRUCT lpDrawItemStruct)
 
 	DrawFocusRect(dc, &lpDrawItemStruct->rcItem, lpDrawItemStruct->itemState & ODS_FOCUS, bCtrlFocused, lpDrawItemStruct->itemState & ODS_SELECTED);
 
-	m_updatethread->AddItemUpdated((LPARAM)pServer);
+	QueueItemUpdated((LPARAM)pServer);
 }
 
 void CServerListCtrl::Localize()
@@ -647,7 +647,7 @@ void CServerListCtrl::RefreshServer(const CServer *pServer)
 	if (theApp.IsClosing() || !pServer || theApp.emuledlg->activewnd != theApp.emuledlg->serverwnd || !theApp.emuledlg->serverwnd->serverlistctrl.IsWindowVisible())
 		return;
 
-	m_updatethread->AddItemToUpdate((LPARAM)pServer);
+	QueueItemUpdate((LPARAM)pServer);
 }
 
 void CServerListCtrl::RefreshAllServer() {

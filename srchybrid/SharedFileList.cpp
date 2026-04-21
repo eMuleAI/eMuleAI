@@ -562,6 +562,7 @@ IMPLEMENT_DYNCREATE(CAddFileThread, CWinThread)
 CAddFileThread::CAddFileThread()
 	: m_pOwner()
 	, m_partfile()
+	, m_pImportOperationContext()
 {
 }
 
@@ -572,6 +573,13 @@ void CAddFileThread::SetValues(CSharedFileList *pOwner, LPCTSTR directory, LPCTS
 	m_strFilename = filename;
 	m_partfile = partfile;
 	m_strSharedDir = strSharedDir;
+}
+
+void CAddFileThread::SetImportOperationContext(ImportOperationContext* pContext)
+{
+	if (m_pImportOperationContext != NULL)
+		ReleaseImportOperationContext(m_pImportOperationContext);
+	m_pImportOperationContext = AcquireImportOperationContext(pContext);
 }
 
 // Special case for SR13-ImportParts
@@ -591,10 +599,22 @@ uint16 CAddFileThread::SetPartToImport(LPCTSTR import)
 
 bool CAddFileThread::ImportParts()
 {
+	ImportOperationContext* const pContext = m_pImportOperationContext;
+	if (pContext == NULL)
+		return false;
+
 	uint64 fileSize = 0;
 	HANDLE hImport = OpenImportSourceLongPath(m_strImport, fileSize);
-	if (hImport == INVALID_HANDLE_VALUE)
+	if (hImport == INVALID_HANDLE_VALUE) {
+		::InterlockedExchange(&pContext->lPendingFinish, 1);
+		::InterlockedExchange(&pContext->lAborted, 1);
+		if (::IsWindow(theApp.emuledlg->m_hWnd)) {
+			AcquireImportOperationContext(pContext);
+			if (!theApp.emuledlg->PostMessage(TM_IMPORTPARTFINISHED, 0, (LPARAM)pContext))
+				ReleaseImportOperationContext(pContext);
+		}
 		return false;
+	}
 
 	CString strFilePath;
 	_tmakepathlimit(strFilePath.GetBuffer(MAX_PATH), NULL, m_strDirectory, m_strFilename, NULL);
@@ -605,8 +625,13 @@ bool CAddFileThread::ImportParts()
 	BYTE *partData = NULL;
 	unsigned partsuccess = 0;
 	CKnownFile kfimport;
+	bool bImportAborted = IsImportOperationAborted(pContext);
 
 	for (INT_PTR i = 0; i < m_PartsToImport.GetSize(); ++i) {
+		bImportAborted = IsImportOperationAborted(pContext);
+		if (bImportAborted || !theApp.IsRunning())
+			break;
+
 		const uint16 partnumber = m_PartsToImport[i];
 		const uint64 uStart = PARTSIZE * partnumber;
 		if (uStart > fileSize)
@@ -640,26 +665,41 @@ bool CAddFileThread::ImportParts()
 				LogWarning(LOG_STATUSBAR, _T("Part %i: Not accessible (You may have a bad cluster on your hard disk)."), (int)partnumber);
 				continue;
 			}
+			if (IsImportOperationAborted(pContext))
+				break;
+
 			uchar hash[MDX_DIGEST_SIZE];
 			kfimport.CreateHash(partData, partSize, hash);
 			ImportPart_Struct *importpart = new ImportPart_Struct;
 			importpart->start = uStart;
 			importpart->end = importpart->start + partSize - 1;
 			importpart->data = partData;
-			if (!theApp.emuledlg->PostMessage(TM_IMPORTPART, (WPARAM)importpart, (LPARAM)m_partfile))
+			importpart->pContext = AcquireImportOperationContext(pContext);
+			::InterlockedIncrement(&pContext->lQueuedBlocks);
+			if (!theApp.emuledlg->PostMessage(TM_IMPORTPART, (WPARAM)importpart, 0)) {
+				::InterlockedDecrement(&pContext->lQueuedBlocks);
+				ReleaseImportOperationContext(importpart->pContext);
+				delete importpart;
+				bImportAborted = true;
 				break;
+			}
 			partData = NULL; // Will be deleted in async write thread
 			++partsuccess;
 
 			if (theApp.IsRunning()) {
 				WPARAM uProgress = (WPARAM)(i * 100 / m_PartsToImport.GetSize());
-				VERIFY(theApp.emuledlg->PostMessage(TM_FILEOPPROGRESS, uProgress, (LPARAM)m_partfile));
+				AcquireImportOperationContext(pContext);
+				if (!theApp.emuledlg->PostMessage(TM_IMPORTPARTPROGRESS, uProgress, (LPARAM)pContext))
+					ReleaseImportOperationContext(pContext);
 				::Sleep(100);
 			}
 
-			if (!theApp.IsRunning() || partSize != PARTSIZE || m_partfile->GetFileOp() != PFOP_IMPORTPARTS)
+			bImportAborted = IsImportOperationAborted(pContext);
+			if (!theApp.IsRunning() || partSize != PARTSIZE || bImportAborted)
 				break;
 		} catch (...) {
+			bImportAborted = true;
+			break;
 		}
 	}
 
@@ -668,16 +708,19 @@ bool CAddFileThread::ImportParts()
 
 	delete[] partData;
 
-	try {
-		bool importaborted = !theApp.IsRunning() || m_partfile->GetFileOp() == PFOP_NONE;
-		if (m_partfile->GetFileOp() == PFOP_IMPORTPARTS)
-			m_partfile->SetFileOp(PFOP_NONE);
-		Log(LOG_STATUSBAR, _T("Import %s. %u parts imported to %s.")
-			, importaborted ? _T("aborted") : _T("completed")
-			, partsuccess
-			, (LPCTSTR)m_strFilename);
-	} catch (...) {
-		// This could happen if we deleted the part file instance
+	bImportAborted = bImportAborted || !theApp.IsRunning() || IsImportOperationAborted(pContext);
+	if (bImportAborted)
+		::InterlockedExchange(&pContext->lAborted, 1);
+	::InterlockedExchange(&pContext->lPendingFinish, 1);
+	Log(LOG_STATUSBAR, _T("Import %s. %u parts imported to %s.")
+		, bImportAborted ? _T("aborted") : _T("completed")
+		, partsuccess
+		, (LPCTSTR)m_strFilename);
+
+	if (::IsWindow(theApp.emuledlg->m_hWnd)) {
+		AcquireImportOperationContext(pContext);
+		if (!theApp.emuledlg->PostMessage(TM_IMPORTPARTFINISHED, bImportAborted ? 1 : 0, (LPARAM)pContext))
+			ReleaseImportOperationContext(pContext);
 	}
 
 	return true;
@@ -690,14 +733,21 @@ BOOL CAddFileThread::InitInstance()
 
 int CAddFileThread::Run()
 {
-	DbgSetThreadName(m_partfile && m_partfile->GetFileOp() == PFOP_IMPORTPARTS ? "ImportingParts %s" : "Hashing %s", (LPCTSTR)m_strFilename);
-	if (!(m_pOwner || m_partfile) || m_strFilename.IsEmpty() || theApp.IsClosing())
+	DbgSetThreadName(m_pImportOperationContext != NULL ? "ImportingParts %s" : "Hashing %s", (LPCTSTR)m_strFilename);
+	if (!(m_pOwner || m_partfile || m_pImportOperationContext) || m_strFilename.IsEmpty() || theApp.IsClosing()) {
+		if (m_pImportOperationContext != NULL) {
+			ReleaseImportOperationContext(m_pImportOperationContext);
+			m_pImportOperationContext = NULL;
+		}
 		return 0;
+	}
 
 	(void)CoInitialize(NULL);
 
-	if (m_partfile && m_partfile->GetFileOp() == PFOP_IMPORTPARTS) {
+	if (m_pImportOperationContext != NULL) {
 		ImportParts();
+		ReleaseImportOperationContext(m_pImportOperationContext);
+		m_pImportOperationContext = NULL;
 		CoUninitialize();
 		return 0;
 	}
@@ -1297,6 +1347,34 @@ void CSharedFileList::ClearKadSourcePublishInfo()
 {
 	for (const CKnownFilesMap::CPair *pair = m_Files_map.PGetFirstAssoc(); pair != NULL; pair = m_Files_map.PGetNextAssoc(pair))
 		pair->value->SetLastPublishTimeKadSrc(0, 0);
+}
+
+bool CSharedFileList::CanClientBrowseSharedFile(const CKnownFile *file, const CUpDownClient *client) const
+{
+	if (file == NULL)
+		return false;
+
+	if (thePrefs.CanSeeShares() == vsfaNobody)
+		return false;
+	if (thePrefs.CanSeeShares() == vsfaFriends && (client == NULL || !client->IsFriend()))
+		return false;
+	if (client == NULL)
+		return true;
+
+	int iPermission = file->GetPermissions();
+	if (iPermission < 0)
+		iPermission = thePrefs.GetSharePermissions();
+
+	switch (iPermission) {
+	case PERM_ALL:
+		return true;
+	case PERM_FRIENDS:
+		return client->IsFriend();
+	case PERM_NOONE:
+		return false;
+	default:
+		return true;
+	}
 }
 
 void CSharedFileList::CreateOfferedFilePacket(CKnownFile *cur_file, CSafeMemFile &files

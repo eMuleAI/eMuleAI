@@ -168,6 +168,8 @@ public:
 	static uint32	m_minupload;
 	static uint32	m_maxupload;
 	static uint32	m_maxdownload;
+	static uint32	m_lastmaxupload;
+	static uint32	m_lastmaxdownload;
 	static CStringA m_strBindAddrA;
 	static CStringW m_strBindAddrW;
 	static uint16	port;
@@ -523,6 +525,9 @@ public:
 	static bool		m_bUseChatCaptchas;
 
 	static UINT		filterlevel;
+	static bool		m_bAutoIPFilterUpdate;
+	static int		m_nIPFilterUpdatePeriodDays;
+	static time_t	m_tLastIPFilterUpdate;
 	static UINT		m_uFileBufferSize;
 	static INT_PTR	m_iQueueSize;
 	static int		m_iCommitFiles;
@@ -733,6 +738,8 @@ public:
 	static uchar* GetUserHash() { return userhash; }
 	static uint32	GetMinUpload() { return m_minupload; }
 	static uint32	GetMaxUpload() { return m_maxupload; }
+	static uint32	GetLastMaxUpload() { return m_lastmaxupload; }
+	static uint32	GetLastMaxDownload() { return m_lastmaxdownload; }
 	static bool		IsICHEnabled() { return ICH; }
 	static bool		GetAutoUpdateServerList() { return m_bAutoUpdateServerList; }
 
@@ -855,18 +862,34 @@ public:
 	static int		m_iDownloadInspector;
 	static bool		m_bDownloadInspectorFake;
 	static bool		m_bDownloadInspectorDRM;
+	static bool		m_bDownloadInspectorAutoRenameToMajorityName;
 	static int		m_iDownloadInspectorCheckPeriod;
 	static int		m_iDownloadInspectorCompletedThreshold;
 	static int		m_iDownloadInspectorZeroPercentageThreshold;
 	static int		m_iDownloadInspectorCompressionThreshold;
 	static bool		m_bDownloadInspectorBypassZeroPercentage;
 	static int		m_iDownloadInspectorCompressionThresholdToBypassZero;
+	static bool		m_bDownloadInspectorAutoDeleteEnabled;
+	static bool		m_bDownloadInspectorAutoDeleteAddedBeforeEnabled;
+	static int		m_iDownloadInspectorAutoDeleteAddedBeforeDays;
+	static bool		m_bDownloadInspectorAutoDeleteLastSeenCompleteBeforeEnabled;
+	static int		m_iDownloadInspectorAutoDeleteLastSeenCompleteBeforeDays;
+	static bool		m_bDownloadInspectorAutoDeleteLastReceivedBeforeEnabled;
+	static int		m_iDownloadInspectorAutoDeleteLastReceivedBeforeDays;
+	static bool		m_bDownloadInspectorAutoDeleteDownloadedLessThanPercentEnabled;
+	static int		m_iDownloadInspectorAutoDeleteDownloadedLessThanPercent;
+	static bool		m_bDownloadInspectorAutoDeleteDownloadedLessThanMbEnabled;
+	static int		m_iDownloadInspectorAutoDeleteDownloadedLessThanMb;
+	static bool		m_bDownloadInspectorAutoDeleteBackupEd2kLinks;
+	static bool		m_bDownloadInspectorAutoDeleteDontMarkAsCanceled;
 	static int		GetDownloadInspector() { return m_iDownloadInspector; };
 	static void		SetDownloadInspector(int in) { m_iDownloadInspector = in; }
 	static bool		GetDownloadInspectorFake() { return m_bDownloadInspectorFake; }
 	static void		SetDownloadInspectorFake(bool in) { m_bDownloadInspectorFake = in; }
 	static bool		GetDownloadInspectorDRM() { return m_bDownloadInspectorDRM; }
 	static void		SetDownloadInspectorDRM(bool in) { m_bDownloadInspectorDRM = in; }
+	static bool		IsDownloadInspectorAutoRenameToMajorityName() { return m_bDownloadInspectorAutoRenameToMajorityName; }
+	static void		SetDownloadInspectorAutoRenameToMajorityName(bool in) { m_bDownloadInspectorAutoRenameToMajorityName = in; }
 	static bool		m_bDownloadInspectorInvalidExt;
 	static bool		IsDownloadInspectorInvalidExt() { return m_bDownloadInspectorInvalidExt; }
 	static int		GetDownloadInspectorCheckPeriod() { return m_iDownloadInspectorCheckPeriod; };
@@ -881,6 +904,32 @@ public:
 	static void		SetDownloadInspectorBypassZeroPercentage(bool in) { m_bDownloadInspectorBypassZeroPercentage = in; }
 	static int		GetDownloadInspectorCompressionThresholdToBypassZero() { return m_iDownloadInspectorCompressionThresholdToBypassZero; };
 	static void		SetDownloadInspectorCompressionThresholdToBypassZero(int in) { m_iDownloadInspectorCompressionThresholdToBypassZero = in; }
+	static bool		IsDownloadInspectorAutoDeleteEnabled() { return m_bDownloadInspectorAutoDeleteEnabled; }
+	static void		SetDownloadInspectorAutoDeleteEnabled(bool in) { m_bDownloadInspectorAutoDeleteEnabled = in; }
+	static bool		IsDownloadInspectorAutoDeleteAddedBeforeEnabled() { return m_bDownloadInspectorAutoDeleteAddedBeforeEnabled; }
+	static void		SetDownloadInspectorAutoDeleteAddedBeforeEnabled(bool in) { m_bDownloadInspectorAutoDeleteAddedBeforeEnabled = in; }
+	static int		GetDownloadInspectorAutoDeleteAddedBeforeDays() { return m_iDownloadInspectorAutoDeleteAddedBeforeDays; }
+	static void		SetDownloadInspectorAutoDeleteAddedBeforeDays(int in) { m_iDownloadInspectorAutoDeleteAddedBeforeDays = in; }
+	static bool		IsDownloadInspectorAutoDeleteLastSeenCompleteBeforeEnabled() { return m_bDownloadInspectorAutoDeleteLastSeenCompleteBeforeEnabled; }
+	static void		SetDownloadInspectorAutoDeleteLastSeenCompleteBeforeEnabled(bool in) { m_bDownloadInspectorAutoDeleteLastSeenCompleteBeforeEnabled = in; }
+	static int		GetDownloadInspectorAutoDeleteLastSeenCompleteBeforeDays() { return m_iDownloadInspectorAutoDeleteLastSeenCompleteBeforeDays; }
+	static void		SetDownloadInspectorAutoDeleteLastSeenCompleteBeforeDays(int in) { m_iDownloadInspectorAutoDeleteLastSeenCompleteBeforeDays = in; }
+	static bool		IsDownloadInspectorAutoDeleteLastReceivedBeforeEnabled() { return m_bDownloadInspectorAutoDeleteLastReceivedBeforeEnabled; }
+	static void		SetDownloadInspectorAutoDeleteLastReceivedBeforeEnabled(bool in) { m_bDownloadInspectorAutoDeleteLastReceivedBeforeEnabled = in; }
+	static int		GetDownloadInspectorAutoDeleteLastReceivedBeforeDays() { return m_iDownloadInspectorAutoDeleteLastReceivedBeforeDays; }
+	static void		SetDownloadInspectorAutoDeleteLastReceivedBeforeDays(int in) { m_iDownloadInspectorAutoDeleteLastReceivedBeforeDays = in; }
+	static bool		IsDownloadInspectorAutoDeleteDownloadedLessThanPercentEnabled() { return m_bDownloadInspectorAutoDeleteDownloadedLessThanPercentEnabled; }
+	static void		SetDownloadInspectorAutoDeleteDownloadedLessThanPercentEnabled(bool in) { m_bDownloadInspectorAutoDeleteDownloadedLessThanPercentEnabled = in; }
+	static int		GetDownloadInspectorAutoDeleteDownloadedLessThanPercent() { return m_iDownloadInspectorAutoDeleteDownloadedLessThanPercent; }
+	static void		SetDownloadInspectorAutoDeleteDownloadedLessThanPercent(int in) { m_iDownloadInspectorAutoDeleteDownloadedLessThanPercent = in; }
+	static bool		IsDownloadInspectorAutoDeleteDownloadedLessThanMbEnabled() { return m_bDownloadInspectorAutoDeleteDownloadedLessThanMbEnabled; }
+	static void		SetDownloadInspectorAutoDeleteDownloadedLessThanMbEnabled(bool in) { m_bDownloadInspectorAutoDeleteDownloadedLessThanMbEnabled = in; }
+	static int		GetDownloadInspectorAutoDeleteDownloadedLessThanMb() { return m_iDownloadInspectorAutoDeleteDownloadedLessThanMb; }
+	static void		SetDownloadInspectorAutoDeleteDownloadedLessThanMb(int in) { m_iDownloadInspectorAutoDeleteDownloadedLessThanMb = in; }
+	static bool		IsDownloadInspectorAutoDeleteBackupEd2kLinksEnabled() { return m_bDownloadInspectorAutoDeleteBackupEd2kLinks; }
+	static void		SetDownloadInspectorAutoDeleteBackupEd2kLinksEnabled(bool in) { m_bDownloadInspectorAutoDeleteBackupEd2kLinks = in; }
+	static bool		IsDownloadInspectorAutoDeleteDontMarkAsCanceledEnabled() { return m_bDownloadInspectorAutoDeleteDontMarkAsCanceled; }
+	static void		SetDownloadInspectorAutoDeleteDontMarkAsCanceledEnabled(bool in) { m_bDownloadInspectorAutoDeleteDontMarkAsCanceled = in; }
 
 	static bool		m_bGroupKnownAtTheBottom;
 	static bool		GetGroupKnownAtTheBottom() { return m_bGroupKnownAtTheBottom; }
@@ -932,6 +981,33 @@ public:
 	static bool		m_bAllowDSTTimeTolerance;
 	static bool		GetAllowDSTTimeTolerance() { return m_bAllowDSTTimeTolerance; }
 	static void		SetAllowDSTTimeTolerance(bool on) { m_bAllowDSTTimeTolerance = on; }
+	static bool		m_bSpreadbarSetStatus;
+	static bool		GetSpreadbarSetStatus() { return m_bSpreadbarSetStatus; }
+	static void		SetSpreadbarSetStatus(bool on) { m_bSpreadbarSetStatus = on; }
+	static int		m_iHideOvershares;
+	static int		GetHideOvershares() { return m_iHideOvershares; }
+	static void		SetHideOvershares(int value) { m_iHideOvershares = value; }
+	static bool		m_bSelectiveShare;
+	static bool		IsSelectiveShareEnabled() { return m_bSelectiveShare; }
+	static void		SetSelectiveShare(bool on) { m_bSelectiveShare = on; }
+	static bool		m_bShareOnlyTheNeed;
+	static bool		GetShareOnlyTheNeed() { return m_bShareOnlyTheNeed; }
+	static void		SetShareOnlyTheNeed(bool on) { m_bShareOnlyTheNeed = on; }
+	static int		m_iPowerShareMode;
+	static int		GetPowerShareMode() { return m_iPowerShareMode; }
+	static void		SetPowerShareMode(int value) { m_iPowerShareMode = value; }
+	static bool		m_bPowerShareInternalPrio;
+	static bool		IsPowerShareInternalPrioEnabled() { return m_bPowerShareInternalPrio; }
+	static void		SetPowerShareInternalPrio(bool on) { m_bPowerShareInternalPrio = on; }
+	static int		m_iPowerShareLimit;
+	static int		GetPowerShareLimit() { return m_iPowerShareLimit; }
+	static void		SetPowerShareLimit(int value) { m_iPowerShareLimit = value; }
+	static int		m_iSharePermissions;
+	static int		GetSharePermissions() { return m_iSharePermissions; }
+	static void		SetSharePermissions(int value) { m_iSharePermissions = value; }
+	static bool		m_bSharePermissionColorRows;
+	static bool		GetSharePermissionColorRows() { return m_bSharePermissionColorRows; }
+	static void		SetSharePermissionColorRows(bool on) { m_bSharePermissionColorRows = on; }
 
 	static bool		m_bEmulateMLDonkey;
 	static bool		m_bEmulateEdonkey;
@@ -1679,6 +1755,8 @@ public:
 
 	static void		SetMaxUpload(uint32 val);
 	static void		SetMaxDownload(uint32 val);
+	static void		SetLastMaxUpload(uint32 val);
+	static void		SetLastMaxDownload(uint32 val);
 
 	static WINDOWPLACEMENT GetEmuleWindowPlacement() { return EmuleWindowPlacement; }
 	static void		SetWindowLayout(const WINDOWPLACEMENT& in) { EmuleWindowPlacement = in; }
@@ -1725,6 +1803,12 @@ public:
 	static bool		GetRemoveToBin() { return m_bRemove2bin; }
 	static bool		GetFilterServerByIP() { return filterserverbyip; }
 	static bool		GetDontFilterPrivateIPs() { return m_bDontFilterPrivateIPs; }
+	static bool		GetAutoIPFilterUpdate() { return m_bAutoIPFilterUpdate; }
+	static void		SetAutoIPFilterUpdate(bool bEnable) { m_bAutoIPFilterUpdate = bEnable; }
+	static int		GetIPFilterUpdatePeriodDays() { return m_nIPFilterUpdatePeriodDays; }
+	static void		SetIPFilterUpdatePeriodDays(int nDays) { m_nIPFilterUpdatePeriodDays = max(1, nDays); }
+	static time_t		GetLastIPFilterUpdate() { return m_tLastIPFilterUpdate; }
+	static void		SetLastIPFilterUpdate(time_t t) { m_tLastIPFilterUpdate = t; }
 
 	static bool		GetLog2Disk() { return log2disk; }
 	static bool		GetDebug2Disk() { return m_bVerbose && debug2disk; }

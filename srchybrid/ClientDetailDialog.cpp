@@ -28,15 +28,190 @@
 #include "UserMsgs.h"
 #include "ListenSocket.h"
 #include "preferences.h"
+#include "ClientList.h"
 #include "eMuleAI/GeoLite2.h"
 #include "emuledlg.h" 
 #include "eMuleAI/DarkMode.h"
+#include <unordered_map>
 
 #ifdef _DEBUG
 #define new DEBUG_NEW
 #undef THIS_FILE
 static char THIS_FILE[] = __FILE__;
 #endif
+
+namespace
+{
+	class CClientDetailRuntimeToken : public CObject
+	{
+	public:
+		explicit CClientDetailRuntimeToken(ClientRuntimeID uRuntimeID)
+			: m_uRuntimeID(uRuntimeID)
+		{
+		}
+
+		ClientRuntimeID GetRuntimeID() const
+		{
+			return m_uRuntimeID;
+		}
+
+	private:
+		ClientRuntimeID m_uRuntimeID;
+	};
+
+	CCriticalSection s_csClientDetailRuntimeTokens;
+	std::unordered_map<const CObject*, ClientRuntimeID> s_ClientDetailRuntimeTokens;
+
+	CObject* CreateClientDetailToken(ClientRuntimeID uRuntimeID)
+	{
+		if (uRuntimeID == 0)
+			return NULL;
+
+		CObject* pToken = new CClientDetailRuntimeToken(uRuntimeID);
+		{
+			CSingleLock tokenLock(&s_csClientDetailRuntimeTokens, TRUE);
+			s_ClientDetailRuntimeTokens[pToken] = uRuntimeID;
+		}
+		return pToken;
+	}
+
+	void DestroyClientDetailToken(CObject* pToken)
+	{
+		if (pToken == NULL)
+			return;
+
+		{
+			CSingleLock tokenLock(&s_csClientDetailRuntimeTokens, TRUE);
+			const auto itToken = s_ClientDetailRuntimeTokens.find(pToken);
+			if (itToken != s_ClientDetailRuntimeTokens.end())
+				s_ClientDetailRuntimeTokens.erase(itToken);
+		}
+		delete static_cast<const CClientDetailRuntimeToken*>(pToken);
+	}
+
+	ClientRuntimeID ClientDetailRuntimeIDFromToken(const CObject* pToken)
+	{
+		if (pToken == NULL)
+			return 0;
+
+		{
+			CSingleLock tokenLock(&s_csClientDetailRuntimeTokens, TRUE);
+			const auto itToken = s_ClientDetailRuntimeTokens.find(pToken);
+			if (itToken != s_ClientDetailRuntimeTokens.end())
+				return itToken->second;
+		}
+
+		const ULONG_PTR uTokenValue = reinterpret_cast<ULONG_PTR>(pToken);
+		return (uTokenValue & 1) != 0 ? static_cast<ClientRuntimeID>(uTokenValue >> 1) : 0;
+	}
+
+	CObject* CreateTrackedClientDetailToken(const CUpDownClient* pClient)
+	{
+		if (pClient == NULL || theApp.clientlist == NULL)
+			return NULL;
+
+		CUpDownClient* pTrackedClient = theApp.clientlist->AcquireTrackedClientByPointer(pClient);
+		if (pTrackedClient == NULL)
+			return NULL;
+
+		CObject* pToken = CreateClientDetailToken(pTrackedClient->GetRuntimeID());
+		pTrackedClient->ReleaseRuntimeReference();
+		return pToken;
+	}
+}
+
+static void SetClientDetailText(CWnd* pWnd, int nControlID, LPCTSTR pszText)
+{
+	if (pWnd != NULL)
+		pWnd->SetDlgItemText(nControlID, pszText);
+}
+
+static void ClearClientDetailView(CClientDetailPage* pPage)
+{
+	if (pPage == NULL)
+		return;
+
+	CWnd* pFlagIcon = pPage->GetDlgItem(IDC_COUNTRY_FLAG_ICON);
+	if (pFlagIcon != NULL) {
+		((CStatic*)pFlagIcon)->SetIcon(NULL);
+		pFlagIcon->ShowWindow(SW_HIDE);
+	}
+
+	SetClientDetailText(pPage, IDC_DNAME, _T("?"));
+	SetClientDetailText(pPage, IDC_DHASH, _T("?"));
+	SetClientDetailText(pPage, IDC_DSOFT, _T("?"));
+	SetClientDetailText(pPage, IDC_GEOLOCATION_TXT, _T("?"));
+	SetClientDetailText(pPage, IDC_CLIENT_IP, _T("?"));
+	SetClientDetailText(pPage, IDC_OBFUSCATION_STAT, _T("?"));
+	SetClientDetailText(pPage, IDC_DID, _T("?"));
+	SetClientDetailText(pPage, IDC_DSIP, _T("?"));
+	SetClientDetailText(pPage, IDC_DSNAME, _T("?"));
+	SetClientDetailText(pPage, IDC_LEECHER, _T("?"));
+	SetClientDetailText(pPage, IDC_PUNISHMENT, _T("?"));
+	SetClientDetailText(pPage, IDC_DDOWNLOADING, _T("-"));
+	SetClientDetailText(pPage, IDC_UPLOADING, _T("-"));
+	SetClientDetailText(pPage, IDC_DDUP, _T("?"));
+	SetClientDetailText(pPage, IDC_DDOWN, _T("?"));
+	SetClientDetailText(pPage, IDC_DAVUR, _T("?"));
+	SetClientDetailText(pPage, IDC_DAVDR, _T("?"));
+	SetClientDetailText(pPage, IDC_DUPTOTAL, _T("?"));
+	SetClientDetailText(pPage, IDC_DDOWNTOTAL, _T("?"));
+	SetClientDetailText(pPage, IDC_DRATIO, _T("?"));
+	SetClientDetailText(pPage, IDC_CDIDENT, _T("?"));
+	SetClientDetailText(pPage, IDC_DRATING, _T("?"));
+	SetClientDetailText(pPage, IDC_DSCORE, _T("-"));
+	SetClientDetailText(pPage, IDC_CLIENTDETAIL_KADCON, _T("?"));
+}
+
+class CScopedDetailClientRef
+{
+public:
+	CScopedDetailClientRef()
+		: m_pClient(NULL)
+	{
+	}
+
+	explicit CScopedDetailClientRef(ClientRuntimeID uRuntimeID)
+		: m_pClient(NULL)
+	{
+		AttachRuntimeID(uRuntimeID);
+	}
+
+	~CScopedDetailClientRef()
+	{
+		Release();
+	}
+
+	void AttachRuntimeID(ClientRuntimeID uRuntimeID)
+	{
+		Release();
+		if (uRuntimeID != 0 && theApp.clientlist != NULL)
+			m_pClient = theApp.clientlist->AcquireTrackedClientByRuntimeID(uRuntimeID);
+	}
+
+	CUpDownClient* Get() const
+	{
+		return m_pClient;
+	}
+
+	void Release()
+	{
+		if (m_pClient != NULL) {
+			m_pClient->ReleaseRuntimeReference();
+			m_pClient = NULL;
+		}
+	}
+
+private:
+	CUpDownClient* m_pClient;
+};
+
+static CUpDownClient* ResolveClientDetailClient(const CObject* pToken, CScopedDetailClientRef& clientRef)
+{
+	const ClientRuntimeID uRuntimeID = ClientDetailRuntimeIDFromToken(pToken);
+	clientRef.AttachRuntimeID(uRuntimeID);
+	return clientRef.Get();
+}
 
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -91,10 +266,17 @@ BOOL CClientDetailPage::OnSetActive()
 		return FALSE;
 
 	if (m_bDataChanged) {
-		CUpDownClient *client = static_cast<CUpDownClient*>((*m_paClients)[0]);
+		const CObject* pToken = (m_paClients != NULL && m_paClients->GetSize() > 0) ? (*m_paClients)[0] : NULL;
+		CScopedDetailClientRef clientRef;
+		CUpDownClient* client = ResolveClientDetailClient(pToken, clientRef);
+		if (client == NULL) {
+			ClearClientDetailView(this);
+			m_bDataChanged = false;
+			return TRUE;
+		}
 
-		SetDlgItemText(IDC_DNAME, (client->GetUserName() ? client->GetUserName() : _T("?")));
-		SetDlgItemText(IDC_DHASH, (client->HasValidHash() ? (LPCTSTR)md4str(client->GetUserHash()) : _T("?")));
+			SetDlgItemText(IDC_DNAME, (client->GetUserName() ? client->GetUserName() : _T("?")));
+			SetDlgItemText(IDC_DHASH, (client->HasValidHash() ? (LPCTSTR)md4str(client->GetUserHash()) : _T("?")));
 		SetDlgItemText(IDC_DSOFT, client->DbgGetFullClientSoftVer());
 
 		bool longCountryName = true;
@@ -244,7 +426,7 @@ void CClientDetailPage::Localize()
 	SetDlgItemText(IDC_STATIC_BAD_CLIENT_TYPE, GetResString(_T("REASON")));
 	SetDlgItemText(IDC_STATIC_PUNISHMENT, GetResString(_T("PUNISHMENT")) + _T(':'));
 	SetDlgItemText(IDC_STATIC_SOFTWARE, GetResString(_T("CD_CSOFT")) + _T(':'));
-	SetDlgItemText(IDC_STATIC_PUNISHMENT, GetResString(_T("CD_UIP")));
+	SetDlgItemText(IDC_STATIC_CLIENT_IP, GetResString(_T("CD_UIP")));
 }
 
 
@@ -266,16 +448,60 @@ void CClientDetailDialog::Localize()
 CClientDetailDialog::CClientDetailDialog(CUpDownClient *pClient, CListCtrlItemWalk *pListCtrl)
 	: CListViewWalkerPropertySheet(pListCtrl)
 {
-	m_aItems.Add(pClient);
+	if (pListCtrl != NULL)
+		AddRuntimeToken(pClient);
+	else
+		AddTrackedRuntimeToken(pClient);
 	Construct();
 }
 
 CClientDetailDialog::CClientDetailDialog(const CSimpleArray<CUpDownClient*> *paClients, CListCtrlItemWalk *pListCtrl)
 	: CListViewWalkerPropertySheet(pListCtrl)
 {
-	for (int i = 0; i < paClients->GetSize(); ++i)
-		m_aItems.Add((*paClients)[i]);
+	for (int i = 0; i < paClients->GetSize(); ++i) {
+		CUpDownClient* pClient = (*paClients)[i];
+		if (pListCtrl != NULL)
+			AddRuntimeToken(pClient);
+		else
+			AddTrackedRuntimeToken(pClient);
+	}
 	Construct();
+}
+
+CClientDetailDialog::~CClientDetailDialog()
+{
+	DestroyOwnedRuntimeTokens();
+}
+
+void CClientDetailDialog::AddRuntimeToken(CUpDownClient *pClient)
+{
+	if (pClient == NULL)
+		return;
+
+	CObject* pToken = CreateTrackedClientDetailToken(pClient);
+	if (pToken != NULL) {
+		m_aOwnedRuntimeTokens.Add(pToken);
+		m_aItems.Add(pToken);
+	}
+}
+
+void CClientDetailDialog::AddTrackedRuntimeToken(CUpDownClient *pClient)
+{
+	if (pClient == NULL)
+		return;
+
+	CObject* pToken = CreateTrackedClientDetailToken(pClient);
+	if (pToken != NULL) {
+		m_aOwnedRuntimeTokens.Add(pToken);
+		m_aItems.Add(pToken);
+	}
+}
+
+void CClientDetailDialog::DestroyOwnedRuntimeTokens()
+{
+	for (INT_PTR i = 0; i < m_aOwnedRuntimeTokens.GetCount(); ++i)
+		DestroyClientDetailToken(static_cast<CObject*>(m_aOwnedRuntimeTokens[i]));
+	m_aOwnedRuntimeTokens.RemoveAll();
 }
 
 void CClientDetailDialog::Construct()
@@ -293,6 +519,7 @@ void CClientDetailDialog::Construct()
 void CClientDetailDialog::OnDestroy()
 {
 	CListViewWalkerPropertySheet::OnDestroy();
+	DestroyOwnedRuntimeTokens();
 }
 
 BOOL CClientDetailDialog::OnInitDialog()

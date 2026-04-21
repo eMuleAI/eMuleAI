@@ -46,6 +46,8 @@ public:
 	void	Show()								{ ShowWindow(SW_SHOW); }
 	void	Localize();
 	void	ShowSelectedUserDetails();
+	virtual CObject* GetNextSelectableItem() override;
+	virtual CObject* GetPrevSelectableItem() override;
 	typedef std::map<CUpDownClient*, CUpDownClient*> ListItemsMapType;
 	ListItemsMapType m_ListItemsMap;
 	

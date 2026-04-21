@@ -77,6 +77,13 @@ namespace
 	CBarShader* g_pPartFileLoadBar = NULL;
 	CBarShader* g_pPartFileChunkBar = NULL;
 
+	enum EAutoRenameToMajorityAction
+	{
+		ARTM_NONE = 0,
+		ARTM_LOG_ONLY = 1,
+		ARTM_RENAME = 2
+	};
+
 	CBarShader& BB_GetPartFileLoadBar()
 	{
 		if (g_pPartFileLoadBar == NULL)
@@ -89,6 +96,12 @@ namespace
 		if (g_pPartFileChunkBar == NULL)
 			g_pPartFileChunkBar = new CBarShader(16);
 		return *g_pPartFileChunkBar;
+	}
+
+	PartFileRuntimeID GetNextPartFileRuntimeID()
+	{
+		static volatile LONG s_lNextPartFileRuntimeID = 0;
+		return (PartFileRuntimeID)::InterlockedIncrement(&s_lNextPartFileRuntimeID);
 	}
 }
 
@@ -336,15 +349,30 @@ void CPartFile::Init()
 	m_bAutoDownPriority = thePrefs.GetNewAutoDown();
 	m_bDelayDelete = false;
 	m_bpreviewprio = false;
+	m_bProcessingPendingAICHRecovery = false;
+	m_bAutoRenameToMajorityName = thePrefs.IsDownloadInspectorAutoRenameToMajorityName();
+	m_iLastAutoRenameToMajorityAction = ARTM_NONE;
+	m_uRuntimeID = GetNextPartFileRuntimeID();
+	m_uNextImportOperationID = 0;
+	m_uActiveImportOperationID = 0;
+	m_pImportOperationContext = NULL;
 	m_lastSoureCacheProcesstime = ::GetTickCount();
 	m_tLastChecked = 0;
+	m_tLastAutoDeleteEvaluation = 0;
+	m_tNextAutoDeleteCheck = 0;
+	m_tLastSeenCompleteForAutoDelete = 0;
+	m_bAutoDeletePendingWhileBusy = false;
+	m_lAutoDeleteStateGeneration = 0;
 	m_bSaveSourcesInQueue = false;
 	m_bFlushPartMetInQueue = false;
+	m_strLastAutoRenameToMajorityCandidate.Empty();
 	PartMetFileData = new PartMetFileDataStruct;
 }
 
 CPartFile::~CPartFile()
 {
+	CancelImportPartsOperation(false);
+
 	// Barry - Ensure all buffered data is written unless shutdown already stopped the writer thread.
 	if ((HANDLE)m_hpartfile != INVALID_HANDLE_VALUE) {
 		const CPartFileWriteThread* pThread = theApp.m_pPartFileWriteThread;
@@ -363,6 +391,7 @@ CPartFile::~CPartFile()
 		delete[] item->data;
 		delete item;
 	}
+	m_PendingAICHRecoveryParts.RemoveAll();
 	delete m_pAICHRecoveryHashSet;
 
 	theApp.clientlist->CleanUp(this);
@@ -533,6 +562,149 @@ void CPartFile::CreatePartFile(UINT cat)
 	SavePartFile();
 	m_CorruptionBlackBox.Init(m_nFileSize);
 	SetActive(theApp.IsConnected());
+}
+
+void CPartFile::ResetAutoRenameToMajorityTracking()
+{
+	m_iLastAutoRenameToMajorityAction = ARTM_NONE;
+	m_strLastAutoRenameToMajorityCandidate.Empty();
+}
+
+bool CPartFile::GetMajoritySourceFileName(CString& strMajorityFileName)
+{
+	strMajorityFileName.Empty();
+
+	int iMaxCount = 0;
+	CString strCandidate;
+	int iCandidateCount = 0;
+	for (POSITION pos = m_mapSourceFileNameCounts.GetStartPosition(); pos != NULL;) {
+		m_mapSourceFileNameCounts.GetNextAssoc(pos, strCandidate, iCandidateCount);
+		if (iCandidateCount > iMaxCount && !strCandidate.IsEmpty()) {
+			iMaxCount = iCandidateCount;
+			strMajorityFileName = strCandidate;
+		}
+	}
+
+	return !strMajorityFileName.IsEmpty();
+}
+
+void CPartFile::ApplyAutoRenameToMajorityName()
+{
+	if (status == PS_COMPLETE || status == PS_COMPLETING) {
+		ResetAutoRenameToMajorityTracking();
+		return;
+	}
+
+	if (!m_bAutoRenameToMajorityName) {
+		ResetAutoRenameToMajorityTracking();
+		return;
+	}
+
+	const int iAction = thePrefs.GetDownloadInspector();
+	if (iAction != ARTM_LOG_ONLY && iAction != ARTM_RENAME) {
+		ResetAutoRenameToMajorityTracking();
+		return;
+	}
+
+	CString strMajorityFileName;
+	if (!GetMajoritySourceFileName(strMajorityFileName)) {
+		ResetAutoRenameToMajorityTracking();
+		return;
+	}
+
+	const CString strCurrentFileName(GetFileName());
+	if (CompareLocaleStringNoCase(strCurrentFileName, strMajorityFileName) == 0) {
+		ResetAutoRenameToMajorityTracking();
+		return;
+	}
+
+	if (m_iLastAutoRenameToMajorityAction == iAction && CompareLocaleStringNoCase(m_strLastAutoRenameToMajorityCandidate, strMajorityFileName) == 0)
+		return;
+
+	CString strLogMessage;
+	if (iAction == ARTM_LOG_ONLY) {
+		strLogMessage.Format(GetResString(_T("DOWNLOAD_INSPECTOR_AUTO_RENAME_TO_MAJORITY_NAME_LOG_MESSAGE")), (LPCTSTR)EscPercent(strCurrentFileName), (LPCTSTR)EscPercent(strMajorityFileName));
+		theApp.QueueLogLine(true, (LPCTSTR)EscPercent(strLogMessage));
+	} else {
+		SetFileName(strMajorityFileName, true);
+		const CString strRenamedFileName(GetFileName());
+		if (CompareLocaleStringNoCase(strCurrentFileName, strRenamedFileName) == 0) {
+			ResetAutoRenameToMajorityTracking();
+			return;
+		}
+
+		UpdateDisplayedInfo();
+		if (SavePartFile()) {
+			strLogMessage.Format(GetResString(_T("DOWNLOAD_INSPECTOR_AUTO_RENAME_TO_MAJORITY_NAME_RENAMED_MESSAGE")), (LPCTSTR)EscPercent(strCurrentFileName), (LPCTSTR)EscPercent(strRenamedFileName));
+			theApp.QueueLogLine(true, (LPCTSTR)EscPercent(strLogMessage));
+		}
+	}
+
+	m_iLastAutoRenameToMajorityAction = iAction;
+	m_strLastAutoRenameToMajorityCandidate = strMajorityFileName;
+}
+
+void CPartFile::SetAutoRenameToMajorityName(bool bEnabled)
+{
+	if (m_bAutoRenameToMajorityName == bEnabled)
+		return;
+
+	m_bAutoRenameToMajorityName = bEnabled;
+	ResetAutoRenameToMajorityTracking();
+	if (m_bAutoRenameToMajorityName)
+		ApplyAutoRenameToMajorityName();
+}
+
+void CPartFile::UpdateSourceFileName(CUpDownClient* pSource)
+{
+	if (pSource == NULL || status == PS_COMPLETE || status == PS_COMPLETING)
+		return;
+
+	CString strSourceFileName;
+	if (m_mapSourceFileNames.Lookup(pSource, strSourceFileName)) {
+		int iCount = 0;
+		if (m_mapSourceFileNameCounts.Lookup(strSourceFileName, iCount)) {
+			if (iCount <= 1)
+				m_mapSourceFileNameCounts.RemoveKey(strSourceFileName);
+			else
+				m_mapSourceFileNameCounts.SetAt(strSourceFileName, iCount - 1);
+		}
+		m_mapSourceFileNames.RemoveKey(pSource);
+	}
+
+	if (srclist.Find(pSource) != NULL) {
+		strSourceFileName = pSource->GetClientFilename();
+		if (!strSourceFileName.IsEmpty()) {
+			int iCount = 0;
+			m_mapSourceFileNames.SetAt(pSource, strSourceFileName);
+			if (m_mapSourceFileNameCounts.Lookup(strSourceFileName, iCount))
+				m_mapSourceFileNameCounts.SetAt(strSourceFileName, iCount + 1);
+			else
+				m_mapSourceFileNameCounts.SetAt(strSourceFileName, 1);
+		}
+	}
+
+	ApplyAutoRenameToMajorityName();
+}
+
+void CPartFile::RemoveSourceFileName(CUpDownClient* pSource)
+{
+	if (pSource == NULL || status == PS_COMPLETE || status == PS_COMPLETING)
+		return;
+
+	CString strSourceFileName;
+	if (m_mapSourceFileNames.Lookup(pSource, strSourceFileName)) {
+		int iCount = 0;
+		if (m_mapSourceFileNameCounts.Lookup(strSourceFileName, iCount)) {
+			if (iCount <= 1)
+				m_mapSourceFileNameCounts.RemoveKey(strSourceFileName);
+			else
+				m_mapSourceFileNameCounts.SetAt(strSourceFileName, iCount - 1);
+		}
+		m_mapSourceFileNames.RemoveKey(pSource);
+	}
+
+	ApplyAutoRenameToMajorityName();
 }
 
 /*
@@ -1539,6 +1711,17 @@ bool CPartFile::SavePartFile(bool bDontOverrideBak)
 		return false;
 	}
 
+	// Preserve the previous part.met snapshot before replacing it.
+	const CString strBakFile(m_fullname + PARTMET_BAK_EXT);
+	const CString strBakTmpFile(strBakFile + PARTMET_TMP_EXT);
+	DWORD dwBakError = ERROR_SUCCESS;
+	if (!CopyFileToTempAndReplace(m_fullname, strBakFile, strBakTmpFile, bDontOverrideBak, &dwBakError)) {
+		if (!bDontOverrideBak && theApp.CanWritePartMetFiles(GetTmpPath(), true)) {
+			DebugLogError(_T("Failed to create backup of %s (%s) - %s"),
+				(LPCTSTR)EscPercent(m_fullname), (LPCTSTR)EscPercent(GetFileName()), (LPCTSTR)EscPercent(GetErrorMessage(dwBakError)));
+		}
+	}
+
 	// after successfully writing the temporary part.met file...
 	DWORD dwReplaceError = ERROR_SUCCESS;
 	if (!ReplaceFileAtomically(strTmpFile, m_fullname, &dwReplaceError)) {
@@ -1551,18 +1734,6 @@ bool CPartFile::SavePartFile(bool bDontOverrideBak)
 		strError.AppendFormat(_T(" - %s"), (LPCTSTR)EscPercent(GetErrorMessage(dwReplaceError)));
 		LogError(_T("%s"), (LPCTSTR)strError);
 		return false;
-	}
-
-
-	// create a backup of the successfully written part.met file
-	const CString strBakFile(m_fullname + PARTMET_BAK_EXT);
-	const CString strBakTmpFile(strBakFile + PARTMET_TMP_EXT);
-	DWORD dwBakError = ERROR_SUCCESS;
-	if (!CopyFileToTempAndReplace(m_fullname, strBakFile, strBakTmpFile, bDontOverrideBak, &dwBakError)) {
-		if (!bDontOverrideBak && theApp.CanWritePartMetFiles(GetTmpPath(), true)) {
-			DebugLogError(_T("Failed to create backup of %s (%s) - %s"),
-				(LPCTSTR)EscPercent(m_fullname), (LPCTSTR)EscPercent(GetFileName()), (LPCTSTR)EscPercent(GetErrorMessage(dwBakError)));
-		}
 	}
 
 	return true;
@@ -2420,8 +2591,11 @@ void CPartFile::DrawStatusBar(CDC *dc, const CRect &rect, bool bFlat) /*const*/
 	}
 }
 
-void CPartFile::WritePartStatus(CSafeMemFile &file) const
+void CPartFile::WritePartStatus(CSafeMemFile &file, CUpDownClient *client)
 {
+	if (client != NULL && HideOvershares(file, client))
+		return;
+
 	uint16 uED2KPartCount = GetED2KPartCount();
 	file.WriteUInt16(uED2KPartCount);
 
@@ -2490,6 +2664,8 @@ uint32 CPartFile::Process(uint32 reducedownload, UINT icounter/*in percent*/)
 	if (thePrefs.m_iDbgHeap >= 2)
 		ASSERT_VALID(this);
 
+	ServiceDeferredMainThreadWork(false);
+
 	UINT nOldTransSourceCount = GetSrcStatisticsValue(DS_DOWNLOADING);
 	const DWORD curTick = ::GetTickCount();
 	if (curTick < m_nLastBufferFlushTime) {
@@ -2500,6 +2676,7 @@ uint32 CPartFile::Process(uint32 reducedownload, UINT icounter/*in percent*/)
 	// If buffer size exceeds limit, or if not written within time limit, flush data
 	if (m_nTotalBufferData > thePrefs.GetFileBufferSize() || curTick >= m_nLastBufferFlushTime + thePrefs.GetFileBufferTimeLimit())
 		FlushBuffer();
+	ServiceDeferredMainThreadWork(false);
 	//If data keeps arriving, flush to disk sometimes for extra safety
 	if (m_nFileFlushTime && curTick >= m_nFileFlushTime + SEC2MS(31) && m_hWrite != INVALID_HANDLE_VALUE) {
 		::FlushFileBuffers(m_hWrite);
@@ -2916,6 +3093,7 @@ void CPartFile::UpdatePartsInfo()
 	}
 	time_t tNow = time(NULL);
 	bool bRefresh = (tNow - m_nCompleteSourcesTime > 0);
+	UINT uCompleteSourcesCountInfoReceived = 0;
 
 	// Reset part counters
 	m_SrcPartFrequency.SetSize(GetPartCount());
@@ -2938,8 +3116,11 @@ void CPartFile::UpdatePartsInfo()
 					else
 						m_SrcIncPartFrequency[i] += static_cast<uint16>(cur_src->IsIncPartAvailable((uint16)i));
 				}
-				if (bRefresh)
+				if (bRefresh) {
 					acount.push_back(cur_src->GetUpCompleteSourcesCount());
+					if (cur_src->GetUpCompleteSourcesCount() > 0)
+						++uCompleteSourcesCountInfoReceived;
+				}
 			}
 		}
 	}
@@ -3003,6 +3184,23 @@ void CPartFile::UpdatePartsInfo()
 		}
 		m_nCompleteSourcesTime = tNow + MIN2S(1);
 	}
+
+	if (GetPartCount() == 0)
+		m_nVirtualCompleteSourcesCount = 0;
+	else {
+		m_nVirtualCompleteSourcesCount = _UI16_MAX;
+		for (INT_PTR i = GetPartCount(); --i >= 0;) {
+			if (m_nVirtualCompleteSourcesCount > m_SrcPartFrequency[i])
+				m_nVirtualCompleteSourcesCount = m_SrcPartFrequency[i];
+		}
+	}
+
+	UpdatePowerShareLimit(
+		m_nVirtualCompleteSourcesCount <= 5,
+		uCompleteSourcesCountInfoReceived > 1 && m_anStates[DS_TOOMANYCONNS] == 0 && m_anStates[DS_CONNECTING] == 0 && m_nVirtualCompleteSourcesCount == 1,
+		m_nCompleteSourcesCountHi > ((GetPowerShareLimit() >= 0) ? GetPowerShareLimit() : thePrefs.GetPowerShareLimit()));
+	SetHideOSAuthorized(m_nVirtualCompleteSourcesCount > 1);
+
 	NewSrcIncPartsInfo();
 	UpdateDisplayedInfo();
 }
@@ -3696,6 +3894,9 @@ void CPartFile::StopFile(bool bCancel)
 
 void CPartFile::StopPausedFile()
 {
+	if (m_pImportOperationContext != NULL || !m_PendingAICHRecoveryParts.IsEmpty() || HasPendingBufferedWriteBookkeeping())
+		ServiceDeferredMainThreadWork(true);
+
 	//Once an hour, remove any sources for files which are no longer active downloads
 	EPartFileStatus uState = GetStatus();
 	if ((uState == PS_PAUSED || uState == PS_INSUFFICIENT || uState == PS_ERROR) && !m_stopped && time(NULL) >= m_iLastPausePurge + HR2S(1))
@@ -4140,7 +4341,7 @@ Packet* CPartFile::CreateSrcInfoPacket(const CUpDownClient *forClient, uint8 byR
 			//and currently we just send them all.
 			int i = GetPartCount();
 			while (--i >= 0)
-				if (srcstatus[i] && (!reqstatus || !reqstatus[i]))
+				if ((srcstatus[i] & SC_AVAILABLE) != 0 && (!reqstatus || (reqstatus[i] & SC_AVAILABLE) == 0))
 					break;
 
 			if (i >= 0) { //found a needed part
@@ -5221,6 +5422,170 @@ void CPartFile::NotifyStatusChange()
 		theApp.emuledlg->transferwnd->GetDownloadList()->UpdateCurrentCategoryView(this);
 }
 
+ImportOperationContext* CPartFile::BeginImportPartsOperation()
+{
+	CancelImportPartsOperation(false);
+	TryFinalizeImportPartsOperation();
+
+	ImportOperationContext* pContext = new ImportOperationContext;
+	memset(pContext, 0, sizeof(*pContext));
+	pContext->nRefCount = 1;
+	pContext->uPartFileRuntimeID = m_uRuntimeID;
+	pContext->uOperationID = ++m_uNextImportOperationID;
+	if (pContext->uOperationID == 0)
+		pContext->uOperationID = ++m_uNextImportOperationID;
+	pContext->hStopEvent = ::CreateEvent(NULL, TRUE, FALSE, NULL);
+	if (pContext->hStopEvent == NULL) {
+		AddDebugLogLine(DLP_HIGH, false, _T("ImportParts: failed to create stop event for \"%s\""), (LPCTSTR)EscPercent(GetFileName()));
+		delete pContext;
+		return NULL;
+	}
+
+	md4cpy(pContext->aucFileHash, GetFileHash());
+	m_pImportOperationContext = pContext;
+	m_uActiveImportOperationID = pContext->uOperationID;
+	return AcquireImportOperationContext(pContext);
+}
+
+void CPartFile::CancelImportPartsOperation(bool bResetFileOp)
+{
+	if (m_pImportOperationContext != NULL) {
+		ImportOperationContext* pContext = m_pImportOperationContext;
+		m_pImportOperationContext = NULL;
+		m_uActiveImportOperationID = 0;
+		AbortImportOperationContext(pContext);
+		ReleaseImportOperationContext(pContext);
+	}
+
+	if (bResetFileOp && GetFileOp() == PFOP_IMPORTPARTS) {
+		SetFileOp(PFOP_NONE);
+		UpdateDisplayedInfo(true);
+	}
+}
+
+bool CPartFile::IsImportOperationCurrent(const ImportOperationContext* pContext) const
+{
+	return pContext != NULL
+		&& m_pImportOperationContext == pContext
+		&& pContext->uPartFileRuntimeID == m_uRuntimeID
+		&& pContext->uOperationID == m_uActiveImportOperationID;
+}
+
+void CPartFile::MarkImportPartQueued(ImportOperationContext* pContext) const
+{
+	if (pContext != NULL)
+		::InterlockedIncrement(&pContext->lQueuedBlocks);
+}
+
+void CPartFile::MarkImportPartHandled(ImportOperationContext* pContext)
+{
+	if (pContext == NULL)
+		return;
+
+	const LONG lQueuedBlocks = ::InterlockedDecrement(&pContext->lQueuedBlocks);
+	if (lQueuedBlocks < 0) {
+		ASSERT(0);
+		::InterlockedExchange(&pContext->lQueuedBlocks, 0);
+	}
+	TryFinalizeImportPartsOperation(pContext);
+}
+
+void CPartFile::TryFinalizeImportPartsOperation(const ImportOperationContext* pContext)
+{
+	ImportOperationContext* pCurrentContext = m_pImportOperationContext;
+	if (pCurrentContext == NULL)
+		return;
+
+	if (pContext != NULL && !IsImportOperationCurrent(pContext))
+		return;
+
+	if (::InterlockedCompareExchange(&pCurrentContext->lPendingFinish, 0, 0) == 0)
+		return;
+	if (::InterlockedCompareExchange(&pCurrentContext->lQueuedBlocks, 0, 0) != 0)
+		return;
+
+	m_pImportOperationContext = NULL;
+	m_uActiveImportOperationID = 0;
+	if (GetFileOp() == PFOP_IMPORTPARTS) {
+		if (!IsImportOperationAborted(pCurrentContext))
+			SetFileOpProgress(100);
+		SetFileOp(PFOP_NONE);
+		UpdateDisplayedInfo(true);
+	}
+	ReleaseImportOperationContext(pCurrentContext);
+}
+
+bool CPartFile::HasPendingBufferedWriteBookkeeping() const
+{
+	return m_iWrites > 0 || !m_BufferedData_list.IsEmpty();
+}
+
+bool CPartFile::HasBufferedWriteOnPart(UINT nPart) const
+{
+	if (nPart >= GetPartCount())
+		return false;
+
+	const uint64 uStart = PARTSIZE * (uint64)nPart;
+	if ((uint64)m_nFileSize <= uStart)
+		return false;
+	const uint64 uEnd = min(uStart + PARTSIZE, (uint64)m_nFileSize) - 1;
+
+	for (POSITION pos = m_BufferedData_list.GetHeadPosition(); pos != NULL;) {
+		const PartFileBufferedData* pItem = m_BufferedData_list.GetNext(pos);
+		if (pItem != NULL && !(pItem->end < uStart || pItem->start > uEnd))
+			return true;
+	}
+	return false;
+}
+
+void CPartFile::QueuePendingAICHRecovery(UINT nPart)
+{
+	if (nPart >= GetPartCount() || m_PendingAICHRecoveryParts.Find(nPart) != NULL)
+		return;
+	m_PendingAICHRecoveryParts.AddTail(nPart);
+}
+
+void CPartFile::ProcessPendingAICHRecovery()
+{
+	if (m_bProcessingPendingAICHRecovery || m_PendingAICHRecoveryParts.IsEmpty())
+		return;
+
+	std::vector<UINT> aRetryParts;
+	aRetryParts.reserve((size_t)m_PendingAICHRecoveryParts.GetCount());
+	for (POSITION pos = m_PendingAICHRecoveryParts.GetHeadPosition(); pos != NULL;) {
+		const UINT nPart = m_PendingAICHRecoveryParts.GetNext(pos);
+		if (HasBufferedWriteOnPart(nPart))
+			continue;
+
+		const uint64 uStart = PARTSIZE * (uint64)nPart;
+		if ((uint64)m_nFileSize <= uStart)
+			continue;
+
+		if (m_hpartfile.GetLength() <= (ULONGLONG)uStart)
+			continue;
+
+		aRetryParts.push_back(nPart);
+	}
+
+	if (aRetryParts.empty())
+		return;
+
+	m_bProcessingPendingAICHRecovery = true;
+	for (size_t i = 0; i < aRetryParts.size(); ++i) {
+		AICHRecoveryDataAvailable(aRetryParts[i]);
+	}
+	m_bProcessingPendingAICHRecovery = false;
+}
+
+void CPartFile::ServiceDeferredMainThreadWork(bool bForceFlushPendingWrites)
+{
+	TryFinalizeImportPartsOperation();
+	if (bForceFlushPendingWrites && HasPendingBufferedWriteBookkeeping())
+		FlushBuffer();
+	TryFinalizeImportPartsOperation();
+	ProcessPendingAICHRecovery();
+}
+
 
 
 UINT CPartFile::GetTransferringSrcCount() const
@@ -5900,18 +6265,38 @@ void CPartFile::RequestAICHRecovery(UINT nPart)
 
 void CPartFile::AICHRecoveryDataAvailable(UINT nPart)
 {
-	if (GetPartCount() < nPart) {
+	if (GetPartCount() <= nPart) {
 		ASSERT(0);
 		return;
 	}
 
+	POSITION posPending = m_PendingAICHRecoveryParts.Find(nPart);
+	const bool bWasQueued = posPending != NULL;
+	if (posPending != NULL)
+		m_PendingAICHRecoveryParts.RemoveAt(posPending);
+
 	FlushBuffer(true, true);
 	const uint64 uStart = PARTSIZE * nPart;
-	const uint64 length = mini(m_hpartfile.GetLength() - uStart, PARTSIZE);
+	if (HasBufferedWriteOnPart(nPart)) {
+		QueuePendingAICHRecovery(nPart);
+		if (!bWasQueued)
+			AddDebugLogLine(DLP_DEFAULT, false, _T("AICHRecoveryDataAvailable: deferred part %u until buffered write bookkeeping completes"), nPart);
+		return;
+	}
+
+	const ULONGLONG uFileLength = m_hpartfile.GetLength();
+	if (uFileLength <= uStart) {
+		QueuePendingAICHRecovery(nPart);
+		if (!bWasQueued)
+			AddDebugLogLine(DLP_DEFAULT, false, _T("AICHRecoveryDataAvailable: deferred part %u because file length %I64u has not reached %I64u yet"), nPart, uFileLength, uStart);
+		return;
+	}
+	const uint64 length = mini((uint64)(uFileLength - uStart), (uint64)PARTSIZE);
 
 	if (length == 0) {
-		// Nothing to recover for this part (no bytes on disk yet).
-		AddDebugLogLine(DLP_DEFAULT, false, _T("AICHRecoveryDataAvailable: zero-length part %u at %I64u, skipping"), nPart, uStart);
+		QueuePendingAICHRecovery(nPart);
+		if (!bWasQueued)
+			AddDebugLogLine(DLP_DEFAULT, false, _T("AICHRecoveryDataAvailable: deferred zero-length part %u at %I64u"), nPart, uStart);
 		return;
 	}
 

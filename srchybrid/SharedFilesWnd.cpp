@@ -49,6 +49,10 @@ static char THIS_FILE[] = __FILE__;
 
 namespace
 {
+	const int kSharedFilesFilterMinGapFromButtons = 3;
+	const int kSharedFilesFilterRightMargin = 4;
+	const int kSharedFilesFilterMinWidth = 120;
+
 	int GetPageBottomOverflow(CWnd *pPage)
 	{
 		if (pPage == NULL || !::IsWindow(pPage->GetSafeHwnd()) || !::IsWindowVisible(pPage->GetSafeHwnd()))
@@ -145,6 +149,7 @@ BOOL CSharedFilesWnd::OnInitDialog()
 	CArray<int, int> aIgnore; // ignored no-text columns for filter edit
 	aIgnore.Add(8); // shared parts
 	aIgnore.Add(11); // shared ed2k/kad
+	aIgnore.Add(22); // spread bar (UL part history)
 	m_ctlFilter.OnInit(&m_ctlSharedListHeader, &aIgnore);
 
 	RECT rcSpl;
@@ -216,6 +221,7 @@ void CSharedFilesWnd::DoResize(int iDelta)
 	ScreenToClient(&rcfname);
 	rcfname.left += iDelta;
 	wname->MoveWindow(&rcfname);
+	EnsureFilterControlLayout();
 
 	AddOrReplaceAnchor(this, m_ctlFilter, TOP_RIGHT);
 	AddOrReplaceAnchor(this, IDC_UPDATE_METADATA, TOP_RIGHT);
@@ -235,6 +241,45 @@ void CSharedFilesWnd::DoResize(int iDelta)
 	RequestDetailsPanelHeightAdjustment();
 	Invalidate();
 	UpdateWindow();
+}
+
+void CSharedFilesWnd::EnsureFilterControlLayout()
+{
+	if (!::IsWindow(m_hWnd) || !::IsWindow(m_ctlFilter.GetSafeHwnd()))
+		return;
+
+	CWnd* pReloadButton = GetDlgItem(IDC_RELOADSHAREDFILES);
+	CWnd* pUpdateMetadataButton = GetDlgItem(IDC_UPDATE_METADATA);
+	if (pReloadButton == NULL || pUpdateMetadataButton == NULL)
+		return;
+
+	CRect rcClient;
+	GetClientRect(&rcClient);
+
+	CRect rcFilter;
+	m_ctlFilter.GetWindowRect(&rcFilter);
+	ScreenToClient(&rcFilter);
+
+	CRect rcReloadButton;
+	pReloadButton->GetWindowRect(&rcReloadButton);
+	ScreenToClient(&rcReloadButton);
+
+	CRect rcUpdateMetadataButton;
+	pUpdateMetadataButton->GetWindowRect(&rcUpdateMetadataButton);
+	ScreenToClient(&rcUpdateMetadataButton);
+
+	const int iMinLeft = max(rcReloadButton.right, rcUpdateMetadataButton.right) + kSharedFilesFilterMinGapFromButtons;
+	const int iMaxRight = rcClient.right - kSharedFilesFilterRightMargin;
+	const int iMaxWidth = max(0, iMaxRight - iMinLeft);
+	if (iMaxWidth <= 0)
+		return;
+
+	const int iNewWidth = max(min(rcFilter.Width(), iMaxWidth), min(kSharedFilesFilterMinWidth, iMaxWidth));
+	const int iNewLeft = max(iMinLeft, iMaxRight - iNewWidth);
+	if (rcFilter.left == iNewLeft && rcFilter.Width() == iNewWidth)
+		return;
+
+	m_ctlFilter.SetWindowPos(NULL, iNewLeft, rcFilter.top, iNewWidth, rcFilter.Height(), SWP_NOOWNERZORDER | SWP_NOZORDER | SWP_NOACTIVATE);
 }
 
 void CSharedFilesWnd::Reload(bool bForceTreeReload, bool bUserForced)
@@ -278,6 +323,7 @@ void CSharedFilesWnd::OnSize(UINT nType, int cx, int cy)
 		m_wndSplitter.SetRange(rcWnd.left + SPLITTER_RANGE_MIN, rcWnd.left + SPLITTER_RANGE_MAX);
 	}
 
+	EnsureFilterControlLayout();
 	RequestDetailsPanelHeightAdjustment();
 }
 

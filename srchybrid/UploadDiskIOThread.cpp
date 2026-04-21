@@ -267,6 +267,7 @@ void CUploadDiskIOThread::StartCreateNextBlockPackage(UploadingToClient_Struct *
 
 			addedPayloadQueueSession += uTogo;
 			pClient->SetQueueSessionUploadAdded(addedPayloadQueueSession);
+			pFile->statistic.AddBlockTransferred(currentblock->StartOffset, currentblock->EndOffset, 1);
 			pUploadClientStruct->m_DoneBlocks_list.AddHead(pUploadClientStruct->m_BlockRequests_queue.RemoveHead());
 		}
 		return; //no errors

@@ -287,7 +287,7 @@ void CCollectionCreateDialog::OnBnClickedOk()
 		}
 
 		if (::PathFileExists(sFilePath)) {
-			if (LocMessageBox(_T("COLL_REPLACEEXISTING"), MB_ICONWARNING | MB_DEFBUTTON2 | MB_YESNO, 0) == IDNO)
+			if (LocMessageBox(_T("COLL_REPLACEEXISTING"), MB_ICONWARNING | MB_DEFBUTTON2 | MB_YESNO, 0) != IDYES)
 				return;
 
 			bool bDeleteSuccessful = ShellDeleteFile(sFilePath);

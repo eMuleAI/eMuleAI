@@ -46,6 +46,256 @@
 static char THIS_FILE[] = __FILE__;
 #endif
 
+namespace
+{
+	const int kUploadListColumnPermission = 25;
+	const int kUploadListColumnPowershare = 26;
+	const int kUploadListColumnSpreadbarHistory = 27;
+	const int kUploadListColumnHideOverShare = 28;
+	const int kUploadListColumnShareOnlyTheNeed = 29;
+
+	CObject* CreateClientDetailWalkerToken(const CUpDownClient* pClient)
+	{
+		if (pClient == NULL || theApp.clientlist == NULL)
+			return NULL;
+
+		CUpDownClient* pTrackedClient = theApp.clientlist->AcquireTrackedClientByPointer(pClient);
+		if (pTrackedClient == NULL)
+			return NULL;
+
+		const ClientRuntimeID uRuntimeID = pTrackedClient->GetRuntimeID();
+		pTrackedClient->ReleaseRuntimeReference();
+		return uRuntimeID != 0 ? reinterpret_cast<CObject*>((static_cast<ULONG_PTR>(uRuntimeID) << 1) | 1) : NULL;
+	}
+
+	const CKnownFile* GetUploadListKnownFile(const CUpDownClient* pClient)
+	{
+		return (pClient != NULL) ? theApp.sharedfiles->GetFileByID(pClient->GetUploadFileID()) : NULL;
+	}
+
+	CString GetEnabledDisabledLabel(const bool bEnabled)
+	{
+		return GetResString(bEnabled ? _T("ENABLED") : _T("DISABLED"));
+	}
+
+	CString GetDefaultShortLabel()
+	{
+		CString strDefault(GetResString(_T("DEFAULT")));
+		return strDefault.IsEmpty() ? CString(_T("D")) : strDefault.Left(1);
+	}
+
+	CString BuildDefaultScopedLabel(const CString& strLabel)
+	{
+		CString strResult(GetDefaultShortLabel());
+		strResult.Append(_T(". "));
+		strResult.Append(strLabel);
+		return strResult;
+	}
+
+	CString GetSharePermissionLabel(const int iPermission)
+	{
+		switch (iPermission) {
+		case PERM_ALL:
+			return GetResString(_T("SHARE_PERMISSION_EVERYBODY"));
+		case PERM_FRIENDS:
+			return GetResString(_T("SHARE_PERMISSION_FRIENDSONLY"));
+		case PERM_NOONE:
+			return GetResString(_T("SHARE_PERMISSION_HIDDEN"));
+		default:
+			return CString();
+		}
+	}
+
+	int CompareIntValues(const int iLeft, const int iRight)
+	{
+		return (iLeft < iRight) ? -1 : static_cast<int>(iLeft > iRight);
+	}
+
+	int CompareDoubleValues(const double fLeft, const double fRight)
+	{
+		return (fLeft < fRight) ? -1 : static_cast<int>(fLeft > fRight);
+	}
+
+	bool IsSpreadbarEnabledForFile(const CKnownFile* pFile)
+	{
+		return pFile != NULL && (pFile->GetSpreadbarSetStatus() > 0 || (pFile->GetSpreadbarSetStatus() < 0 && thePrefs.GetSpreadbarSetStatus()));
+	}
+
+	int GetEffectivePermission(const CKnownFile* pFile)
+	{
+		if (pFile == NULL)
+			return PERM_ALL;
+
+		return (pFile->GetPermissions() >= 0) ? pFile->GetPermissions() : thePrefs.GetSharePermissions();
+	}
+
+	CString BuildSharePermissionColumnText(const CKnownFile* pFile)
+	{
+		if (pFile == NULL)
+			return CString();
+
+		CString strPermission(GetSharePermissionLabel(GetEffectivePermission(pFile)));
+		return (pFile->GetPermissions() < 0) ? BuildDefaultScopedLabel(strPermission) : strPermission;
+	}
+
+	CString GetPowerShareModeLabel(const int iMode)
+	{
+		switch (iMode) {
+		case 0:
+			return GetResString(_T("POWERSHARE_DISABLED"));
+		case 1:
+			return GetResString(_T("POWERSHARE_ACTIVATED"));
+		case 2:
+			return GetResString(_T("POWERSHARE_AUTO"));
+		case 3:
+			return GetResString(_T("POWERSHARE_LIMITED"));
+		default:
+			return CString();
+		}
+	}
+
+	int GetEffectivePowerShareMode(const CKnownFile* pFile)
+	{
+		if (pFile == NULL)
+			return 0;
+
+		return (pFile->GetPowerSharedMode() >= 0) ? pFile->GetPowerSharedMode() : thePrefs.GetPowerShareMode();
+	}
+
+	CString BuildPowerShareColumnText(const CKnownFile* pFile)
+	{
+		if (pFile == NULL)
+			return CString();
+
+		CString strText;
+		strText.Format(_T("[%s] "), (LPCTSTR)GetResString(pFile->GetPowerShared() ? _T("POWERSHARE_ON_LABEL") : _T("POWERSHARE_OFF_LABEL")));
+
+		const int iPowerShareMode = GetEffectivePowerShareMode(pFile);
+		CString strModeLabel(GetPowerShareModeLabel(iPowerShareMode));
+		if (pFile->GetPowerSharedMode() < 0)
+			strModeLabel = BuildDefaultScopedLabel(strModeLabel);
+		strText.Append(strModeLabel);
+
+		if (iPowerShareMode == 3) {
+			if (pFile->GetPowerShareLimit() < 0)
+				strText.AppendFormat(_T(" %s. %d"), (LPCTSTR)GetDefaultShortLabel(), thePrefs.GetPowerShareLimit());
+			else
+				strText.AppendFormat(_T(" %d"), pFile->GetPowerShareLimit());
+		}
+
+		CString strEffectiveState;
+		if (pFile->GetPowerShareAuto())
+			strEffectiveState = GetResString(_T("POWERSHARE_ADVISED_LABEL"));
+		else if (pFile->GetPowerShareLimited() && iPowerShareMode == 3)
+			strEffectiveState = GetResString(_T("POWERSHARE_LIMITED"));
+		else if (pFile->GetPowerShareAuthorized())
+			strEffectiveState = GetResString(_T("POWERSHARE_AUTHORIZED_LABEL"));
+		else
+			strEffectiveState = GetResString(_T("POWERSHARE_DENIED_LABEL"));
+
+		strText.AppendFormat(_T(" (%s)"), (LPCTSTR)strEffectiveState);
+		return strText;
+	}
+
+	CString BuildSpreadbarHistoryColumnText(const CKnownFile* pFile)
+	{
+		if (pFile == NULL)
+			return CString();
+
+		CString strText;
+		strText.Format(_T("%.2f"), pFile->statistic.GetSpreadSortValue());
+		return strText;
+	}
+
+	CString BuildHideOverShareColumnText(const CKnownFile* pFile)
+	{
+		if (pFile == NULL)
+			return CString();
+
+		CString strText;
+		const UINT uHideOSInWork = pFile->HideOSInWork();
+		strText.Format(_T("[%s] "), (LPCTSTR)GetResString(uHideOSInWork > 0 ? _T("POWERSHARE_ON_LABEL") : _T("POWERSHARE_OFF_LABEL")));
+
+		if (pFile->GetHideOS() < 0)
+			strText.AppendFormat(_T("%s. "), (LPCTSTR)GetDefaultShortLabel());
+
+		const UINT uHideOSValue = (pFile->GetHideOS() >= 0) ? static_cast<UINT>(pFile->GetHideOS()) : static_cast<UINT>(thePrefs.GetHideOvershares());
+		if (uHideOSValue > 0)
+			strText.AppendFormat(_T("%u"), uHideOSValue);
+		else if (!IsSpreadbarEnabledForFile(pFile))
+			strText.AppendFormat(_T("%s %s"), (LPCTSTR)GetResString(_T("SPREADBAR")), (LPCTSTR)GetResString(_T("DISABLED")));
+		else
+			strText.Append(GetResString(_T("DISABLED")));
+
+		if (pFile->GetSelectiveChunk() >= 0) {
+			if (pFile->GetSelectiveChunk() != 0)
+				strText.Append(_T(" + S"));
+		} else if (thePrefs.IsSelectiveShareEnabled()) {
+			strText.AppendFormat(_T(" + %s. S"), (LPCTSTR)GetDefaultShortLabel());
+		}
+
+		return strText;
+	}
+
+	CString BuildShareOnlyTheNeedColumnText(const CKnownFile* pFile)
+	{
+		if (pFile == NULL)
+			return CString();
+
+		if (pFile->GetShareOnlyTheNeed() >= 0)
+			return GetEnabledDisabledLabel(pFile->GetShareOnlyTheNeed() != 0);
+
+		return BuildDefaultScopedLabel(GetEnabledDisabledLabel(thePrefs.GetShareOnlyTheNeed() != 0));
+	}
+
+	int ComparePermissionSettings(const CKnownFile* pLeft, const CKnownFile* pRight)
+	{
+		return CompareIntValues(pRight->GetPermissions(), pLeft->GetPermissions());
+	}
+
+	int ComparePowerShareSettings(const CKnownFile* pLeft, const CKnownFile* pRight)
+	{
+		if (!pLeft->GetPowerShared() && pRight->GetPowerShared())
+			return -1;
+		if (pLeft->GetPowerShared() && !pRight->GetPowerShared())
+			return 1;
+
+		int iResult = CompareIntValues(pLeft->GetPowerSharedMode(), pRight->GetPowerSharedMode());
+		if (iResult != 0)
+			return iResult;
+
+		if (!pLeft->GetPowerShareAuthorized() && pRight->GetPowerShareAuthorized())
+			return -1;
+		if (pLeft->GetPowerShareAuthorized() && !pRight->GetPowerShareAuthorized())
+			return 1;
+
+		if (!pLeft->GetPowerShareAuto() && pRight->GetPowerShareAuto())
+			return -1;
+		if (pLeft->GetPowerShareAuto() && !pRight->GetPowerShareAuto())
+			return 1;
+
+		if (!pLeft->GetPowerShareLimited() && pRight->GetPowerShareLimited())
+			return -1;
+		if (pLeft->GetPowerShareLimited() && !pRight->GetPowerShareLimited())
+			return 1;
+
+		return 0;
+	}
+
+	int CompareHideOverShareSettings(const CKnownFile* pLeft, const CKnownFile* pRight)
+	{
+		const int iHideOSResult = CompareIntValues(pLeft->GetHideOS(), pRight->GetHideOS());
+		if (iHideOSResult != 0)
+			return iHideOSResult;
+		return CompareIntValues(pLeft->GetSelectiveChunk(), pRight->GetSelectiveChunk());
+	}
+
+	int CompareShareOnlyTheNeedSettings(const CKnownFile* pLeft, const CKnownFile* pRight)
+	{
+		return CompareIntValues(pLeft->GetShareOnlyTheNeed(), pRight->GetShareOnlyTheNeed());
+	}
+}
+
 
 IMPLEMENT_DYNAMIC(CUploadListCtrl, CMuleListCtrl)
 
@@ -110,6 +360,11 @@ void CUploadListCtrl::Init()
 	InsertColumn(22, EMPTY, LVCFMT_LEFT, 100);
 	InsertColumn(23, EMPTY, LVCFMT_RIGHT, 60);
 	InsertColumn(24, EMPTY, LVCFMT_RIGHT, 60);
+	InsertColumn(kUploadListColumnPermission, EMPTY, LVCFMT_LEFT, 120);
+	InsertColumn(kUploadListColumnPowershare, EMPTY, LVCFMT_LEFT, 170);
+	InsertColumn(kUploadListColumnSpreadbarHistory, EMPTY, LVCFMT_LEFT, 170);
+	InsertColumn(kUploadListColumnHideOverShare, EMPTY, LVCFMT_LEFT, 120);
+	InsertColumn(kUploadListColumnShareOnlyTheNeed, EMPTY, LVCFMT_LEFT, 120);
 
 	SetAllIcons();
 	LoadSettings();
@@ -119,7 +374,7 @@ void CUploadListCtrl::Init()
 
 void CUploadListCtrl::Localize()
 {
-	static const LPCTSTR uids[25] =
+	static const LPCTSTR uids[30] =
 	{
 		_T("QL_USERNAME"), _T("FILE"), _T("DL_SPEED"), _T("DL_TRANSF"), _T("WAITED")
 		, _T("UPLOADTIME"), _T("STATUS"), _T("UPSTATUS")
@@ -140,6 +395,11 @@ void CUploadListCtrl::Localize()
 		, _T("CLIENT_NOTE")
 		, _T("RATIO")
 		, _T("RATIO_SESSION")
+		, _T("SHARE_PERMISSION_GROUP")
+		, _T("POWERSHARE")
+		, _T("SPREADBAR_UL_PART_HISTORY")
+		, _T("HIDE_OVER_SHARE_MENU")
+		, _T("SHAREONLYTHENEED")
 	};
 
 	LocaliseHeaderCtrl(uids, _countof(uids));
@@ -219,11 +479,18 @@ void CUploadListCtrl::DrawItem(LPDRAWITEMSTRUCT lpDrawItemStruct)
 				dc.DrawText(sItem, -1, &rcItem, MLC_DT_TEXT | uDrawTextAlignment);
 				break;
 			case 7: //upload status bar
-				++rcItem.top;
-				--rcItem.bottom;
-				client->DrawUpStatusBar(dc, &rcItem, false, thePrefs.UseFlatBar());
-				++rcItem.bottom;
-				--rcItem.top;
+				{
+					CRect rcStatus(rcItem);
+					++rcStatus.top;
+					--rcStatus.bottom;
+					if (rcStatus.Width() > 0 && rcStatus.Height() > 0) {
+						const bool bUseFlatBar = thePrefs.UseFlatBar();
+						const int iSavedDC = bUseFlatBar ? dc->SaveDC() : 0;
+						client->DrawUpStatusBar(dc, rcStatus, false, bUseFlatBar);
+						if (iSavedDC != 0)
+							dc->RestoreDC(iSavedDC);
+					}
+				}
 				break;
 			case 11:
 			{
@@ -236,13 +503,25 @@ void CUploadListCtrl::DrawItem(LPDRAWITEMSTRUCT lpDrawItemStruct)
 				dc->DrawText(sItem, sItem.GetLength(), &rcItem, MLC_DT_TEXT);
 			}
 			break;
+			case kUploadListColumnSpreadbarHistory:
+				{
+					const CKnownFile* pFile = GetUploadListKnownFile(client);
+					if (pFile != NULL) {
+						++rcItem.top;
+						--rcItem.bottom;
+						pFile->statistic.DrawSpreadBar(&dc, &rcItem, thePrefs.UseFlatBar());
+						++rcItem.bottom;
+						--rcItem.top;
+					}
+				}
+				break;
 			}
 		}
 		itemLeft += iColumnWidth;
 	}
 
 	DrawFocusRect(dc, &lpDrawItemStruct->rcItem, lpDrawItemStruct->itemState & ODS_FOCUS, bCtrlFocused, lpDrawItemStruct->itemState & ODS_SELECTED);
-	m_updatethread->AddItemUpdated((LPARAM)client);
+	QueueItemUpdated((LPARAM)client);
 }
 
 const CString  CUploadListCtrl::GetItemDisplayText(CUpDownClient* client, const int iSubItem) const
@@ -257,7 +536,7 @@ const CString  CUploadListCtrl::GetItemDisplayText(CUpDownClient* client, const 
 		break;
 	case 1:
 		{
-			const CKnownFile *file = theApp.sharedfiles->GetFileByID(client->GetUploadFileID());
+			const CKnownFile *file = GetUploadListKnownFile(client);
 			if (file)
 				sText = file->GetFileName();
 		}
@@ -350,17 +629,32 @@ const CString  CUploadListCtrl::GetItemDisplayText(CUpDownClient* client, const 
 		break;
 	case 23:
 		{
-			const CKnownFile *file = theApp.sharedfiles->GetFileByID(client->GetUploadFileID());
+			const CKnownFile *file = GetUploadListKnownFile(client);
 			if (file)
 				sText.Format(_T("%.1f"), file->GetAllTimeRatio());
 		}
 		break;
 	case 24:
 		{
-			const CKnownFile *file = theApp.sharedfiles->GetFileByID(client->GetUploadFileID());
+			const CKnownFile *file = GetUploadListKnownFile(client);
 			if (file)
 				sText.Format(_T("%.1f"), file->GetRatio());
 		}
+		break;
+	case kUploadListColumnPermission:
+		sText = BuildSharePermissionColumnText(GetUploadListKnownFile(client));
+		break;
+	case kUploadListColumnPowershare:
+		sText = BuildPowerShareColumnText(GetUploadListKnownFile(client));
+		break;
+	case kUploadListColumnSpreadbarHistory:
+		sText = BuildSpreadbarHistoryColumnText(GetUploadListKnownFile(client));
+		break;
+	case kUploadListColumnHideOverShare:
+		sText = BuildHideOverShareColumnText(GetUploadListKnownFile(client));
+		break;
+	case kUploadListColumnShareOnlyTheNeed:
+		sText = BuildShareOnlyTheNeedColumnText(GetUploadListKnownFile(client));
 		break;
 	}
 	return sText;
@@ -430,6 +724,7 @@ void CUploadListCtrl::OnLvnColumnClick(LPNMHDR pNMHDR, LRESULT *pResult)
 		case 3: // Session Up
 		case 4: // Wait Time
 		case 7: // Part Count
+		case kUploadListColumnSpreadbarHistory:
 			sortAscending = false;
 			break;
 		default:
@@ -539,8 +834,8 @@ int CALLBACK CUploadListCtrl::SortProc(const LPARAM lParam1, const LPARAM lParam
 		break;
 	case 23:
 		{
-			const CKnownFile *file1 = theApp.sharedfiles->GetFileByID(item1->GetUploadFileID());
-			const CKnownFile *file2 = theApp.sharedfiles->GetFileByID(item2->GetUploadFileID());
+			const CKnownFile *file1 = GetUploadListKnownFile(item1);
+			const CKnownFile *file2 = GetUploadListKnownFile(item2);
 			if (file1 != NULL && file2 != NULL) {
 				const double ratio1 = file1->GetAllTimeRatio();
 				const double ratio2 = file2->GetAllTimeRatio();
@@ -551,13 +846,63 @@ int CALLBACK CUploadListCtrl::SortProc(const LPARAM lParam1, const LPARAM lParam
 		break;
 	case 24:
 		{
-			const CKnownFile *file1 = theApp.sharedfiles->GetFileByID(item1->GetUploadFileID());
-			const CKnownFile *file2 = theApp.sharedfiles->GetFileByID(item2->GetUploadFileID());
+			const CKnownFile *file1 = GetUploadListKnownFile(item1);
+			const CKnownFile *file2 = GetUploadListKnownFile(item2);
 			if (file1 != NULL && file2 != NULL) {
 				const double ratio1 = file1->GetRatio();
 				const double ratio2 = file2->GetRatio();
 				iResult = (ratio1 < ratio2) ? -1 : static_cast<int>(ratio1 > ratio2);
 			} else
+				iResult = (file1 == NULL) ? 1 : -1;
+		}
+		break;
+	case kUploadListColumnPermission:
+		{
+			const CKnownFile* file1 = GetUploadListKnownFile(item1);
+			const CKnownFile* file2 = GetUploadListKnownFile(item2);
+			if (file1 != NULL && file2 != NULL)
+				iResult = ComparePermissionSettings(file1, file2);
+			else
+				iResult = (file1 == NULL) ? 1 : -1;
+		}
+		break;
+	case kUploadListColumnPowershare:
+		{
+			const CKnownFile* file1 = GetUploadListKnownFile(item1);
+			const CKnownFile* file2 = GetUploadListKnownFile(item2);
+			if (file1 != NULL && file2 != NULL)
+				iResult = ComparePowerShareSettings(file1, file2);
+			else
+				iResult = (file1 == NULL) ? 1 : -1;
+		}
+		break;
+	case kUploadListColumnSpreadbarHistory:
+		{
+			const CKnownFile* file1 = GetUploadListKnownFile(item1);
+			const CKnownFile* file2 = GetUploadListKnownFile(item2);
+			if (file1 != NULL && file2 != NULL)
+				iResult = CompareDoubleValues(file1->statistic.GetSpreadSortValue(), file2->statistic.GetSpreadSortValue());
+			else
+				iResult = (file1 == NULL) ? 1 : -1;
+		}
+		break;
+	case kUploadListColumnHideOverShare:
+		{
+			const CKnownFile* file1 = GetUploadListKnownFile(item1);
+			const CKnownFile* file2 = GetUploadListKnownFile(item2);
+			if (file1 != NULL && file2 != NULL)
+				iResult = CompareHideOverShareSettings(file1, file2);
+			else
+				iResult = (file1 == NULL) ? 1 : -1;
+		}
+		break;
+	case kUploadListColumnShareOnlyTheNeed:
+		{
+			const CKnownFile* file1 = GetUploadListKnownFile(item1);
+			const CKnownFile* file2 = GetUploadListKnownFile(item2);
+			if (file1 != NULL && file2 != NULL)
+				iResult = CompareShareOnlyTheNeedSettings(file1, file2);
+			else
 				iResult = (file1 == NULL) ? 1 : -1;
 		}
 		break;
@@ -641,6 +986,10 @@ BOOL CUploadListCtrl::OnCommand(WPARAM wParam, LPARAM)
 	int iSel = GetNextItem(-1, LVIS_SELECTED | LVIS_FOCUSED);
 	if (iSel >= 0) {
 		CUpDownClient *client = reinterpret_cast<CUpDownClient*>(GetItemData(iSel));
+		auto RefreshQueueCountAfterManualPunishment = []() {
+			if (theApp.emuledlg != NULL && theApp.emuledlg->transferwnd != NULL)
+				theApp.emuledlg->transferwnd->InvalidateQueueCount(true);
+		};
 		switch (wParam) {
 		case MP_SHOWLIST:
 			{
@@ -678,54 +1027,67 @@ BOOL CUploadListCtrl::OnCommand(WPARAM wParam, LPARAM)
 		case MP_PUNISMENT_IPUSERHASHBAN:
 			theApp.shield->SetPunishment(client,GetResString(_T("PUNISHMENT_REASON_MANUAL_IP_BAN")), PR_MANUAL, P_IPUSERHASHBAN);
 			RefreshClient(client);
+			RefreshQueueCountAfterManualPunishment();
 			break;
 		case MP_PUNISMENT_USERHASHBAN:
 			theApp.shield->SetPunishment(client,GetResString(_T("PUNISHMENT_REASON_MANUAL_USER_HASH_BAN")), PR_MANUAL, P_USERHASHBAN);
 			RefreshClient(client);
+			RefreshQueueCountAfterManualPunishment();
 			break;
 		case MP_PUNISMENT_UPLOADBAN:
 			theApp.shield->SetPunishment(client,GetResString(_T("PUNISHMENT_REASON_MANUAL_UPLOAD_BAN")), PR_MANUAL, P_UPLOADBAN);
 			RefreshClient(client);
+			RefreshQueueCountAfterManualPunishment();
 			break;
 		case MP_PUNISMENT_SCOREX01:
 			theApp.shield->SetPunishment(client,GetResString(_T("PUNISHMENT_REASON_MANUAL_SCORE_REDUCING")), PR_MANUAL, P_SCOREX01);
 			RefreshClient(client);
+			RefreshQueueCountAfterManualPunishment();
 			break;
 		case MP_PUNISMENT_SCOREX02:
 			theApp.shield->SetPunishment(client,GetResString(_T("PUNISHMENT_REASON_MANUAL_SCORE_REDUCING")), PR_MANUAL, P_SCOREX02);
 			RefreshClient(client);
+			RefreshQueueCountAfterManualPunishment();
 			break;
 		case MP_PUNISMENT_SCOREX03:
 			theApp.shield->SetPunishment(client,GetResString(_T("PUNISHMENT_REASON_MANUAL_SCORE_REDUCING")), PR_MANUAL, P_SCOREX03);
 			RefreshClient(client);
+			RefreshQueueCountAfterManualPunishment();
 			break;
 		case MP_PUNISMENT_SCOREX04:
 			theApp.shield->SetPunishment(client,GetResString(_T("PUNISHMENT_REASON_MANUAL_SCORE_REDUCING")), PR_MANUAL, P_SCOREX04);
 			RefreshClient(client);
+			RefreshQueueCountAfterManualPunishment();
 			break;
 		case MP_PUNISMENT_SCOREX05:
 			theApp.shield->SetPunishment(client,GetResString(_T("PUNISHMENT_REASON_MANUAL_SCORE_REDUCING")), PR_MANUAL, P_SCOREX05);
 			RefreshClient(client);
+			RefreshQueueCountAfterManualPunishment();
 			break;
 		case MP_PUNISMENT_SCOREX06:
 			theApp.shield->SetPunishment(client,GetResString(_T("PUNISHMENT_REASON_MANUAL_SCORE_REDUCING")), PR_MANUAL, P_SCOREX06);
 			RefreshClient(client);
+			RefreshQueueCountAfterManualPunishment();
 			break;
 		case MP_PUNISMENT_SCOREX07:
 			theApp.shield->SetPunishment(client,GetResString(_T("PUNISHMENT_REASON_MANUAL_SCORE_REDUCING")), PR_MANUAL, P_SCOREX07);
 			RefreshClient(client);
+			RefreshQueueCountAfterManualPunishment();
 			break;
 		case MP_PUNISMENT_SCOREX08:
 			theApp.shield->SetPunishment(client,GetResString(_T("PUNISHMENT_REASON_MANUAL_SCORE_REDUCING")), PR_MANUAL, P_SCOREX08);
 			RefreshClient(client);
+			RefreshQueueCountAfterManualPunishment();
 			break;
 		case MP_PUNISMENT_SCOREX09:
 			theApp.shield->SetPunishment(client,GetResString(_T("PUNISHMENT_REASON_MANUAL_SCORE_REDUCING")), PR_MANUAL, P_SCOREX09);
 			RefreshClient(client);
+			RefreshQueueCountAfterManualPunishment();
 			break;
 		case MP_PUNISMENT_NONE:
 			theApp.shield->SetPunishment(client,GetResString(_T("PUNISHMENT_REASON_MANUAL_CANCELATION")), PR_MANUAL, P_NOPUNISHMENT);
 			RefreshClient(client);
+			RefreshQueueCountAfterManualPunishment();
 			break;
 		}
 	}
@@ -776,7 +1138,7 @@ void CUploadListCtrl::RefreshClient(const CUpDownClient *client)
 	if (theApp.IsClosing() || !client || theApp.emuledlg->activewnd != theApp.emuledlg->transferwnd || !theApp.emuledlg->transferwnd->m_pwndTransfer->uploadlistctrl.IsWindowVisible())
 		return;
 
-	m_updatethread->AddItemToUpdate((LPARAM)client);
+	QueueItemUpdate((LPARAM)client);
 }
 
 void CUploadListCtrl::UpdateView()
@@ -862,6 +1224,58 @@ void CUploadListCtrl::ShowSelectedUserDetails()
 		CClientDetailDialog dialog(client, this);
 		dialog.DoModal();
 	}
+}
+
+CObject* CUploadListCtrl::GetNextSelectableItem()
+{
+	const int iItemCount = GetItemCount();
+	if (iItemCount < 2)
+		return NULL;
+
+	POSITION pos = GetFirstSelectedItemPosition();
+	if (pos == NULL)
+		return NULL;
+
+	const int iSelectedItem = GetNextSelectedItem(pos);
+	for (int iNewItem = iSelectedItem + 1; iNewItem < iItemCount; ++iNewItem) {
+		CObject* pToken = CreateClientDetailWalkerToken(reinterpret_cast<CUpDownClient*>(GetItemData(iNewItem)));
+		if (pToken == NULL)
+			continue;
+
+		SetItemState(iSelectedItem, 0, LVIS_SELECTED | LVIS_FOCUSED);
+		SetItemState(iNewItem, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+		SetSelectionMark(iNewItem);
+		EnsureVisible(iNewItem, FALSE);
+		return pToken;
+	}
+
+	return NULL;
+}
+
+CObject* CUploadListCtrl::GetPrevSelectableItem()
+{
+	const int iItemCount = GetItemCount();
+	if (iItemCount < 2)
+		return NULL;
+
+	POSITION pos = GetFirstSelectedItemPosition();
+	if (pos == NULL)
+		return NULL;
+
+	const int iSelectedItem = GetNextSelectedItem(pos);
+	for (int iNewItem = iSelectedItem - 1; iNewItem >= 0; --iNewItem) {
+		CObject* pToken = CreateClientDetailWalkerToken(reinterpret_cast<CUpDownClient*>(GetItemData(iNewItem)));
+		if (pToken == NULL)
+			continue;
+
+		SetItemState(iSelectedItem, 0, LVIS_SELECTED | LVIS_FOCUSED);
+		SetItemState(iNewItem, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+		SetSelectionMark(iNewItem);
+		EnsureVisible(iNewItem, FALSE);
+		return pToken;
+	}
+
+	return NULL;
 }
 
 void CUploadListCtrl::OnKeyDown(UINT nChar, UINT nRepCnt, UINT nFlags)

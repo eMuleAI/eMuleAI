@@ -88,9 +88,9 @@ https://github.com/eMuleAI/eMuleAI
 
 Many thanks to everyone who contributed to eMule over the years. Without their work, eMule AI would not have been possible.
 
-**Developers:** Merkur, John aka. Unknown1, Ornis, Bluecow, Tecxx, Pach2, Juanjo, Dirus, Barry, zz, Some Support, fox88
+**Developers:** Merkur, John aka. Unknown1, Ornis, Bluecow, Tecxx, Pach2, Juanjo, Dirus, Barry, zz, Some Support
 
-**Modders:** David Xanatos, Stulle, XMan, netfinity, WiZaRd, leuk_he, enkeyDev, SLUGFILLER, SiRoB, khaos, Enig123, TAHO, Pretender, Mighty Knife, Ottavio84, Dolphin, sFrQlXeRt, evcz, cyrex2001, zz_fly, Slaham, Spike, shadow2004, gomez82, JvA, Pawcio, lovelace, MoNKi, Avi3k, Commander, emulEspaña, Maella, VQB, J.C.Conner
+**Modders:** David Xanatos, Stulle, XMan, netfinity, WiZaRd, leuk_he, enkeyDev, SLUGFILLER, SiRoB, khaos, fox88, Enig123, TAHO, Pretender, Mighty Knife, Ottavio84, Dolphin, sFrQlXeRt, evcz, cyrex2001, zz_fly, Slaham, Spike, shadow2004, gomez82, JvA, Pawcio, lovelace, MoNKi, Avi3k, Commander, emulEspaña, Maella, VQB, J.C.Conner
 
 **Testers:** Sony, Monk, Myxin, Mr Ozon, Daan, Elandal, Frozen_North, kayfam, Khandurian, Masta2002, mrLabr, Nesi-San, SeveredCross, Skynetman
 

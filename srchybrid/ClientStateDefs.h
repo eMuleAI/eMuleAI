@@ -145,3 +145,11 @@ enum EConnectingState : uint8
 	CCS_SERVERCALLBACK,
 	CCS_PRECONDITIONS
 };
+
+enum ESharedClientPartStatus : uint8
+{
+	SC_AVAILABLE		= 1,
+	SC_HIDDENBYSOTN		= 2,
+	SC_HIDDENBYHIDEOS	= 4,
+	SC_XFER			= 16
+};

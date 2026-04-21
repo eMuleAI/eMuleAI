@@ -144,6 +144,7 @@ public:
 	float	GetFinishedSize();
 	bool	ReportAvailableCommands(CList<int> &liAvailableCommands);
 	void	DownloadInspector(const bool bForce = false);
+	void	ResetDownloadInspectorAutoDeleteState();
 	void	ShowActiveDownloadsBold(const bool bEnabled);
 	const bool IsFilteredOut(CPartFile* pFile);
 	uint32 GetTotalFilesCount();
@@ -153,6 +154,7 @@ public:
 	static bool IsFileDeletionInProgress() { return s_bFileDeletionInProgress; }
 protected:
 	CImageList  m_ImageList;
+	CMenuXP	m_PermMenu;
 	CMenuXP	m_PrioMenu;
 	CMenuXP	m_FileMenu;
 	CMenuXP	m_PreviewMenu;
@@ -212,12 +214,28 @@ private:
 	static UINT AFX_CDECL DownloadInspectorProc(LPVOID pParam);
 	CWinThread* pDownloadInspectorThread;
 	DWORD m_dwLastDetection;
+	time_t m_tNextAutoDeleteScan;
 
 	struct PartFileOperationMsgParams
 	{
+		PartFileOperationMsgParams()
+			: pFile(NULL)
+			, bAppendAutoDeleteEd2kLink(false)
+			, bAddToCanceledMet(true)
+			, bAutoDeleteOperation(false)
+			, lAutoDeleteGeneration(0)
+		{
+		}
+
 		CPartFile* pFile;
 		CString strNewFileName;
 		CString cLogMsg;
+		bool bAppendAutoDeleteEd2kLink;
+		bool bAddToCanceledMet;
+		CString strAutoDeleteEd2kLink;
+		bool bAutoDeleteOperation;
+		LONG lAutoDeleteGeneration;
+		CString strAutoDeleteReason;
 	};
 	
 	static bool s_bFileDeletionInProgress; // Track file deletion to avoid redundant SaveListState/RestoreListState calls

@@ -294,7 +294,7 @@ const INT_PTR CIPFilter::AddFromFile(const LPCTSTR pszFilePath, const bool bShow
 			delete[] pcToDelete;
 		}
 
-		AddLogLine(bShowResponse, GetResString(_T("IPFILTERLOADED2")), m_iplist.GetCount(), (LPCTSTR)EscPercent(pszFilePath));
+		AddLogLine(bShowResponse, GetResString(_T("IPFILTER_LOADED_2")), m_iplist.GetCount(), (LPCTSTR)EscPercent(pszFilePath));
 		if (thePrefs.GetVerbose())
 			AddDebugLogLine(false, _T("Parsed lines/entries:%u  Found IP ranges:%u  Duplicate:%u  Merged:%u  Time:%s"), iLine, iFoundRanges, iDuplicate, iMerged, (LPCTSTR)CastSecondsToHM((::GetTickCount() - dwStart + 500) / 1000));
 	}
@@ -744,7 +744,7 @@ void CIPFilter::AddFromFileWhite(const LPCTSTR pszFilePath)
 		fclose(readFile);
 
 		if (m_iplist_White.GetCount() > 0) {
-			AddLogLine(false, GetResString(_T("IPFILTERWHITELOADED")), m_iplist_White.GetCount());
+			AddLogLine(false, GetResString(_T("IPFILTER_WHITE_LOADED")), m_iplist_White.GetCount());
 
 			// sort the IP filter list by IP range start addresses
 			qsort(m_iplist_White.GetData(), m_iplist_White.GetCount(), sizeof(m_iplist_White[0]), CmpSIPFilterByStartAddr);

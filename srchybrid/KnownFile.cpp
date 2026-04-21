@@ -46,6 +46,7 @@
 #include "emuledlg.h"
 #include "SharedFilesWnd.h"
 #include "MediaInfo.h"
+#include "UploadQueue.h"
 #include "uploaddiskiothread.h"
 #include "eMuleAI/MediaInfoLib.h"
 #include "OtherFunctions.h"
@@ -72,6 +73,29 @@ namespace
 	bool IsRetryableHashOpenError(DWORD dwError)
 	{
 		return dwError == ERROR_SHARING_VIOLATION || dwError == ERROR_LOCK_VIOLATION;
+	}
+
+	void RefreshKnownFileShareManagementState(CKnownFile* pFile, bool bRefreshUploadChunkStatus)
+	{
+		if (pFile == NULL)
+			return;
+
+		if (pFile->IsPartFile())
+			static_cast<CPartFile*>(pFile)->UpdatePartsInfo();
+		else
+			pFile->UpdatePartsInfo();
+
+		if (bRefreshUploadChunkStatus)
+			pFile->RefreshUploadingClientPartStatusCache(true);
+	}
+
+	void ClearUploadVisibilityFlags(CUpDownClient* pClient, UINT uPartCount)
+	{
+		if (pClient == NULL || pClient->GetUpPartStatus() == NULL || pClient->GetUpPartCount() != uPartCount)
+			return;
+
+		for (UINT i = 0; i < uPartCount; ++i)
+			pClient->m_abyUpPartStatus[i] &= SC_AVAILABLE;
 	}
 
 	FILE* OpenFileStreamSharedReadForHashing(const CString& path, DWORD& rwLastError)
@@ -117,6 +141,7 @@ CKnownFile::CKnownFile()
 	, m_nCompleteSourcesCount(1)
 	, m_nCompleteSourcesCountLo(1)
 	, m_nCompleteSourcesCountHi(1)
+	, m_nVirtualCompleteSourcesCount()
 	, m_pCollection()
 	, m_hRead(INVALID_HANDLE_VALUE)
 	, nInUse()
@@ -134,6 +159,18 @@ CKnownFile::CKnownFile()
 	, m_bAutoUpPriority(thePrefs.GetNewAutoUp())
 	, m_PublishedED2K()
 	, m_bAICHRecoverHashSetAvailable()
+	, m_iPermissions(-1)
+	, m_iSpreadbarSetStatus(-1)
+	, m_iHideOS(-1)
+	, m_iSelectiveChunk(-1)
+	, m_bHideOSAuthorized(true)
+	, m_iShareOnlyTheNeed(-1)
+	, m_iPowerSharedMode(-1)
+	, m_bPowerShareAuthorized(true)
+	, m_bPowerShareAuto()
+	, m_bPowerShared()
+	, m_iPowerShareLimit(-1)
+	, m_bPowerShareLimited()
 {
 	m_iUpPriority = m_bAutoUpPriority ? PR_HIGH : PR_NORMAL;
 	statistic.fileParent = this;
@@ -162,8 +199,10 @@ void CKnownFile::AssertValid() const
 	(void)m_nCompleteSourcesCount;
 	(void)m_nCompleteSourcesCountLo;
 	(void)m_nCompleteSourcesCountHi;
+	(void)m_nVirtualCompleteSourcesCount;
 	m_ClientUploadList.AssertValid();
 	m_AvailPartFrequency.AssertValid();
+	m_PartSentCount.AssertValid();
 	(void)m_strDirectory;
 	(void)m_strFilePath;
 	(void)m_iPartCount;
@@ -177,6 +216,18 @@ void CKnownFile::AssertValid() const
 	(void)m_lastPublishTimeKadNotes;
 	(void)m_lastServingBuddyIP;
 	(void)wordlist;
+	(void)m_iPermissions;
+	(void)m_iSpreadbarSetStatus;
+	(void)m_iHideOS;
+	(void)m_iSelectiveChunk;
+	CHECK_BOOL(m_bHideOSAuthorized);
+	(void)m_iShareOnlyTheNeed;
+	(void)m_iPowerSharedMode;
+	CHECK_BOOL(m_bPowerShareAuthorized);
+	CHECK_BOOL(m_bPowerShareAuto);
+	CHECK_BOOL(m_bPowerShared);
+	(void)m_iPowerShareLimit;
+	CHECK_BOOL(m_bPowerShareLimited);
 }
 
 void CKnownFile::Dump(CDumpContext &dc) const
@@ -261,6 +312,7 @@ void CKnownFile::UpdatePartsInfo()
 {
 	time_t tNow = time(NULL);
 	bool bRefresh = (tNow - m_nCompleteSourcesTime > 0);
+	UINT uCompleteSourcesCountInfoReceived = 0;
 
 	// Reset part counters
 	if (m_AvailPartFrequency.GetCount() < GetPartCount())
@@ -275,11 +327,14 @@ void CKnownFile::UpdatePartsInfo()
 		CUpDownClient *cur_src = m_ClientUploadList.GetNext(pos);
 		//This could be a partfile that just completed. Many of these clients will not have this information.
 		if (cur_src->m_abyUpPartStatus && cur_src->GetUpPartCount() == GetPartCount()) {
-			for (INT_PTR i = GetPartCount(); --i > 0;)
+			for (INT_PTR i = GetPartCount(); --i >= 0;)
 				m_AvailPartFrequency[i] += static_cast<uint16>(cur_src->IsUpPartAvailable((UINT)i));
 
-			if (bRefresh)
+			if (bRefresh) {
 				acount.push_back(cur_src->GetUpCompleteSourcesCount());
+				if (cur_src->GetUpCompleteSourcesCount() > 0)
+					++uCompleteSourcesCountInfoReceived;
+			}
 		}
 	}
 
@@ -337,8 +392,41 @@ void CKnownFile::UpdatePartsInfo()
 			}
 		m_nCompleteSourcesTime = tNow + MIN2S(1);
 	}
+
+	if (GetPartCount() == 0)
+		m_nVirtualCompleteSourcesCount = 0;
+	else {
+		m_nVirtualCompleteSourcesCount = _UI16_MAX;
+		for (INT_PTR i = GetPartCount(); --i >= 0;) {
+			if (m_nVirtualCompleteSourcesCount > m_AvailPartFrequency[i])
+				m_nVirtualCompleteSourcesCount = m_AvailPartFrequency[i];
+		}
+	}
+
+	UpdatePowerShareLimit(
+		m_nVirtualCompleteSourcesCount <= 1 || m_nCompleteSourcesCountHi <= GetPartCount(),
+		m_nCompleteSourcesCountHi == 1 && m_nVirtualCompleteSourcesCount == 0 && uCompleteSourcesCountInfoReceived > 1,
+		m_nCompleteSourcesCountHi > ((GetPowerShareLimit() >= 0) ? GetPowerShareLimit() : thePrefs.GetPowerShareLimit()));
+	SetHideOSAuthorized(true);
+
 	if (theApp.emuledlg->sharedfileswnd->m_hWnd)
 		::PostMessage(theApp.emuledlg->GetSafeHwnd(), TM_SHAREDFILESCTRLUPDATEFILE, (WPARAM)this, 0);
+}
+
+void CKnownFile::RefreshUploadingClientPartStatusCache(bool bResetSelectedChunk)
+{
+	const UINT uPartCount = GetPartCount();
+	for (POSITION pos = m_ClientUploadList.GetHeadPosition(); pos != NULL;) {
+		CUpDownClient* pClient = m_ClientUploadList.GetNext(pos);
+		if (pClient == NULL || pClient->GetUpPartStatus() == NULL || pClient->GetUpPartCount() != uPartCount)
+			continue;
+
+		if (bResetSelectedChunk)
+			pClient->SetSelectedUpChunk(0);
+
+		CArray<uint64, uint64> partspread;
+		CalcPartSpread(partspread, pClient);
+	}
 }
 
 void CKnownFile::AddUploadingClient(CUpDownClient *client)
@@ -686,6 +774,10 @@ void CKnownFile::SetFileSize(EMFileSize nFileSize)
 bool CKnownFile::LoadTagsFromFile(CFileDataIO &file)
 {
 	bool bHadAICHHashSetTag = false;
+	bool bRefreshShareManagementState = false;
+	CMap<UINT, UINT, uint64, uint64> spreadStartMap;
+	CMap<UINT, UINT, uint64, uint64> spreadEndMap;
+	CMap<UINT, UINT, uint64, uint64> spreadCountMap;
 	for (uint32 j = file.ReadUInt32(); j > 0; --j) {
 		CTag *newtag = new CTag(file, false);
 		switch (newtag->GetNameID()) {
@@ -773,7 +865,14 @@ bool CKnownFile::LoadTagsFromFile(CFileDataIO &file)
 			if (newtag->IsInt())
 				m_uMetaDataVer = newtag->GetInt() & 0x0F;
 			break;
-		case FT_PERMISSIONS:  // old tags: as they are not needed, take a chance to purge
+		case FT_PERMISSIONS:
+			ASSERT(newtag->IsInt());
+			if (newtag->IsInt()) {
+				m_iPermissions = (int)newtag->GetInt();
+				if (m_iPermissions != PERM_ALL && m_iPermissions != PERM_FRIENDS && m_iPermissions != PERM_NOONE)
+					m_iPermissions = -1;
+			}
+			break;
 		case FT_KADLASTPUBLISHKEY:
 			ASSERT(newtag->IsInt());
 			break;
@@ -803,6 +902,61 @@ bool CKnownFile::LoadTagsFromFile(CFileDataIO &file)
 				ASSERT(0);
 			break;
 		default:
+			if (newtag->GetNameID() == 0 && newtag->HasName()) {
+				if (newtag->IsInt64(true)) {
+					const uint64 uTagValue = newtag->GetInt64();
+					const char cSpreadTag = newtag->GetName()[0];
+					if (cSpreadTag == FT_SPREADSTART || cSpreadTag == FT_SPREADEND || cSpreadTag == FT_SPREADCOUNT) {
+						const UINT uSpreadKey = (UINT)atoi(&newtag->GetName()[1]);
+						if (cSpreadTag == FT_SPREADSTART)
+							spreadStartMap.SetAt(uSpreadKey, uTagValue);
+						else if (cSpreadTag == FT_SPREADEND)
+							spreadEndMap.SetAt(uSpreadKey, uTagValue);
+						else
+							spreadCountMap.SetAt(uSpreadKey, uTagValue);
+						delete newtag;
+						continue;
+					}
+
+					if (CmpED2KTagName(newtag->GetName(), FT_POWERSHARE) == 0) {
+						m_iPowerSharedMode = (uTagValue <= 3) ? (int)uTagValue : -1;
+						bRefreshShareManagementState = true;
+						delete newtag;
+						continue;
+					}
+					if (CmpED2KTagName(newtag->GetName(), FT_POWERSHARE_LIMIT) == 0) {
+						SetPowerShareLimit(uTagValue <= 200 ? (int)uTagValue : -1);
+						bRefreshShareManagementState = true;
+						delete newtag;
+						continue;
+					}
+					if (CmpED2KTagName(newtag->GetName(), FT_SPREADBAR) == 0) {
+						SetSpreadbarSetStatus(uTagValue <= 1 ? (int)uTagValue : -1);
+						bRefreshShareManagementState = true;
+						delete newtag;
+						continue;
+					}
+					if (CmpED2KTagName(newtag->GetName(), FT_HIDEOS) == 0) {
+						SetHideOS(uTagValue <= 10 ? (int)uTagValue : -1);
+						bRefreshShareManagementState = true;
+						delete newtag;
+						continue;
+					}
+					if (CmpED2KTagName(newtag->GetName(), FT_SELECTIVE_CHUNK) == 0) {
+						SetSelectiveChunk(uTagValue <= 1 ? (int)uTagValue : -1);
+						bRefreshShareManagementState = true;
+						delete newtag;
+						continue;
+					}
+					if (CmpED2KTagName(newtag->GetName(), FT_SHAREONLYTHENEED) == 0) {
+						SetShareOnlyTheNeed(uTagValue <= 1 ? (int)uTagValue : -1);
+						bRefreshShareManagementState = true;
+						delete newtag;
+						continue;
+					}
+				}
+			}
+
 			ConvertED2KTag(newtag);
 			if (newtag) {
 				CSingleLock sTagListLock(&m_mutTagList, TRUE);
@@ -812,6 +966,27 @@ bool CKnownFile::LoadTagsFromFile(CFileDataIO &file)
 		}
 		delete newtag;
 	}
+
+	for (POSITION pos = spreadStartMap.GetStartPosition(); pos != NULL;) {
+		UINT uSpreadKey = 0;
+		uint64 uSpreadStart = 0;
+		uint64 uSpreadEnd = 0;
+		uint64 uSpreadCount = 0;
+		spreadStartMap.GetNextAssoc(pos, uSpreadKey, uSpreadStart);
+		if (!spreadEndMap.Lookup(uSpreadKey, uSpreadEnd) || !spreadCountMap.Lookup(uSpreadKey, uSpreadCount))
+			continue;
+		if (uSpreadCount == 0 || uSpreadStart >= uSpreadEnd)
+			continue;
+		statistic.AddBlockTransferred(uSpreadStart, uSpreadEnd, uSpreadCount);
+	}
+
+	if (bRefreshShareManagementState) {
+		if (IsPartFile())
+			static_cast<CPartFile*>(this)->UpdatePartsInfo();
+		else
+			UpdatePartsInfo();
+	}
+
 	if (bHadAICHHashSetTag)
 		if (!m_FileIdentifier.VerifyAICHHashSet())
 			DebugLogError(_T("Failed to load AICH Part HashSet for file %s"), (LPCTSTR)EscPercent(GetFileName()));
@@ -985,6 +1160,87 @@ bool CKnownFile::WriteToFile(CFileDataIO &file)
 			++uTagCount;
 		}
 
+		if (GetPermissions() >= 0) {
+			CTag permissionTag(FT_PERMISSIONS, (uint64)GetPermissions());
+			permissionTag.WriteTagToFile(file);
+			++uTagCount;
+		}
+
+		if (GetSpreadbarSetStatus() >= 0) {
+			CTag spreadBarTag(FT_SPREADBAR, (uint64)GetSpreadbarSetStatus());
+			spreadBarTag.WriteTagToFile(file);
+			++uTagCount;
+		}
+
+		if (GetHideOS() >= 0) {
+			CTag hideOSTag(FT_HIDEOS, (uint64)GetHideOS());
+			hideOSTag.WriteTagToFile(file);
+			++uTagCount;
+		}
+
+		if (GetSelectiveChunk() >= 0) {
+			CTag selectiveChunkTag(FT_SELECTIVE_CHUNK, (uint64)GetSelectiveChunk());
+			selectiveChunkTag.WriteTagToFile(file);
+			++uTagCount;
+		}
+
+		if (GetShareOnlyTheNeed() >= 0) {
+			CTag shareOnlyTheNeedTag(FT_SHAREONLYTHENEED, (uint64)GetShareOnlyTheNeed());
+			shareOnlyTheNeedTag.WriteTagToFile(file);
+			++uTagCount;
+		}
+
+		if (GetPowerSharedMode() >= 0) {
+			CTag powerShareTag(FT_POWERSHARE, (uint64)GetPowerSharedMode());
+			powerShareTag.WriteTagToFile(file);
+			++uTagCount;
+		}
+
+		if (GetPowerShareLimit() >= 0) {
+			CTag powerShareLimitTag(FT_POWERSHARE_LIMIT, (uint64)GetPowerShareLimit());
+			powerShareLimitTag.WriteTagToFile(file);
+			++uTagCount;
+		}
+
+		const bool bSpreadBarEnabled = GetSpreadbarSetStatus() > 0 || (GetSpreadbarSetStatus() == -1 && thePrefs.GetSpreadbarSetStatus());
+		CSpreadEntryArray aSpreadEntries;
+		if (bSpreadBarEnabled)
+			statistic.GetSpreadListSnapshot(aSpreadEntries);
+		if (bSpreadBarEnabled && !aSpreadEntries.IsEmpty()) {
+			char acTagName[10];
+			char *pcIndex = &acTagName[1];
+			UINT uSpreadIndex = 0;
+			const uint64 uHideOS = (GetHideOS() >= 0) ? (uint64)GetHideOS() : (uint64)thePrefs.GetHideOvershares();
+			for (INT_PTR i = 0; i < aSpreadEntries.GetSize(); ++i) {
+				const uint64 uCount = aSpreadEntries[i].uCount;
+				if (uCount == 0) {
+					continue;
+				}
+
+				const uint64 uStart = aSpreadEntries[i].uStart;
+				if (i + 1 >= aSpreadEntries.GetSize()) {
+					ASSERT(false);
+					break;
+				}
+
+				const uint64 uEnd = aSpreadEntries[i + 1].uStart;
+				if (uEnd <= uStart)
+					continue;
+				if (uEnd - uStart < EMBLOCKSIZE && uCount > uHideOS)
+					continue;
+
+				_itoa((int)uSpreadIndex, pcIndex, 10);
+				acTagName[0] = FT_SPREADSTART;
+				CTag(acTagName, uStart, true).WriteTagToFile(file);
+				acTagName[0] = FT_SPREADEND;
+				CTag(acTagName, uEnd, true).WriteTagToFile(file);
+				acTagName[0] = FT_SPREADCOUNT;
+				CTag(acTagName, uCount, true).WriteTagToFile(file);
+				uTagCount += 3;
+				++uSpreadIndex;
+			}
+		}
+
 		// other tags
 		for (INT_PTR i = 0; i < m_taglist.GetCount(); ++i) {
 			if (m_taglist[i]->IsStr() || m_taglist[i]->IsInt()) {
@@ -1152,7 +1408,7 @@ Packet*	CKnownFile::CreateSrcInfoPacket(const CUpDownClient *forClient, uint8 by
 				ASSERT(cur_src->GetUpPartCount() == GetPartCount());
 				if (cur_src->GetUpPartCount() == forClient->GetUpPartCount()) {
 					for (INT_PTR x = GetPartCount(); --x >= 0;)
-						if (srcstatus[x] && !rcvstatus[x]) {
+						if ((srcstatus[x] & SC_AVAILABLE) != 0 && (rcvstatus[x] & SC_AVAILABLE) == 0) {
 							// We know the receiving client needs a chunk from this client.
 							bNeeded = true;
 							break;
@@ -1176,7 +1432,7 @@ Packet*	CKnownFile::CreateSrcInfoPacket(const CUpDownClient *forClient, uint8 by
 			if (srcstatus) {
 				ASSERT(cur_src->GetUpPartCount() == GetPartCount());
 				for (INT_PTR x = GetPartCount(); --x >= 0;)
-					if (srcstatus[x]) {
+					if ((srcstatus[x] & SC_AVAILABLE) != 0) {
 						// this client has at least one chunk
 						bNeeded = true;
 						break;
@@ -1618,10 +1874,8 @@ bool CKnownFile::ImportParts()
 	}
 
 	CPartFile *partfile = static_cast<CPartFile*>(this);
-	if (partfile->GetFileOp() == PFOP_IMPORTPARTS) {
-		partfile->SetFileOp(PFOP_NONE); //cancel import
-		return false;
-	}
+	if (partfile->GetFileOp() == PFOP_IMPORTPARTS)
+		partfile->CancelImportPartsOperation();
 
 	CFileDialog dlg(true, NULL, NULL, OFN_FILEMUSTEXIST | OFN_HIDEREADONLY);
 	if (dlg.DoModal() != IDOK)
@@ -1632,7 +1886,18 @@ bool CKnownFile::ImportParts()
 		const CString &pathName = dlg.GetPathName();
 		partfile->SetFileOpProgress(0);
 		addfilethread->SetValues(theApp.sharedfiles, partfile->GetPath(), partfile->m_hpartfile.GetFileName(), EMPTY, partfile);
-		partfile->SetFileOp(addfilethread->SetPartToImport(pathName) ? PFOP_IMPORTPARTS : PFOP_HASHING);
+		const uint16 uPartsToImport = addfilethread->SetPartToImport(pathName);
+		if (uPartsToImport > 0) {
+			ImportOperationContext* pContext = partfile->BeginImportPartsOperation();
+			if (pContext == NULL) {
+				delete addfilethread;
+				return false;
+			}
+			addfilethread->SetImportOperationContext(pContext);
+			ReleaseImportOperationContext(pContext);
+			partfile->SetFileOp(PFOP_IMPORTPARTS);
+		} else
+			partfile->SetFileOp(PFOP_HASHING);
 		addfilethread->ResumeThread();
 	}
 	return true;
@@ -1708,6 +1973,393 @@ CString CKnownFile::GetUpPriorityDisplayString() const
 	}
 	return !IsEmpty(uid) ? GetResString(uid) : CString();
 }
+
+void CKnownFile::SetPermissions(int iNewPermissions)
+{
+	ASSERT(iNewPermissions == -1 || iNewPermissions == PERM_ALL || iNewPermissions == PERM_FRIENDS || iNewPermissions == PERM_NOONE);
+	if (m_iPermissions == iNewPermissions)
+		return;
+
+	m_iPermissions = iNewPermissions;
+}
+
+void CKnownFile::SetPowerShared(int newValue)
+{
+	if (m_iPowerSharedMode == newValue)
+		return;
+
+	m_iPowerSharedMode = newValue;
+	RefreshKnownFileShareManagementState(this, false);
+}
+
+void CKnownFile::SetPowerShareLimit(int newValue)
+{
+	if (m_iPowerShareLimit == newValue)
+		return;
+
+	m_iPowerShareLimit = newValue;
+	RefreshKnownFileShareManagementState(this, false);
+}
+
+void CKnownFile::SetSpreadbarSetStatus(int newValue)
+{
+	if (m_iSpreadbarSetStatus == newValue)
+		return;
+
+	m_iSpreadbarSetStatus = newValue;
+	RefreshKnownFileShareManagementState(this, true);
+}
+
+void CKnownFile::SetHideOS(int newValue)
+{
+	if (m_iHideOS == newValue)
+		return;
+
+	m_iHideOS = newValue;
+	RefreshKnownFileShareManagementState(this, true);
+}
+
+void CKnownFile::SetSelectiveChunk(int newValue)
+{
+	if (m_iSelectiveChunk == newValue)
+		return;
+
+	m_iSelectiveChunk = newValue;
+	RefreshKnownFileShareManagementState(this, true);
+}
+
+void CKnownFile::SetShareOnlyTheNeed(int newValue)
+{
+	if (m_iShareOnlyTheNeed == newValue)
+		return;
+
+	m_iShareOnlyTheNeed = newValue;
+	RefreshKnownFileShareManagementState(this, true);
+}
+
+void CKnownFile::UpdatePowerShareLimit(bool authorizePowerShare, bool autoPowerShare, bool limitedPowerShare)
+{
+	m_bPowerShareAuthorized = authorizePowerShare;
+	m_bPowerShareAuto = autoPowerShare;
+	m_bPowerShareLimited = limitedPowerShare;
+
+	const int iPowerShareMode = (m_iPowerSharedMode >= 0) ? m_iPowerSharedMode : thePrefs.GetPowerShareMode();
+	m_bPowerShared = ((iPowerShareMode & 1) != 0 || (iPowerShareMode == 2 && m_bPowerShareAuto))
+		&& m_bPowerShareAuthorized
+		&& !(iPowerShareMode == 3 && m_bPowerShareLimited);
+}
+
+bool CKnownFile::GetPowerShared() const
+{
+	return m_bPowerShared;
+}
+
+void CKnownFile::CalcPartSpread(CArray<uint64, uint64> &partspread, CUpDownClient *client)
+{
+	const UINT uPartCount = GetPartCount();
+	if (client == NULL || uPartCount == 0)
+		return;
+
+	partspread.RemoveAll();
+	partspread.SetSize(uPartCount);
+
+	CArray<bool, bool> partAvailable;
+	partAvailable.SetSize(uPartCount);
+
+	bool bUsePartAvailability = false;
+	for (UINT i = 0; i < uPartCount; ++i) {
+		partspread[i] = 0;
+		partAvailable[i] = true;
+	}
+
+	ClearUploadVisibilityFlags(client, uPartCount);
+
+	if (IsPartFile()) {
+		CPartFile *pPartFile = static_cast<CPartFile*>(this);
+		UINT uShareablePartCount = 0;
+		for (UINT i = 0; i < uPartCount; ++i) {
+			if (!pPartFile->IsCompleteBD(i)) {
+				partAvailable[i] = false;
+				bUsePartAvailability = true;
+			} else
+				++uShareablePartCount;
+		}
+		if (uShareablePartCount <= 2)
+			return;
+	}
+
+	if (client->GetUpPartStatus() != NULL) {
+		UINT uNeededPartCount = 0;
+		for (UINT i = 0; i < uPartCount; ++i) {
+			if (client->IsUpPartAvailable(i)) {
+				partAvailable[i] = false;
+				bUsePartAvailability = true;
+			} else if (partAvailable[i])
+				++uNeededPartCount;
+		}
+		if (uNeededPartCount <= 2)
+			return;
+	}
+
+	const UINT uHideOS = HideOSInWork();
+	CSpreadEntryArray aSpreadEntries;
+	if (uHideOS != 0)
+		statistic.GetSpreadListSnapshot(aSpreadEntries);
+	const bool bHaveSpreadEntries = !aSpreadEntries.IsEmpty();
+	if (uHideOS != 0 && bHaveSpreadEntries) {
+		uint16 uLastPart = 0;
+		uint64 uCount = aSpreadEntries[0].uCount;
+		uint64 uMinValue = uCount;
+		INT_PTR iSpreadEntry = 1;
+		while (iSpreadEntry < aSpreadEntries.GetSize() && uLastPart < uPartCount) {
+			uint64 uNext = aSpreadEntries[iSpreadEntry].uStart;
+			if (uNext >= GetFileSize())
+				break;
+			uNext /= PARTSIZE;
+			while (uLastPart < uNext && uLastPart < uPartCount) {
+				partspread[uLastPart] = uCount;
+				++uLastPart;
+			}
+			if (uLastPart >= uPartCount || (aSpreadEntries[iSpreadEntry].uStart % PARTSIZE) == 0) {
+				uCount = aSpreadEntries[iSpreadEntry].uCount;
+				if (uMinValue > uCount)
+					uMinValue = uCount;
+				++iSpreadEntry;
+				continue;
+			}
+			partspread[uLastPart] = uCount;
+			while (uNext == uLastPart) {
+				uCount = aSpreadEntries[iSpreadEntry].uCount;
+				if (uMinValue > uCount)
+					uMinValue = uCount;
+				if (partspread[uLastPart] > uCount)
+					partspread[uLastPart] = uCount;
+				++iSpreadEntry;
+				if (iSpreadEntry >= aSpreadEntries.GetSize())
+					break;
+				uNext = aSpreadEntries[iSpreadEntry].uStart;
+				if (uNext >= GetFileSize())
+					break;
+				uNext /= PARTSIZE;
+			}
+			++uLastPart;
+		}
+		while (uLastPart < uPartCount) {
+			partspread[uLastPart] = uCount;
+			++uLastPart;
+		}
+
+		if (client->GetUpPartStatus() != NULL) {
+			for (UINT i = 0; i < uPartCount; ++i) {
+				if (partspread[i] >= uHideOS)
+					client->m_abyUpPartStatus[i] |= SC_HIDDENBYHIDEOS;
+			}
+		}
+	}
+
+	const bool bShareOnlyTheNeed = ((GetShareOnlyTheNeed() >= 0) ? GetShareOnlyTheNeed() : (int)thePrefs.GetShareOnlyTheNeed()) != 0;
+	if (bShareOnlyTheNeed) {
+		if (IsPartFile()) {
+			const CArray<uint16, uint16> &rSourcePartFrequency = static_cast<CPartFile*>(this)->GetSourcePartFrequency();
+			if (!rSourcePartFrequency.IsEmpty()) {
+				for (UINT i = 0; i < uPartCount; ++i) {
+					if (partAvailable[i] && rSourcePartFrequency[i] > partspread[i]) {
+						partspread[i] = rSourcePartFrequency[i];
+						if (client->GetUpPartStatus() != NULL)
+							client->m_abyUpPartStatus[i] |= SC_HIDDENBYSOTN;
+					}
+				}
+			}
+		} else if (!m_AvailPartFrequency.IsEmpty()) {
+			for (UINT i = 0; i < uPartCount; ++i) {
+				if (partAvailable[i] && m_AvailPartFrequency[i] > partspread[i]) {
+					partspread[i] = m_AvailPartFrequency[i];
+					if (client->GetUpPartStatus() != NULL)
+						client->m_abyUpPartStatus[i] |= SC_HIDDENBYSOTN;
+				}
+			}
+		}
+	}
+
+	uint64 uMinValue = (uint64)-1;
+	if ((bUsePartAvailability && bHaveSpreadEntries) || bShareOnlyTheNeed) {
+		uint64 uMinValue2 = (uint64)-1;
+		for (UINT i = 0; i < uPartCount; ++i) {
+			if (!partAvailable[i])
+				continue;
+			if (uMinValue2 > partspread[i])
+				uMinValue2 = partspread[i];
+			else if (uMinValue2 == partspread[i])
+				uMinValue = uMinValue2;
+		}
+	}
+
+	for (UINT i = 0; i < uPartCount; ++i) {
+		if (partspread[i] > uMinValue)
+			partspread[i] -= uMinValue;
+		else {
+			partspread[i] = 0;
+			if (client->GetUpPartStatus() != NULL)
+				client->m_abyUpPartStatus[i] &= SC_AVAILABLE;
+		}
+	}
+
+	if (uHideOS == 0 || ((GetSelectiveChunk() >= 0) ? GetSelectiveChunk() == 0 : !thePrefs.IsSelectiveShareEnabled()))
+		return;
+
+	const uint16 uSelectedChunk = client->GetSelectedUpChunk();
+	if (uSelectedChunk > 0 && uSelectedChunk <= partspread.GetSize() && partAvailable[uSelectedChunk - 1]) {
+		for (UINT i = 0; i < uSelectedChunk - 1; ++i) {
+			partspread[i] = uHideOS;
+			if (client->GetUpPartStatus() != NULL)
+				client->m_abyUpPartStatus[i] |= SC_HIDDENBYHIDEOS;
+		}
+		for (UINT i = uSelectedChunk; i < uPartCount; ++i) {
+			partspread[i] = uHideOS;
+			if (client->GetUpPartStatus() != NULL)
+				client->m_abyUpPartStatus[i] |= SC_HIDDENBYHIDEOS;
+		}
+		return;
+	}
+
+	client->SetSelectedUpChunk(0);
+
+	bool bResetSentCount = false;
+	uint64 uMinSentCount = 0;
+	UINT uMinCount = 1;
+	UINT uMinCount2 = 1;
+	if (m_PartSentCount.GetSize() != partspread.GetSize() || m_PartSentCount.GetSize() == 0)
+		bResetSentCount = true;
+	else {
+		uMinSentCount = uHideOS;
+		for (UINT i = 0; i < uPartCount; ++i) {
+			if (!partAvailable[i])
+				continue;
+			if (m_PartSentCount[i] < partspread[i])
+				m_PartSentCount[i] = partspread[i];
+			if (m_PartSentCount[i] < uMinSentCount) {
+				uMinSentCount = m_PartSentCount[i];
+				uMinCount = 1;
+			} else if (m_PartSentCount[i] == uMinSentCount)
+				++uMinCount;
+		}
+		if (uMinSentCount >= uHideOS)
+			bResetSentCount = true;
+	}
+
+	if (bResetSentCount) {
+		uMinSentCount = 0;
+		uMinCount = 0;
+		uMinCount2 = 0;
+		m_PartSentCount.SetSize(uPartCount);
+		for (UINT i = 0; i < uPartCount; ++i) {
+			m_PartSentCount[i] = partspread[i];
+			if (partAvailable[i] && partspread[i] == 0)
+				++uMinCount;
+		}
+		if (uMinCount == 0)
+			return;
+	}
+
+	if (uMinCount == 0)
+		return;
+	uMinCount = (rand() % uMinCount) + 1;
+	uMinCount2 = uMinCount;
+
+	UINT uFirstChunk = 0;
+	for (; uFirstChunk < uPartCount; ++uFirstChunk) {
+		if (!partAvailable[uFirstChunk] || m_PartSentCount[uFirstChunk] > uMinSentCount)
+			continue;
+		if (--uMinCount == 0)
+			break;
+	}
+	if (uFirstChunk >= uPartCount)
+		return;
+
+	m_PartSentCount[uFirstChunk]++;
+	client->SetSelectedUpChunk((uint16)(uFirstChunk + 1));
+
+	UINT uSecondChunk = 0;
+	for (; uSecondChunk < uPartCount; ++uSecondChunk) {
+		if (!partAvailable[uSecondChunk] || m_PartSentCount[uSecondChunk] > uMinSentCount)
+			continue;
+		if (--uMinCount2 == 0)
+			break;
+	}
+	if (uSecondChunk >= uPartCount)
+		return;
+
+	m_PartSentCount[uSecondChunk]++;
+	for (UINT i = 0; i < uPartCount; ++i) {
+		if (i == uFirstChunk || i == uSecondChunk)
+			continue;
+		partspread[i] = uHideOS;
+		if (client->GetUpPartStatus() != NULL)
+			client->m_abyUpPartStatus[i] |= SC_HIDDENBYHIDEOS;
+	}
+}
+
+bool CKnownFile::HideOvershares(CSafeMemFile &file, CUpDownClient *client)
+{
+	if (client == NULL)
+		return false;
+
+	const uint16 uPartCount = GetPartCount();
+	if (uPartCount == 0)
+		return false;
+
+	if (client->GetUpPartStatus() == NULL || client->GetUpPartCount() != uPartCount) {
+		delete[] client->m_abyUpPartStatus;
+		client->m_abyUpPartStatus = new uint8[uPartCount];
+		memset(client->m_abyUpPartStatus, 0, uPartCount);
+		client->SetUpPartCount(uPartCount);
+		client->SetSelectedUpChunk(0);
+	}
+
+	CArray<uint64, uint64> partspread;
+	CalcPartSpread(partspread, client);
+	if (partspread.GetSize() == 0)
+		return false;
+
+	uint64 uMaxSpread = partspread[0];
+	for (UINT i = 1; i < uPartCount; ++i) {
+		if (partspread[i] > uMaxSpread)
+			uMaxSpread = partspread[i];
+	}
+
+	UINT uHideOS = HideOSInWork();
+	const bool bShareOnlyTheNeed = ((GetShareOnlyTheNeed() >= 0) ? GetShareOnlyTheNeed() : (int)thePrefs.GetShareOnlyTheNeed()) != 0;
+	if (uHideOS == 0 && bShareOnlyTheNeed)
+		uHideOS = 1;
+	if (uHideOS == 0 || uMaxSpread < uHideOS)
+		return false;
+
+	const uint16 uED2KPartCount = GetED2KPartCount();
+	file.WriteUInt16(uED2KPartCount);
+	for (UINT uDone = 0; uDone < uED2KPartCount;) {
+		uint8 byToWrite = 0;
+		for (UINT i = 0; i < 8 && uDone < uED2KPartCount; ++i) {
+			if (uDone < uPartCount && partspread[uDone] < uHideOS) {
+				byToWrite |= (1 << i);
+				client->m_abyUpPartStatus[uDone] &= SC_AVAILABLE;
+			}
+			++uDone;
+		}
+		file.WriteUInt8(byToWrite);
+	}
+	return true;
+}
+
+UINT CKnownFile::HideOSInWork() const
+{
+	if (GetSpreadbarSetStatus() == 0 || (GetSpreadbarSetStatus() == -1 && !thePrefs.GetSpreadbarSetStatus()))
+		return 0;
+
+	if (m_bHideOSAuthorized)
+		return (m_iHideOS >= 0) ? (UINT)m_iHideOS : (UINT)thePrefs.GetHideOvershares();
+	return 0;
+}
+
 bool CKnownFile::ShouldPartiallyPurgeFile() const
 {
 	return thePrefs.DoPartiallyPurgeOldKnownFiles() && m_timeLastSeen > 0

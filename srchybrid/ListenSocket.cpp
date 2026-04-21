@@ -372,7 +372,7 @@ bool CClientReqSocket::ProcessPacket(const BYTE *packet, uint32 size, UINT opcod
 			catch (...) {
 				if (bNewClient) {
 					// Don't let CUpDownClient::Disconnected process a client which is not in the list of clients.
-					delete client;
+					CUpDownClient::SafeDelete(client);
 					client = NULL;
 				}
 				throw;
@@ -627,8 +627,8 @@ bool CClientReqSocket::ProcessPacket(const BYTE *packet, uint32 size, UINT opcod
 				CSafeMemFile data(16 + 16);
 				data.WriteHash16(reqfile->GetFileHash());
 				if (reqfile->IsPartFile())
-					static_cast<CPartFile*>(reqfile)->WritePartStatus(data);
-				else
+					static_cast<CPartFile*>(reqfile)->WritePartStatus(data, client);
+				else if (!reqfile->HideOvershares(data, client))
 					data.WriteUInt16(0);
 				Packet* packet2 = new Packet(data);
 				packet2->opcode = OP_FILESTATUS;
@@ -1072,7 +1072,7 @@ bool CClientReqSocket::ProcessPacket(const BYTE *packet, uint32 size, UINT opcod
 			CPtrList list;
 			if (thePrefs.CanSeeShares() == vsfaEverybody || (thePrefs.CanSeeShares() == vsfaFriends && client->IsFriend())) {
 				for (const CKnownFilesMap::CPair* pair = theApp.sharedfiles->m_Files_map.PGetFirstAssoc(); pair != NULL; pair = theApp.sharedfiles->m_Files_map.PGetNextAssoc(pair))
-					if (!pair->value->IsLargeFile() || client->SupportsLargeFiles())
+					if (theApp.sharedfiles->CanClientBrowseSharedFile(pair->value, client) && (!pair->value->IsLargeFile() || client->SupportsLargeFiles()))
 						list.AddTail((void*)pair->value);
 				CString m_strTemp = GetResString(_T("REQ_SHAREDFILES"));
 				if (client->GetUserName() == NULL || client->GetUserName()[0] == '\0') {
@@ -1175,7 +1175,7 @@ bool CClientReqSocket::ProcessPacket(const BYTE *packet, uint32 size, UINT opcod
 				if (strReqDir == OP_INCOMPLETE_SHARED_FILES) {
 					for (POSITION pos = NULL; ;) { // get all shared files from download queue
 						CPartFile* pFile = theApp.downloadqueue->GetFileNext(pos);
-						if (pFile && pFile->GetStatus(true) == PS_READY && (!pFile->IsLargeFile() || client->SupportsLargeFiles()))
+						if (pFile && pFile->GetStatus(true) == PS_READY && theApp.sharedfiles->CanClientBrowseSharedFile(pFile, client) && (!pFile->IsLargeFile() || client->SupportsLargeFiles()))
 							list.AddTail(pFile);
 						if (pos == NULL)
 							break;
@@ -1193,6 +1193,7 @@ bool CClientReqSocket::ProcessPacket(const BYTE *packet, uint32 size, UINT opcod
 							if (((!bSingleSharedFiles && EqualPaths(strReqDir, cur_file->GetSharedDirectory()))
 								|| (bSingleSharedFiles && !theApp.sharedfiles->ShouldBeShared(cur_file->GetSharedDirectory(), NULL, false))
 								)
+								&& theApp.sharedfiles->CanClientBrowseSharedFile(cur_file, client)
 								&& (!cur_file->IsLargeFile() || client->SupportsLargeFiles()))
 							{
 								list.AddTail(cur_file);
@@ -1265,8 +1266,11 @@ bool CClientReqSocket::ProcessPacket(const BYTE *packet, uint32 size, UINT opcod
 
 				client->m_uSharedFilesStatus = S_RECEIVED;
 				client->m_bAutoQuerySharedFiles = false;
-				if (client->m_ArchivedClient)
-					client->m_ArchivedClient->m_bAutoQuerySharedFiles = false;
+				CUpDownClient* pArchivedClient = client->AcquireArchivedClient();
+				if (pArchivedClient != NULL) {
+					pArchivedClient->m_bAutoQuerySharedFiles = false;
+					pArchivedClient->ReleaseRuntimeReference();
+				}
 				client->m_bQueryingSharedFiles = false;
 				theApp.emuledlg->transferwnd->GetClientList()->RefreshClient(client);
 				theApp.emuledlg->transferwnd->GetUploadList()->RefreshClient(client);
@@ -1323,8 +1327,11 @@ bool CClientReqSocket::ProcessPacket(const BYTE *packet, uint32 size, UINT opcod
 
 				client->m_uSharedFilesStatus = S_RECEIVED;
 				client->m_bAutoQuerySharedFiles = false;
-				if (client->m_ArchivedClient)
-					client->m_ArchivedClient->m_bAutoQuerySharedFiles = false;
+				CUpDownClient* pArchivedClient = client->AcquireArchivedClient();
+				if (pArchivedClient != NULL) {
+					pArchivedClient->m_bAutoQuerySharedFiles = false;
+					pArchivedClient->ReleaseRuntimeReference();
+				}
 				client->m_bQueryingSharedFiles = false;
 				client->m_uSharedFilesCount = theApp.searchlist->GetFoundFiles(client->GetSearchID());
 				theApp.emuledlg->transferwnd->GetClientList()->RefreshClient(client);
@@ -1364,8 +1371,11 @@ bool CClientReqSocket::ProcessPacket(const BYTE *packet, uint32 size, UINT opcod
 
 			client->m_uSharedFilesStatus = S_ACCESS_DENIED;
 			client->m_bAutoQuerySharedFiles = false;
-			if (client->m_ArchivedClient)
-				client->m_ArchivedClient->m_bAutoQuerySharedFiles = false;
+			CUpDownClient* pArchivedClient = client->AcquireArchivedClient();
+			if (pArchivedClient != NULL) {
+				pArchivedClient->m_bAutoQuerySharedFiles = false;
+				pArchivedClient->ReleaseRuntimeReference();
+			}
 			client->m_bQueryingSharedFiles = false;
 			theApp.emuledlg->transferwnd->GetClientList()->RefreshClient(client);
 			theApp.emuledlg->transferwnd->GetUploadList()->RefreshClient(client);
@@ -1607,8 +1617,8 @@ bool CClientReqSocket::ProcessExtPacket(const BYTE *packet, uint32 size, UINT op
 
 						data_out.WriteUInt8(OP_FILESTATUS);
 						if (reqfile->IsPartFile())
-							static_cast<CPartFile*>(reqfile)->WritePartStatus(data_out);
-						else
+							static_cast<CPartFile*>(reqfile)->WritePartStatus(data_out, client);
+						else if (!reqfile->HideOvershares(data_out, client))
 							data_out.WriteUInt16(0);
 
 						if (client->GetIncompletePartVersion() && reqfile->IsPartFile()) { // Don't send on complete files
@@ -3531,8 +3541,8 @@ bool CClientReqSocket::ProcessExtPacket(const BYTE *packet, uint32 size, UINT op
 						CSafeMemFile data_out(128);
 						if (sender->GetUDPVersion() > 3)
 							if (reqfile->IsPartFile())
-								static_cast<CPartFile*>(reqfile)->WritePartStatus(data_out);
-							else
+								static_cast<CPartFile*>(reqfile)->WritePartStatus(data_out, sender);
+							else if (!reqfile->HideOvershares(data_out, sender))
 								data_out.WriteUInt16(0);
 
 						data_out.WriteUInt16((uint16)theApp.uploadqueue->GetWaitingPosition(sender));
@@ -4532,10 +4542,14 @@ void CListenSocket::RemoveSocket(CClientReqSocket *todel)
 void CListenSocket::KillAllSockets()
 {
 	while (!socket_list.IsEmpty()) {
-		const CClientReqSocket *cur_socket = socket_list.GetHead();
-		if (cur_socket->client)
-			delete cur_socket->client;
-		else
+		CClientReqSocket* cur_socket = socket_list.GetHead();
+		CUpDownClient* pClient = cur_socket->client;
+		if (pClient != NULL) {
+			cur_socket->client = NULL;
+			pClient->socket = NULL;
+			delete cur_socket;
+			CUpDownClient::SafeDelete(pClient);
+		} else
 			delete cur_socket;
 	}
 }

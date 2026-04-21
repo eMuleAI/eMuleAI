@@ -36,6 +36,7 @@
 #include "SharedFileList.h"
 #include "MemDC.h"
 #include "PartFile.h"
+#include "Preview.h"
 #include "MenuCmds.h"
 #include "IrcWnd.h"
 #include "SharedFilesWnd.h"
@@ -75,11 +76,399 @@ namespace
 {
 	const EListStateField kSharedFilesViewState = static_cast<EListStateField>(LSF_SELECTION | LSF_SCROLL);
 	const DWORD kSharedFilesSetItemCountFlags = LVSICF_NOSCROLL | LVSICF_NOINVALIDATEALL;
+	const int kSharedFilesColumnPermission = 20;
+	const int kSharedFilesColumnPowershare = 21;
+	const int kSharedFilesColumnSpreadbarHistory = 22;
+	const int kSharedFilesColumnHideOverShare = 23;
+	const int kSharedFilesColumnShareOnlyTheNeed = 24;
 
 	typedef CMap<CString, LPCTSTR, CShareableFile*, CShareableFile*> CTempShareableFilesMap;
 	typedef CMap<CShareableFile*, CShareableFile*, ULONGLONG, ULONGLONG> CTempShareableFileWriteTimeMap;
 
 	CTempShareableFileWriteTimeMap g_mapTempShareableFileWriteTimes;
+
+
+	void RebuildPreviewMenu(CMenuXP& menu, const CPartFile* file, bool bEnablePreview, bool bEnablePauseOnPreview, bool bPauseOnPreviewChecked, bool bEnablePreviewParts, bool bPreviewPartsChecked)
+	{
+		while (menu.GetMenuItemCount() > 0)
+			menu.RemoveMenu(0, MF_BYPOSITION);
+
+		CString strPrimaryCommand = thePrefs.GetVideoPlayer();
+		if (file != NULL) {
+			const int iPreviewApp = thePreviewApps.GetPreviewApp(file);
+			if (iPreviewApp >= 0)
+				strPrimaryCommand = thePreviewApps.GetPreviewAppCmd(iPreviewApp);
+		}
+
+		const CString strPrimaryLabel = thePreviewApps.GetPreviewAppDisplayNameByCommand(strPrimaryCommand);
+		menu.AppendODMenu(MF_STRING | (bEnablePreview ? MF_ENABLED : MF_GRAYED), MP_PREVIEW, new CMenuXPText(MP_PREVIEW, strPrimaryLabel.IsEmpty() ? GetResString(_T("DL_PREVIEW")) : strPrimaryLabel, thePreviewApps.GetPreviewCommandIcon(strPrimaryCommand)));
+		thePreviewApps.GetAllMenuEntries(menu, file, strPrimaryCommand);
+		menu.AppendMenu(MF_SEPARATOR);
+		if (!thePrefs.GetPreviewPrio()) {
+			menu.AppendMenu(MF_STRING | (bEnablePreviewParts ? MF_ENABLED : MF_GRAYED), MP_TRY_TO_GET_PREVIEW_PARTS, GetResString(_T("DL_TRY_TO_GET_PREVIEW_PARTS")));
+			menu.CheckMenuItem(MP_TRY_TO_GET_PREVIEW_PARTS, bPreviewPartsChecked ? MF_CHECKED : MF_UNCHECKED);
+		}
+		menu.AppendMenu(MF_STRING | (bEnablePauseOnPreview ? MF_ENABLED : MF_GRAYED), MP_PAUSEONPREVIEW, GetResString(_T("PAUSEONPREVIEW")));
+		menu.CheckMenuItem(MP_PAUSEONPREVIEW, bPauseOnPreviewChecked ? MF_CHECKED : MF_UNCHECKED);
+	}
+
+	UINT GetSharePermissionMenuItem(const CKnownFile* pFile)
+	{
+		if (pFile == NULL)
+			return 0;
+
+		switch (pFile->GetPermissions()) {
+		case -1:
+			return MP_PERMDEFAULT;
+		case PERM_ALL:
+			return MP_PERMALL;
+		case PERM_FRIENDS:
+			return MP_PERMFRIENDS;
+		case PERM_NOONE:
+			return MP_PERMNONE;
+		default:
+			ASSERT(false);
+			return 0;
+		}
+	}
+
+	UINT GetPowerShareMenuItem(const CKnownFile* pFile)
+	{
+		if (pFile == NULL)
+			return 0;
+
+		switch (pFile->GetPowerSharedMode()) {
+		case -1:
+			return MP_POWERSHARE_DEFAULT;
+		case 0:
+			return MP_POWERSHARE_OFF;
+		case 1:
+			return MP_POWERSHARE_ON;
+		case 2:
+			return MP_POWERSHARE_AUTO;
+		case 3:
+			return MP_POWERSHARE_LIMITED;
+		default:
+			ASSERT(false);
+			return 0;
+		}
+	}
+
+	UINT GetToggleMenuItem(const int iValue, const UINT uDefaultItem, const UINT uDisabledItem, const UINT uEnabledItem)
+	{
+		switch (iValue) {
+		case -1:
+			return uDefaultItem;
+		case 0:
+			return uDisabledItem;
+		case 1:
+			return uEnabledItem;
+		default:
+			ASSERT(false);
+			return 0;
+		}
+	}
+
+	CString GetEnabledDisabledLabel(const bool bEnabled)
+	{
+		return GetResString(bEnabled ? _T("ENABLED") : _T("DISABLED"));
+	}
+
+	CString GetDefaultShortLabel()
+	{
+		CString strDefault(GetResString(_T("DEFAULT")));
+		return strDefault.IsEmpty() ? CString(_T("D")) : strDefault.Left(1);
+	}
+
+	CString BuildDefaultScopedLabel(const CString& strLabel)
+	{
+		CString strResult(GetDefaultShortLabel());
+		strResult.Append(_T(". "));
+		strResult.Append(strLabel);
+		return strResult;
+	}
+
+	CString GetSharePermissionLabel(const int iPermission)
+	{
+		switch (iPermission) {
+		case PERM_ALL:
+			return GetResString(_T("SHARE_PERMISSION_EVERYBODY"));
+		case PERM_FRIENDS:
+			return GetResString(_T("SHARE_PERMISSION_FRIENDSONLY"));
+		case PERM_NOONE:
+			return GetResString(_T("SHARE_PERMISSION_HIDDEN"));
+		default:
+			return CString();
+		}
+	}
+
+	int CompareIntValues(const int iLeft, const int iRight)
+	{
+		return (iLeft < iRight) ? -1 : static_cast<int>(iLeft > iRight);
+	}
+
+	bool IsSpreadbarEnabledForFile(const CKnownFile* pFile)
+	{
+		return pFile != NULL && (pFile->GetSpreadbarSetStatus() > 0 || (pFile->GetSpreadbarSetStatus() < 0 && thePrefs.GetSpreadbarSetStatus()));
+	}
+
+	int GetEffectivePermission(const CKnownFile* pFile)
+	{
+		if (pFile == NULL)
+			return PERM_ALL;
+
+		return (pFile->GetPermissions() >= 0) ? pFile->GetPermissions() : thePrefs.GetSharePermissions();
+	}
+
+	bool ShouldSuppressShareManagementColumns(const CKnownFile* pFile)
+	{
+		if (pFile == NULL)
+			return false;
+
+		return pFile->IsPartFile();
+	}
+
+	bool ShouldSuppressShareManagementRowColor(const CKnownFile* pFile, const FilterType eFilter)
+	{
+		if (pFile == NULL)
+			return false;
+
+		if (pFile->IsPartFile())
+			return true;
+
+		return eFilter == FilterType::Duplicate || theApp.knownfiles->DuplicatesCount(pFile->GetFileHash()) > 0;
+	}
+
+	COLORREF GetSharedFilesColumnTextColor(const CKnownFile* pFile, const int iColumn, const COLORREF clrDefaultText, const bool bSuppressShareManagementRowColor)
+	{
+		if (pFile == NULL)
+			return clrDefaultText;
+
+		if (bSuppressShareManagementRowColor)
+			return clrDefaultText;
+
+		if (iColumn == 0)
+			return clrDefaultText;
+
+		if (!thePrefs.GetSharePermissionColorRows())
+			return clrDefaultText;
+
+		switch (GetEffectivePermission(pFile)) {
+		case PERM_NOONE:
+			return RGB(0, 175, 0);
+		case PERM_FRIENDS:
+			return RGB(208, 128, 0);
+		case PERM_ALL:
+			return RGB(240, 0, 0);
+		default:
+			return clrDefaultText;
+		}
+	}
+
+	CString BuildSharePermissionColumnText(const CKnownFile* pFile)
+	{
+		if (pFile == NULL)
+			return CString();
+
+		CString strPermission(GetSharePermissionLabel(GetEffectivePermission(pFile)));
+		return (pFile->GetPermissions() < 0) ? BuildDefaultScopedLabel(strPermission) : strPermission;
+	}
+
+	CString BuildPriorityColumnText(const CKnownFile* pFile)
+	{
+		if (pFile == NULL)
+			return CString();
+
+		CString strText;
+		if (pFile->GetPowerShared())
+			strText.Format(_T("%s %s"), (LPCTSTR)GetResString(_T("POWERSHARE_PREFIX")), (LPCTSTR)pFile->GetUpPriorityDisplayString());
+		else
+			strText = pFile->GetUpPriorityDisplayString();
+		return strText;
+	}
+
+	void UpdateSharePermissionMenuChecks(CMenu& menu, UINT uCheckedItem)
+	{
+		static const UINT s_auPermissionMenuItems[] = { MP_PERMDEFAULT, MP_PERMNONE, MP_PERMFRIENDS, MP_PERMALL };
+		for (size_t i = 0; i < _countof(s_auPermissionMenuItems); ++i)
+			menu.CheckMenuItem(s_auPermissionMenuItems[i], MF_BYCOMMAND | ((s_auPermissionMenuItems[i] == uCheckedItem) ? MF_CHECKED : MF_UNCHECKED));
+	}
+
+	CString GetPowerShareModeLabel(const int iMode)
+	{
+		switch (iMode) {
+		case 0:
+			return GetResString(_T("POWERSHARE_DISABLED"));
+		case 1:
+			return GetResString(_T("POWERSHARE_ACTIVATED"));
+		case 2:
+			return GetResString(_T("POWERSHARE_AUTO"));
+		case 3:
+			return GetResString(_T("POWERSHARE_LIMITED"));
+		default:
+			return CString();
+		}
+	}
+
+	int GetEffectivePowerShareMode(const CKnownFile* pFile)
+	{
+		if (pFile == NULL)
+			return 0;
+
+		return (pFile->GetPowerSharedMode() >= 0) ? pFile->GetPowerSharedMode() : thePrefs.GetPowerShareMode();
+	}
+
+	CString BuildPowerShareColumnText(const CKnownFile* pFile)
+	{
+		if (pFile == NULL)
+			return CString();
+
+		CString strText;
+		strText.Format(_T("[%s] "), (LPCTSTR)GetResString(pFile->GetPowerShared() ? _T("POWERSHARE_ON_LABEL") : _T("POWERSHARE_OFF_LABEL")));
+
+		const int iPowerShareMode = GetEffectivePowerShareMode(pFile);
+		CString strModeLabel(GetPowerShareModeLabel(iPowerShareMode));
+		if (pFile->GetPowerSharedMode() < 0)
+			strModeLabel = BuildDefaultScopedLabel(strModeLabel);
+		strText.Append(strModeLabel);
+
+		if (iPowerShareMode == 3) {
+			if (pFile->GetPowerShareLimit() < 0)
+				strText.AppendFormat(_T(" %s. %d"), (LPCTSTR)GetDefaultShortLabel(), thePrefs.GetPowerShareLimit());
+			else
+				strText.AppendFormat(_T(" %d"), pFile->GetPowerShareLimit());
+		}
+
+		CString strEffectiveState;
+		if (pFile->GetPowerShareAuto())
+			strEffectiveState = GetResString(_T("POWERSHARE_ADVISED_LABEL"));
+		else if (pFile->GetPowerShareLimited() && iPowerShareMode == 3)
+			strEffectiveState = GetResString(_T("POWERSHARE_LIMITED"));
+		else if (pFile->GetPowerShareAuthorized())
+			strEffectiveState = GetResString(_T("POWERSHARE_AUTHORIZED_LABEL"));
+		else
+			strEffectiveState = GetResString(_T("POWERSHARE_DENIED_LABEL"));
+
+		strText.AppendFormat(_T(" (%s)"), (LPCTSTR)strEffectiveState);
+		return strText;
+	}
+
+	CString BuildSpreadbarHistoryColumnText(const CKnownFile* pFile)
+	{
+		if (pFile == NULL)
+			return CString();
+
+		CString strText;
+		strText.Format(_T("%.2f"), pFile->statistic.GetSpreadSortValue());
+		return strText;
+	}
+
+	CString BuildHideOverShareColumnText(const CKnownFile* pFile)
+	{
+		if (pFile == NULL)
+			return CString();
+
+		CString strText;
+		const UINT uHideOSInWork = pFile->HideOSInWork();
+		strText.Format(_T("[%s] "), (LPCTSTR)GetResString(uHideOSInWork > 0 ? _T("POWERSHARE_ON_LABEL") : _T("POWERSHARE_OFF_LABEL")));
+
+		if (pFile->GetHideOS() < 0)
+			strText.AppendFormat(_T("%s. "), (LPCTSTR)GetDefaultShortLabel());
+
+		const UINT uHideOSValue = (pFile->GetHideOS() >= 0) ? static_cast<UINT>(pFile->GetHideOS()) : static_cast<UINT>(thePrefs.GetHideOvershares());
+		if (uHideOSValue > 0)
+			strText.AppendFormat(_T("%u"), uHideOSValue);
+		else if (!IsSpreadbarEnabledForFile(pFile))
+			strText.AppendFormat(_T("%s %s"), (LPCTSTR)GetResString(_T("SPREADBAR")), (LPCTSTR)GetResString(_T("DISABLED")));
+		else
+			strText.Append(GetResString(_T("DISABLED")));
+
+		if (pFile->GetSelectiveChunk() >= 0) {
+			if (pFile->GetSelectiveChunk() != 0)
+				strText.Append(_T(" + S"));
+		} else if (thePrefs.IsSelectiveShareEnabled()) {
+			strText.AppendFormat(_T(" + %s. S"), (LPCTSTR)GetDefaultShortLabel());
+		}
+
+		return strText;
+	}
+
+	CString BuildShareOnlyTheNeedColumnText(const CKnownFile* pFile)
+	{
+		if (pFile == NULL)
+			return CString();
+
+		CString strText;
+		if (pFile->GetShareOnlyTheNeed() >= 0) {
+			strText = GetEnabledDisabledLabel(pFile->GetShareOnlyTheNeed() != 0);
+			return strText;
+		}
+
+		return BuildDefaultScopedLabel(GetEnabledDisabledLabel(thePrefs.GetShareOnlyTheNeed() != 0));
+	}
+
+	int ComparePermissionSettings(const CKnownFile* pLeft, const CKnownFile* pRight)
+	{
+		return CompareIntValues(pRight->GetPermissions(), pLeft->GetPermissions());
+	}
+
+	int ComparePowerShareSettings(const CKnownFile* pLeft, const CKnownFile* pRight)
+	{
+		if (!pLeft->GetPowerShared() && pRight->GetPowerShared())
+			return -1;
+		if (pLeft->GetPowerShared() && !pRight->GetPowerShared())
+			return 1;
+
+		int iResult = CompareIntValues(pLeft->GetPowerSharedMode(), pRight->GetPowerSharedMode());
+		if (iResult != 0)
+			return iResult;
+
+		if (!pLeft->GetPowerShareAuthorized() && pRight->GetPowerShareAuthorized())
+			return -1;
+		if (pLeft->GetPowerShareAuthorized() && !pRight->GetPowerShareAuthorized())
+			return 1;
+
+		if (!pLeft->GetPowerShareAuto() && pRight->GetPowerShareAuto())
+			return -1;
+		if (pLeft->GetPowerShareAuto() && !pRight->GetPowerShareAuto())
+			return 1;
+
+		if (!pLeft->GetPowerShareLimited() && pRight->GetPowerShareLimited())
+			return -1;
+		if (pLeft->GetPowerShareLimited() && !pRight->GetPowerShareLimited())
+			return 1;
+
+		return 0;
+	}
+
+	int CompareHideOverShareSettings(const CKnownFile* pLeft, const CKnownFile* pRight)
+	{
+		const int iHideOSResult = CompareIntValues(pLeft->GetHideOS(), pRight->GetHideOS());
+		if (iHideOSResult != 0)
+			return iHideOSResult;
+		return CompareIntValues(pLeft->GetSelectiveChunk(), pRight->GetSelectiveChunk());
+	}
+
+	int CompareShareOnlyTheNeedSettings(const CKnownFile* pLeft, const CKnownFile* pRight)
+	{
+		return CompareIntValues(pLeft->GetShareOnlyTheNeed(), pRight->GetShareOnlyTheNeed());
+	}
+
+	bool TryParseMenuInputNonNegativeInt(const CString& strInput, int& iValue)
+	{
+		CString strTrimmed(strInput);
+		strTrimmed.Trim();
+		if (strTrimmed.IsEmpty())
+			return false;
+
+		for (int i = 0; i < strTrimmed.GetLength(); ++i) {
+			if (!_istdigit(strTrimmed[i]))
+				return false;
+		}
+
+		iValue = _tstoi(strTrimmed);
+		return true;
+	}
 
 	void UpdateSharedFilesItemCount(CListCtrl& listCtrl, const size_t itemCount)
 	{
@@ -536,8 +925,13 @@ void CSharedFilesCtrl::Init()
 	InsertColumn(15,	EMPTY,	LVCFMT_RIGHT,	DFLT_LENGTH_COL_WIDTH, -1, true);	//LENGTH
 	InsertColumn(16,	EMPTY,	LVCFMT_RIGHT,	DFLT_BITRATE_COL_WIDTH, -1, true);	//BITRATE
 	InsertColumn(17,	EMPTY,	LVCFMT_LEFT,	DFLT_CODEC_COL_WIDTH, -1, true);	//CODEC
-	InsertColumn(18,	EMPTY,	LVCFMT_RIGHT,	DFLT_LENGTH_COL_WIDTH);
-	InsertColumn(19,	EMPTY,	LVCFMT_RIGHT,	DFLT_LENGTH_COL_WIDTH);
+	InsertColumn(18,	EMPTY,	LVCFMT_RIGHT,	DFLT_LENGTH_COL_WIDTH);				//RATIO
+	InsertColumn(19,	EMPTY,	LVCFMT_RIGHT,	DFLT_LENGTH_COL_WIDTH);				//RATIO_SESSION
+	InsertColumn(kSharedFilesColumnPermission, EMPTY, LVCFMT_LEFT, 120);			//SHOW_PERMISSION
+	InsertColumn(kSharedFilesColumnPowershare, EMPTY, LVCFMT_LEFT, 170);			//POWERSHARE
+	InsertColumn(kSharedFilesColumnSpreadbarHistory, EMPTY, LVCFMT_LEFT, 170);		//SPREADBAR_UL_PART_HISTORY
+	InsertColumn(kSharedFilesColumnHideOverShare, EMPTY, LVCFMT_LEFT, 120);		//HIDE_OVER_SHARE
+	InsertColumn(kSharedFilesColumnShareOnlyTheNeed, EMPTY, LVCFMT_LEFT, 120);	//SHARE_ONLY_THE_NEED
 
 	SetAllIcons();
 	LoadSettings();
@@ -598,13 +992,13 @@ void CSharedFilesCtrl::SetAllIcons()
 
 void CSharedFilesCtrl::Localize()
 {
-	static const LPCTSTR uids[20] =
+	static const LPCTSTR uids[25] =
 	{
 		_T("DL_FILENAME"), _T("DL_SIZE"), _T("TYPE"), _T("PRIORITY"), _T("FILEID")
 		, _T("SF_REQUESTS"), _T("SF_ACCEPTS"), _T("SF_TRANSFERRED"), _T("SHARED_STATUS"), _T("FOLDER")
 		, _T("COMPLSOURCES"), _T("SHAREDTITLE"), _T("ARTIST"), _T("ALBUM"), _T("TITLE")
 		, _T("LENGTH"), _T("BITRATE"), _T("CODEC")
-		, _T("RATIO"), _T("RATIO_SESSION")
+		, _T("RATIO"), _T("RATIO_SESSION"), _T("SHARE_PERMISSION_GROUP"), _T("POWERSHARE"), _T("SPREADBAR_UL_PART_HISTORY"), _T("HIDE_OVER_SHARE_MENU"), _T("SHAREONLYTHENEED")
 	};
 
 	LocaliseHeaderCtrl(uids, _countof(uids));
@@ -786,7 +1180,7 @@ void CSharedFilesCtrl::ReloadList(const bool bSortCurrentList, const EListStateF
 		if (m_eFilter != FilterType::FileSystem || m_pDirectoryFilter == NULL || m_pDirectoryFilter->m_strFullPath.IsEmpty())
 			DeleteTempShareableFilesList(liTempShareableFilesInDir);
 
-		// List part files if "All Shared Files", "Incomplete Files" or "File History" root or branches selected. For the last case GetFileHistoryShowPart also need to be true.
+		// List part files if "All Shared Files", "Incomplete Files" or "File History" views require them.
 		// m_pDirectoryFilter can be NULL while loading the window first time. So we need to consider this case, too.
 		const CDirectoryItem* pSelectedTreeFilter = (theApp.emuledlg != NULL && theApp.emuledlg->sharedfileswnd != NULL)
 			? theApp.emuledlg->sharedfileswnd->m_ctlSharedDirTree.GetSelectedFilter()
@@ -1101,6 +1495,7 @@ void CSharedFilesCtrl::DrawItem(LPDRAWITEMSTRUCT lpDrawItemStruct)
 	InitItemMemDC(dc, lpDrawItemStruct, bCtrlFocused);
 
 	COLORREF clrBk = (lpDrawItemStruct->itemState & ODS_SELECTED) ? GetCustomSysColor(COLOR_HIGHLIGHT) : GetCustomSysColor(COLOR_WINDOW);
+	COLORREF clrText = (lpDrawItemStruct->itemState & ODS_SELECTED) ? GetCustomSysColor(COLOR_HIGHLIGHTTEXT) : GetCustomSysColor(COLOR_WINDOWTEXT);
 	dc.FillSolidRect(rcItem, clrBk);
 	dc.SetBkMode(OPAQUE);
 	dc.SetBkColor(clrBk);
@@ -1114,6 +1509,8 @@ void CSharedFilesCtrl::DrawItem(LPDRAWITEMSTRUCT lpDrawItemStruct)
 		file = reinterpret_cast<CShareableFile*>(m_ListedItemsVector[index]);
 	if (!file->IsKindOf(RUNTIME_CLASS(CKnownFile)))
 		pKnownFile = NULL;
+	const bool bSuppressShareManagementColumns = (pKnownFile != NULL && ShouldSuppressShareManagementColumns(pKnownFile));
+	const bool bSuppressShareManagementRowColor = (pKnownFile != NULL && ShouldSuppressShareManagementRowColor(pKnownFile, m_eFilter));
 
 	const CHeaderCtrl *pHeaderCtrl = GetHeaderCtrl();
 	int iCount = pHeaderCtrl->GetItemCount();
@@ -1131,6 +1528,7 @@ void CSharedFilesCtrl::DrawItem(LPDRAWITEMSTRUCT lpDrawItemStruct)
 		rcItem.right = itemLeft + iColumnWidth;
 		if (rcItem.left < rcItem.right && HaveIntersection(rcClient, rcItem)) {
 			const CString &sItem(GetItemDisplayText(file, iColumn));
+			dc.SetTextColor(GetSharedFilesColumnTextColor(pKnownFile, iColumn, clrText, bSuppressShareManagementRowColor));
 			switch (iColumn) {
 			case 0: //file name
 				{
@@ -1201,6 +1599,16 @@ void CSharedFilesCtrl::DrawItem(LPDRAWITEMSTRUCT lpDrawItemStruct)
 							SafeImageListDraw(&m_ImageList, dc, IsSharedInKad(pKnownFile) ? 2 : 0, point, ILD_NORMAL);
 					}
 				}
+				break;
+			case kSharedFilesColumnSpreadbarHistory: //spread history bar
+				if (pKnownFile != NULL && !bSuppressShareManagementColumns) {
+					++rcItem.top;
+					--rcItem.bottom;
+					pKnownFile->statistic.DrawSpreadBar(&dc, &rcItem, thePrefs.UseFlatBar());
+					++rcItem.bottom;
+					--rcItem.top;
+				}
+				break;
 			}
 		}
 		itemLeft += iColumnWidth;
@@ -1227,9 +1635,10 @@ const CString CSharedFilesCtrl::GetItemDisplayText(const CShareableFile *file, c
 
 	if (file->IsKindOf(RUNTIME_CLASS(CKnownFile))) {
 		const CKnownFile *pKnownFile = static_cast<const CKnownFile*>(file);
+		const bool bSuppressShareManagementColumns = ShouldSuppressShareManagementColumns(pKnownFile);
 		switch (iSubItem) {
 		case 3:
-			sText = pKnownFile->GetUpPriorityDisplayString();
+			sText = BuildPriorityColumnText(pKnownFile);
 			break;
 		case 4:
 			sText = md4str(pKnownFile->GetFileHash());
@@ -1289,6 +1698,26 @@ const CString CSharedFilesCtrl::GetItemDisplayText(const CShareableFile *file, c
 		case 19:
 			sText.Format(_T("%.1f"), pKnownFile->GetRatio());
 			break;
+		case kSharedFilesColumnPermission:
+			if (!bSuppressShareManagementColumns)
+				sText = BuildSharePermissionColumnText(pKnownFile);
+			break;
+		case kSharedFilesColumnPowershare:
+			if (!bSuppressShareManagementColumns)
+				sText = BuildPowerShareColumnText(pKnownFile);
+			break;
+		case kSharedFilesColumnSpreadbarHistory:
+			if (!bSuppressShareManagementColumns)
+				sText = BuildSpreadbarHistoryColumnText(pKnownFile);
+			break;
+		case kSharedFilesColumnHideOverShare:
+			if (!bSuppressShareManagementColumns)
+				sText = BuildHideOverShareColumnText(pKnownFile);
+			break;
+		case kSharedFilesColumnShareOnlyTheNeed:
+			if (!bSuppressShareManagementColumns)
+				sText = BuildShareOnlyTheNeedColumnText(pKnownFile);
+			break;
 		}
 	}
 	return sText;
@@ -1303,7 +1732,23 @@ void CSharedFilesCtrl::OnContextMenu(CWnd*, CPoint point)
 	bool bContainsOnlyShareableFile = true;
 	bool bContainsOnlyUnshareableFile = true;
 	bool m_bAllInDownloadList = true;
+	int iDownloadListMatches = 0;
+	int iFilesToPreview = 0;
+	int iFilesCanPauseOnPreview = 0;
+	int iFilesDoPauseOnPreview = 0;
+	int iFilesPreviewType = 0;
+	int iFilesGetPreviewParts = 0;
+	const CPartFile* pSingleDownloadFile = NULL;
 	int iSelectedItems = GetSelectedCount();
+	UINT uPermMenuItem = 0;
+	UINT uPowershareMenuItem = 0;
+	UINT uPowerShareLimitMenuItem = 0;
+	UINT uSpreadbarMenuItem = 0;
+	UINT uHideOSMenuItem = 0;
+	UINT uSelectiveChunkMenuItem = 0;
+	UINT uShareOnlyTheNeedMenuItem = 0;
+	int iPowerShareLimit = -1;
+	int iHideOS = -1;
 	UINT uPrioMenuItem = 0;
 	const CShareableFile *pSingleSelFile = NULL;
 	for (POSITION pos = GetFirstSelectedItemPosition(); pos != NULL;) {
@@ -1315,8 +1760,19 @@ void CSharedFilesCtrl::OnContextMenu(CWnd*, CPoint point)
 
 		pSingleSelFile = bFirstItem ? pFile : NULL;
 
-		if (!theApp.downloadqueue->GetFileByID(pFile->GetFileHash()))
+		const CPartFile* pDownloadFile = theApp.downloadqueue->GetFileByID(pFile->GetFileHash());
+		if (pDownloadFile == NULL)
 			m_bAllInDownloadList = false;
+		else {
+			++iDownloadListMatches;
+			iFilesPreviewType += static_cast<int>(pDownloadFile->IsPreviewableFileType());
+			iFilesToPreview += static_cast<int>(pDownloadFile->IsReadyForPreview());
+			iFilesCanPauseOnPreview += static_cast<int>(pDownloadFile->IsPreviewableFileType() && !pDownloadFile->IsReadyForPreview() && pDownloadFile->CanPauseFile());
+			iFilesDoPauseOnPreview += static_cast<int>(pDownloadFile->IsPausingOnPreview());
+			iFilesGetPreviewParts += static_cast<int>(pDownloadFile->GetPreviewPrio());
+			if (bFirstItem)
+				pSingleDownloadFile = pDownloadFile;
+		}
 
 		bContainsOnlyUnshareableFile = bContainsOnlyUnshareableFile && pFile && !pFile->IsShellLinked() && !pFile->IsPartFile() && (theApp.sharedfiles->ShouldBeShared(pFile->GetSharedDirectory(), pFile->GetFilePath(), false)
 			&& !theApp.sharedfiles->ShouldBeShared(pFile->GetSharedDirectory(), pFile->GetFilePath(), true));
@@ -1324,11 +1780,12 @@ void CSharedFilesCtrl::OnContextMenu(CWnd*, CPoint point)
 		if (pFile && pFile->IsKindOf(RUNTIME_CLASS(CKnownFile))) {
 			if (pFile->GetFilePath().GetLength() == 0)
 				bContainsOnlyShareableFile = false;
+			const CKnownFile* pKnownFile = static_cast<const CKnownFile*>(pFile);
 			UINT uCurPrioMenuItem = 0;
-			if (static_cast<const CKnownFile*>(pFile)->IsAutoUpPriority())
+			if (pKnownFile->IsAutoUpPriority())
 				uCurPrioMenuItem = MP_PRIOAUTO;
 			else
-				switch (static_cast<const CKnownFile*>(pFile)->GetUpPriority()) {
+				switch (pKnownFile->GetUpPriority()) {
 				case PR_VERYLOW:
 					uCurPrioMenuItem = MP_PRIOVERYLOW;
 					break;
@@ -1352,6 +1809,47 @@ void CSharedFilesCtrl::OnContextMenu(CWnd*, CPoint point)
 				uPrioMenuItem = uCurPrioMenuItem;
 			else if (uPrioMenuItem != uCurPrioMenuItem)
 				uPrioMenuItem = 0;
+
+			const UINT uCurPermMenuItem = GetSharePermissionMenuItem(pKnownFile);
+			const UINT uCurPowershareMenuItem = GetPowerShareMenuItem(pKnownFile);
+			const UINT uCurSpreadbarMenuItem = GetToggleMenuItem(pKnownFile->GetSpreadbarSetStatus(), MP_SPREADBAR_DEFAULT, MP_SPREADBAR_OFF, MP_SPREADBAR_ON);
+			const UINT uCurHideOSMenuItem = (pKnownFile->GetHideOS() < 0) ? MP_HIDEOS_DEFAULT : MP_HIDEOS_SET;
+			const UINT uCurSelectiveChunkMenuItem = GetToggleMenuItem(pKnownFile->GetSelectiveChunk(), MP_SELECTIVE_CHUNK, MP_SELECTIVE_CHUNK_0, MP_SELECTIVE_CHUNK_1);
+			const UINT uCurShareOnlyTheNeedMenuItem = GetToggleMenuItem(pKnownFile->GetShareOnlyTheNeed(), MP_SHAREONLYTHENEED, MP_SHAREONLYTHENEED_0, MP_SHAREONLYTHENEED_1);
+			const UINT uCurPowerShareLimitMenuItem = (pKnownFile->GetPowerShareLimit() < 0) ? MP_POWERSHARE_LIMIT : MP_POWERSHARE_LIMIT_SET;
+			const int iCurPowerShareLimit = pKnownFile->GetPowerShareLimit();
+			const int iCurHideOS = pKnownFile->GetHideOS();
+
+			if (bFirstItem) {
+				uPermMenuItem = uCurPermMenuItem;
+				uPowershareMenuItem = uCurPowershareMenuItem;
+				uSpreadbarMenuItem = uCurSpreadbarMenuItem;
+				uPowerShareLimitMenuItem = uCurPowerShareLimitMenuItem;
+				uHideOSMenuItem = uCurHideOSMenuItem;
+				uSelectiveChunkMenuItem = uCurSelectiveChunkMenuItem;
+				uShareOnlyTheNeedMenuItem = uCurShareOnlyTheNeedMenuItem;
+				iPowerShareLimit = iCurPowerShareLimit;
+				iHideOS = iCurHideOS;
+			} else {
+				if (uPermMenuItem != uCurPermMenuItem)
+					uPermMenuItem = 0;
+				if (uPowershareMenuItem != uCurPowershareMenuItem)
+					uPowershareMenuItem = 0;
+				if (uSpreadbarMenuItem != uCurSpreadbarMenuItem)
+					uSpreadbarMenuItem = 0;
+				if (uPowerShareLimitMenuItem != uCurPowerShareLimitMenuItem || iPowerShareLimit != iCurPowerShareLimit) {
+					uPowerShareLimitMenuItem = 0;
+					iPowerShareLimit = -1;
+				}
+				if (uHideOSMenuItem != uCurHideOSMenuItem || iHideOS != iCurHideOS) {
+					uHideOSMenuItem = 0;
+					iHideOS = -1;
+				}
+				if (uSelectiveChunkMenuItem != uCurSelectiveChunkMenuItem)
+					uSelectiveChunkMenuItem = 0;
+				if (uShareOnlyTheNeedMenuItem != uCurShareOnlyTheNeedMenuItem)
+					uShareOnlyTheNeedMenuItem = 0;
+			}
 		} else
 			bContainsShareableFiles = true;
 
@@ -1397,14 +1895,86 @@ void CSharedFilesCtrl::OnContextMenu(CWnd*, CPoint point)
 
 	m_SharedFilesMenu.EnableMenuItem(MP_OPEN, (iSelectedItems == 1 && ((m_eFilter != FilterType::History && !m_bContainsPartFile) || (m_eFilter == FilterType::History && !m_bContainsPartFile && m_bContainsSharedFile))) ? MF_ENABLED : MF_GRAYED);
 	m_SharedFilesMenu.EnableMenuItem(MP_REMOVEFROMHISTORY, (iSelectedItems != 0 && m_eFilter == FilterType::History && !m_bContainsPartFile && !m_bContainsSharedFile) ? MF_ENABLED : MF_GRAYED);
-	m_SharedFilesMenu.EnableMenuItem(MP_CANCEL, iSelectedItems > 0 && m_bAllInDownloadList ? MF_ENABLED : MF_GRAYED);
-	m_SharedFilesMenu.EnableMenuItem(MP_CANCEL_FORGET, iSelectedItems > 0 && m_bAllInDownloadList ? MF_ENABLED : MF_GRAYED);
+	const bool bEnableDownloadOnlyMenu = (iSelectedItems > 0 && m_bAllInDownloadList && iDownloadListMatches == iSelectedItems);
+	m_SharedFilesMenu.EnableMenuItem(MP_CANCEL, bEnableDownloadOnlyMenu ? MF_ENABLED : MF_GRAYED);
+	m_SharedFilesMenu.EnableMenuItem(MP_CANCEL_FORGET, bEnableDownloadOnlyMenu ? MF_ENABLED : MF_GRAYED);
+	RebuildPreviewMenu(m_PreviewMenu, (bEnableDownloadOnlyMenu && iSelectedItems == 1) ? pSingleDownloadFile : NULL, bEnableDownloadOnlyMenu && iSelectedItems == 1 && iFilesToPreview == 1, bEnableDownloadOnlyMenu && iFilesCanPauseOnPreview > 0, bEnableDownloadOnlyMenu && iSelectedItems > 0 && iFilesDoPauseOnPreview == iSelectedItems, bEnableDownloadOnlyMenu && iSelectedItems == 1 && iFilesPreviewType == 1 && iFilesToPreview == 0 && iDownloadListMatches == 1, bEnableDownloadOnlyMenu && iSelectedItems == 1 && iFilesGetPreviewParts == 1);
+	m_SharedFilesMenu.EnableMenuItem((UINT)m_PreviewMenu.m_hMenu, bEnableDownloadOnlyMenu && m_PreviewMenu.HasEnabledItems() ? MF_ENABLED : MF_GRAYED);
 	m_SharedFilesMenu.EnableMenuItem(MP_VIEWPARTFILES, m_eFilter == FilterType::History ? MF_ENABLED : MF_GRAYED);
 	m_SharedFilesMenu.EnableMenuItem(MP_VIEWSHAREDFILES, m_eFilter == FilterType::History ? MF_ENABLED : MF_GRAYED);
 	m_SharedFilesMenu.EnableMenuItem(MP_VIEWDUPLICATEFILES, m_eFilter == FilterType::History ? MF_ENABLED : MF_GRAYED);
 	m_SharedFilesMenu.EnableMenuItem((UINT)m_FileHistorysMenu.m_hMenu, m_eFilter == FilterType::History ? MF_ENABLED : MF_GRAYED);
-	m_SharedFilesMenu.EnableMenuItem((UINT)m_PrioMenu.m_hMenu, (iSelectedItems != 0 && ((m_eFilter != FilterType::Duplicate && m_eFilter != FilterType::History && !m_bContainsNotSharedFile && m_bContainsSharedFile) || (m_eFilter == FilterType::History && m_bContainsSharedFile && bContainsOnlyShareableFile))) ? MF_ENABLED : MF_GRAYED);
-	m_PrioMenu.CheckMenuRadioItem(MP_PRIOVERYLOW, MP_PRIOAUTO, uPrioMenuItem, 0);
+	const bool bEnableShareManagementMenu = (iSelectedItems != 0
+		&& ((m_eFilter != FilterType::Duplicate && m_eFilter != FilterType::History && !m_bContainsNotSharedFile && m_bContainsSharedFile)
+			|| (m_eFilter == FilterType::History && m_bContainsSharedFile && bContainsOnlyShareableFile)));
+	m_SharedFilesMenu.EnableMenuItem((UINT)m_PrioMenu.m_hMenu, bEnableShareManagementMenu ? MF_ENABLED : MF_GRAYED);
+	m_PrioMenu.CheckMenuRadioItem(MP_PRIOVERYLOW, MP_PRIOAUTO, uPrioMenuItem, MF_BYCOMMAND);
+
+	m_SharedFilesMenu.EnableMenuItem((UINT)m_PermMenu.m_hMenu, bEnableShareManagementMenu ? MF_ENABLED : MF_GRAYED);
+	CString buffer;
+	CString strDefaultMenu(GetResString(_T("DEFAULT")));
+	CString strSuffix(GetSharePermissionLabel(thePrefs.GetSharePermissions()));
+	if (!strSuffix.IsEmpty())
+		strDefaultMenu.AppendFormat(_T(" (%s)"), (LPCTSTR)strSuffix);
+	m_PermMenu.SetMenuText(MP_PERMDEFAULT, strDefaultMenu);
+	UpdateSharePermissionMenuChecks(m_PermMenu, uPermMenuItem);
+
+	m_SharedFilesMenu.EnableMenuItem((UINT)m_PowershareMenu.m_hMenu, bEnableShareManagementMenu ? MF_ENABLED : MF_GRAYED);
+	strDefaultMenu = GetResString(_T("DEFAULT"));
+	strSuffix = GetPowerShareModeLabel(thePrefs.GetPowerShareMode());
+	if (!strSuffix.IsEmpty())
+		strDefaultMenu.AppendFormat(_T(" (%s)"), (LPCTSTR)strSuffix);
+	m_PowershareMenu.SetMenuText(MP_POWERSHARE_DEFAULT, strDefaultMenu);
+	m_PowershareMenu.CheckMenuRadioItem(MP_POWERSHARE_DEFAULT, MP_POWERSHARE_LIMITED, uPowershareMenuItem, MF_BYCOMMAND);
+
+	m_PowershareMenu.EnableMenuItem((UINT)m_PowerShareLimitMenu.m_hMenu, bEnableShareManagementMenu ? MF_ENABLED : MF_GRAYED);
+	buffer = GetResString(_T("DEFAULT"));
+	if (thePrefs.GetPowerShareLimit() == 0)
+		buffer.AppendFormat(_T(" (%s)"), (LPCTSTR)GetResString(_T("DISABLED")));
+	else
+		buffer.AppendFormat(_T(" (%u)"), thePrefs.GetPowerShareLimit());
+	m_PowerShareLimitMenu.SetMenuText(MP_POWERSHARE_LIMIT, buffer);
+	if (iPowerShareLimit < 0)
+		buffer = GetResString(_T("EDIT"));
+	else if (iPowerShareLimit == 0)
+		buffer = GetResString(_T("DISABLED"));
+	else
+		buffer.Format(_T("%i"), iPowerShareLimit);
+	m_PowerShareLimitMenu.SetMenuText(MP_POWERSHARE_LIMIT_SET, buffer);
+	m_PowerShareLimitMenu.CheckMenuRadioItem(MP_POWERSHARE_LIMIT, MP_POWERSHARE_LIMIT_SET, uPowerShareLimitMenuItem, MF_BYCOMMAND);
+
+	m_SharedFilesMenu.EnableMenuItem((UINT)m_SpreadbarMenu.m_hMenu, bEnableShareManagementMenu ? MF_ENABLED : MF_GRAYED);
+	strDefaultMenu = GetResString(_T("DEFAULT"));
+	strDefaultMenu.AppendFormat(_T(" (%s)"), (LPCTSTR)GetEnabledDisabledLabel(thePrefs.GetSpreadbarSetStatus()));
+	m_SpreadbarMenu.SetMenuText(MP_SPREADBAR_DEFAULT, strDefaultMenu);
+	m_SpreadbarMenu.CheckMenuRadioItem(MP_SPREADBAR_DEFAULT, MP_SPREADBAR_ON, uSpreadbarMenuItem, MF_BYCOMMAND);
+
+	m_SharedFilesMenu.EnableMenuItem((UINT)m_HideOSMenu.m_hMenu, bEnableShareManagementMenu ? MF_ENABLED : MF_GRAYED);
+	if (thePrefs.GetHideOvershares() == 0)
+		buffer.Format(_T("%s (%s)"), (LPCTSTR)GetResString(_T("DEFAULT")), (LPCTSTR)GetResString(_T("DISABLED")));
+	else
+		buffer.Format(_T("%s (%u)"), (LPCTSTR)GetResString(_T("DEFAULT")), thePrefs.GetHideOvershares());
+	m_HideOSMenu.SetMenuText(MP_HIDEOS_DEFAULT, buffer);
+	if (iHideOS < 0)
+		buffer = GetResString(_T("EDIT"));
+	else if (iHideOS == 0)
+		buffer = GetResString(_T("DISABLED"));
+	else
+		buffer.Format(_T("%i"), iHideOS);
+	m_HideOSMenu.SetMenuText(MP_HIDEOS_SET, buffer);
+	m_HideOSMenu.CheckMenuRadioItem(MP_HIDEOS_DEFAULT, MP_HIDEOS_SET, uHideOSMenuItem, MF_BYCOMMAND);
+
+	m_HideOSMenu.EnableMenuItem((UINT)m_SelectiveChunkMenu.m_hMenu, bEnableShareManagementMenu ? MF_ENABLED : MF_GRAYED);
+	strDefaultMenu = GetResString(_T("DEFAULT"));
+	strDefaultMenu.AppendFormat(_T(" (%s)"), (LPCTSTR)GetEnabledDisabledLabel(thePrefs.IsSelectiveShareEnabled()));
+	m_SelectiveChunkMenu.SetMenuText(MP_SELECTIVE_CHUNK, strDefaultMenu);
+	m_SelectiveChunkMenu.CheckMenuRadioItem(MP_SELECTIVE_CHUNK, MP_SELECTIVE_CHUNK_1, uSelectiveChunkMenuItem, MF_BYCOMMAND);
+
+	m_SharedFilesMenu.EnableMenuItem((UINT)m_ShareOnlyTheNeedMenu.m_hMenu, bEnableShareManagementMenu ? MF_ENABLED : MF_GRAYED);
+	strDefaultMenu = GetResString(_T("DEFAULT"));
+	strDefaultMenu.AppendFormat(_T(" (%s)"), (LPCTSTR)GetEnabledDisabledLabel(thePrefs.GetShareOnlyTheNeed()));
+	m_ShareOnlyTheNeedMenu.SetMenuText(MP_SHAREONLYTHENEED, strDefaultMenu);
+	m_ShareOnlyTheNeedMenu.CheckMenuRadioItem(MP_SHAREONLYTHENEED, MP_SHAREONLYTHENEED_1, uShareOnlyTheNeedMenuItem, MF_BYCOMMAND);
 
 	UINT uInsertedMenuItem = 0;
 	static const TCHAR _szSkinPkgSuffix1[] = _T(".") EMULSKIN_BASEEXT _T(".zip");
@@ -1475,12 +2045,20 @@ BOOL CSharedFilesCtrl::OnCommand(WPARAM wParam, LPARAM)
 	CKnownFile* pKnownFile = NULL;
 	bool m_bFirstFile = true;
 	CTypedPtrList<CPtrList, CShareableFile*> selectedList;
+	CTypedPtrList<CPtrList, CPartFile*> selectedDownloadList;
+	CPartFile* pSingleDownloadFile = NULL;
 	for (POSITION pos = GetFirstSelectedItemPosition(); pos != NULL;) {
 		int index = GetNextSelectedItem(pos);
 		if (index >= 0) {
 			CKnownFile* cur_file = m_ListedItemsVector[index];
 			if (cur_file != NULL) {
 				selectedList.AddTail(reinterpret_cast<CShareableFile*>(cur_file));
+				CPartFile* pDownloadFile = theApp.downloadqueue->GetFileByID(cur_file->GetFileHash());
+				if (pDownloadFile != NULL) {
+					selectedDownloadList.AddTail(pDownloadFile);
+					if (selectedDownloadList.GetCount() == 1)
+						pSingleDownloadFile = pDownloadFile;
+				}
 				if (m_bFirstFile && selectedList.GetCount() == 1) {
 					pKnownFile = cur_file;
 					m_bFirstFile = false;
@@ -1537,6 +2115,215 @@ BOOL CSharedFilesCtrl::OnCommand(WPARAM wParam, LPARAM)
 					theApp.emuledlg->statusbar->SetText(GetResString(_T("ED2K_LINK_COPIED_TO_CLIPBOARD")), SBarLog, 0);
 				}
 			}
+			break;
+		case MP_POWERSHARE_DEFAULT:
+		case MP_POWERSHARE_OFF:
+		case MP_POWERSHARE_ON:
+		case MP_POWERSHARE_AUTO:
+		case MP_POWERSHARE_LIMITED:
+			SetRedraw(false);
+			while (!selectedList.IsEmpty()) {
+				CShareableFile* pSelectedFile = selectedList.RemoveHead();
+				if (pSelectedFile == NULL || !pSelectedFile->IsKindOf(RUNTIME_CLASS(CKnownFile)))
+					continue;
+
+				CKnownFile* pSelectedKnownFile = static_cast<CKnownFile*>(pSelectedFile);
+				switch (wParam) {
+				case MP_POWERSHARE_DEFAULT:
+					pSelectedKnownFile->SetPowerShared(-1);
+					break;
+				case MP_POWERSHARE_OFF:
+					pSelectedKnownFile->SetPowerShared(0);
+					break;
+				case MP_POWERSHARE_ON:
+					pSelectedKnownFile->SetPowerShared(1);
+					break;
+				case MP_POWERSHARE_AUTO:
+					pSelectedKnownFile->SetPowerShared(2);
+					break;
+				default:
+					pSelectedKnownFile->SetPowerShared(3);
+					break;
+				}
+				UpdateFile(pSelectedKnownFile);
+			}
+			SetRedraw(true);
+			break;
+		case MP_POWERSHARE_LIMIT:
+		case MP_POWERSHARE_LIMIT_SET:
+			{
+				int iNewPowerShareLimit = -1;
+				if (wParam == MP_POWERSHARE_LIMIT_SET) {
+					InputBox inputbox;
+					CString strCurrentLimit;
+					if (pKnownFile != NULL)
+						strCurrentLimit.Format(_T("%i"), (pKnownFile->GetPowerShareLimit() >= 0) ? pKnownFile->GetPowerShareLimit() : thePrefs.GetPowerShareLimit());
+					else
+						strCurrentLimit = _T("0");
+					inputbox.SetLabels(GetResString(_T("POWERSHARE")), GetResString(_T("POWERSHARE_LIMIT")), strCurrentLimit);
+					if (inputbox.DoModal() != IDOK || !TryParseMenuInputNonNegativeInt(inputbox.GetInput(), iNewPowerShareLimit))
+						break;
+				}
+
+				SetRedraw(false);
+				while (!selectedList.IsEmpty()) {
+					CShareableFile* pSelectedFile = selectedList.RemoveHead();
+					if (pSelectedFile == NULL || !pSelectedFile->IsKindOf(RUNTIME_CLASS(CKnownFile)))
+						continue;
+
+					CKnownFile* pSelectedKnownFile = static_cast<CKnownFile*>(pSelectedFile);
+					pSelectedKnownFile->SetPowerShareLimit(iNewPowerShareLimit);
+					UpdateFile(pSelectedKnownFile);
+				}
+				SetRedraw(true);
+			}
+			break;
+		case MP_SPREADBAR_DEFAULT:
+		case MP_SPREADBAR_OFF:
+		case MP_SPREADBAR_ON:
+			SetRedraw(false);
+			while (!selectedList.IsEmpty()) {
+				CShareableFile* pSelectedFile = selectedList.RemoveHead();
+				if (pSelectedFile == NULL || !pSelectedFile->IsKindOf(RUNTIME_CLASS(CKnownFile)))
+					continue;
+
+				CKnownFile* pSelectedKnownFile = static_cast<CKnownFile*>(pSelectedFile);
+				switch (wParam) {
+				case MP_SPREADBAR_DEFAULT:
+					pSelectedKnownFile->SetSpreadbarSetStatus(-1);
+					break;
+				case MP_SPREADBAR_OFF:
+					pSelectedKnownFile->SetSpreadbarSetStatus(0);
+					break;
+				default:
+					pSelectedKnownFile->SetSpreadbarSetStatus(1);
+					break;
+				}
+				UpdateFile(pSelectedKnownFile);
+			}
+			SetRedraw(true);
+			break;
+		case MP_SPREADBAR_RESET:
+			SetRedraw(false);
+			while (!selectedList.IsEmpty()) {
+				CShareableFile* pSelectedFile = selectedList.RemoveHead();
+				if (pSelectedFile == NULL || !pSelectedFile->IsKindOf(RUNTIME_CLASS(CKnownFile)))
+					continue;
+
+				CKnownFile* pSelectedKnownFile = static_cast<CKnownFile*>(pSelectedFile);
+				pSelectedKnownFile->statistic.ResetSpreadBar();
+				UpdateFile(pSelectedKnownFile);
+			}
+			SetRedraw(true);
+			break;
+		case MP_HIDEOS_DEFAULT:
+		case MP_HIDEOS_SET:
+			{
+				int iNewHideOS = -1;
+				if (wParam == MP_HIDEOS_SET) {
+					InputBox inputbox;
+					CString strCurrentHideOS;
+					if (pKnownFile != NULL)
+						strCurrentHideOS.Format(_T("%i"), (pKnownFile->GetHideOS() >= 0) ? pKnownFile->GetHideOS() : thePrefs.GetHideOvershares());
+					else
+						strCurrentHideOS = _T("0");
+					inputbox.SetLabels(GetResString(_T("HIDE_OVER_SHARE_MENU")), GetResString(_T("HIDEOVERSHARES")), strCurrentHideOS);
+					if (inputbox.DoModal() != IDOK || !TryParseMenuInputNonNegativeInt(inputbox.GetInput(), iNewHideOS))
+						break;
+				}
+
+				SetRedraw(false);
+				while (!selectedList.IsEmpty()) {
+					CShareableFile* pSelectedFile = selectedList.RemoveHead();
+					if (pSelectedFile == NULL || !pSelectedFile->IsKindOf(RUNTIME_CLASS(CKnownFile)))
+						continue;
+
+					CKnownFile* pSelectedKnownFile = static_cast<CKnownFile*>(pSelectedFile);
+					pSelectedKnownFile->SetHideOS(iNewHideOS);
+					UpdateFile(pSelectedKnownFile);
+				}
+				SetRedraw(true);
+			}
+			break;
+		case MP_SELECTIVE_CHUNK:
+		case MP_SELECTIVE_CHUNK_0:
+		case MP_SELECTIVE_CHUNK_1:
+			SetRedraw(false);
+			while (!selectedList.IsEmpty()) {
+				CShareableFile* pSelectedFile = selectedList.RemoveHead();
+				if (pSelectedFile == NULL || !pSelectedFile->IsKindOf(RUNTIME_CLASS(CKnownFile)))
+					continue;
+
+				CKnownFile* pSelectedKnownFile = static_cast<CKnownFile*>(pSelectedFile);
+				switch (wParam) {
+				case MP_SELECTIVE_CHUNK:
+					pSelectedKnownFile->SetSelectiveChunk(-1);
+					break;
+				case MP_SELECTIVE_CHUNK_0:
+					pSelectedKnownFile->SetSelectiveChunk(0);
+					break;
+				default:
+					pSelectedKnownFile->SetSelectiveChunk(1);
+					break;
+				}
+				UpdateFile(pSelectedKnownFile);
+			}
+			SetRedraw(true);
+			break;
+		case MP_PERMDEFAULT:
+		case MP_PERMNONE:
+		case MP_PERMFRIENDS:
+		case MP_PERMALL:
+			SetRedraw(false);
+			while (!selectedList.IsEmpty()) {
+				CShareableFile* pSelectedFile = selectedList.RemoveHead();
+				if (pSelectedFile == NULL || !pSelectedFile->IsKindOf(RUNTIME_CLASS(CKnownFile)))
+					continue;
+
+				CKnownFile* pSelectedKnownFile = static_cast<CKnownFile*>(pSelectedFile);
+				switch (wParam) {
+				case MP_PERMDEFAULT:
+					pSelectedKnownFile->SetPermissions(-1);
+					break;
+				case MP_PERMNONE:
+					pSelectedKnownFile->SetPermissions(PERM_NOONE);
+					break;
+				case MP_PERMFRIENDS:
+					pSelectedKnownFile->SetPermissions(PERM_FRIENDS);
+					break;
+				default:
+					pSelectedKnownFile->SetPermissions(PERM_ALL);
+					break;
+				}
+				UpdateFile(pSelectedKnownFile);
+			}
+			SetRedraw(true);
+			Invalidate();
+			break;
+		case MP_SHAREONLYTHENEED:
+		case MP_SHAREONLYTHENEED_0:
+		case MP_SHAREONLYTHENEED_1:
+			SetRedraw(false);
+			while (!selectedList.IsEmpty()) {
+				CShareableFile* pSelectedFile = selectedList.RemoveHead();
+				if (pSelectedFile == NULL || !pSelectedFile->IsKindOf(RUNTIME_CLASS(CKnownFile)))
+					continue;
+
+				CKnownFile* pSelectedKnownFile = static_cast<CKnownFile*>(pSelectedFile);
+				switch (wParam) {
+				case MP_SHAREONLYTHENEED:
+					pSelectedKnownFile->SetShareOnlyTheNeed(-1);
+					break;
+				case MP_SHAREONLYTHENEED_0:
+					pSelectedKnownFile->SetShareOnlyTheNeed(0);
+					break;
+				default:
+					pSelectedKnownFile->SetShareOnlyTheNeed(1);
+					break;
+				}
+				UpdateFile(pSelectedKnownFile);
+			}
+			SetRedraw(true);
 			break;
 #if defined(_DEBUG)
 		//JOHNTODO: Not for release as we need kad lowID users in the network to see how well this works. Also, we do not support these links yet.
@@ -1618,6 +2405,7 @@ BOOL CSharedFilesCtrl::OnCommand(WPARAM wParam, LPARAM)
 					}
 
 					if (pKnownFile->IsKindOf(RUNTIME_CLASS(CPartFile))) {
+						static_cast<CPartFile*>(pKnownFile)->SetAutoRenameToMajorityName(false);
 						pKnownFile->SetFileName(newname);
 						static_cast<CPartFile*>(pKnownFile)->SetFullName(newpath);
 					} else {
@@ -1639,7 +2427,7 @@ BOOL CSharedFilesCtrl::OnCommand(WPARAM wParam, LPARAM)
 				if (pKnownFile && (pKnownFile->IsPartFile() || (m_eFilter == FilterType::History && theApp.sharedfiles->GetFileByID(pKnownFile->GetFileHash()) == NULL)))
 					break;
 
-				if (IDNO == LocMessageBox(_T("CONFIRM_FILEDELETE"), MB_ICONWARNING | MB_DEFBUTTON2 | MB_YESNO, 0))
+				if (LocMessageBox(_T("CONFIRM_FILEDELETE"), MB_ICONWARNING | MB_DEFBUTTON2 | MB_YESNO, 0) != IDYES)
 					return TRUE;
 
 				// Shared Files bulk removals may still use one ReloadList, but we also batch list state to avoid restoring large selections per item.
@@ -1770,6 +2558,39 @@ BOOL CSharedFilesCtrl::OnCommand(WPARAM wParam, LPARAM)
 				}
 			}
 		break;
+		case MP_TRY_TO_GET_PREVIEW_PARTS:
+			if (selectedDownloadList.GetCount() == 1 && pSingleDownloadFile != NULL)
+				pSingleDownloadFile->SetPreviewPrio(!pSingleDownloadFile->GetPreviewPrio());
+			break;
+		case MP_PREVIEW:
+			if (selectedDownloadList.GetCount() == 1 && pSingleDownloadFile != NULL)
+				pSingleDownloadFile->PreviewFile();
+			break;
+		case MP_PREVIEW1:
+		case MP_PREVIEW2:
+		case MP_PREVIEW3:
+		case MP_PREVIEW4:
+		case MP_PREVIEW5:
+		case MP_PREVIEW6:
+		case MP_PREVIEW7:
+		case MP_PREVIEW8:
+		case MP_PREVIEW9:
+		case MP_PREVIEW10:
+			if (selectedDownloadList.GetCount() == 1 && pSingleDownloadFile != NULL)
+				pSingleDownloadFile->PreviewFile((UINT)wParam - MP_PREVIEW1);
+			break;
+		case MP_PAUSEONPREVIEW:
+			{
+				bool bAllPausedOnPreview = true;
+				for (POSITION pos = selectedDownloadList.GetHeadPosition(); pos != NULL && bAllPausedOnPreview;)
+					bAllPausedOnPreview = selectedDownloadList.GetNext(pos)->IsPausingOnPreview();
+				while (!selectedDownloadList.IsEmpty()) {
+					CPartFile* pPartFile = selectedDownloadList.RemoveHead();
+					if (pPartFile->IsPreviewableFileType() && !pPartFile->IsReadyForPreview())
+						pPartFile->SetPauseOnPreview(!bAllPausedOnPreview);
+				}
+			}
+			break;
 		case MP_UNSHAREFILE:
 			{
 				SetRedraw(false);
@@ -1906,7 +2727,7 @@ BOOL CSharedFilesCtrl::OnCommand(WPARAM wParam, LPARAM)
 			break;
 			case MP_REMOVEFROMHISTORY:
 			{
-				if (selectedList.IsEmpty() || CDarkMode::MessageBox(GetResString(_T("FILE_HISTORY_REMOVE_QUESTION")),	MB_YESNO | MB_ICONQUESTION) == IDNO) 
+				if (selectedList.IsEmpty() || CDarkMode::MessageBox(GetResString(_T("FILE_HISTORY_REMOVE_QUESTION")),	MB_YESNO | MB_ICONQUESTION) != IDYES) 
 					break;
 
 				const bool bMultipleFiles = (selectedList.GetCount() > 1);
@@ -1948,7 +2769,11 @@ BOOL CSharedFilesCtrl::OnCommand(WPARAM wParam, LPARAM)
 				ReloadList(false, kSharedFilesViewState);
 				break;
 		default:
-			if (wParam >= MP_WEBURL && wParam <= MP_WEBURL + 256) {
+			if (wParam >= MP_PREVIEW_APP_MIN && wParam <= MP_PREVIEW_APP_MAX) {
+				if (selectedDownloadList.GetCount() == 1 && pSingleDownloadFile != NULL)
+					thePreviewApps.RunApp(pSingleDownloadFile, (UINT)wParam);
+			}
+			else if (wParam >= MP_WEBURL && wParam <= MP_WEBURL + 256) {
 				for (POSITION pos = GetFirstSelectedItemPosition(); pos != NULL;) {
 					int index = GetNextSelectedItem(pos);
 					if (index >= 0) {
@@ -2126,6 +2951,25 @@ int CALLBACK CSharedFilesCtrl::SortProc(const LPARAM lParam1, const LPARAM lPara
 					iResult = (ratio1 < ratio2) ? -1 : static_cast<int>(ratio1 > ratio2);
 				}
 				break;
+			case kSharedFilesColumnPermission:
+				iResult = ComparePermissionSettings(kitem1, kitem2);
+				break;
+			case kSharedFilesColumnPowershare:
+				iResult = ComparePowerShareSettings(kitem1, kitem2);
+				break;
+			case kSharedFilesColumnSpreadbarHistory:
+				{
+					const float fSpread1 = kitem1->statistic.GetSpreadSortValue();
+					const float fSpread2 = kitem2->statistic.GetSpreadSortValue();
+					iResult = (fSpread1 < fSpread2) ? -1 : static_cast<int>(fSpread1 > fSpread2);
+				}
+				break;
+			case kSharedFilesColumnHideOverShare:
+				iResult = CompareHideOverShareSettings(kitem1, kitem2);
+				break;
+			case kSharedFilesColumnShareOnlyTheNeed:
+				iResult = CompareShareOnlyTheNeedSettings(kitem1, kitem2);
+				break;
 
 			case 105: //all requests
 				iResult = CompareUnsigned(kitem1->statistic.GetAllTimeRequests(), kitem2->statistic.GetAllTimeRequests());
@@ -2188,6 +3032,22 @@ void CSharedFilesCtrl::OnNmDblClk(LPNMHDR, LRESULT* pResult)
 void CSharedFilesCtrl::CreateMenus()
 {
 	// Destroy child submenus before their owner to avoid invalid handle asserts.
+	if (m_SelectiveChunkMenu)
+		VERIFY2(m_SelectiveChunkMenu.DestroyMenu());
+	if (m_HideOSMenu)
+		VERIFY2(m_HideOSMenu.DestroyMenu());
+	if (m_ShareOnlyTheNeedMenu)
+		VERIFY2(m_ShareOnlyTheNeedMenu.DestroyMenu());
+	if (m_SpreadbarMenu)
+		VERIFY2(m_SpreadbarMenu.DestroyMenu());
+	if (m_PowerShareLimitMenu)
+		VERIFY2(m_PowerShareLimitMenu.DestroyMenu());
+	if (m_PowershareMenu)
+		VERIFY2(m_PowershareMenu.DestroyMenu());
+	if (m_PermMenu)
+		VERIFY2(m_PermMenu.DestroyMenu());
+	if (m_PreviewMenu)
+		VERIFY2(m_PreviewMenu.DestroyMenu());
 	if (m_PrioMenu)
 		VERIFY2(m_PrioMenu.DestroyMenu());
 	if (m_CollectionsMenu)
@@ -2208,6 +3068,48 @@ void CSharedFilesCtrl::CreateMenus()
 	m_PrioMenu.AppendMenu(MF_STRING, MP_PRIOVERYHIGH, GetResString(_T("PRIORELEASE")));
 	m_PrioMenu.AppendMenu(MF_STRING, MP_PRIOAUTO, GetResString(_T("PRIOAUTO")));//UAP
 
+	m_PermMenu.CreateMenu();
+	m_PermMenu.AppendMenu(MF_STRING, MP_PERMDEFAULT, GetResString(_T("DEFAULT")));
+	m_PermMenu.AppendMenu(MF_STRING, MP_PERMNONE, GetResString(_T("SHARE_PERMISSION_HIDDEN")));
+	m_PermMenu.AppendMenu(MF_STRING, MP_PERMFRIENDS, GetResString(_T("SHARE_PERMISSION_FRIENDSONLY")));
+	m_PermMenu.AppendMenu(MF_STRING, MP_PERMALL, GetResString(_T("SHARE_PERMISSION_EVERYBODY")));
+
+	m_PowershareMenu.CreateMenu();
+	m_PowershareMenu.AppendMenu(MF_STRING, MP_POWERSHARE_DEFAULT, GetResString(_T("DEFAULT")));
+	m_PowershareMenu.AppendMenu(MF_STRING, MP_POWERSHARE_OFF, GetResString(_T("POWERSHARE_DISABLED")));
+	m_PowershareMenu.AppendMenu(MF_STRING, MP_POWERSHARE_ON, GetResString(_T("POWERSHARE_ACTIVATED")));
+	m_PowershareMenu.AppendMenu(MF_STRING, MP_POWERSHARE_AUTO, GetResString(_T("POWERSHARE_AUTO")));
+	m_PowershareMenu.AppendMenu(MF_STRING, MP_POWERSHARE_LIMITED, GetResString(_T("POWERSHARE_LIMITED")));
+
+	m_PowerShareLimitMenu.CreateMenu();
+	m_PowerShareLimitMenu.AppendMenu(MF_STRING, MP_POWERSHARE_LIMIT, GetResString(_T("DEFAULT")));
+	m_PowerShareLimitMenu.AppendMenu(MF_STRING, MP_POWERSHARE_LIMIT_SET, GetResString(_T("DISABLED")));
+	m_PowershareMenu.AppendMenu(MF_SEPARATOR);
+	m_PowershareMenu.AppendMenu(MF_STRING | MF_POPUP, (UINT_PTR)m_PowerShareLimitMenu.m_hMenu, GetResString(_T("POWERSHARE_LIMIT")));
+
+	m_SpreadbarMenu.CreateMenu();
+	m_SpreadbarMenu.AppendMenu(MF_STRING, MP_SPREADBAR_DEFAULT, GetResString(_T("DEFAULT")));
+	m_SpreadbarMenu.AppendMenu(MF_STRING, MP_SPREADBAR_OFF, GetResString(_T("DISABLED")));
+	m_SpreadbarMenu.AppendMenu(MF_STRING, MP_SPREADBAR_ON, GetResString(_T("ENABLED")));
+	m_SpreadbarMenu.AppendMenu(MF_SEPARATOR);
+	m_SpreadbarMenu.AppendMenu(MF_STRING, MP_SPREADBAR_RESET, GetResString(_T("PW_RESET")));
+
+	m_HideOSMenu.CreateMenu();
+	m_HideOSMenu.AppendMenu(MF_STRING, MP_HIDEOS_DEFAULT, GetResString(_T("DEFAULT")));
+	m_HideOSMenu.AppendMenu(MF_STRING, MP_HIDEOS_SET, GetResString(_T("DISABLED")));
+
+	m_SelectiveChunkMenu.CreateMenu();
+	m_SelectiveChunkMenu.AppendMenu(MF_STRING, MP_SELECTIVE_CHUNK, GetResString(_T("DEFAULT")));
+	m_SelectiveChunkMenu.AppendMenu(MF_STRING, MP_SELECTIVE_CHUNK_0, GetResString(_T("DISABLED")));
+	m_SelectiveChunkMenu.AppendMenu(MF_STRING, MP_SELECTIVE_CHUNK_1, GetResString(_T("ENABLED")));
+	m_HideOSMenu.AppendMenu(MF_SEPARATOR);
+	m_HideOSMenu.AppendMenu(MF_STRING | MF_POPUP, (UINT_PTR)m_SelectiveChunkMenu.m_hMenu, GetResString(_T("SELECTIVESHARE")));
+
+	m_ShareOnlyTheNeedMenu.CreateMenu();
+	m_ShareOnlyTheNeedMenu.AppendMenu(MF_STRING, MP_SHAREONLYTHENEED, GetResString(_T("DEFAULT")));
+	m_ShareOnlyTheNeedMenu.AppendMenu(MF_STRING, MP_SHAREONLYTHENEED_0, GetResString(_T("DISABLED")));
+	m_ShareOnlyTheNeedMenu.AppendMenu(MF_STRING, MP_SHAREONLYTHENEED_1, GetResString(_T("ENABLED")));
+
 	m_CollectionsMenu.CreateMenu();
 	m_CollectionsMenu.AppendMenu(MF_STRING, MP_CREATECOLLECTION, GetResString(_T("CREATECOLLECTION")), _T("COLLECTION_ADD"));
 	m_CollectionsMenu.AppendMenu(MF_STRING, MP_MODIFYCOLLECTION, GetResString(_T("MODIFYCOLLECTION")), _T("COLLECTION_EDIT"));
@@ -2223,13 +3125,23 @@ void CSharedFilesCtrl::CreateMenus()
 	m_SharedFilesMenu.AppendMenu(MF_STRING, MP_UPDATE_METADATA, GetResString(_T("UPDATE_METADATA")), _T("METADATA"));
 	m_SharedFilesMenu.AppendMenu(MF_STRING, MP_REMOVE, GetResString(_T("DELETE")), _T("DELETE"));
 	m_SharedFilesMenu.AppendMenu(MF_STRING, MP_REMOVEFROMHISTORY, GetResString(_T("FILE_HISTORY_REMOVE")), _T("DELETESELECTED"));
-	m_SharedFilesMenu.AppendMenu(MF_STRING, MP_CANCEL, GetResString(_T("CANCEL_DOWNLOAD")), _T("DELETE"));
-	m_SharedFilesMenu.AppendMenu(MF_STRING, MP_CANCEL_FORGET, GetResString(_T("CANCEL_FORGET_DOWNLOAD")), _T("DELETE_FORGET"));
 
 	m_SharedFilesMenu.AppendMenu(MF_STRING, MP_UNSHAREFILE, GetResString(_T("UNSHARE")), _T("KADBOOTSTRAP")); // TODO: better icon
 	if (thePrefs.IsExtControlsEnabled())
 		m_SharedFilesMenu.AppendMenu(MF_STRING, Irc_SetSendLink, GetResString(_T("IRC_ADDLINKTOIRC")), _T("IRCCLIPBOARD"));
 
+	m_SharedFilesMenu.AppendMenu(MF_STRING | MF_SEPARATOR);
+	m_SharedFilesMenu.AppendMenu(MF_STRING, MP_CANCEL, GetResString(_T("CANCEL_DOWNLOAD")), _T("DELETE"));
+	m_SharedFilesMenu.AppendMenu(MF_STRING, MP_CANCEL_FORGET, GetResString(_T("CANCEL_FORGET_DOWNLOAD")), _T("DELETE_FORGET"));
+	m_PreviewMenu.CreateMenu();
+	RebuildPreviewMenu(m_PreviewMenu, NULL, false, false, false, false, false);
+	m_SharedFilesMenu.AppendMenu(MF_STRING | MF_POPUP, (UINT_PTR)m_PreviewMenu.m_hMenu, GetResString(_T("PREVIEWWITH")), _T("PREVIEW"));
+	m_SharedFilesMenu.AppendMenu(MF_STRING | MF_SEPARATOR);
+	m_SharedFilesMenu.AppendMenu(MF_STRING | MF_POPUP, (UINT_PTR)m_PermMenu.m_hMenu, GetResString(_T("SHARE_PERMISSION_GROUP")), _T("FRIEND"));
+	m_SharedFilesMenu.AppendMenu(MF_STRING | MF_POPUP, (UINT_PTR)m_PowershareMenu.m_hMenu, GetResString(_T("POWERSHARE")), _T("FILEPRIORITY"));
+	m_SharedFilesMenu.AppendMenu(MF_STRING | MF_POPUP, (UINT_PTR)m_SpreadbarMenu.m_hMenu, GetResString(_T("SPREADBAR")), _T("SHAREDFILESLIST"));
+	m_SharedFilesMenu.AppendMenu(MF_STRING | MF_POPUP, (UINT_PTR)m_HideOSMenu.m_hMenu, GetResString(_T("HIDE_OVER_SHARE_MENU")), _T("FILE"));
+	m_SharedFilesMenu.AppendMenu(MF_STRING | MF_POPUP, (UINT_PTR)m_ShareOnlyTheNeedMenu.m_hMenu, GetResString(_T("SHAREONLYTHENEED")), _T("FILE"));
 	m_SharedFilesMenu.AppendMenu(MF_STRING | MF_SEPARATOR);
 	m_SharedFilesMenu.AppendMenu(MF_STRING, MP_VIEWPARTFILES, GetResString(_T("FILE_HISTORY_SHOW_PART2")));
 	m_SharedFilesMenu.AppendMenu(MF_STRING, MP_VIEWSHAREDFILES, GetResString(_T("FILE_HISTORY_SHOW_SHARED2")));
@@ -2371,8 +3283,9 @@ const bool CSharedFilesCtrl::IsFilteredOut(const CShareableFile *pFile) const
 		ASSERT(pFile->IsKindOf(RUNTIME_CLASS(CKnownFile)) || m_pDirectoryFilter->m_eItemType == SDI_UNSHAREDDIRECTORY);
 		switch (m_pDirectoryFilter->m_eItemType) {
 		case SDI_ALL: // No filter
-		case SDI_DUP: // No filter
 		case SDI_ALLHISTORY: // No filter
+			break;
+		case SDI_DUP: // No filter
 			break;
 		case SDI_FILESYSTEMPARENT:
 			return true;

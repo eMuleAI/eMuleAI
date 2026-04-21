@@ -879,13 +879,13 @@ BEGIN
     LTEXT           "",IDC_PREVIEW,90,5,26,13
 END
 
-IDD_PPG_SECURITY DIALOGEX 0, 0, 231, 214
+IDD_PPG_SECURITY DIALOGEX 0, 0, 231, 228
 STYLE DS_SETFONT | DS_FIXEDSYS | WS_CHILD | WS_DISABLED | WS_CAPTION
 CAPTION "Security"
 FONT 8, "MS Shell Dlg", 0, 0, 0x0
 BEGIN
-    GROUPBOX        "IP Filter",IDC_STATIC_IPFILTER,4,2,223,62
-    CONTROL         "Filter servers too",IDC_FILTERSERVERBYIPFILTER,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,11,12,71,10
+    GROUPBOX        "IP Filter",IDC_STATIC_IPFILTER,4,2,223,78
+    CONTROL         "Filter servers too",IDC_FILTER_SERVER_BY_IPFILTER,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,11,12,71,10
     CONTROL         "Don't filter private IPs",IDC_DONTFILTERPRIVATEIPS,
                     "Button",BS_AUTOCHECKBOX | WS_TABSTOP,121,12,98,10
     RTEXT           "Filter level:",IDC_STATIC_FILTERLEVEL,11,25,54,8
@@ -897,24 +897,27 @@ BEGIN
     EDITTEXT        IDC_UPDATEURL,11,47,163,12,ES_AUTOHSCROLL
     PUSHBUTTON      "v",IDC_DD,174,47,11,12,BS_CENTER
     PUSHBUTTON      "Load",IDC_LOADURL,186,47,35,12
-    GROUPBOX        "See My Shared Files/Directories",IDC_SEEMYSHARE_FRM,4,69,223,26
-    CONTROL         "Everybody",IDC_SEESHARE1,"Button",BS_AUTORADIOBUTTON | WS_GROUP | WS_TABSTOP,11,80,73,10
-    CONTROL         "Only friends",IDC_SEESHARE2,"Button",BS_AUTORADIOBUTTON,88,80,71,10
-    CONTROL         "Nobody",IDC_SEESHARE3,"Button",BS_AUTORADIOBUTTON,166,80,52,10
-    GROUPBOX        "Protocol Obfuscation",IDC_SEC_OBFUSCATIONBOX,4,99,223,45,WS_GROUP
+    CONTROL         "Auto update",IDC_AUTOUPDATE_IPFILTER,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,11,63,60,10
+    RTEXT           "",IDC_PERIODDAYS_LABEL,75,64,55,8
+    EDITTEXT        IDC_IPFILTERPERIOD,135,62,30,12,ES_AUTOHSCROLL | ES_NUMBER
+    GROUPBOX        "See My Shared Files/Directories",IDC_SEEMYSHARE_FRM,4,80,223,27
+    CONTROL         "Everybody",IDC_SEESHARE1,"Button",BS_AUTORADIOBUTTON | WS_GROUP | WS_TABSTOP,11,92,73,10
+    CONTROL         "Only friends",IDC_SEESHARE2,"Button",BS_AUTORADIOBUTTON,88,92,71,10
+    CONTROL         "Nobody",IDC_SEESHARE3,"Button",BS_AUTORADIOBUTTON,166,92,52,10
+    GROUPBOX        "Protocol Obfuscation",IDC_SEC_OBFUSCATIONBOX,4,107,223,45,WS_GROUP
     CONTROL         "Enable protocol obfuscation",IDC_ENABLEOBFUSCATION,
-                    "Button",BS_AUTOCHECKBOX | WS_TABSTOP,11,110,202,10
+                    "Button",BS_AUTOCHECKBOX | WS_TABSTOP,11,118,202,10
     CONTROL         "Allow obfuscated connections only (not recommended)",IDC_ONLYOBFUSCATED,
-                    "Button",BS_AUTOCHECKBOX | WS_TABSTOP,11,120,202,10
+                    "Button",BS_AUTOCHECKBOX | WS_TABSTOP,11,128,202,10
     CONTROL         "Disable support for obfuscated connections",IDC_DISABLEOBFUSCATION,
-                    "Button",BS_AUTOCHECKBOX | WS_TABSTOP,11,130,202,10
-    GROUPBOX        "Misc",IDC_SEC_MISC,4,149,223,55,WS_GROUP
-    CONTROL         "Use secure Identification",IDC_USESECIDENT,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,11,159,212,10
-    CONTROL         "Run eMule as unprivileged user",IDC_RUNASUSER,"Button",BS_AUTOCHECKBOX | WS_DISABLED | WS_TABSTOP,11,169,212,10
+                    "Button",BS_AUTOCHECKBOX | WS_TABSTOP,11,138,202,10
+    GROUPBOX        "Misc",IDC_SEC_MISC,4,152,223,55,WS_GROUP
+    CONTROL         "Use secure Identification",IDC_USESECIDENT,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,11,162,212,10
+    CONTROL         "Run eMule as unprivileged user",IDC_RUNASUSER,"Button",BS_AUTOCHECKBOX | WS_DISABLED | WS_TABSTOP,11,172,212,10
     CONTROL         "Enable spam filter for search results",IDC_SEARCHSPAMFILTER,
-                    "Button",BS_AUTOCHECKBOX | WS_TABSTOP,11,179,212,10
+                    "Button",BS_AUTOCHECKBOX | WS_TABSTOP,11,182,212,10
     CONTROL         "Warn when opening untrusted files",IDC_CHECK_FILE_OPEN,
-                    "Button",BS_AUTOCHECKBOX | WS_TABSTOP,11,189,212,10
+                    "Button",BS_AUTOCHECKBOX | WS_TABSTOP,11,192,212,10
 END
 
 IDD_GEOLITE_DOWNLOAD DIALOGEX 0, 0, 276, 132
@@ -1173,13 +1176,13 @@ BEGIN
     CONTROL         "Static",IDC_DDOWNLOADING,"Static",SS_LEFTNOWORDWRAP | SS_NOPREFIX | WS_GROUP,110,109,202,8
     RTEXT           "Downloaded (this session):",IDC_STATIC42,19,131,87,8
     CONTROL         "Static",IDC_DDOWN,"Static",SS_LEFTNOWORDWRAP | SS_NOPREFIX | WS_GROUP,110,131,53,8
-    RTEXT           "Average Downloadrate:",IDC_STATIC43,19,142,87,8
+    RTEXT           "Download rate:",IDC_STATIC43,19,142,87,8
     CONTROL         "Static",IDC_DAVDR,"Static",SS_LEFTNOWORDWRAP | SS_NOPREFIX | WS_GROUP,110,142,53,8
     RTEXT           "Downloaded total:",IDC_STATIC44,19,153,87,8
     CONTROL         "Static",IDC_DDOWNTOTAL,"Static",SS_LEFTNOWORDWRAP | SS_NOPREFIX | WS_GROUP,110,153,53,8
     RTEXT           "Uploaded (this session):",IDC_STATIC45,163,131,90,8
     CONTROL         "Static",IDC_DDUP,"Static",SS_LEFTNOWORDWRAP | SS_NOPREFIX | WS_GROUP,256,131,51,8
-    RTEXT           "Average Upload rate:",IDC_STATIC46,163,142,90,8
+    RTEXT           "Upload rate:",IDC_STATIC46,163,142,90,8
     CONTROL         "Static",IDC_DAVUR,"Static",SS_LEFTNOWORDWRAP | SS_NOPREFIX | WS_GROUP,256,142,50,8
     RTEXT           "Uploaded total:",IDC_STATIC47,163,153,90,8
     CONTROL         "Static",IDC_DUPTOTAL,"Static",SS_LEFTNOWORDWRAP | SS_NOPREFIX | WS_GROUP,256,153,50,8

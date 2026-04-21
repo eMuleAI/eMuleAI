@@ -43,10 +43,48 @@ bool GetMimeType(LPCTSTR pszFilePath, CString &rstrMimeType);
 
 #define	IPFILTERUPDATEURL_STRINGS_PROFILE	_T("AC_IPFilterUpdateURLs.dat")
 
+namespace
+{
+	CString GetIPFilterUpdateUrlHistoryPath()
+	{
+		return thePrefs.GetMuleDirectory(EMULE_CONFIGDIR) + IPFILTERUPDATEURL_STRINGS_PROFILE;
+	}
+
+	void ReloadCurrentIPFilter()
+	{
+		CWaitCursor curHourglass;
+		theApp.ipfilter->LoadFromDefaultFile();
+		if (thePrefs.GetFilterServerByIP())
+			theApp.emuledlg->serverwnd->serverlistctrl.RemoveAllFilteredServers();
+	}
+
+	void ReportIPFilterUpdateError(const CString &strError, bool bInteractive)
+	{
+		if (bInteractive)
+			CDarkMode::MessageBox(strError, MB_ICONERROR);
+		else
+			AddDebugLogLine(DLP_LOW, false, _T("%s"), (LPCTSTR)strError);
+	}
+
+	bool ReplaceDefaultIPFilterFile(const CString &strSourceFilePath, const CString &strTempFileToRemove = CString())
+	{
+		const CString strDefaultFilePath = CIPFilter::GetDefaultFilePath();
+		if (_tremove(strDefaultFilePath) != 0)
+			AddDebugLogLine(DLP_LOW, false, _T("Failed to remove default IP filter file \"%s\" - %s"), (LPCTSTR)strDefaultFilePath, _tcserror(errno));
+		if (_trename(strSourceFilePath, strDefaultFilePath) != 0) {
+			AddDebugLogLine(DLP_LOW, false, _T("Failed to rename IP filter file \"%s\" to \"%s\" - %s"), (LPCTSTR)strSourceFilePath, (LPCTSTR)strDefaultFilePath, _tcserror(errno));
+			return false;
+		}
+		if (!strTempFileToRemove.IsEmpty() && _tremove(strTempFileToRemove) != 0)
+			AddDebugLogLine(DLP_LOW, false, _T("Failed to remove temporary IP filter file \"%s\" - %s"), (LPCTSTR)strTempFileToRemove, _tcserror(errno));
+		return true;
+	}
+}
+
 IMPLEMENT_DYNAMIC(CPPgSecurity, CPropertyPage)
 
 BEGIN_MESSAGE_MAP(CPPgSecurity, CPropertyPage)
-	ON_BN_CLICKED(IDC_FILTERSERVERBYIPFILTER, OnSettingsChange)
+	ON_BN_CLICKED(IDC_FILTER_SERVER_BY_IPFILTER, OnSettingsChange)
 	ON_BN_CLICKED(IDC_DONTFILTERPRIVATEIPS, OnSettingsChange)
 	ON_BN_CLICKED(IDC_RELOADFILTER, OnReloadIPFilter)
 	ON_BN_CLICKED(IDC_EDITFILTER, OnEditIPFilter)
@@ -66,23 +104,32 @@ BEGIN_MESSAGE_MAP(CPPgSecurity, CPropertyPage)
 	ON_BN_CLICKED(IDC_DISABLEOBFUSCATION, OnObfuscatedDisabledChange)
 	ON_BN_CLICKED(IDC_SEARCHSPAMFILTER, OnSettingsChange)
 	ON_BN_CLICKED(IDC_CHECK_FILE_OPEN, OnSettingsChange)
+	ON_BN_CLICKED(IDC_AUTOUPDATE_IPFILTER, OnBnClickedAutoupdateIpfilter)
+	ON_EN_CHANGE(IDC_IPFILTERPERIOD, OnEnChangeIpfilterperiod)
 END_MESSAGE_MAP()
 
 CPPgSecurity::CPPgSecurity()
 	: CPropertyPage(CPPgSecurity::IDD)
 	, m_pacIPFilterURL()
+	, m_bAutoUpdate(false)
+	, m_nPeriodDays(7)
 {
 }
 
 void CPPgSecurity::DoDataExchange(CDataExchange *pDX)
 {
 	CPropertyPage::DoDataExchange(pDX);
+	int nAutoUpdate = m_bAutoUpdate ? 1 : 0;
+	DDX_Check(pDX, IDC_AUTOUPDATE_IPFILTER, nAutoUpdate);
+	DDX_Text(pDX, IDC_IPFILTERPERIOD, m_nPeriodDays);
+	DDV_MinMaxInt(pDX, m_nPeriodDays, 1, 365);
+	m_bAutoUpdate = (nAutoUpdate != 0);
 }
 
 void CPPgSecurity::LoadSettings()
 {
 	SetDlgItemInt(IDC_FILTERLEVEL, thePrefs.filterlevel);
-	CheckDlgButton(IDC_FILTERSERVERBYIPFILTER, thePrefs.filterserverbyip);
+	CheckDlgButton(IDC_FILTER_SERVER_BY_IPFILTER, thePrefs.filterserverbyip);
 	CheckDlgButton(IDC_DONTFILTERPRIVATEIPS, thePrefs.m_bDontFilterPrivateIPs);
 
 	CheckDlgButton(IDC_USESECIDENT, thePrefs.m_bUseSecureIdent);
@@ -101,17 +148,21 @@ void CPPgSecurity::LoadSettings()
 	CheckDlgButton(IDC_SEARCHSPAMFILTER, thePrefs.IsSearchSpamFilterEnabled());
 	CheckDlgButton(IDC_CHECK_FILE_OPEN, thePrefs.GetCheckFileOpen());
 
+	m_bAutoUpdate = thePrefs.GetAutoIPFilterUpdate();
+	m_nPeriodDays = thePrefs.GetIPFilterUpdatePeriodDays();
+
 	ASSERT(vsfaEverybody == 0);
 	ASSERT(vsfaFriends == 1);
 	ASSERT(vsfaNobody == 2);
 	CheckRadioButton(IDC_SEESHARE1, IDC_SEESHARE3, IDC_SEESHARE1 + thePrefs.m_iSeeShares);
 }
 
-BOOL CPPgSecurity::OnInitDialog()
+	BOOL CPPgSecurity::OnInitDialog()
 {
 	CPropertyPage::OnInitDialog();
 
 	LoadSettings();
+	UpdateData(FALSE);
 	Localize();
 
 	if (thePrefs.GetUseAutocompletion()) {
@@ -137,12 +188,14 @@ BOOL CPPgSecurity::OnInitDialog()
 
 BOOL CPPgSecurity::OnApply()
 {
+	if (!UpdateData(TRUE))
+		return FALSE;
 
 	UINT uLevel = thePrefs.filterlevel;
 
 	bool bFilter = thePrefs.filterserverbyip;
 	thePrefs.filterlevel = GetDlgItemInt(IDC_FILTERLEVEL, NULL, FALSE);
-	thePrefs.filterserverbyip = IsDlgButtonChecked(IDC_FILTERSERVERBYIPFILTER) != 0;
+	thePrefs.filterserverbyip = IsDlgButtonChecked(IDC_FILTER_SERVER_BY_IPFILTER) != 0;
 	thePrefs.m_bDontFilterPrivateIPs = IsDlgButtonChecked(IDC_DONTFILTERPRIVATEIPS) != 0;
 	if (thePrefs.filterserverbyip && (!bFilter || uLevel != thePrefs.filterlevel))
 		theApp.emuledlg->serverwnd->serverlistctrl.RemoveAllFilteredServers();
@@ -164,7 +217,11 @@ BOOL CPPgSecurity::OnApply()
 	else
 		thePrefs.m_iSeeShares = vsfaNobody;
 
+	thePrefs.SetAutoIPFilterUpdate(m_bAutoUpdate);
+	thePrefs.SetIPFilterUpdatePeriodDays(m_nPeriodDays);
+
 	LoadSettings();
+	UpdateData(FALSE);
 	SetModified(FALSE);
 	return CPropertyPage::OnApply();
 }
@@ -177,7 +234,7 @@ void CPPgSecurity::Localize()
 		SetDlgItemText(IDC_RELOADFILTER, GetResString(_T("SF_RELOAD")));
 		SetDlgItemText(IDC_EDITFILTER, GetResString(_T("EDIT")));
 		SetDlgItemText(IDC_STATIC_FILTERLEVEL, GetResString(_T("FILTERLEVEL")) + _T(':'));
-		SetDlgItemText(IDC_FILTERSERVERBYIPFILTER, GetResString(_T("FILTERSERVERBYIPFILTER")));
+		SetDlgItemText(IDC_FILTER_SERVER_BY_IPFILTER, GetResString(_T("FILTER_SERVER_BY_IPFILTER")));
 		SetDlgItemText(IDC_DONTFILTERPRIVATEIPS, GetResString(_T("DONTFILTERPRIVATEIPS")));
 
 		SetDlgItemText(IDC_SEC_MISC, GetResString(_T("PW_MISC")));
@@ -198,15 +255,14 @@ void CPPgSecurity::Localize()
 		SetDlgItemText(IDC_SEC_OBFUSCATIONBOX, GetResString(_T("PROTOCOLOBFUSCATION")));
 		SetDlgItemText(IDC_SEARCHSPAMFILTER, GetResString(_T("SEARCHSPAMFILTER")));
 		SetDlgItemText(IDC_CHECK_FILE_OPEN, GetResString(_T("CHECK_FILE_OPEN")));
+		SetDlgItemText(IDC_AUTOUPDATE_IPFILTER, GetResString(_T("IPFILTER_AUTO_UPDATE")));
+		SetDlgItemText(IDC_PERIODDAYS_LABEL, GetResString(_T("IPFILTER_PERIOD_DAYS")));
 	}
 }
 
 void CPPgSecurity::OnReloadIPFilter()
 {
-	CWaitCursor curHourglass;
-	theApp.ipfilter->LoadFromDefaultFile();
-	if (thePrefs.GetFilterServerByIP())
-		theApp.emuledlg->serverwnd->serverlistctrl.RemoveAllFilteredServers();
+	ReloadCurrentIPFilter();
 }
 
 void CPPgSecurity::OnEditIPFilter()
@@ -214,194 +270,195 @@ void CPPgSecurity::OnEditIPFilter()
 	ShellOpen(thePrefs.GetTxtEditor(), _T('"') + CIPFilter::GetDefaultFilePath() + _T('"'));
 }
 
-void CPPgSecurity::OnLoadIPFFromURL()
+CString CPPgSecurity::GetStoredIPFilterUpdateURL()
 {
+	CCustomAutoComplete acIPFilterURL;
+	if (acIPFilterURL.LoadList(GetIPFilterUpdateUrlHistoryPath()) && acIPFilterURL.GetItemCount() > 0)
+		return acIPFilterURL.GetItem(0);
+	return CString();
+}
+
+bool CPPgSecurity::UpdateIPFilterFromURL(const CString &url, bool bInteractive)
+{
+	if (url.IsEmpty())
+		return false;
+
 	bool bHaveNewFilterFile = false;
-	CString url;
-	GetDlgItemText(IDC_UPDATEURL, url);
-	if (!url.IsEmpty()) {
-		// add entered URL to LRU list even if it's not yet known whether we can download from this URL (it's just more convenient this way)
-		if (m_pacIPFilterURL && m_pacIPFilterURL->IsBound())
-			m_pacIPFilterURL->AddItem(url, 0);
+	const CString &sConfDir(thePrefs.GetMuleDirectory(EMULE_CONFIGDIR));
+	CString strTempFilePath;
+	_tmakepathlimit(strTempFilePath.GetBuffer(MAX_PATH), NULL, sConfDir, DFLT_IPFILTER_FILENAME, _T("tmp"));
+	strTempFilePath.ReleaseBuffer();
 
-		const CString &sConfDir(thePrefs.GetMuleDirectory(EMULE_CONFIGDIR));
-		CString strTempFilePath;
-		_tmakepathlimit(strTempFilePath.GetBuffer(MAX_PATH), NULL, sConfDir, DFLT_IPFILTER_FILENAME, _T("tmp"));
-		strTempFilePath.ReleaseBuffer();
+	CHttpDownloadDlg dlgDownload;
+	dlgDownload.m_strTitle = GetResString(_T("DOWNLOADING_IPFILTER_FILE"));
+	dlgDownload.m_sURLToDownload = url;
+	dlgDownload.m_sFileToDownloadInto = strTempFilePath;
+	if (dlgDownload.DoModal() != IDOK) {
+		(void)_tremove(strTempFilePath);
+		CString strError(GetResString(_T("IPFILTER_DOWNLOAD_FAILED")));
+		if (!dlgDownload.GetError().IsEmpty())
+			strError.AppendFormat(_T("\r\n\r\n%s"), (LPCTSTR)dlgDownload.GetError());
+		ReportIPFilterUpdateError(strError, bInteractive);
+		return false;
+	}
 
-		CHttpDownloadDlg dlgDownload;
-		dlgDownload.m_strTitle = GetResString(_T("DWL_IPFILTERFILE"));
-		dlgDownload.m_sURLToDownload = url;
-		dlgDownload.m_sFileToDownloadInto = strTempFilePath;
-		if (dlgDownload.DoModal() != IDOK) {
-			(void)_tremove(strTempFilePath);
-			CString strError(GetResString(_T("DWLIPFILTERFAILED")));
-			if (!dlgDownload.GetError().IsEmpty())
-				strError.AppendFormat(_T("\r\n\r\n%s"), (LPCTSTR)dlgDownload.GetError());
-			CDarkMode::MessageBox(strError, MB_ICONERROR);
-			return;
+	CString strMimeType;
+	GetMimeType(strTempFilePath, strMimeType);
+
+	bool bIsArchiveFile = false;
+	bool bUncompressed = false;
+	CZIPFile zip;
+	if (zip.Open(strTempFilePath)) {
+		bIsArchiveFile = true;
+
+		CZIPFile::File *zfile = zip.GetFile(_T("ipfilter.dat"));
+		if (zfile == NULL) {
+			zfile = zip.GetFile(_T("guarding.p2p"));
+			if (zfile == NULL)
+				zfile = zip.GetFile(_T("guardian.p2p"));
 		}
+		if (zfile) {
+			CString strTempUnzipFilePath;
+			_tmakepathlimit(strTempUnzipFilePath.GetBuffer(MAX_PATH), NULL, sConfDir, DFLT_IPFILTER_FILENAME, _T(".unzip.tmp"));
+			strTempUnzipFilePath.ReleaseBuffer();
 
-		CString strMimeType;
-		GetMimeType(strTempFilePath, strMimeType);
-
-		bool bIsArchiveFile = false;
-		bool bUncompressed = false;
-		CZIPFile zip;
-		if (zip.Open(strTempFilePath)) {
-			bIsArchiveFile = true;
-
-			CZIPFile::File *zfile = zip.GetFile(_T("ipfilter.dat"));
-			if (zfile == NULL) {
-				zfile = zip.GetFile(_T("guarding.p2p"));
-				if (zfile == NULL)
-					zfile = zip.GetFile(_T("guardian.p2p"));
-			}
-			if (zfile) {
-				CString strTempUnzipFilePath;
-				_tmakepathlimit(strTempUnzipFilePath.GetBuffer(MAX_PATH), NULL, sConfDir, DFLT_IPFILTER_FILENAME, _T(".unzip.tmp"));
-				strTempUnzipFilePath.ReleaseBuffer();
-
-				if (zfile->Extract(strTempUnzipFilePath)) {
-					zip.Close();
-
-					if (_tremove(theApp.ipfilter->GetDefaultFilePath()) != 0)
-						AddDebugLogLine(DLP_LOW, false, _T("Failed to remove default IP filter file \"%s\" - %s"), (LPCTSTR)theApp.ipfilter->GetDefaultFilePath(), _tcserror(errno));
-					if (_trename(strTempUnzipFilePath, theApp.ipfilter->GetDefaultFilePath()) != 0)
-						AddDebugLogLine(DLP_LOW, false, _T("Failed to rename uncompressed IP filter file \"%s\" to default IP filter file \"%s\" - %s"), (LPCTSTR)strTempUnzipFilePath, (LPCTSTR)theApp.ipfilter->GetDefaultFilePath(), _tcserror(errno));
-					if (_tremove(strTempFilePath) != 0)
-						AddDebugLogLine(DLP_LOW, false, _T("Failed to remove temporary IP filter file \"%s\" - %s"), (LPCTSTR)strTempFilePath, _tcserror(errno));
-					bUncompressed = true;
-					bHaveNewFilterFile = true;
-				} else {
-					CString strError;
-					strError.Format(GetResString(_T("ERR_IPFILTERZIPEXTR")), (LPCTSTR)strTempFilePath);
-					CDarkMode::MessageBox(strError, MB_ICONERROR);
-				}
+			if (zfile->Extract(strTempUnzipFilePath)) {
+				zip.Close();
+				bUncompressed = true;
+				bHaveNewFilterFile = ReplaceDefaultIPFilterFile(strTempUnzipFilePath, strTempFilePath);
 			} else {
 				CString strError;
-				strError.Format(GetResString(_T("ERR_IPFILTERCONTENTERR")), (LPCTSTR)strTempFilePath);
-				CDarkMode::MessageBox(strError, MB_ICONERROR);
-			}
-
-			zip.Close();
-		} else if (strMimeType.CompareNoCase(_T("application/x-rar-compressed")) == 0) {
-			bIsArchiveFile = true;
-
-			CRARFile rar;
-			if (rar.Open(strTempFilePath)) {
-				CString strFile;
-				if (rar.GetNextFile(strFile)
-					&& (strFile.CompareNoCase(_T("ipfilter.dat")) == 0
-						|| strFile.CompareNoCase(_T("guarding.p2p")) == 0
-						|| strFile.CompareNoCase(_T("guardian.p2p")) == 0))
-				{
-					CString strTempUnzipFilePath;
-					_tmakepathlimit(strTempUnzipFilePath.GetBuffer(MAX_PATH), NULL, sConfDir, DFLT_IPFILTER_FILENAME, _T(".unzip.tmp"));
-					strTempUnzipFilePath.ReleaseBuffer();
-					if (rar.Extract(strTempUnzipFilePath)) {
-						rar.Close();
-
-						if (_tremove(theApp.ipfilter->GetDefaultFilePath()) != 0)
-							AddDebugLogLine(DLP_LOW, false, _T("Failed to remove default IP filter file \"%s\" - %s"), (LPCTSTR)theApp.ipfilter->GetDefaultFilePath(), _tcserror(errno));
-						if (_trename(strTempUnzipFilePath, theApp.ipfilter->GetDefaultFilePath()) != 0)
-							AddDebugLogLine(DLP_LOW, false, _T("Failed to rename uncompressed IP filter file \"%s\" to default IP filter file \"%s\" - %s"), (LPCTSTR)strTempUnzipFilePath, (LPCTSTR)theApp.ipfilter->GetDefaultFilePath(), _tcserror(errno));
-						if (_tremove(strTempFilePath) != 0)
-							AddDebugLogLine(DLP_LOW, false, _T("Failed to remove temporary IP filter file \"%s\" - %s"), (LPCTSTR)strTempFilePath, _tcserror(errno));
-						bUncompressed = true;
-						bHaveNewFilterFile = true;
-					} else {
-						CString strError;
-						strError.Format(_T("Failed to extract IP filter file from RAR file \"%s\"."), (LPCTSTR)strTempFilePath);
-						CDarkMode::MessageBox(strError, MB_ICONERROR);
-					}
-				} else {
-					CString strError;
-					strError.Format(_T("Failed to find IP filter file \"guarding.p2p\" or \"ipfilter.dat\" in RAR file \"%s\"."), (LPCTSTR)strTempFilePath);
-					CDarkMode::MessageBox(strError, MB_ICONERROR);
-				}
-				rar.Close();
-			} else {
-				CString strError;
-				strError.Format(_T("Failed to open file \"%s\".\r\n\r\nInvalid file format?\r\n\r\n%s"), (LPCTSTR)url, CRARFile::sUnrar_download);
-				CDarkMode::MessageBox(strError, MB_ICONERROR);
+				strError.Format(GetResString(_T("IPFILTER_ZIP_ERROR")), (LPCTSTR)strTempFilePath);
+				ReportIPFilterUpdateError(strError, bInteractive);
 			}
 		} else {
-			CGZIPFile gz;
-			if (gz.Open(strTempFilePath)) {
-				bIsArchiveFile = true;
+			CString strError;
+			strError.Format(GetResString(_T("IPFILTER_CONTENT_ERROR")), (LPCTSTR)strTempFilePath);
+			ReportIPFilterUpdateError(strError, bInteractive);
+		}
 
+		zip.Close();
+	} else if (strMimeType.CompareNoCase(_T("application/x-rar-compressed")) == 0) {
+		bIsArchiveFile = true;
+
+		CRARFile rar;
+		if (rar.Open(strTempFilePath)) {
+			CString strFile;
+			if (rar.GetNextFile(strFile)
+				&& (strFile.CompareNoCase(_T("ipfilter.dat")) == 0
+					|| strFile.CompareNoCase(_T("guarding.p2p")) == 0
+					|| strFile.CompareNoCase(_T("guardian.p2p")) == 0))
+			{
 				CString strTempUnzipFilePath;
 				_tmakepathlimit(strTempUnzipFilePath.GetBuffer(MAX_PATH), NULL, sConfDir, DFLT_IPFILTER_FILENAME, _T(".unzip.tmp"));
 				strTempUnzipFilePath.ReleaseBuffer();
-
-				// add filename and extension of uncompressed file to temporary file
-				const CString &strUncompressedFileName(gz.GetUncompressedFileName());
-				if (!strUncompressedFileName.IsEmpty())
-					strTempUnzipFilePath.AppendFormat(_T(".%s"), (LPCTSTR)strUncompressedFileName);
-
-				if (gz.Extract(strTempUnzipFilePath)) {
-					gz.Close();
-
-					if (_tremove(theApp.ipfilter->GetDefaultFilePath()) != 0)
-						AddDebugLogLine(DLP_LOW, false, _T("Failed to remove default IP filter file \"%s\" - %s"), (LPCTSTR)theApp.ipfilter->GetDefaultFilePath(), _tcserror(errno));
-					if (_trename(strTempUnzipFilePath, theApp.ipfilter->GetDefaultFilePath()) != 0)
-						AddDebugLogLine(DLP_LOW, false, _T("Failed to rename uncompressed IP filter file \"%s\" to default IP filter file \"%s\" - %s"), (LPCTSTR)strTempUnzipFilePath, (LPCTSTR)theApp.ipfilter->GetDefaultFilePath(), _tcserror(errno));
-					if (_tremove(strTempFilePath) != 0)
-						AddDebugLogLine(DLP_LOW, false, _T("Failed to remove temporary IP filter file \"%s\" - %s"), (LPCTSTR)strTempFilePath, _tcserror(errno));
+				if (rar.Extract(strTempUnzipFilePath)) {
+					rar.Close();
 					bUncompressed = true;
-					bHaveNewFilterFile = true;
+					bHaveNewFilterFile = ReplaceDefaultIPFilterFile(strTempUnzipFilePath, strTempFilePath);
 				} else {
 					CString strError;
-					strError.Format(GetResString(_T("ERR_IPFILTERZIPEXTR")), (LPCTSTR)strTempFilePath);
-					CDarkMode::MessageBox(strError, MB_ICONERROR);
+					strError.Format(_T("Failed to extract IP filter file from RAR file \"%s\"."), (LPCTSTR)strTempFilePath);
+					ReportIPFilterUpdateError(strError, bInteractive);
 				}
+			} else {
+				CString strError;
+				strError.Format(_T("Failed to find IP filter file \"guarding.p2p\" or \"ipfilter.dat\" in RAR file \"%s\"."), (LPCTSTR)strTempFilePath);
+				ReportIPFilterUpdateError(strError, bInteractive);
 			}
-			gz.Close();
+			rar.Close();
+		} else {
+			CString strError;
+			strError.Format(_T("Failed to open file \"%s\".\r\n\r\nInvalid file format?\r\n\r\n%s"), (LPCTSTR)url, CRARFile::sUnrar_download);
+			ReportIPFilterUpdateError(strError, bInteractive);
 		}
+	} else {
+		CGZIPFile gz;
+		if (gz.Open(strTempFilePath)) {
+			bIsArchiveFile = true;
 
-		if (!bIsArchiveFile && !bUncompressed) {
-			// Check first lines of downloaded file for potential HTML content (e.g. 404 error pages)
-			bool bValidIPFilterFile = true;
-			FILE *fp = _tfsopen(strTempFilePath, _T("rb"), _SH_DENYWR);
-			if (fp) {
-				char szBuff[16384];
-				size_t iRead = fread(szBuff, 1, sizeof szBuff - 1, fp);
-				fclose(fp);
-				if (iRead <= 0)
+			CString strTempUnzipFilePath;
+			_tmakepathlimit(strTempUnzipFilePath.GetBuffer(MAX_PATH), NULL, sConfDir, DFLT_IPFILTER_FILENAME, _T(".unzip.tmp"));
+			strTempUnzipFilePath.ReleaseBuffer();
+
+			// Add filename and extension of uncompressed file to temporary file.
+			const CString &strUncompressedFileName(gz.GetUncompressedFileName());
+			if (!strUncompressedFileName.IsEmpty())
+				strTempUnzipFilePath.AppendFormat(_T(".%s"), (LPCTSTR)strUncompressedFileName);
+
+			if (gz.Extract(strTempUnzipFilePath)) {
+				gz.Close();
+				bUncompressed = true;
+				bHaveNewFilterFile = ReplaceDefaultIPFilterFile(strTempUnzipFilePath, strTempFilePath);
+			} else {
+				CString strError;
+				strError.Format(GetResString(_T("IPFILTER_ZIP_ERROR")), (LPCTSTR)strTempFilePath);
+				ReportIPFilterUpdateError(strError, bInteractive);
+			}
+		}
+		gz.Close();
+	}
+
+	if (!bIsArchiveFile && !bUncompressed) {
+		// Check first lines of downloaded file for potential HTML content (e.g. 404 error pages).
+		bool bValidIPFilterFile = true;
+		FILE *fp = _tfsopen(strTempFilePath, _T("rb"), _SH_DENYWR);
+		if (fp) {
+			char szBuff[16384];
+			size_t iRead = fread(szBuff, 1, sizeof szBuff - 1, fp);
+			fclose(fp);
+			if (iRead <= 0)
+				bValidIPFilterFile = false;
+			else {
+				szBuff[iRead - 1] = '\0';
+
+				const char *pc = szBuff;
+				while (*pc && *pc <= ' ')
+					++pc;
+				if (_strnicmp(pc, "<html", 5) == 0 || _strnicmp(pc, "<xml", 4) == 0 || _strnicmp(pc, "<!doc", 5) == 0)
 					bValidIPFilterFile = false;
-				else {
-					szBuff[iRead - 1] = '\0';
-
-					const char *pc = szBuff;
-					while (*pc && *pc <= ' ')
-						++pc;
-					if (_strnicmp(pc, "<html", 5) == 0 || _strnicmp(pc, "<xml", 4) == 0 || _strnicmp(pc, "<!doc", 5) == 0)
-						bValidIPFilterFile = false;
-				}
 			}
-
-			if (bValidIPFilterFile) {
-				(void)_tremove(theApp.ipfilter->GetDefaultFilePath());
-				VERIFY(_trename(strTempFilePath, theApp.ipfilter->GetDefaultFilePath()) == 0);
-				bHaveNewFilterFile = true;
-			} else
-				LocMessageBox(_T("DWLIPFILTERFAILED"), MB_ICONERROR, 0);
 		}
+
+		if (bValidIPFilterFile)
+			bHaveNewFilterFile = ReplaceDefaultIPFilterFile(strTempFilePath);
+		else
+			ReportIPFilterUpdateError(GetResString(_T("IPFILTER_DOWNLOAD_FAILED")), bInteractive);
 	}
 
-	if (url.IsEmpty() || bHaveNewFilterFile)
-		OnReloadIPFilter();
+	if (!bHaveNewFilterFile)
+		return false;
 
-	// In case we received an invalid IP filter file (e.g. an 404 HTML page with HTTP status "OK"),
-	// warn the user that there are no IP filters available any longer.
-	if (bHaveNewFilterFile && theApp.ipfilter->GetIPFilter().IsEmpty()) {
+	ReloadCurrentIPFilter();
+
+	// Warn if the new file left the filter list empty.
+	if (theApp.ipfilter->GetIPFilter().IsEmpty()) {
 		CString strLoaded;
-		strLoaded.Format(GetResString(_T("IPFILTERLOADED")), theApp.ipfilter->GetIPFilter().GetCount());
-		CString strError(GetResString(_T("DWLIPFILTERFAILED")));
+		strLoaded.Format(GetResString(_T("IPFILTER_LOADED")), theApp.ipfilter->GetIPFilter().GetCount());
+		CString strError(GetResString(_T("IPFILTER_DOWNLOAD_FAILED")));
 		strError.AppendFormat(_T("\r\n\r\n%s"), (LPCTSTR)strLoaded);
-		CDarkMode::MessageBox(strError, MB_ICONERROR);
+		ReportIPFilterUpdateError(strError, bInteractive);
+		return false;
 	}
+
+	thePrefs.SetLastIPFilterUpdate(time(nullptr));
+	return true;
+}
+
+void CPPgSecurity::OnLoadIPFFromURL()
+{
+	CString url;
+	GetDlgItemText(IDC_UPDATEURL, url);
+	if (url.IsEmpty()) {
+		OnReloadIPFilter();
+		return;
+	}
+
+	// Add entered URL to the LRU list even if download still fails.
+	if (m_pacIPFilterURL && m_pacIPFilterURL->IsBound())
+		m_pacIPFilterURL->AddItem(url, 0);
+
+	UpdateIPFilterFromURL(url, true);
 }
 
 void CPPgSecurity::OnDestroy()
@@ -522,4 +579,14 @@ void CPPgSecurity::OnObfuscatedRequestedChange()
 		CheckDlgButton(IDC_ONLYOBFUSCATED, bCheck);
 	GetDlgItem(IDC_ONLYOBFUSCATED)->EnableWindow(bCheck);
 	OnSettingsChange();
+}
+
+void CPPgSecurity::OnBnClickedAutoupdateIpfilter()
+{
+	SetModified();
+}
+
+void CPPgSecurity::OnEnChangeIpfilterperiod()
+{
+	SetModified();
 }

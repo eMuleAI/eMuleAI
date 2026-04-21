@@ -315,34 +315,34 @@ void CPartFileWriteThread::WriteBuffers()
 					continue;
 				}
 
-				// after successfully writing the temporary part.met file...
-				DWORD dwReplaceError = ERROR_SUCCESS;
-				if (!ReplaceFileAtomically(strTmpFile, pFile->PartMetFileData->m_fullname, &dwReplaceError)) {
-					(void)theApp.CanWritePartMetFiles(pFile->GetTmpPath(), true);
-					if (m_bVerbose)
-						theApp.QueueDebugLogLine(false, _T("Failed to move temporary part.met file \"%s\" to \"%s\" - %s"),
-							(LPCTSTR)EscPercent(strTmpFile), (LPCTSTR)EscPercent(pFile->PartMetFileData->m_fullname), (LPCTSTR)EscPercent(GetErrorMessage(dwReplaceError)));
-
-					CString strError;
-					strError.Format(GetResString(_T("ERR_SAVEMET")), (LPCTSTR)pFile->PartMetFileData->m_partmetfilename, (LPCTSTR)EscPercent(pFile->PartMetFileData->m_strFileName));
-					strError.AppendFormat(_T(" - %s"), (LPCTSTR)EscPercent(GetErrorMessage(dwReplaceError)));
-					theApp.QueueLogLine(false, _T("%s"), (LPCTSTR)strError);
-					CleanUp(item, pFile);
-					continue;
-				}
-
-				// create a backup of the successfully written part.met file
-				const CString strBakFile(pFile->PartMetFileData->m_fullname + PARTMET_BAK_EXT);
-				const CString strBakTmpFile(strBakFile + PARTMET_TMP_EXT);
-				DWORD dwBakError = ERROR_SUCCESS;
-				if (!CopyFileToTempAndReplace(pFile->PartMetFileData->m_fullname, strBakFile, strBakTmpFile, item.pFlushPartMetData->bDontOverrideBak, &dwBakError)) {
-					if (!item.pFlushPartMetData->bDontOverrideBak && theApp.CanWritePartMetFiles(pFile->GetTmpPath(), true)) {
-						theApp.QueueDebugLogLine(false, _T("Failed to create backup of %s (%s) - %s"),
-							(LPCTSTR)EscPercent(pFile->PartMetFileData->m_fullname), (LPCTSTR)EscPercent(pFile->PartMetFileData->m_strFileName), (LPCTSTR)EscPercent(GetErrorMessage(dwBakError)));
+					// Preserve the previous part.met snapshot before replacing it.
+					const CString strBakFile(pFile->PartMetFileData->m_fullname + PARTMET_BAK_EXT);
+					const CString strBakTmpFile(strBakFile + PARTMET_TMP_EXT);
+					DWORD dwBakError = ERROR_SUCCESS;
+					if (!CopyFileToTempAndReplace(pFile->PartMetFileData->m_fullname, strBakFile, strBakTmpFile, item.pFlushPartMetData->bDontOverrideBak, &dwBakError)) {
+						if (!item.pFlushPartMetData->bDontOverrideBak && theApp.CanWritePartMetFiles(pFile->GetTmpPath(), true)) {
+							theApp.QueueDebugLogLine(false, _T("Failed to create backup of %s (%s) - %s"),
+								(LPCTSTR)EscPercent(pFile->PartMetFileData->m_fullname), (LPCTSTR)EscPercent(pFile->PartMetFileData->m_strFileName), (LPCTSTR)EscPercent(GetErrorMessage(dwBakError)));
+						}
 					}
-				}
-				CleanUp(item, pFile);
-			} else if (item.pSaveSourcesData) { // Save sources
+
+					// after successfully writing the temporary part.met file...
+					DWORD dwReplaceError = ERROR_SUCCESS;
+					if (!ReplaceFileAtomically(strTmpFile, pFile->PartMetFileData->m_fullname, &dwReplaceError)) {
+						(void)theApp.CanWritePartMetFiles(pFile->GetTmpPath(), true);
+						if (m_bVerbose)
+							theApp.QueueDebugLogLine(false, _T("Failed to move temporary part.met file \"%s\" to \"%s\" - %s"),
+								(LPCTSTR)EscPercent(strTmpFile), (LPCTSTR)EscPercent(pFile->PartMetFileData->m_fullname), (LPCTSTR)EscPercent(GetErrorMessage(dwReplaceError)));
+
+						CString strError;
+						strError.Format(GetResString(_T("ERR_SAVEMET")), (LPCTSTR)pFile->PartMetFileData->m_partmetfilename, (LPCTSTR)EscPercent(pFile->PartMetFileData->m_strFileName));
+						strError.AppendFormat(_T(" - %s"), (LPCTSTR)EscPercent(GetErrorMessage(dwReplaceError)));
+						theApp.QueueLogLine(false, _T("%s"), (LPCTSTR)strError);
+						CleanUp(item, pFile);
+						continue;
+					}
+					CleanUp(item, pFile);
+				} else if (item.pSaveSourcesData) { // Save sources
 				CSingleLock sSaveSourcesLock(&pFile->m_SaveSourcesLock, TRUE);
 				CString strLine;
 				CStdioFile f;

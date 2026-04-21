@@ -50,11 +50,11 @@ public:
 protected:
 	virtual BOOL OnCommand(WPARAM wParam, LPARAM lParam);
 
-	CUpDownClient* m_SelectedClient;
+	ClientRuntimeID m_uSelectedClientRuntimeID;
 	CToolTipCtrlX m_tooltipTabs;
 	int m_nTooltipTabIndex;
 
-	CUpDownClient* GetClientForTab(int iTab) const;
+	ClientRuntimeID GetClientRuntimeIDForTab(int iTab) const;
 	CString BuildSearchTooltip(int iTab) const;
 	CString BuildSharedFilesTooltip(int iTab) const;
 
@@ -160,6 +160,7 @@ protected:
 	bool		m_cancelled;
 	CStringArray	m_astrFilterTemp;
 	bool			m_bColumnDiff;
+	bool			m_bDeferredSearchListRefreshPending;
 	CString			m_strFullFilterExpr;
 	uint32			m_nFilterColumnLastApplied;
 
@@ -171,6 +172,7 @@ protected:
 	void SetSearchResultsIcon(uint32 uSearchID, int iImage);
 	void SetActiveSearchResultsIcon(uint32 uSearchID);
 	void SetInactiveSearchResultsIcon(uint32 uSearchID);
+	void EnsureFilterControlLayout();
 
 
 	virtual void OnInitialUpdate();
@@ -198,5 +200,7 @@ protected:
 	afx_msg void OnSearchListMenuBtnDropDown(LPNMHDR, LRESULT*);
 	afx_msg void OnTabMovement(LPNMHDR, LRESULT*);
 	afx_msg void OnBnClickedComplete();
+	afx_msg void OnSize(UINT nType, int cx, int cy);
+	afx_msg LRESULT OnDeferredSearchListRefresh(WPARAM, LPARAM);
 	afx_msg HBRUSH OnCtlColor(CDC* pDC, CWnd* pWnd, UINT nCtlColor);
 };

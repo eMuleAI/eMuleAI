@@ -205,12 +205,14 @@ void CPPgConnection::LoadSettings()
 
 		uint32 up = thePrefs.m_maxupload;
 		uint32 dn = thePrefs.m_maxdownload;
-		CheckDlgButton(IDC_DLIMIT_LBL, (dn != UNLIMITED));
-		CheckDlgButton(IDC_ULIMIT_LBL, (up != UNLIMITED));
-		if (dn == UNLIMITED)
-			dn = thePrefs.maxGraphDownloadRate;
-		if (up == UNLIMITED)
-			up = thePrefs.GetMaxGraphUploadRate(true);
+		const bool bDownloadLimitEnabled = (dn != UNLIMITED);
+		const bool bUploadLimitEnabled = (up != UNLIMITED);
+		CheckDlgButton(IDC_DLIMIT_LBL, static_cast<UINT>(bDownloadLimitEnabled));
+		CheckDlgButton(IDC_ULIMIT_LBL, static_cast<UINT>(bUploadLimitEnabled));
+		if (!bDownloadLimitEnabled)
+			dn = thePrefs.GetLastMaxDownload();
+		if (!bUploadLimitEnabled)
+			up = thePrefs.GetLastMaxUpload();
 		CheckUp(up, dn);
 		CheckDown(up, dn);
 		m_ctlMaxDown.SetPos(dn);
@@ -269,8 +271,11 @@ BOOL CPPgConnection::OnApply()
 
 	SetRateSliderTicks(m_ctlMaxUp);
 
+	const uint32 nLastUploadLimit = (uint32)m_ctlMaxUp.GetPos();
+	const uint32 nLastDownloadLimit = (uint32)m_ctlMaxDown.GetPos();
+
 	if (IsDlgButtonChecked(IDC_ULIMIT_LBL)) {
-		u = (uint32)m_ctlMaxUp.GetPos();
+		u = nLastUploadLimit;
 		v = (uint32)thePrefs.GetMaxGraphUploadRate(true);
 		if (u > v)
 			u = v * 4 / 5; //80%
@@ -282,18 +287,21 @@ BOOL CPPgConnection::OnApply()
 		theApp.lastCommonRouteFinder->InitiateFastReactionPeriod();
 
 	thePrefs.SetMaxUpload(u);
+	thePrefs.SetLastMaxUpload(thePrefs.GetMaxUpload() != UNLIMITED ? thePrefs.GetMaxUpload() : nLastUploadLimit);
 
 	if (thePrefs.GetMaxUpload() != UNLIMITED)
 		m_ctlMaxUp.SetPos(thePrefs.GetMaxUpload());
 
-	thePrefs.SetMaxDownload(IsDlgButtonChecked(IDC_DLIMIT_LBL) ? m_ctlMaxDown.GetPos() : UNLIMITED);
+	thePrefs.SetMaxDownload(IsDlgButtonChecked(IDC_DLIMIT_LBL) ? nLastDownloadLimit : UNLIMITED);
 
 	if (thePrefs.GetMaxDownload() != UNLIMITED) {
 		u = (uint32)thePrefs.GetMaxGraphDownloadRate();
 		if (thePrefs.GetMaxDownload() > u)
 			thePrefs.SetMaxDownload(u * 4 / 5); //80%
+		thePrefs.SetLastMaxDownload(thePrefs.GetMaxDownload());
 		m_ctlMaxDown.SetPos(thePrefs.GetMaxDownload());
-	}
+	} else
+		thePrefs.SetLastMaxDownload(nLastDownloadLimit);
 
 	u = GetDlgItemInt(IDC_MAXSOURCEPERFILE, NULL, FALSE);
 	thePrefs.maxsourceperfile = (u > INT_MAX ? 1 : u);

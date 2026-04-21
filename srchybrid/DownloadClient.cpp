@@ -29,6 +29,7 @@
 #include "ClientUDPSocket.h"
 #include "emuledlg.h"
 #include "TransferDlg.h"
+#include "ClientListCtrl.h"
 #include "Exceptions.h"
 #include "clientlist.h"
 #include "Kademlia/Kademlia/Kademlia.h"
@@ -50,6 +51,9 @@ static char THIS_FILE[] = __FILE__;
 CBarShader CUpDownClient::s_StatusBar(16);
 void CUpDownClient::DrawStatusBar(CDC *dc, const CRect &rect, bool onlygreyrect, bool  bFlat) const
 {
+	if (m_reqfile == NULL)
+		return;
+
 	if (g_bLowColorDesktop)
 		bFlat = true;
 
@@ -59,78 +63,75 @@ void CUpDownClient::DrawStatusBar(CDC *dc, const CRect &rect, bool onlygreyrect,
 	else
 		crNeither = RGB(240, 240, 240);
 
-	if (m_reqfile) {
-		s_StatusBar.SetFileSize(m_reqfile->GetFileSize());
-		s_StatusBar.SetRect(rect);
-		s_StatusBar.Fill(crNeither);
+	s_StatusBar.SetFileSize(m_reqfile->GetFileSize());
+	s_StatusBar.SetRect(rect);
+	s_StatusBar.Fill(crNeither);
 
-		if (!onlygreyrect && (m_abyPartStatus || m_abyIncPartStatus)) {
-			COLORREF crBoth;
-			COLORREF crClientOnly;
-			COLORREF crPending;
-			COLORREF crNextPending;
-			COLORREF crClientPartial;
-			if (g_bLowColorDesktop) {
-				crBoth = RGB(0, 0, 0);
-				crClientOnly = RGB(0, 0, 255);
-				crPending = RGB(0, 255, 0);
-				crNextPending = RGB(255, 255, 0);
-				crClientPartial = RGB(255, 191, 0);
-			} else if (bFlat) {
-				crBoth = RGB(0, 0, 0);
-				crClientOnly = RGB(0, 100, 255);
-				crPending = RGB(0, 150, 0);
-				crNextPending = RGB(255, 208, 0);
-				crClientPartial = RGB(255, 191, 255);
-			} else {
-				crBoth = RGB(104, 104, 104);
-				crClientOnly = RGB(0, 100, 255);
-				crPending = RGB(0, 150, 0);
-				crNextPending = RGB(255, 208, 0);
-				crClientPartial = RGB(255, 191, 255);
+	if (!onlygreyrect && (m_abyPartStatus || m_abyIncPartStatus)) {
+		COLORREF crBoth;
+		COLORREF crClientOnly;
+		COLORREF crPending;
+		COLORREF crNextPending;
+		COLORREF crClientPartial;
+		if (g_bLowColorDesktop) {
+			crBoth = RGB(0, 0, 0);
+			crClientOnly = RGB(0, 0, 255);
+			crPending = RGB(0, 255, 0);
+			crNextPending = RGB(255, 255, 0);
+			crClientPartial = RGB(255, 191, 0);
+		} else if (bFlat) {
+			crBoth = RGB(0, 0, 0);
+			crClientOnly = RGB(0, 100, 255);
+			crPending = RGB(0, 150, 0);
+			crNextPending = RGB(255, 208, 0);
+			crClientPartial = RGB(255, 191, 255);
+		} else {
+			crBoth = RGB(104, 104, 104);
+			crClientOnly = RGB(0, 100, 255);
+			crPending = RGB(0, 150, 0);
+			crNextPending = RGB(255, 208, 0);
+			crClientPartial = RGB(255, 191, 255);
+		}
+
+		char *pcNextPendingBlks;
+		if (m_eDownloadState == DS_DOWNLOADING) {
+			pcNextPendingBlks = new char[m_nPartCount]{};
+			for (POSITION pos = m_PendingBlocks_list.GetHeadPosition(); pos != NULL;) {
+				UINT uPart = (UINT)(m_PendingBlocks_list.GetNext(pos)->block->StartOffset / PARTSIZE);
+				if (uPart < m_nPartCount)
+					pcNextPendingBlks[uPart] = 1;
+			}
+		} else
+			pcNextPendingBlks = NULL;
+
+		for (UINT i = 0; i < m_nPartCount; ++i)
+			if (m_abyPartStatus[i]) {
+				uint64 uBegin = PARTSIZE * i;
+				uint64 uEnd = min(uBegin + PARTSIZE, (uint64)m_reqfile->GetFileSize());
+
+				COLORREF colour;
+				if (m_reqfile->IsComplete(uBegin, uEnd - 1))
+					colour = crBoth;
+				else if (m_eDownloadState == DS_DOWNLOADING && GetSessionDown() && m_nLastBlockOffset >= uBegin && m_nLastBlockOffset < uEnd)
+					colour = crPending;
+				else if (pcNextPendingBlks && pcNextPendingBlks[i])
+					colour = crNextPending;
+				else
+					colour = crClientOnly;
+				s_StatusBar.FillRange(uBegin, uEnd, colour);
+			}
+			else if (m_abyIncPartStatus && m_abyIncPartStatus[i]) {
+				uint64 uEnd;
+				if ((uint32)PARTSIZE * (uint64)(i + 1) > m_reqfile->GetFileSize())
+					uEnd = m_reqfile->GetFileSize();
+				else
+					uEnd = PARTSIZE * (uint64)(i + 1);
+
+				s_StatusBar.FillRange(PARTSIZE * (uint64)i, uEnd, crClientPartial);
 			}
 
-			char *pcNextPendingBlks;
-			if (m_eDownloadState == DS_DOWNLOADING) {
-				pcNextPendingBlks = new char[m_nPartCount]{};
-				for (POSITION pos = m_PendingBlocks_list.GetHeadPosition(); pos != NULL;) {
-					UINT uPart = (UINT)(m_PendingBlocks_list.GetNext(pos)->block->StartOffset / PARTSIZE);
-					if (uPart < m_nPartCount)
-						pcNextPendingBlks[uPart] = 1;
-				}
-			} else
-				pcNextPendingBlks = NULL;
-
-			for (UINT i = 0; i < m_nPartCount; ++i)
-				if (m_abyPartStatus[i]) {
-					uint64 uBegin = PARTSIZE * i;
-					uint64 uEnd = min(uBegin + PARTSIZE, (uint64)m_reqfile->GetFileSize());
-
-					COLORREF colour;
-					if (m_reqfile->IsComplete(uBegin, uEnd - 1))
-						colour = crBoth;
-					else if (m_eDownloadState == DS_DOWNLOADING && GetSessionDown() && m_nLastBlockOffset >= uBegin && m_nLastBlockOffset < uEnd)
-						colour = crPending;
-					else if (pcNextPendingBlks && pcNextPendingBlks[i])
-						colour = crNextPending;
-					else
-						colour = crClientOnly;
-					s_StatusBar.FillRange(uBegin, uEnd, colour);
-				}
-				else if (m_abyIncPartStatus && m_abyIncPartStatus[i]) {
-					uint64 uEnd;
-					if ((uint32)PARTSIZE * (uint64)(i + 1) > m_reqfile->GetFileSize())
-						uEnd = m_reqfile->GetFileSize();
-					else
-						uEnd = PARTSIZE * (uint64)(i + 1);
-
-					s_StatusBar.FillRange(PARTSIZE * (uint64)i, uEnd, crClientPartial);
-				}
-
-			delete[] pcNextPendingBlks;
-		}
-	} else
-		ASSERT(0);
+		delete[] pcNextPendingBlks;
+	}
 	s_StatusBar.Draw(dc, rect.left, rect.top, bFlat);
 }
 
@@ -572,6 +573,7 @@ void CUpDownClient::ProcessFileInfo(CSafeMemFile &data, CPartFile *file)
 		throw GetResString(_T("ERR_WRONGFILEID")) + p;
 
 	m_strClientFilename = data.ReadString(GetUnicodeSupport() != UTF8strNone);
+	m_reqfile->UpdateSourceFileName(this);
 	if (thePrefs.GetDebugClientTCPLevel() > 0)
 		Debug(_T("  Filename=\"%s\"\n"), (LPCTSTR)m_strClientFilename);
 	// 26-Jul-2003: removed requesting the file status for files <= PARTSIZE for better compatibility with
@@ -1667,7 +1669,7 @@ void CUpDownClient::UDPReaskFNF()
 		default:
 			theApp.downloadqueue->RemoveSource(this);
 			if (!socket && Disconnected(_T("UDPReaskFNF socket=NULL")))
-				delete this;
+				SafeDelete();
 		}
 	} else if (thePrefs.GetVerbose())
 		DebugLogWarning(_T("UDP FNF-Answer: %s - did not remove client because of current download state"), (LPCTSTR)EscPercent(GetUserName()));
@@ -1761,7 +1763,7 @@ void CUpDownClient::UDPReaskForDownload()
 void CUpDownClient::UpdateDisplayedInfo(bool force)
 {
 	theApp.emuledlg->transferwnd->GetDownloadList()->UpdateItem(this);
-	theApp.emuledlg->transferwnd->GetClientList()->RefreshClient(this);
+	theApp.emuledlg->transferwnd->GetClientList()->RefreshClient(this, -1, CClientListCtrl::kSortImpactDownloadState | CClientListCtrl::kSortImpactTransferredDown);
 	theApp.emuledlg->transferwnd->GetDownloadClientsList()->RefreshClient(this);
 }
 

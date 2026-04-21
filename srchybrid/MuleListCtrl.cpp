@@ -93,6 +93,7 @@ BEGIN_MESSAGE_MAP(CMuleListCtrl, CListCtrl)
 	ON_MESSAGE(WM_MOUSEHOVER, OnMouseHover)
 	ON_MESSAGE(WM_MOUSELEAVE, OnMouseLeave)
 	ON_MESSAGE(WM_MULELISTCTRL_INVALIDATE, OnAsyncInvalidate)
+	ON_MESSAGE(WM_MULELISTCTRL_UPDATE_ITEM, OnAsyncUpdateItem)
 END_MESSAGE_MAP()
 
 CMuleListCtrl::CMuleListCtrl(PFNLVCOMPARE pfnCompare, LPARAM iParamSort)
@@ -134,25 +135,29 @@ CMuleListCtrl::CMuleListCtrl(PFNLVCOMPARE pfnCompare, LPARAM iParamSort)
 	, m_bTrackingMouseLeave()
 	, m_liDefaultHiddenColumns()
 	, m_iMaxSortHistory()
+	, m_dwLastAsyncSortTick(0)
 
 {
 	m_updatethread = (CUpdateItemThread*)AfxBeginThread(RUNTIME_CLASS(CUpdateItemThread), THREAD_PRIORITY_NORMAL, 0, CREATE_SUSPENDED);
-	m_updatethread->ResumeThread();
-	m_updatethread->SetListCtrl(this);
+	if (m_updatethread != NULL) {
+		m_updatethread->SetListCtrl(this);
+		m_updatethread->ResumeThread();
+	}
 }
 
 CMuleListCtrl::~CMuleListCtrl()
 {
+	ShutdownUpdateThread();
 	m_wndInfoTip.CleanupWindow();
 	HidePersistentInfoTip(true);
 	delete[] m_aColumns;
-	m_updatethread->EndThread();
 	if (m_imlHeaderCtrl.m_hImageList != NULL)
 		m_imlHeaderCtrl.DeleteImageList();
 }
 
 void CMuleListCtrl::OnDestroy()
 {
+	ShutdownUpdateThread();
 	m_wndInfoTip.CleanupWindow();
 	HidePersistentInfoTip(true);
 
@@ -166,11 +171,61 @@ void CMuleListCtrl::OnDestroy()
 	CListCtrl::OnDestroy();
 }
 
+void CMuleListCtrl::ShutdownUpdateThread()
+{
+	CUpdateItemThread* pThread = NULL;
+	HANDLE hWaitHandle = NULL;
+	{
+		CSingleLock lock(&m_updatethreadlocker, TRUE);
+		pThread = m_updatethread;
+		if (pThread != NULL) {
+			// Detach the owner pointer before control teardown so the worker can no longer
+			// call back into a partially destroyed list control.
+			pThread->SetListCtrl(NULL);
+			m_updatethread = NULL;
+			if (pThread->m_hThread != NULL)
+				::DuplicateHandle(::GetCurrentProcess(), pThread->m_hThread, ::GetCurrentProcess(), &hWaitHandle, 0, FALSE, DUPLICATE_SAME_ACCESS);
+		}
+	}
+
+	if (pThread == NULL)
+		return;
+
+	pThread->EndThread();
+
+	if (hWaitHandle != NULL) {
+		const DWORD dwWaitResult = ::WaitForSingleObject(hWaitHandle, SEC2MS(5));
+		::CloseHandle(hWaitHandle);
+		if (dwWaitResult != WAIT_OBJECT_0)
+			TRACE(_T("CMuleListCtrl::ShutdownUpdateThread, timed out waiting for CUpdateItemThread to exit.\n"));
+	}
+}
+
 // Post to self to guarantee UI-thread execution
 void CMuleListCtrl::RequestInvalidateAsync() const
 {
 	if (::IsWindow(m_hWnd))
 		::PostMessage(m_hWnd, WM_MULELISTCTRL_INVALIDATE, 0, 0);
+}
+
+void CMuleListCtrl::RequestItemUpdateAsync(LPARAM item) const
+{
+	if (::IsWindow(m_hWnd))
+		::PostMessage(m_hWnd, WM_MULELISTCTRL_UPDATE_ITEM, 0, static_cast<LPARAM>(item));
+}
+
+void CMuleListCtrl::QueueItemUpdate(LPARAM item) const
+{
+	CSingleLock lock(&m_updatethreadlocker, TRUE);
+	if (m_updatethread != NULL)
+		m_updatethread->AddItemToUpdate(item);
+}
+
+void CMuleListCtrl::QueueItemUpdated(LPARAM item) const
+{
+	CSingleLock lock(&m_updatethreadlocker, TRUE);
+	if (m_updatethread != NULL)
+		m_updatethread->AddItemUpdated(item);
 }
 
 // Post a message to UI thread to invalidate safely
@@ -180,6 +235,29 @@ LRESULT CMuleListCtrl::OnAsyncInvalidate(WPARAM, LPARAM)
 		return 0;
 
 	Invalidate(FALSE);
+	return 0;
+}
+
+LRESULT CMuleListCtrl::OnAsyncUpdateItem(WPARAM, LPARAM lParam)
+{
+	if (!::IsWindow(m_hWnd) || theApp.m_app_state == APP_STATE_SHUTTINGDOWN)
+		return 0;
+
+	LVFINDINFO find = {};
+	find.flags = LVFI_PARAM;
+	find.lParam = lParam;
+	const int iFound = FindItem(&find);
+	if (iFound < 0)
+		return 0;
+
+	Update(iFound);
+	if (ShouldMaintainSortOrderOnUpdate()) {
+		const DWORD dwCurrentTime = GetTickCount();
+		if (dwCurrentTime - m_dwLastAsyncSortTick > static_cast<DWORD>(thePrefs.GetUITweaksListUpdatePeriod())) {
+			MaintainSortOrderAfterUpdate();
+			m_dwLastAsyncSortTick = dwCurrentTime;
+		}
+	}
 	return 0;
 }
 
@@ -2436,23 +2514,34 @@ int CMuleListCtrl::InsertColumn(int nCol, LPCTSTR lpszColumnHeading, int nFormat
 // CUpdateItemThread
 IMPLEMENT_DYNCREATE(CUpdateItemThread, CWinThread)
 
-CUpdateItemThread::CUpdateItemThread() {
-	threadEndedEvent = new CEvent(0, 1);
-	doRun = true;
+CUpdateItemThread::CUpdateItemThread()
+	: m_listctrl(NULL)
+{
+	m_bRun = TRUE;
 }
 
-CUpdateItemThread::~CUpdateItemThread() {
-	// wait for the thread to signal that it has stopped looping.
-	threadEndedEvent->Lock();
-	delete threadEndedEvent;
+CUpdateItemThread::~CUpdateItemThread()
+{
 }
 
-void CUpdateItemThread::SetListCtrl(CListCtrl* listctrl) {
+void CUpdateItemThread::SetListCtrl(CMuleListCtrl* listctrl) {
+	CSingleLock lock(&listitemlocker, TRUE);
 	m_listctrl = listctrl;
 }
 
+bool CUpdateItemThread::IsRunning() const {
+	return ::InterlockedCompareExchange(const_cast<LONG*>(&m_bRun), TRUE, TRUE) != FALSE;
+}
+
 void CUpdateItemThread::AddItemToUpdate(const LPARAM item) {
+	if (!IsRunning())
+		return;
+
 	queueditemlocker.Lock();
+	if (!IsRunning()) {
+		queueditemlocker.Unlock();
+		return;
+	}
 	update_req_struct toadd;
 	toadd.dwRequestTime = GetTickCount();
 	toadd.lpItem = item;
@@ -2462,14 +2551,21 @@ void CUpdateItemThread::AddItemToUpdate(const LPARAM item) {
 }
 
 void CUpdateItemThread::AddItemUpdated(const LPARAM item) {
+	if (!IsRunning())
+		return;
+
 	updateditemlocker.Lock();
+	if (!IsRunning()) {
+		updateditemlocker.Unlock();
+		return;
+	}
 	updateditem.AddTail(item);
 	updateditemlocker.Unlock();
 }
 
 
 void CUpdateItemThread::EndThread() {
-	doRun = false;
+	::InterlockedExchange(&m_bRun, FALSE);
 	newitemEvent.SetEvent();
 }
 
@@ -2477,7 +2573,7 @@ int CUpdateItemThread::Run() {
 	DbgSetThreadName("CUpdateItemThread");
 
 	newitemEvent.Lock();
-	while (doRun) {
+	while (IsRunning()) {
 		queueditemlocker.Lock();
 		while (queueditem.GetCount()) {
 			update_req_struct currecord = queueditem.RemoveHead();
@@ -2514,25 +2610,10 @@ int CUpdateItemThread::Run() {
 				wecanwait = min(wecanwait, update_info->dwUpdate - GetTickCount());
 			} else if (update_info->dwUpdate <= GetTickCount() && update_info->bNeedToUpdate) {
 				if (update_info->dwUpdate + thePrefs.GetUITweaksListUpdatePeriod() > GetTickCount()) { //check if not too much time occured before to prevent overload
-					LVFINDINFO find;
-					find.flags = LVFI_PARAM;
-					find.lParam = (LPARAM)item;
-					int found = m_listctrl->FindItem(&find);   // assert on shutdown? 
-					if (found != -1) {
-						m_listctrl->Update(found);
-						// Check if we need to maintain sort order after update
-						if (CMuleListCtrl* pMuleListCtrl = dynamic_cast<CMuleListCtrl*>(m_listctrl)) {
-							if (pMuleListCtrl->ShouldMaintainSortOrderOnUpdate()) {
-								static DWORD dwLastSortTime = 0;
-								DWORD dwCurrentTime = GetTickCount();
-								
-								// Only resort if enough time has passed since last sort (respect user's update period setting)
-								if (dwCurrentTime - dwLastSortTime > (DWORD)thePrefs.GetUITweaksListUpdatePeriod()) {
-									pMuleListCtrl->MaintainSortOrderAfterUpdate();
-									dwLastSortTime = dwCurrentTime;
-								}
-							}
-						}
+					{
+						CSingleLock lock(&listitemlocker, TRUE);
+						if (m_listctrl != NULL)
+							m_listctrl->RequestItemUpdateAsync(item);
 					}
 					update_info->dwUpdate = GetTickCount() + thePrefs.GetUITweaksListUpdatePeriod() + (uint32)(rand() / (RAND_MAX / 1000));
 					update_info->bNeedToUpdate = false;
@@ -2546,7 +2627,7 @@ int CUpdateItemThread::Run() {
 			}
 		}
 
-		if (doRun) {
+		if (IsRunning()) {
 			if ((ListItems.GetCount() == 0) || (theApp.m_app_state == APP_STATE_SHUTTINGDOWN))
 				newitemEvent.Lock();
 			else
@@ -2563,6 +2644,5 @@ int CUpdateItemThread::Run() {
 		delete update_info;
 	}
 	ListItems.RemoveAll();
-	threadEndedEvent->SetEvent();
 	return 0;
 }

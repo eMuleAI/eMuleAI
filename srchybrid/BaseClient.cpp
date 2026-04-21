@@ -38,6 +38,7 @@
 #include "ServerConnect.h"
 #include "DownloadQueue.h"
 #include "UploadQueue.h"
+#include "ClientListCtrl.h"
 #include "SearchFile.h"
 #include "SearchList.h"
 #include "SharedFileList.h"
@@ -69,12 +70,21 @@
 #include "InputBox.h" 
 #include "SearchDlg.h"
 #include "MuleStatusBarCtrl.h"
+#include "UserMsgs.h"
 
 #ifdef _DEBUG
 #define new DEBUG_NEW
 #undef THIS_FILE
 static char THIS_FILE[] = __FILE__;
 #endif
+
+extern UINT g_uMainThreadId;
+
+static ClientRuntimeID GetNextClientRuntimeID()
+{
+	static volatile LONG s_lNextClientRuntimeID = 0;
+	return static_cast<ClientRuntimeID>(::InterlockedIncrement(&s_lNextClientRuntimeID));
+}
 
 #define URLINDICATOR	_T("http:|www.|.de |.net |.com |.org |.to |.tk |.cc |.fr |ftp:|ed2k:|https:|ftp.|.info|.biz|.uk|.eu|.es|.tv|.cn|.tw|.ws|.nu|.jp")
 
@@ -178,6 +188,10 @@ void CUpDownClient::Init()
 	m_bQueryingSharedFiles = false;
 	m_tSharedFilesLastQueriedTime = 0;
 	m_uSharedFilesCount = 0;
+	m_uRuntimeID = GetNextClientRuntimeID();
+	m_lRuntimeReferenceCount = 0;
+	m_lDeletePending = 0;
+	m_lDeleteFinalized = 0;
 
 	m_bAutoQuerySharedFiles = false;
 
@@ -314,6 +328,7 @@ void CUpDownClient::Init()
 	m_addedPayloadQueueSession = 0;
 	m_nUpPartCount = 0;
 	m_nUpCompleteSourcesCount = 0;
+	m_nSelectedChunk = 0;
 	md4clr(requpfileid);
 	m_slotNumber = 0;
 	m_bCollectionUploadSlot = false;
@@ -422,12 +437,121 @@ void CUpDownClient::Init()
 	m_nIncPartCount = 0;
 
 	m_bIsArchived = false;
-	m_ArchivedClient = NULL;
+	ClearArchivedClientLink();
 	tLastSeen = time(NULL);
 
 	m_tLastCleanUpCheck = time(NULL);
 
 	m_bSendIP = false;
+}
+
+bool CUpDownClient::TryAcquireRuntimeReference(bool* pbNeedsFinalize)
+{
+	if (pbNeedsFinalize != NULL)
+		*pbNeedsFinalize = false;
+
+	if (::InterlockedCompareExchange(&m_lDeletePending, 0, 0) != 0)
+		return false;
+
+	::InterlockedIncrement(&m_lRuntimeReferenceCount);
+	if (::InterlockedCompareExchange(&m_lDeletePending, 0, 0) == 0)
+		return true;
+
+	const LONG lRemainingRefs = ::InterlockedDecrement(&m_lRuntimeReferenceCount);
+	ASSERT(lRemainingRefs >= 0);
+	if (lRemainingRefs < 0) {
+		::InterlockedExchange(&m_lRuntimeReferenceCount, 0);
+		return false;
+	}
+
+	if (lRemainingRefs == 0 && pbNeedsFinalize != NULL)
+		*pbNeedsFinalize = true;
+	return false;
+}
+
+bool CUpDownClient::TryAcquirePendingDeleteFinalizeHold()
+{
+	if (::InterlockedCompareExchange(&m_lDeletePending, 0, 0) == 0)
+		return false;
+	if (::InterlockedCompareExchange(&m_lDeleteFinalized, 0, 0) != 0)
+		return false;
+	if (::InterlockedCompareExchange(&m_lRuntimeReferenceCount, 0, 0) != 0)
+		return false;
+
+	::InterlockedIncrement(&m_lRuntimeReferenceCount);
+	if (::InterlockedCompareExchange(&m_lDeletePending, 0, 0) != 0 && ::InterlockedCompareExchange(&m_lDeleteFinalized, 0, 0) == 0)
+		return true;
+
+	const LONG lRemainingRefs = ::InterlockedDecrement(&m_lRuntimeReferenceCount);
+	ASSERT(lRemainingRefs >= 0);
+	if (lRemainingRefs < 0) {
+		::InterlockedExchange(&m_lRuntimeReferenceCount, 0);
+		return false;
+	}
+
+	return false;
+}
+
+CUpDownClient* CUpDownClient::AcquireArchivedClient() const
+{
+	if (m_uArchivedClientRuntimeID == 0 || theApp.clientlist == NULL)
+		return NULL;
+
+	CUpDownClient* pArchivedClient = theApp.clientlist->AcquireTrackedClientByRuntimeID(m_uArchivedClientRuntimeID);
+	if (pArchivedClient != NULL && pArchivedClient != this && pArchivedClient->m_bIsArchived)
+		return pArchivedClient;
+
+	if (pArchivedClient != NULL)
+		pArchivedClient->ReleaseRuntimeReference();
+	return NULL;
+}
+
+void CUpDownClient::TryFinalizePendingDelete()
+{
+	if (::InterlockedCompareExchange(&m_lDeletePending, 0, 0) == 0)
+		return;
+	if (::InterlockedCompareExchange(&m_lRuntimeReferenceCount, 0, 0) != 0)
+		return;
+	if (GetCurrentThreadId() != g_uMainThreadId && !theApp.IsClosing() && theApp.emuledlg != NULL) {
+		const HWND hMainWnd = theApp.emuledlg->GetSafeHwnd();
+		if (hMainWnd != NULL && ::IsWindow(hMainWnd)) {
+			if (theApp.emuledlg->PostMessage(UM_FINALIZE_DELETE_PENDING_CLIENT, (WPARAM)m_uRuntimeID, 0))
+				return;
+
+			DWORD_PTR dwMessageResult = 0;
+			if (::SendMessageTimeout(hMainWnd, UM_FINALIZE_DELETE_PENDING_CLIENT, (WPARAM)m_uRuntimeID, 0, SMTO_BLOCK | SMTO_ABORTIFHUNG, 5000, &dwMessageResult) != 0)
+				return;
+
+			return;
+		}
+	}
+	if (::InterlockedCompareExchange(&m_lDeleteFinalized, 1, 0) != 0)
+		return;
+
+	if (theApp.clientlist != NULL)
+		theApp.clientlist->DetachClientFromRuntimeMaps(this);
+
+	delete this;
+}
+
+void CUpDownClient::ReleaseRuntimeReference()
+{
+	const LONG lRemainingRefs = ::InterlockedDecrement(&m_lRuntimeReferenceCount);
+	ASSERT(lRemainingRefs >= 0);
+	if (lRemainingRefs < 0) {
+		::InterlockedExchange(&m_lRuntimeReferenceCount, 0);
+		return;
+	}
+
+	if (lRemainingRefs == 0)
+		TryFinalizePendingDelete();
+}
+
+void CUpDownClient::SafeDelete()
+{
+	if (::InterlockedCompareExchange(&m_lDeletePending, 1, 0) != 0)
+		return;
+	TryFinalizePendingDelete();
 }
 
 CUpDownClient::~CUpDownClient()
@@ -448,7 +572,7 @@ CUpDownClient::~CUpDownClient()
 
 	int m_iIndex = -1;
 	if (thePrefs.GetClientHistoryLog() && (!isnulmd4(GetUserHash()) || GetUserName() != NULL)) {
-		if (!theApp.IsClosing() && theApp.emuledlg->transferwnd->GetClientList()->m_ListedItemsMap.Lookup(this, m_iIndex) && m_iIndex >= 0)
+		if (!theApp.IsClosing() && GetCurrentThreadId() == g_uMainThreadId && theApp.emuledlg->transferwnd->GetClientList()->m_ListedItemsMap.Lookup(this, m_iIndex) && m_iIndex >= 0)
 			AddDebugLogLine(false, _T("[CLIENT HISTORY]: Client is being deleted, but still in the m_ListedItemsMap -> History: %i | Hash: %s | Name: %s"), m_bIsArchived, md4str(GetUserHash()), (LPCTSTR)EscPercent(GetUserName()));
 		else
 			AddDebugLogLine(false, _T("[CLIENT HISTORY]: Client is being deleted -> History: %i | Hash: %s | Name: %s"), m_bIsArchived, md4str(GetUserHash()), (LPCTSTR)EscPercent(GetUserName()));
@@ -1097,8 +1221,11 @@ bool CUpDownClient::ProcessHelloTypePacket(CSafeMemFile &data)
 		((thePrefs.GetRemoteSharedFilesSetAutoQueryDownload() && credits->GetDownloadedTotal() / 1048576 >= thePrefs.GetRemoteSharedFilesSetAutoQueryDownloadThreshold()) ||		//1024*1024
 			(thePrefs.GetRemoteSharedFilesSetAutoQueryUpload() && credits->GetUploadedTotal() / 1048576 >= thePrefs.GetRemoteSharedFilesSetAutoQueryUploadThreshold()))) {				//1024*1024
 		m_bAutoQuerySharedFiles = true;
-		if (m_ArchivedClient)
-			m_ArchivedClient->m_bAutoQuerySharedFiles = false;
+		CUpDownClient* pArchivedClient = AcquireArchivedClient();
+		if (pArchivedClient != NULL) {
+			pArchivedClient->m_bAutoQuerySharedFiles = false;
+			pArchivedClient->ReleaseRuntimeReference();
+		}
 	}
 
 	if (GetFriend() != NULL && GetFriend()->HasUserhash() && !md4equ(GetFriend()->m_abyUserhash, m_achUserHash))
@@ -2204,7 +2331,7 @@ bool CUpDownClient::Disconnected(LPCTSTR pszReason, bool bFromSocket)
 	}
 	socket = NULL;
 	if (!bDelete)
-		theApp.emuledlg->transferwnd->GetClientList()->RefreshClient(this);
+		theApp.emuledlg->transferwnd->GetClientList()->RefreshClient(this, -1, CClientListCtrl::kSortImpactUploadState | CClientListCtrl::kSortImpactDownloadState | CClientListCtrl::kSortImpactClientStatus);
 
 	// finally, remove the client from the timeout timer and reset the connecting state
 	m_eConnectingState = CCS_NONE;
@@ -2329,7 +2456,7 @@ bool CUpDownClient::TryToConnect(bool bIgnoreMaxCon, bool bNoCallbacks, CRuntime
 		// TryToConnect if a special handling, like waiting till there are enough connection available should be fone
 		DebugLogWarning(_T("TryToConnect: Too many connections sanitize check (%s)"), (LPCTSTR)EscPercent(DbgGetClientInfo()));
 		if (Disconnected(GetResString(_T("TOOMANYCONNS")))) {
-			delete this;
+			SafeDelete();
 			return false;
 		}
 		return true;
@@ -2340,7 +2467,7 @@ bool CUpDownClient::TryToConnect(bool bIgnoreMaxCon, bool bNoCallbacks, CRuntime
         	DebugLog(_T("[NATTTESTMODE: TryToConnect] crypt guard hit: req=%d required=%d supp=%d: %s\n"), (int)RequiresCryptLayer(), (int)thePrefs.IsCryptLayerRequired(), (int)SupportsCryptLayer(), (LPCTSTR)DbgGetClientInfo());
 		DEBUG_ONLY(AddDebugLogLine(DLP_DEFAULT, false, _T("Rejected outgoing connection because CryptLayer-Setting (Obfuscation) was incompatible %s"), (LPCTSTR)EscPercent(DbgGetClientInfo())));
 		if (Disconnected(_T("CryptLayer-Settings (Obfuscation) incompatible"))) {
-			delete this;
+			SafeDelete();
 			return false;
 		}
 		return true;
@@ -2365,7 +2492,7 @@ bool CUpDownClient::TryToConnect(bool bIgnoreMaxCon, bool bNoCallbacks, CRuntime
 				AddDebugLogLine(false, (LPCTSTR)GetResString(_T("IPFILTERED")), (LPCTSTR)ipstr(ClientIP), (LPCTSTR)EscPercent(theApp.ipfilter->GetLastHit()));
 			m_cFailed = 5; //force deletion
 			if (Disconnected(_T("IPFilter"))) {
-				delete this;
+				SafeDelete();
 				return false;
 			}
 			return true;
@@ -2377,7 +2504,7 @@ bool CUpDownClient::TryToConnect(bool bIgnoreMaxCon, bool bNoCallbacks, CRuntime
 				AddDebugLogLine(false, _T("Refused to connect to banned client %s"), (LPCTSTR)EscPercent(DbgGetClientInfo()));
 			m_cFailed = 5; //force deletion
 			if (Disconnected(_T("Banned IP"))) {
-				delete this;
+				SafeDelete();
 				return false;
 			}
 			return true;
@@ -2403,7 +2530,7 @@ bool CUpDownClient::TryToConnect(bool bIgnoreMaxCon, bool bNoCallbacks, CRuntime
 			// for example, because we might want to wait a bit and hope we get a high ID,
 			// this check has to be done before calling this function
 			if (Disconnected(_T("LowID->LowID"))) {
-				delete this;
+				SafeDelete();
 				return false;
 			}
 			return true;
@@ -2413,7 +2540,7 @@ bool CUpDownClient::TryToConnect(bool bIgnoreMaxCon, bool bNoCallbacks, CRuntime
 		if (bNoCallbacks) {
 			DebugLogError(_T("TryToConnect: Would like to do callback on a no-callback client, %s"), (LPCTSTR)EscPercent(DbgGetClientInfo()));
 			if (Disconnected(_T("LowID: No Callback Option allowed"))) {
-				delete this;
+				SafeDelete();
 				return false;
 			}
 			return true;
@@ -2426,7 +2553,7 @@ bool CUpDownClient::TryToConnect(bool bIgnoreMaxCon, bool bNoCallbacks, CRuntime
         	DebugLog(_T("[NATTTESTMODE: TryToConnect] no callback option available guard hit: %s\n"), (LPCTSTR)DbgGetClientInfo());
         // Nope
 			if (Disconnected(_T("LowID: No Callback Option available"))) {
-				delete this;
+				SafeDelete();
 				return false;
 			}
 			return true;
@@ -2896,7 +3023,7 @@ bool CUpDownClient::TryToConnect(bool bIgnoreMaxCon, bool bNoCallbacks, CRuntime
 			if (theApp.IsFirewalled() && !thePrefs.IsEnableNatTraversal()) {
 				// Drop if kad callbacks are not possible and NAT-T is disabled
 				if (Disconnected(_T("LowID->LowID"))) {
-					delete this;
+					SafeDelete();
 					return false;
 				}
 				return true;
@@ -4000,7 +4127,7 @@ void CUpDownClient::RequestSharedFileList()
 		AddLogLine(true, GetResString(_T("SHAREDFILES_REQUEST")), (GetUserName() == NULL || GetUserName()[0] == '\0') ? _T('(') + md4str(GetUserHash()) + _T(')') : (LPCTSTR)EscPercent(GetUserName()));
 		m_bQueryingSharedFiles = true;
 		m_tSharedFilesLastQueriedTime = time(NULL);
-		theApp.emuledlg->transferwnd->GetClientList()->RefreshClient(this);
+		theApp.emuledlg->transferwnd->GetClientList()->RefreshClient(this, -1, CClientListCtrl::kSortImpactSharedFiles);
 		theApp.emuledlg->transferwnd->GetUploadList()->RefreshClient(this);
 		theApp.emuledlg->transferwnd->GetQueueList()->RefreshClient(this);
 		theApp.emuledlg->transferwnd->GetDownloadClientsList()->RefreshClient(this);
@@ -4030,8 +4157,14 @@ void CUpDownClient::SetUserHash(const uchar *pucUserHash, bool bLoadArchive)
 			if (bLoadArchive)
 				theApp.emuledlg->transferwnd->GetClientList()->LoadArchive(this, _T("SetUserHash"));
 			int m_iIndex;
-			if (m_ArchivedClient && theApp.emuledlg->transferwnd->GetClientList()->m_ListedItemsMap.Lookup(this, m_iIndex)) // Only try to remove archived client from listCtrl if this active client is listed.
-				theApp.emuledlg->transferwnd->GetClientList()->RemoveClient(m_ArchivedClient);
+			if (m_uArchivedClientRuntimeID != 0 && GetCurrentThreadId() == g_uMainThreadId && theApp.emuledlg->transferwnd->GetClientList()->m_ListedItemsMap.Lookup(this, m_iIndex)) { // Only try to remove archived client from listCtrl if this active client is listed.
+				CUpDownClient* pArchivedClient = theApp.clientlist != NULL ? theApp.clientlist->AcquireTrackedClientByRuntimeID(m_uArchivedClientRuntimeID) : NULL;
+				if (pArchivedClient != NULL) {
+					theApp.emuledlg->transferwnd->GetClientList()->RemoveClient(pArchivedClient);
+					pArchivedClient->ReleaseRuntimeReference();
+				}
+			}
+			theApp.emuledlg->transferwnd->GetDownloadClientsList()->RefreshClient(this);
 		}
 	}
 }
@@ -4291,6 +4424,9 @@ void CUpDownClient::ResetFileStatusInfo()
 	m_strFileComment.Empty();
 	delete m_pReqFileAICHHash;
 	m_pReqFileAICHHash = NULL;
+
+	if (m_reqfile != NULL)
+		m_reqfile->RemoveSourceFileName(this);
 }
 
 bool CUpDownClient::IsBanned() const
@@ -4370,12 +4506,12 @@ void CUpDownClient::ProcessPreviewReq(const uchar *pachPacket, uint32 nSize)
 	if (nSize < 16)
 		throw GetResString(_T("ERR_WRONGPACKETSIZE"));
 
-	if (m_fPreviewAnsPending || thePrefs.CanSeeShares() == vsfaNobody || (thePrefs.CanSeeShares() == vsfaFriends && !IsFriend()))
+	if (m_fPreviewAnsPending)
 		return;
 
 	m_fPreviewAnsPending = 1;
 	CKnownFile *previewFile = theApp.sharedfiles->GetFileByID(pachPacket);
-	if (previewFile == NULL)
+	if (previewFile == NULL || !theApp.sharedfiles->CanClientBrowseSharedFile(previewFile, this))
 		SendPreviewAnswer(NULL, NULL, 0);
 	else
 		previewFile->GrabImage(4, 15, true, 450, this); //start at 15 seconds; at 0 seconds frame usually were solid black
@@ -5259,30 +5395,36 @@ void CUpDownClient::SetConnectOptions(uint8 byOptions, bool bEncryption, bool bC
 
 void CUpDownClient::SendSharedDirectories()
 {
-	//TODO: Don't send empty shared directories
 	theApp.sharedfiles->ResetPseudoDirNames(); //purge stale data
-	// add shared directories
 	CStringArray arFolders;
-	CStringList sharedDirs;
-	thePrefs.CopySharedDirectoryList(sharedDirs);
-	for (POSITION pos = sharedDirs.GetHeadPosition(); pos != NULL;) {
-		const CString &strDir(theApp.sharedfiles->GetPseudoDirName(sharedDirs.GetNext(pos)));
-		if (!strDir.IsEmpty())
-			arFolders.Add(strDir);
-	}
-	//add categories
-	for (INT_PTR iCat = 0; iCat < thePrefs.GetCatCount(); ++iCat) {
-		const CString &strDir(theApp.sharedfiles->GetPseudoDirName(thePrefs.GetCategory(iCat)->strIncomingPath));
-		if (!strDir.IsEmpty())
-			arFolders.Add(strDir);
-	}
+	CMapStringToPtr mapFolderSet;
+	CKnownFilesMap sharedFilesMap;
+	theApp.sharedfiles->CopySharedFileMap(sharedFilesMap);
+	for (const CKnownFilesMap::CPair *pair = sharedFilesMap.PGetFirstAssoc(); pair != NULL; pair = sharedFilesMap.PGetNextAssoc(pair)) {
+		CKnownFile *pFile = pair->value;
+		if (!theApp.sharedfiles->CanClientBrowseSharedFile(pFile, this) || (pFile->IsLargeFile() && !SupportsLargeFiles()))
+			continue;
 
-	// add temporary folder if there are any temp files
-	if (theApp.downloadqueue->GetFileCount() > 0)
-		arFolders.Add(_T(OP_INCOMPLETE_SHARED_FILES));
-	// add "Other" folder (for single shared files) if there are any single shared files
-	if (theApp.sharedfiles->ProbablyHaveSingleSharedFiles())
-		arFolders.Add(_T(OP_OTHER_SHARED_FILES));
+		CString strFolder;
+		if (pFile->IsPartFile()) {
+			CPartFile *pPartFile = static_cast<CPartFile*>(pFile);
+			if (pPartFile->GetStatus(true) != PS_READY)
+				continue;
+			strFolder = _T(OP_INCOMPLETE_SHARED_FILES);
+		} else if (!theApp.sharedfiles->ShouldBeShared(pFile->GetSharedDirectory(), NULL, false))
+			strFolder = _T(OP_OTHER_SHARED_FILES);
+		else
+			strFolder = theApp.sharedfiles->GetPseudoDirName(pFile->GetSharedDirectory());
+
+		if (strFolder.IsEmpty())
+			continue;
+
+		void *pDummy = NULL;
+		if (!mapFolderSet.Lookup(strFolder, pDummy)) {
+			mapFolderSet.SetAt(strFolder, (void*)1);
+			arFolders.Add(strFolder);
+		}
+	}
 
 	// build packet
 	EUTF8str eUnicode = GetUnicodeSupport();
@@ -5945,7 +6087,7 @@ void CUpDownClient::SetClientNote()
 	inputbox.DoModal();
 	if (!inputbox.WasCancelled() && !inputbox.GetInput().IsEmpty()) {
 		m_strClientNote = inputbox.GetInput();
-		theApp.emuledlg->transferwnd->GetClientList()->RefreshClient(this);
+		theApp.emuledlg->transferwnd->GetClientList()->RefreshClient(this, -1, CClientListCtrl::kSortImpactNote);
 		theApp.emuledlg->transferwnd->GetUploadList()->RefreshClient(this);
 		theApp.emuledlg->transferwnd->GetQueueList()->RefreshClient(this);
 		theApp.emuledlg->transferwnd->GetDownloadClientsList()->RefreshClient(this);
@@ -5977,7 +6119,7 @@ void CUpDownClient::SetAutoQuerySharedFiles(const bool bActivate)
 		m_strStatusText.Format(GetResString(_T("AUTO_QUERY_DEACTIVATED")), md4str(GetUserHash()));
 	theApp.emuledlg->statusbar->SetText(m_strStatusText, SBarLog, 0);
 
-	theApp.emuledlg->transferwnd->GetClientList()->RefreshClient(this);
+	theApp.emuledlg->transferwnd->GetClientList()->RefreshClient(this, -1, CClientListCtrl::kSortImpactSharedFiles);
 	theApp.emuledlg->transferwnd->GetUploadList()->RefreshClient(this);
 	theApp.emuledlg->transferwnd->GetQueueList()->RefreshClient(this);
 	theApp.emuledlg->transferwnd->GetDownloadClientsList()->RefreshClient(this);

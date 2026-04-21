@@ -1,4 +1,4 @@
-//This file is part of eMule AI
+﻿//This file is part of eMule AI
 //Copyright (C)2002-2026 Merkur ( strEmail.Format("%s@%s", "devteam", "emule-project.net") / https://www.emule-project.net )
 //Copyright (C)2026 eMule AI
 //
@@ -52,6 +52,7 @@
 #include "IrcWnd.h"
 #include "StatisticsDlg.h"
 #include "PreferencesDlg.h"
+#include "PPgSecurity.h"
 #include "eMuleAI\MigrationWizardDlg.h"
 #include "ServerConnect.h"
 #include "KnownFileList.h"
@@ -374,6 +375,8 @@ namespace
 	const UINT SPECIAL_THANKS_ANIMATION_INTERVAL_MS = 33;
 	const DWORD VERSIONCHECK_HTTP_TIMEOUT_MS = SEC2MS(8);
 	const int VERSIONCHECK_MAX_TEXT_BYTES = 4096;
+	const UINT STARTUP_TIMER_INTERVAL_MS = SEC2MS(3) / 10;
+	const UINT MAIN_TIMER_INTERVAL_MS = SEC2MS(DAY2S(1));
 	const int TITLE_VERSION_TEXT_MIN_CHANNEL = 80;
 	const int TITLE_VERSION_TEXT_SHADOW_OFFSET = 1;
 	const int TITLE_VERSION_TEXT_HORIZONTAL_PADDING = 8;
@@ -929,6 +932,9 @@ BEGIN_MESSAGE_MAP(CemuleDlg, CTrayDialog)
 	ON_MESSAGE(TM_FILEOPPROGRESS, OnFileOpProgress)
 	ON_MESSAGE(TM_HASHFAILED, OnHashFailed)
 	ON_MESSAGE(TM_IMPORTPART, OnImportPart)
+	ON_MESSAGE(TM_IMPORTPARTPROGRESS, OnImportPartProgress)
+	ON_MESSAGE(TM_IMPORTPARTFINISHED, OnImportPartFinished)
+	ON_MESSAGE(UM_FINALIZE_DELETE_PENDING_CLIENT, OnFinalizeDeletePendingClient)
 	ON_MESSAGE(TM_FRAMEGRABFINISHED, OnFrameGrabFinished)
 	ON_MESSAGE(TM_FILEALLOCEXC, OnFileAllocExc)
 	ON_MESSAGE(TM_FILECOMPLETED, OnFileCompleted)
@@ -1402,7 +1408,7 @@ BOOL CemuleDlg::OnInitDialog()
 	if (thePrefs.GetWSIsEnabled())
 		theApp.webserver->StartServer();
 
-	VERIFY((m_hTimer = ::SetTimer(NULL, 0, SEC2MS(3)/10, StartupTimer)) != 0);
+	VERIFY((m_hTimer = ::SetTimer(NULL, 0, STARTUP_TIMER_INTERVAL_MS, StartupTimer)) != 0);
 	if (thePrefs.GetVerbose() && !m_hTimer)
 		AddDebugLogLine(true, _T("Failed to create 'startup' timer - %s"), (LPCTSTR)EscPercent(GetErrorMessage(::GetLastError())));
 
@@ -1426,9 +1432,6 @@ BOOL CemuleDlg::OnInitDialog()
 
 	if (!thePrefs.HasCustomTaskIconColor())
 		SetTaskbarIconColor();
-
-	if (thePrefs.GetConnectionChecker())
-		theApp.ConChecker->Start();
 
 	// Ensure any files already queued by CSharedFileListSearchThread are processed
 	PostMessage(TM_SHAREDFILELISTFOUNDFILES, 0, 0);
@@ -1592,14 +1595,65 @@ void CALLBACK CemuleDlg::StartupTimer(HWND /*hwnd*/, UINT /*uiMsg*/, UINT_PTR /*
 	CATCH_DFLT_EXCEPTIONS(_T("CemuleDlg::StartupTimer"))
 }
 
-void CemuleDlg::StopTimer()
+void CALLBACK CemuleDlg::MainTimer(HWND /*hwnd*/, UINT /*uiMsg*/, UINT_PTR /*idEvent*/, DWORD /*dwTime*/) noexcept
+{
+	// NOTE: Always handle all type of MFC exceptions in TimerProcs - otherwise we'll get mem leaks
+	try {
+		if (theApp.emuledlg != NULL)
+			theApp.emuledlg->CheckScheduledTasks();
+	}
+	CATCH_DFLT_EXCEPTIONS(_T("CemuleDlg::MainTimer"))
+}
+
+void CemuleDlg::KillMainTimer()
 {
 	if (m_hTimer) {
 		VERIFY(::KillTimer(NULL, m_hTimer));
 		m_hTimer = 0;
 	}
-	if (true)
-		DoVersioncheck(false);
+}
+
+void CemuleDlg::StartMainTimer()
+{
+	KillMainTimer();
+	VERIFY((m_hTimer = ::SetTimer(NULL, 0, MAIN_TIMER_INTERVAL_MS, MainTimer)) != 0);
+	if (thePrefs.GetVerbose() && !m_hTimer)
+		AddDebugLogLine(true, _T("Failed to create 'main' timer - %s"), (LPCTSTR)EscPercent(GetErrorMessage(::GetLastError())));
+}
+
+void CemuleDlg::CheckScheduledTasks()
+{
+	if (theApp.IsClosing() || IsInitializing())
+		return;
+
+	if (thePrefs.GetAutoIPFilterUpdate()) {
+		time_t tLast = thePrefs.GetLastIPFilterUpdate();
+		int nDays = thePrefs.GetIPFilterUpdatePeriodDays();
+		if (nDays < 1)
+			nDays = 7;
+		if (tLast == 0 || difftime(time(nullptr), tLast) >= DAY2S(nDays)) {
+			const CString strUpdateUrl = CPPgSecurity::GetStoredIPFilterUpdateURL();
+			if (strUpdateUrl.IsEmpty()) {
+				AddLogLine(false, GetResString(_T("IPFILTER_AUTO_UPDATE_NO_URL")));
+			} else {
+				const CString strLastUpdate = tLast ? CTime(tLast).Format(_T("%Y-%m-%d %H:%M:%S")) : GetResString(_T("NEVER"));
+				AddLogLine(true, GetResString(_T("IPFILTER_AUTO_UPDATE_STARTED")), (LPCTSTR)strLastUpdate, nDays);
+				CPPgSecurity::UpdateIPFilterFromURL(strUpdateUrl, false);
+			}
+		}
+	}
+
+	DoVersioncheck(false);
+}
+
+void CemuleDlg::StopTimer()
+{
+	KillMainTimer();
+	CheckScheduledTasks();
+	StartMainTimer();
+
+	if (thePrefs.GetConnectionChecker() && theApp.ConChecker != NULL && !theApp.ConChecker->IsActive())
+		theApp.ConChecker->Start();
 
 	if (!theApp.m_strPendingLink.IsEmpty()) {
 		OnWMData(NULL, (LPARAM)&theApp.sendstruct);
@@ -2535,14 +2589,72 @@ LRESULT CemuleDlg::OnFileCompleted(WPARAM wParam, LPARAM lParam)
 
 LRESULT CemuleDlg::OnImportPart(WPARAM wParam, LPARAM lParam)
 {
-	CPartFile* partfile = reinterpret_cast<CPartFile*>(lParam);
 	ImportPart_Struct* imp = reinterpret_cast<ImportPart_Struct*>(wParam);
-	if (theApp.downloadqueue->IsPartFile(partfile) && !theApp.IsClosing()) // could have been cancelled
+	UNREFERENCED_PARAMETER(lParam);
+	ImportOperationContext* pContext = (imp != NULL) ? imp->pContext : NULL;
+	CPartFile* partfile = NULL;
+	if (pContext != NULL && !theApp.IsClosing() && theApp.downloadqueue != NULL) {
+		partfile = theApp.downloadqueue->GetFileByID(pContext->aucFileHash);
+		if (partfile == NULL || partfile->GetRuntimeID() != pContext->uPartFileRuntimeID || !partfile->IsImportOperationCurrent(pContext))
+			partfile = NULL;
+	}
+
+	if (imp != NULL && partfile != NULL)
 		if (partfile->WriteToBuffer(imp->end - imp->start + 1, imp->data, imp->start, imp->end, NULL, NULL, false))
 			imp->data = NULL; //do not delete the buffer
 
-	delete[] imp->data;
-	delete imp;
+	if (imp != NULL) {
+		delete[] imp->data;
+		delete imp;
+	}
+
+	if (partfile != NULL)
+		partfile->MarkImportPartHandled(pContext);
+	else if (pContext != NULL) {
+		const LONG lQueuedBlocks = ::InterlockedDecrement(&pContext->lQueuedBlocks);
+		if (lQueuedBlocks < 0) {
+			ASSERT(0);
+			::InterlockedExchange(&pContext->lQueuedBlocks, 0);
+		}
+	}
+	ReleaseImportOperationContext(pContext);
+	return 0;
+}
+
+LRESULT CemuleDlg::OnImportPartProgress(WPARAM wParam, LPARAM lParam)
+{
+	ImportOperationContext* pContext = reinterpret_cast<ImportOperationContext*>(lParam);
+	if (pContext != NULL && !theApp.IsClosing() && theApp.downloadqueue != NULL) {
+		CPartFile* partfile = theApp.downloadqueue->GetFileByID(pContext->aucFileHash);
+		if (partfile != NULL && partfile->GetRuntimeID() == pContext->uPartFileRuntimeID && partfile->IsImportOperationCurrent(pContext)) {
+			partfile->SetFileOpProgress(wParam);
+			partfile->UpdateDisplayedInfo(true);
+		}
+	}
+	ReleaseImportOperationContext(pContext);
+	return 0;
+}
+
+LRESULT CemuleDlg::OnImportPartFinished(WPARAM wParam, LPARAM lParam)
+{
+	ImportOperationContext* pContext = reinterpret_cast<ImportOperationContext*>(lParam);
+	if (wParam != 0)
+		AbortImportOperationContext(pContext);
+
+	if (pContext != NULL && !theApp.IsClosing() && theApp.downloadqueue != NULL) {
+		CPartFile* partfile = theApp.downloadqueue->GetFileByID(pContext->aucFileHash);
+		if (partfile != NULL && partfile->GetRuntimeID() == pContext->uPartFileRuntimeID && partfile->IsImportOperationCurrent(pContext))
+			partfile->TryFinalizeImportPartsOperation(pContext);
+	}
+	ReleaseImportOperationContext(pContext);
+	return 0;
+}
+
+LRESULT CemuleDlg::OnFinalizeDeletePendingClient(WPARAM wParam, LPARAM lParam)
+{
+	UNREFERENCED_PARAMETER(lParam);
+	if (theApp.clientlist != NULL)
+		theApp.clientlist->FinalizeDeletePendingClientByRuntimeID((DWORD)wParam);
 	return 0;
 }
 
@@ -2656,6 +2768,7 @@ LRESULT CemuleDlg::OnConsoleThreadEvent(WPARAM wParam, LPARAM lParam)
 void CemuleDlg::OnDestroy()
 {
 	AddDebugLogLine(DLP_VERYLOW, _T("%hs"), __FUNCTION__);
+	KillMainTimer();
 	StopTitleVersionAnimation();
 	DestroyTitleVersionOverlayWindow();
 	m_rcTitleVersionLink.SetRectEmpty();
@@ -2697,6 +2810,7 @@ void CemuleDlg::OnClose()
 		return;
 	}
 	theApp.m_app_state = APP_STATE_SHUTTINGDOWN;
+	KillMainTimer();
 
 	notifierenabled = false;
 	//flush queued messages
@@ -5080,6 +5194,7 @@ LRESULT CemuleDlg::OnWebServerClearCompleted(WPARAM wParam, LPARAM lParam)
 
 LRESULT CemuleDlg::OnWebServerFileRename(WPARAM wParam, LPARAM lParam)
 {
+	reinterpret_cast<CPartFile*>(wParam)->SetAutoRenameToMajorityName(false);
 	reinterpret_cast<CPartFile*>(wParam)->SetFileName((LPCTSTR)lParam);
 	reinterpret_cast<CPartFile*>(wParam)->SavePartFile();
 	reinterpret_cast<CPartFile*>(wParam)->UpdateDisplayedInfo();
@@ -5611,7 +5726,7 @@ void CemuleDlg::SetTaskbarIconColor()
 }
 LRESULT CemuleDlg::OnConChecker(WPARAM wParam, LPARAM lParam)
 {
-	if (m_hTimer != 0)
+	if (IsInitializing())
 		return 0;
 
 	if (theApp.IsClosing() || theApp.serverconnect == NULL)

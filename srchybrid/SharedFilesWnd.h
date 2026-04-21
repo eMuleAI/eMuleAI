@@ -114,6 +114,7 @@ protected:
 	void SetAllIcons();
 	void DoResize(int iDelta);
 	void UpdateDetailsPanelLayout();
+	void EnsureFilterControlLayout();
 
 	virtual void DoDataExchange(CDataExchange *pDX);    // DDX/DDV support
 	virtual BOOL PreTranslateMessage(MSG *pMsg);

@@ -34,6 +34,9 @@ class CPartFile;
 class CSafeMemFile;
 class CShareableFile;
 
+typedef DWORD PartFileRuntimeID;
+typedef DWORD ImportOperationID;
+
 enum EFileType : uint8
 {
 	FILETYPE_UNKNOWN,
@@ -76,11 +79,60 @@ struct SUnresolvedHostname
 	uint16 nPort;
 };
 
+struct ImportOperationContext
+{
+	LONG			nRefCount;
+	PartFileRuntimeID	uPartFileRuntimeID;
+	ImportOperationID	uOperationID;
+	HANDLE			hStopEvent;
+	volatile LONG	lAborted;
+	volatile LONG	lPendingFinish;
+	volatile LONG	lQueuedBlocks;
+	uchar			aucFileHash[16];
+};
+
+inline ImportOperationContext* AcquireImportOperationContext(ImportOperationContext* pContext)
+{
+	if (pContext != NULL)
+		::InterlockedIncrement(&pContext->nRefCount);
+	return pContext;
+}
+
+inline void AbortImportOperationContext(ImportOperationContext* pContext)
+{
+	if (pContext == NULL)
+		return;
+
+	::InterlockedExchange(&pContext->lAborted, 1);
+	if (pContext->hStopEvent != NULL)
+		::SetEvent(pContext->hStopEvent);
+}
+
+inline bool IsImportOperationAborted(const ImportOperationContext* pContext)
+{
+	return pContext == NULL
+		|| ::InterlockedCompareExchange((LONG*)&pContext->lAborted, 0, 0) != 0
+		|| (pContext->hStopEvent != NULL && ::WaitForSingleObject(pContext->hStopEvent, 0) == WAIT_OBJECT_0);
+}
+
+inline void ReleaseImportOperationContext(ImportOperationContext* pContext)
+{
+	if (pContext == NULL)
+		return;
+
+	if (::InterlockedDecrement(&pContext->nRefCount) == 0) {
+		if (pContext->hStopEvent != NULL)
+			::CloseHandle(pContext->hStopEvent);
+		delete pContext;
+	}
+}
+
 struct ImportPart_Struct
 {
 	uint64	start;
 	uint64	end;
 	BYTE* data;
+	ImportOperationContext* pContext;
 };
 
 #define ROUND(x) (floor((float)(x)+0.5f))

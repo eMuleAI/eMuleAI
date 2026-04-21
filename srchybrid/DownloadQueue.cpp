@@ -624,7 +624,7 @@ bool CDownloadQueue::CheckAndAddSource(CPartFile *sender, CUpDownClient *source,
 	if (sender->IsStopped()) {
 		if (thePrefs.GetLogNatTraversalEvents())
 			DebugLog(_T("[NatTraversal] CheckAndAddSource: REJECTED - sender is stopped\n"));
-		delete source;
+		CUpDownClient::SafeDelete(source);
 		return false;
 	}
 
@@ -633,7 +633,7 @@ bool CDownloadQueue::CheckAndAddSource(CPartFile *sender, CUpDownClient *source,
 			AddDebugLogLine(false, _T("Tried to add source with a hash matching your own."));
 		if (thePrefs.GetLogNatTraversalEvents())
 			DebugLog(_T("[NatTraversal] CheckAndAddSource: REJECTED - source hash matches own hash\n"));
-		delete source;
+		CUpDownClient::SafeDelete(source);
 		return false;
 	}
 
@@ -644,7 +644,7 @@ bool CDownloadQueue::CheckAndAddSource(CPartFile *sender, CUpDownClient *source,
 #endif
 		if (thePrefs.GetLogNatTraversalEvents())
 			DebugLog(_T("[NatTraversal] CheckAndAddSource: REJECTED - encryption incompatible\n"));
-		delete source;
+		CUpDownClient::SafeDelete(source);
 		return false;
 	}
 
@@ -677,7 +677,7 @@ bool CDownloadQueue::CheckAndAddSource(CPartFile *sender, CUpDownClient *source,
 						if (thePrefs.GetLogNatTraversalEvents())
 							DebugLog(_T("[NatTraversal] CheckAndAddSource: REJECTED - source already exists in another file's srclist\n"));
 					}
-					delete source;
+					CUpDownClient::SafeDelete(source);
 					return false;
 				}
 			}
@@ -728,7 +728,7 @@ bool CDownloadQueue::CheckAndAddSource(CPartFile *sender, CUpDownClient *source,
 				DebugLog(_T("[NatTraversal] CheckAndAddSource: REJECTED - source is in global dead source list\n"));
 		}
 		if (!bAttachedToKnownClient)
-			delete source;
+			CUpDownClient::SafeDelete(source);
 		return false;
 	}
 
@@ -865,6 +865,7 @@ bool CDownloadQueue::RemoveSource(CUpDownClient *toremove, bool bDoStatsUpdate)
 		POSITION pos2 = cur_file->srclist.Find(toremove);
 		if (pos2) {
 			cur_file->srclist.RemoveAt(pos2);
+			cur_file->RemoveSourceFileName(toremove);
 			bRemovedSrcFromPartFile = true;
 			if (bDoStatsUpdate) {
 				cur_file->RemoveDownloadingSource(toremove);

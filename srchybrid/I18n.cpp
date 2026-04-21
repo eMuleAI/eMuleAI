@@ -144,15 +144,6 @@ namespace
 		return !primaryTag.IsEmpty();
 	}
 
-	bool TryResolveLanguageIndex(LPCTSTR code, uint16_t &index)
-	{
-		if (TryLookupLanguageIndexByCode(code, index))
-			return true;
-
-		CString primaryTag;
-		return TryGetPrimaryLanguageTag(code, primaryTag) && TryLookupLanguageIndexByCode(primaryTag, index);
-	}
-
 	LPCTSTR GetLocaleAlias(LPCTSTR code)
 	{
 		if (code == nullptr)
@@ -162,6 +153,22 @@ namespace
 		if (_tcsicmp(code, _T("jw")) == 0)
 			return _T("jv");
 		return nullptr;
+	}
+
+	bool TryResolveLanguageIndex(LPCTSTR code, uint16_t &index)
+	{
+		if (TryLookupLanguageIndexByCode(code, index))
+			return true;
+
+		CString primaryTag;
+		if (TryGetPrimaryLanguageTag(code, primaryTag) && TryLookupLanguageIndexByCode(primaryTag, index))
+			return true;
+
+		LPCTSTR alias = GetLocaleAlias(primaryTag);
+		if (alias != nullptr && TryLookupLanguageIndexByCode(alias, index))
+			return true;
+
+		return false;
 	}
 
 	bool SetActiveLanguageByIndex(uint16_t index)

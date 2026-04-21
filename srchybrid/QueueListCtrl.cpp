@@ -47,6 +47,23 @@
 static char THIS_FILE[] = __FILE__;
 #endif
 
+namespace
+{
+	CObject* CreateClientDetailWalkerToken(const CUpDownClient* pClient)
+	{
+		if (pClient == NULL || theApp.clientlist == NULL)
+			return NULL;
+
+		CUpDownClient* pTrackedClient = theApp.clientlist->AcquireTrackedClientByPointer(pClient);
+		if (pTrackedClient == NULL)
+			return NULL;
+
+		const ClientRuntimeID uRuntimeID = pTrackedClient->GetRuntimeID();
+		pTrackedClient->ReleaseRuntimeReference();
+		return uRuntimeID != 0 ? reinterpret_cast<CObject*>((static_cast<ULONG_PTR>(uRuntimeID) << 1) | 1) : NULL;
+	}
+}
+
 
 IMPLEMENT_DYNAMIC(CQueueListCtrl, CMuleListCtrl)
 
@@ -216,11 +233,16 @@ void CQueueListCtrl::DrawItem(LPDRAWITEMSTRUCT lpDrawItemStruct)
 			//case 9: //obtained parts
 			case 8: //obtained parts
 				if (client->GetUpPartCount()) {
-					++rcItem.top;
-					--rcItem.bottom;
-					client->DrawUpStatusBar(dc, &rcItem, false, thePrefs.UseFlatBar());
-					++rcItem.bottom;
-					--rcItem.top;
+					CRect rcStatus(rcItem);
+					++rcStatus.top;
+					--rcStatus.bottom;
+					if (rcStatus.Width() > 0 && rcStatus.Height() > 0) {
+						const bool bUseFlatBar = thePrefs.UseFlatBar();
+						const int iSavedDC = bUseFlatBar ? dc->SaveDC() : 0;
+						client->DrawUpStatusBar(dc, rcStatus, false, bUseFlatBar);
+						if (iSavedDC != 0)
+							dc->RestoreDC(iSavedDC);
+					}
 				}
 			break;
 			case 12:
@@ -241,7 +263,7 @@ void CQueueListCtrl::DrawItem(LPDRAWITEMSTRUCT lpDrawItemStruct)
 
 	DrawFocusRect(dc, &lpDrawItemStruct->rcItem, lpDrawItemStruct->itemState & ODS_FOCUS, bCtrlFocused, lpDrawItemStruct->itemState & ODS_SELECTED);
 
-	m_updatethread->AddItemUpdated((LPARAM)client);
+	QueueItemUpdated((LPARAM)client);
 }
 
 const CString CQueueListCtrl::GetItemDisplayText(CUpDownClient* client, const int iSubItem) const
@@ -664,6 +686,10 @@ BOOL CQueueListCtrl::OnCommand(WPARAM wParam, LPARAM)
 	int iSel = GetNextItem(-1, LVIS_SELECTED | LVIS_FOCUSED);
 	if (iSel >= 0) {
 		CUpDownClient *client = reinterpret_cast<CUpDownClient*>(GetItemData(iSel));
+		auto RefreshQueueCountAfterManualPunishment = []() {
+			if (theApp.emuledlg != NULL && theApp.emuledlg->transferwnd != NULL)
+				theApp.emuledlg->transferwnd->InvalidateQueueCount(true);
+		};
 		switch (wParam) {
 		case MP_SHOWLIST:
 			{
@@ -687,6 +713,7 @@ BOOL CQueueListCtrl::OnCommand(WPARAM wParam, LPARAM)
 			if (client->IsBanned() || client->IsBadClient()) {
 				client->UnBan();
 				Update(iSel);
+				RefreshQueueCountAfterManualPunishment();
 			}
 			break;
 		case MP_DETAIL:
@@ -707,54 +734,67 @@ BOOL CQueueListCtrl::OnCommand(WPARAM wParam, LPARAM)
 		case MP_PUNISMENT_IPUSERHASHBAN:
 			theApp.shield->SetPunishment(client,GetResString(_T("PUNISHMENT_REASON_MANUAL_IP_BAN")), PR_MANUAL, P_IPUSERHASHBAN);
 			RefreshClient(client);
+			RefreshQueueCountAfterManualPunishment();
 			break;
 		case MP_PUNISMENT_USERHASHBAN:
 			theApp.shield->SetPunishment(client,GetResString(_T("PUNISHMENT_REASON_MANUAL_USER_HASH_BAN")), PR_MANUAL, P_USERHASHBAN);
 			RefreshClient(client);
+			RefreshQueueCountAfterManualPunishment();
 			break;
 		case MP_PUNISMENT_UPLOADBAN:
 			theApp.shield->SetPunishment(client,GetResString(_T("PUNISHMENT_REASON_MANUAL_UPLOAD_BAN")), PR_MANUAL, P_UPLOADBAN);
 			RefreshClient(client);
+			RefreshQueueCountAfterManualPunishment();
 			break;
 		case MP_PUNISMENT_SCOREX01:
 			theApp.shield->SetPunishment(client,GetResString(_T("PUNISHMENT_REASON_MANUAL_SCORE_REDUCING")), PR_MANUAL, P_SCOREX01);
 			RefreshClient(client);
+			RefreshQueueCountAfterManualPunishment();
 			break;
 		case MP_PUNISMENT_SCOREX02:
 			theApp.shield->SetPunishment(client,GetResString(_T("PUNISHMENT_REASON_MANUAL_SCORE_REDUCING")), PR_MANUAL, P_SCOREX02);
 			RefreshClient(client);
+			RefreshQueueCountAfterManualPunishment();
 			break;
 		case MP_PUNISMENT_SCOREX03:
 			theApp.shield->SetPunishment(client,GetResString(_T("PUNISHMENT_REASON_MANUAL_SCORE_REDUCING")), PR_MANUAL, P_SCOREX03);
 			RefreshClient(client);
+			RefreshQueueCountAfterManualPunishment();
 			break;
 		case MP_PUNISMENT_SCOREX04:
 			theApp.shield->SetPunishment(client,GetResString(_T("PUNISHMENT_REASON_MANUAL_SCORE_REDUCING")), PR_MANUAL, P_SCOREX04);
 			RefreshClient(client);
+			RefreshQueueCountAfterManualPunishment();
 			break;
 		case MP_PUNISMENT_SCOREX05:
 			theApp.shield->SetPunishment(client,GetResString(_T("PUNISHMENT_REASON_MANUAL_SCORE_REDUCING")), PR_MANUAL, P_SCOREX05);
 			RefreshClient(client);
+			RefreshQueueCountAfterManualPunishment();
 			break;
 		case MP_PUNISMENT_SCOREX06:
 			theApp.shield->SetPunishment(client,GetResString(_T("PUNISHMENT_REASON_MANUAL_SCORE_REDUCING")), PR_MANUAL, P_SCOREX06);
 			RefreshClient(client);
+			RefreshQueueCountAfterManualPunishment();
 			break;
 		case MP_PUNISMENT_SCOREX07:
 			theApp.shield->SetPunishment(client,GetResString(_T("PUNISHMENT_REASON_MANUAL_SCORE_REDUCING")), PR_MANUAL, P_SCOREX07);
 			RefreshClient(client);
+			RefreshQueueCountAfterManualPunishment();
 			break;
 		case MP_PUNISMENT_SCOREX08:
 			theApp.shield->SetPunishment(client,GetResString(_T("PUNISHMENT_REASON_MANUAL_SCORE_REDUCING")), PR_MANUAL, P_SCOREX08);
 			RefreshClient(client);
+			RefreshQueueCountAfterManualPunishment();
 			break;
 		case MP_PUNISMENT_SCOREX09:
 			theApp.shield->SetPunishment(client,GetResString(_T("PUNISHMENT_REASON_MANUAL_SCORE_REDUCING")), PR_MANUAL, P_SCOREX09);
 			RefreshClient(client);
+			RefreshQueueCountAfterManualPunishment();
 			break;
 		case MP_PUNISMENT_NONE:
 			theApp.shield->SetPunishment(client,GetResString(_T("PUNISHMENT_REASON_MANUAL_CANCELATION")), PR_MANUAL, P_NOPUNISHMENT);
 			RefreshClient(client);
+			RefreshQueueCountAfterManualPunishment();
 			break;
 		}
 	}
@@ -807,7 +847,7 @@ void CQueueListCtrl::RefreshClient(const CUpDownClient* client)
 	if (theApp.IsClosing() || !client || theApp.emuledlg->activewnd != theApp.emuledlg->transferwnd || !theApp.emuledlg->transferwnd->GetQueueList()->IsWindowVisible())
 		return;
 
-	m_updatethread->AddItemToUpdate((LPARAM)client);
+	QueueItemUpdate((LPARAM)client);
 }
 
 void CQueueListCtrl::UpdateView()
@@ -893,6 +933,58 @@ void CQueueListCtrl::ShowSelectedUserDetails()
 		CClientDetailDialog dialog(client, this);
 		dialog.DoModal();
 	}
+}
+
+CObject* CQueueListCtrl::GetNextSelectableItem()
+{
+	const int iItemCount = GetItemCount();
+	if (iItemCount < 2)
+		return NULL;
+
+	POSITION pos = GetFirstSelectedItemPosition();
+	if (pos == NULL)
+		return NULL;
+
+	const int iSelectedItem = GetNextSelectedItem(pos);
+	for (int iNewItem = iSelectedItem + 1; iNewItem < iItemCount; ++iNewItem) {
+		CObject* pToken = CreateClientDetailWalkerToken(reinterpret_cast<CUpDownClient*>(GetItemData(iNewItem)));
+		if (pToken == NULL)
+			continue;
+
+		SetItemState(iSelectedItem, 0, LVIS_SELECTED | LVIS_FOCUSED);
+		SetItemState(iNewItem, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+		SetSelectionMark(iNewItem);
+		EnsureVisible(iNewItem, FALSE);
+		return pToken;
+	}
+
+	return NULL;
+}
+
+CObject* CQueueListCtrl::GetPrevSelectableItem()
+{
+	const int iItemCount = GetItemCount();
+	if (iItemCount < 2)
+		return NULL;
+
+	POSITION pos = GetFirstSelectedItemPosition();
+	if (pos == NULL)
+		return NULL;
+
+	const int iSelectedItem = GetNextSelectedItem(pos);
+	for (int iNewItem = iSelectedItem - 1; iNewItem >= 0; --iNewItem) {
+		CObject* pToken = CreateClientDetailWalkerToken(reinterpret_cast<CUpDownClient*>(GetItemData(iNewItem)));
+		if (pToken == NULL)
+			continue;
+
+		SetItemState(iSelectedItem, 0, LVIS_SELECTED | LVIS_FOCUSED);
+		SetItemState(iNewItem, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+		SetSelectionMark(iNewItem);
+		EnsureVisible(iNewItem, FALSE);
+		return pToken;
+	}
+
+	return NULL;
 }
 
 void CQueueListCtrl::ShowQueueClients()

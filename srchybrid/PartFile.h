@@ -87,6 +87,7 @@ class CUpDownClient;
 enum EDownloadState : uint8;
 class CSafeMemFile;
 class CED2KFileLink;
+struct ImportOperationContext;
 
 #pragma pack(push, 1)
 struct Requested_Block_Struct
@@ -223,9 +224,10 @@ public:
 	void	UpdateCompletedInfos();
 	void	UpdateCompletedInfos(uint64 uTotalGaps);
 	virtual void	UpdatePartsInfo();
+	const CArray<uint16, uint16>& GetSourcePartFrequency() const { return m_SrcPartFrequency; }
 
 	bool	GetNextRequestedBlock(CUpDownClient *sender, Requested_Block_Struct **newblocks, int &iCount) /*const*/;
-	void	WritePartStatus(CSafeMemFile &file) const;
+	void	WritePartStatus(CSafeMemFile &file, CUpDownClient *client = NULL);
 	void	WriteCompleteSourcesCount(CSafeMemFile &file) const;
 	void	AddSources(CSafeMemFile *sources, uint32 serverip, uint16 serverport, bool bWithObfuscationAndHash);
 	static bool CanAddSource(uint32 userid, uint16 port, uint32 serverip, uint16 serverport, UINT *pdebug_lowiddropped = NULL, bool ed2kID = true);
@@ -337,6 +339,14 @@ public:
 	EPartFileOp GetFileOp() const						{ return m_eFileOp; }
 	void	SetFileOpProgress(WPARAM uProgress)			{ m_uFileOpProgress = uProgress; } //ASSERT(uProgress <= 100);
 	WPARAM	GetFileOpProgress() const					{ return m_uFileOpProgress; }
+	DWORD	GetRuntimeID() const						{ return m_uRuntimeID; }
+	ImportOperationContext* BeginImportPartsOperation();
+	void	CancelImportPartsOperation(bool bResetFileOp = true);
+	bool	IsImportOperationCurrent(const ImportOperationContext* pContext) const;
+	void	MarkImportPartQueued(ImportOperationContext* pContext) const;
+	void	MarkImportPartHandled(ImportOperationContext* pContext);
+	void	TryFinalizeImportPartsOperation(const ImportOperationContext* pContext = NULL);
+	void	ServiceDeferredMainThreadWork(bool bForceFlushPendingWrites = false);
 
 	CAICHRecoveryHashSet* GetAICHRecoveryHashSet() const { return m_pAICHRecoveryHashSet; }
 	void	RequestAICHRecovery(UINT nPart);
@@ -355,6 +365,11 @@ public:
 
 	bool	GetPreviewPrio() const						{ return m_bpreviewprio; }
 	void	SetPreviewPrio(bool in)						{ m_bpreviewprio = in; }
+	bool	IsAutoRenameToMajorityNameEnabled() const	{ return m_bAutoRenameToMajorityName; }
+	void	SetAutoRenameToMajorityName(bool bEnabled);
+	void	ToggleAutoRenameToMajorityName()			{ SetAutoRenameToMajorityName(!m_bAutoRenameToMajorityName); }
+	void	UpdateSourceFileName(CUpDownClient* pSource);
+	void	RemoveSourceFileName(CUpDownClient* pSource);
 
 	static bool RightFileNotHasHigherPrio(CPartFile* left, CPartFile* right);
 	static bool RightFileHasHigherPrio(CPartFile *left, CPartFile *right);
@@ -365,6 +380,11 @@ public:
 	virtual void Dump(CDumpContext &dc) const;
 #endif
 	time_t	m_tLastChecked;
+	time_t	m_tLastAutoDeleteEvaluation;
+	time_t	m_tNextAutoDeleteCheck;
+	time_t	m_tLastSeenCompleteForAutoDelete;
+	bool	m_bAutoDeletePendingWhileBusy;
+	LONG	m_lAutoDeleteStateGeneration;
 	CCriticalSection m_SavePartFileLock;
 	CCriticalSection m_PartStatusLock;
 	CCriticalSection m_SaveSourcesLock;
@@ -419,6 +439,10 @@ protected:
 	void	CompleteFile(bool bIsHashingDone);
 	void	CreatePartFile(UINT cat = 0);
 	void	Init();
+	bool	HasPendingBufferedWriteBookkeeping() const;
+	bool	HasBufferedWriteOnPart(UINT nPart) const;
+	void	QueuePendingAICHRecovery(UINT nPart);
+	void	ProcessPendingAICHRecovery();
 
 private:
 	BOOL	PerformFileComplete(); // Lord KiRon
@@ -482,4 +506,19 @@ private:
 	bool	m_bAutoDownPriority;
 	bool	m_bDelayDelete;
 	bool	m_bpreviewprio;
+	bool	m_bProcessingPendingAICHRecovery;
+	bool	m_bAutoRenameToMajorityName;
+	int		m_iLastAutoRenameToMajorityAction;
+	DWORD	m_uRuntimeID;
+	DWORD	m_uNextImportOperationID;
+	DWORD	m_uActiveImportOperationID;
+	ImportOperationContext* m_pImportOperationContext;
+	CList<UINT, UINT> m_PendingAICHRecoveryParts;
+	CString	m_strLastAutoRenameToMajorityCandidate;
+	CMap<CUpDownClient*, CUpDownClient*, CString, CString> m_mapSourceFileNames;
+	CMap<CString, LPCTSTR, int, int> m_mapSourceFileNameCounts;
+
+	void	ApplyAutoRenameToMajorityName();
+	bool	GetMajoritySourceFileName(CString& strMajorityFileName);
+	void	ResetAutoRenameToMajorityTracking();
 };

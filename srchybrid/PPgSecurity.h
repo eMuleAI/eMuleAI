@@ -13,12 +13,16 @@ class CPPgSecurity : public CPropertyPage
 
 public:
 	CPPgSecurity();
+	static CString GetStoredIPFilterUpdateURL();
+	static bool UpdateIPFilterFromURL(const CString &url, bool bInteractive = true);
 
 	void Localize();
 	void DeleteDDB();
 
 protected:
 	CCustomAutoComplete *m_pacIPFilterURL;
+	bool				 m_bAutoUpdate;
+	int					 m_nPeriodDays;
 
 	void LoadSettings();
 
@@ -41,4 +45,6 @@ protected:
 	afx_msg void OnDestroy();
 	afx_msg void OnObfuscatedDisabledChange();
 	afx_msg void OnObfuscatedRequestedChange();
+	afx_msg void OnBnClickedAutoupdateIpfilter();
+	afx_msg void OnEnChangeIpfilterperiod();
 };

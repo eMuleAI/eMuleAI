@@ -1779,8 +1779,8 @@ CUpDownClient* pUploadCtx = NULL;
 					CSafeMemFile data_out(128);
 					if (sender->GetUDPVersion() > 3) {
 						if (reqfile->IsPartFile())
-							static_cast<CPartFile*>(reqfile)->WritePartStatus(data_out);
-						else
+							static_cast<CPartFile*>(reqfile)->WritePartStatus(data_out, sender);
+						else if (!reqfile->HideOvershares(data_out, sender))
 							data_out.WriteUInt16(0);
 					}
 					data_out.WriteUInt16((uint16)(theApp.uploadqueue->GetWaitingPosition(sender)));
@@ -1917,7 +1917,7 @@ CUpDownClient* pUploadCtx = NULL;
 							} else {
 								if (thePrefs.GetLogNatTraversalEvents())
 									DebugLog(_T("[NatTraversal] Failed to add new source for ephemeral REASKACK from %s:%u"), (LPCTSTR)ipstr(ip), port);
-								delete sender;
+								CUpDownClient::SafeDelete(sender);
 								sender = NULL;
 							}
 						}
