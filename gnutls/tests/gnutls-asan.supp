@@ -1,0 +1,11 @@
+# ignore a leak in softhsm2:
+#   certtool:generate_self_signed
+#   gnutls_x509_crt_privkey_sign
+#   pkcs11_sign_init
+#   C_SignInit
+#   OSSL::byteString2oid
+#   ASN1_STRING_type_new
+#   CRYPTO_zalloc
+# suppressions format is limiting
+# can't specify the entire stacktrace, hard to pick one of the above, so
+leak:libsofthsm2

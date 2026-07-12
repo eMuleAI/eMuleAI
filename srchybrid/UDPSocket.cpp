@@ -1,4 +1,4 @@
-//This file is part of eMule AI
+﻿//This file is part of eMule AI
 //Copyright (C)2002-2026 Merkur ( strEmail.Format("%s@%s", "devteam", "emule-project.net") / https://www.emule-project.net )
 //Copyright (C)2026 eMule AI
 //
@@ -28,6 +28,7 @@
 #include "Opcodes.h"
 #include "SafeFile.h"
 #include "PartFile.h"
+#include "eMuleAI/NetBind.h"
 #include "Packets.h"
 #include "IPFilter.h"
 #include "emuledlg.h"
@@ -130,13 +131,77 @@ CUDPSocket::~CUDPSocket()
 
 bool CUDPSocket::Create()
 {
-	if (thePrefs.GetServerUDPPort()) {
+	return Create(thePrefs.GetServerUDPPort(), thePrefs.GetBindAddrW());
+}
+
+static bool TryGetServerUDPBoundPort(CUDPSocket& socket, uint16& rnPort)
+{
+	sockaddr_in endpoint = {};
+	int iEndpointLen = sizeof(endpoint);
+	if (!socket.GetSockName(reinterpret_cast<sockaddr*>(&endpoint), &iEndpointLen) || endpoint.sin_family != AF_INET)
+		return false;
+	rnPort = ntohs(endpoint.sin_port);
+	return true;
+}
+
+bool CUDPSocket::Create(uint16 nServerUDPPort, LPCTSTR pszBindAddr)
+{
+	if (theApp.IsNetworkSocketCreationBlockedByBind()) {
+		WSASetLastError(WSAENETDOWN);
+		return false;
+	}
+
+	if (nServerUDPPort) {
 		VERIFY(m_udpwnd.CreateEx(0, AfxRegisterWndClass(0), _T("eMule Async DNS Resolver Socket #1"), 0, 0, 0, 0, 0, HWND_MESSAGE, NULL, 0));
 		m_hWndResolveMessage = m_udpwnd.m_hWnd;
 		m_udpwnd.m_pOwner = this;
-		if (CAsyncSocket::Create(thePrefs.GetServerUDPPort() == _UI16_MAX ? 0 : thePrefs.GetServerUDPPort(), SOCK_DGRAM, FD_READ | FD_WRITE, thePrefs.GetBindAddrW()))
-			return true;
-		LogError(LOG_STATUSBAR, _T("Error: Server UDP socket: Failed to create server UDP socket - %s"), (LPCTSTR)GetErrorMessage(CAsyncSocket::GetLastError()));
+		const bool bRandomServerUDPPort = nServerUDPPort == _UI16_MAX;
+		const int iMaxAttempts = bRandomServerUDPPort ? 8 : 1;
+		int nLastSocketError = 0;
+		for (int iAttempt = 0; iAttempt < iMaxAttempts; ++iAttempt) {
+			const uint16 nBindPort = bRandomServerUDPPort ? 0 : nServerUDPPort;
+			if (CAsyncSocket::Create(nBindPort, SOCK_DGRAM, FD_READ | FD_WRITE, pszBindAddr)) {
+				uint16 nBoundPort = nBindPort;
+				if (bRandomServerUDPPort && TryGetServerUDPBoundPort(*this, nBoundPort) && nBoundPort != 0 && nBoundPort == thePrefs.GetUDPPort()) {
+					DebugLogWarning(_T("Server UDP random socket selected client UDP port %u; retrying with a new OS-selected port"), nBoundPort);
+					Close();
+					continue;
+				}
+				if (thePrefs.IsIpGuardEnabled() && thePrefs.GetActiveBindResolveResult() == NBR_Resolved) {
+					const CAddress::EAF eBindFamily = thePrefs.GetActiveBindResolvedFamily();
+					if (eBindFamily == CAddress::IPv6) {
+						DebugLogError(_T("IP Guard bind enforcement: refusing server UDP socket because server UDP is IPv4-only while the active bind is IPv6 (interface=%s)"), (LPCTSTR)thePrefs.GetActiveBindInterfaceName());
+						Close();
+						WSASetLastError(WSAEAFNOSUPPORT);
+						return false;
+					}
+					if (eBindFamily == CAddress::IPv4) {
+						int nBindInterfaceError = 0;
+						if (!CNetBind::ApplyIpv4UnicastInterfaceOption(m_hSocket, AF_INET, true, true, thePrefs.GetActiveBindIpv4IfIndex(), &nBindInterfaceError)) {
+							DebugLogError(_T("IP Guard bind enforcement failed: IP_UNICAST_IF could not be applied to server UDP socket (interface=%s, ifIndex=%lu, error=%d)"),
+								(LPCTSTR)thePrefs.GetActiveBindInterfaceName(),
+								thePrefs.GetActiveBindIpv4IfIndex(),
+								nBindInterfaceError);
+							Close();
+							WSASetLastError(nBindInterfaceError);
+							return false;
+						}
+					}
+				}
+				return true;
+			}
+			nLastSocketError = CAsyncSocket::GetLastError();
+			DebugLogError(_T("Server UDP socket create failed: port=%u, configured=%u, clientUdp=%u, random=%u, bind=\"%s\", error=%d (%s)"),
+				nBindPort,
+				nServerUDPPort,
+				thePrefs.GetUDPPort(),
+				bRandomServerUDPPort ? 1 : 0,
+				pszBindAddr != NULL ? pszBindAddr : _T(""),
+				nLastSocketError,
+				(LPCTSTR)EscPercent(GetErrorMessage(nLastSocketError, 1)));
+			Close();
+		}
+		LogError(LOG_STATUSBAR, GetResString(_T("SERVER_UDP_SOCKET_CREATE_FAILED")), (LPCTSTR)GetErrorMessage(nLastSocketError != 0 ? nLastSocketError : CAsyncSocket::GetLastError()));
 	}
 	return false;
 }
@@ -235,8 +300,12 @@ bool CUDPSocket::ProcessPacket(const BYTE *packet, UINT size, UINT opcode, uint3
 							Debug(_T("ServerUDPMessage from %-21s - OP_GlobSearchResult(%u); %s\n"), (LPCTSTR)ipstr(nIP, nUDPPort - 4), iDbgPacket++, (LPCTSTR)DbgGetFileInfo(pDbgPacket), (LPCTSTR)DbgGetClientID(PeekUInt32(pDbgPacket + 16)), PeekUInt16(pDbgPacket + 20));
 						}
 					}
-					UINT uResultCount = theApp.searchlist->ProcessUDPSearchAnswer(data, true/*pServer->GetUnicodeSupport()*/, nIP, nUDPPort - 4);
-					theApp.emuledlg->searchwnd->AddEd2kSearchResults(uResultCount);
+					const UINT uPacketStart = static_cast<UINT>(data.GetPosition());
+					if (!theApp.QueueServerUdpSearchAnswerNetworkCommand(data.GetBuffer() + uPacketStart, static_cast<uint32>(data.GetLength() - uPacketStart), true, nIP, nUDPPort - 4)) {
+						UINT uResultCount = theApp.searchlist->ProcessUDPSearchAnswer(data, true/*pServer->GetUnicodeSupport()*/, nIP, nUDPPort - 4);
+						theApp.emuledlg->searchwnd->AddEd2kSearchResults(uResultCount);
+					} else
+						data.SeekToEnd();
 
 					// check if there is another source packet
 					iLeft = (int)(data.GetLength() - data.GetPosition());
@@ -277,13 +346,13 @@ bool CUDPSocket::ProcessPacket(const BYTE *packet, UINT size, UINT opcode, uint3
 					if (thePrefs.GetDebugServerUDPLevel() > 0)
 						Debug(_T("ServerUDPMessage from %-21s - OP_GlobFoundSources(%u); %s\n"), (LPCTSTR)ipstr(nIP, nUDPPort - 4), iDbgPacket++, (LPCTSTR)DbgGetFileInfo(fileid));
 					CPartFile *file = theApp.downloadqueue->GetFileByID(fileid);
-					if (file)
-						file->AddSources(&data, nIP, nUDPPort - 4, false);
-					else {
-						// skip sources for that file
-						UINT count = data.ReadUInt8();
-						data.Seek(count * (4 + 2ull), CFile::current);
-					}
+					const ULONGLONG uSourcePacketPosition = data.GetPosition();
+					if (file != NULL && !theApp.QueueDownloadFoundSourcesNetworkCommand(file, packet, size, uSourcePacketPosition, nIP, nUDPPort - 4, false))
+						theApp.QueueNetworkParserFailureEvent(CemuleApp::NetworkParseServerUdp, _T("udp-found-sources-queue-failed"), ::GetLastError());
+
+					// skip sources for that file
+					UINT count = data.ReadUInt8();
+					data.Seek(count * (4 + 2ull), CFile::current);
 
 					// check if there is another source packet
 					iLeft = (int)(data.GetLength() - data.GetPosition());
@@ -688,6 +757,9 @@ int CUDPSocket::SendTo(BYTE *lpBuf, int nBufLen, uint32 dwIP, uint16 nPort)
 {
 	// NOTE: *** This function is invoked from a *different* thread!
 	//Currently called only locally; sendLocker must be locked by the caller
+	if (theApp.IsNetworkActivityBlockedByBind())
+		return 0;
+
 	int result = CAsyncSocket::SendTo(lpBuf, nBufLen, nPort, ipstr(dwIP));
 	if (result == SOCKET_ERROR) {
 		DWORD dwError = (DWORD)CAsyncSocket::GetLastError();
@@ -704,6 +776,11 @@ int CUDPSocket::SendTo(BYTE *lpBuf, int nBufLen, uint32 dwIP, uint16 nPort)
 
 void CUDPSocket::SendBuffer(uint32 nIP, uint16 nPort, BYTE *pPacket, UINT uSize)
 {
+	if (theApp.IsNetworkActivityBlockedByBind()) {
+		delete[] pPacket;
+		return;
+	}
+
 	SServerUDPPacket *newpending = new SServerUDPPacket;
 	newpending->dwIP = nIP;
 	newpending->nPort = nPort;
@@ -717,6 +794,9 @@ void CUDPSocket::SendBuffer(uint32 nIP, uint16 nPort, BYTE *pPacket, UINT uSize)
 
 void CUDPSocket::SendPacket(Packet *packet, CServer *pServer, uint16 nSpecialPort, BYTE *pInRawPacket, uint32 nRawLen)
 {
+	if (theApp.IsNetworkActivityBlockedByBind())
+		return;
+
 	// Just for safety.
 	// Ensure that there are no stalled DNS queries and/or packets hanging endlessly in the queue.
 	const DWORD curTick = ::GetTickCount();

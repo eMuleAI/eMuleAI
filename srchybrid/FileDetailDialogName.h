@@ -37,11 +37,13 @@ public:
 	virtual BOOL OnInitDialog();
 
 	void SetFiles(const CSimpleArray<CObject*> *paFiles)	{ m_paFiles = paFiles; m_bDataChanged = true; }
+	void SetSnapshotFileName(const CString& strFileName)	{ m_strSnapshotFileName = strFileName; }
 	void Localize();
 
 protected:
 	CMuleListCtrl m_listFileNames;
 	const CSimpleArray<CObject*> *m_paFiles;
+	CString m_strSnapshotFileName;
 
 	UINT_PTR m_timer;
 	int m_aiColWidths[2];

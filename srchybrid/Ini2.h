@@ -30,6 +30,8 @@ void CMyClass::UpdateFromIni(bool bFromIni)
 #define SER_GETD(bGet,value,default) SerGet(bGet,value,#value,NULL,default)
 #define SER_ARRD(bGet,value,n,default) SerGet(bGet,value,n,#value,default)
 
+CCriticalSection& GetIniFileWriteLock();
+
 class CIni
 {
 public:

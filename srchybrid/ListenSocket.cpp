@@ -1,4 +1,4 @@
-﻿//This file is part of eMule AI
+//This file is part of eMule AI
 //Copyright (C)2002-2026 Merkur ( strEmail.Format("%s@%s", "devteam", "emule-project.net") / https://www.emule-project.net )
 //Copyright (C)2026 eMule AI
 //
@@ -30,6 +30,11 @@
 #include "SafeFile.h"
 #include "Packets.h"
 #include "OtherFunctions.h"
+#include "Preferences.h"
+#include "Log.h"
+#include "eMuleAI/QuicNatSocket.h"
+
+static const uint8 ESERVER_PEER_INFO_NATT_HINT_MARKER = 0xE1;
 
 static void AppendEServerExternalPortTail(CSafeMemFile& data, const CUpDownClient* client)
 {
@@ -65,6 +70,140 @@ static bool AppendEServerPeerInfoProbeToken(CSafeMemFile& data, CUpDownClient* c
 	return true;
 }
 
+static bool IsSourceExchangeOnlyMultiPacketTail(CSafeMemFile& data)
+{
+	bool bSawSourceRequest = false;
+	while (data.GetLength() > data.GetPosition()) {
+		const uint8 byOpcode = data.ReadUInt8();
+		switch (byOpcode) {
+		case OP_REQUESTSOURCES:
+			bSawSourceRequest = true;
+			break;
+		case OP_REQUESTSOURCES2:
+			if (data.GetLength() - data.GetPosition() < 3)
+				return false;
+			data.ReadUInt8();
+			data.ReadUInt16();
+			bSawSourceRequest = true;
+			break;
+		default:
+			return false;
+		}
+	}
+	return bSawSourceRequest;
+}
+
+static void SendEServerRelayStatusToClient(CUpDownClient* client, uint8 byStatus)
+{
+	if (client == NULL || client->socket == NULL || !client->socket->IsConnected())
+		return;
+
+	CSafeMemFile data_resp(7);
+	data_resp.WriteUInt32(0);
+	data_resp.WriteUInt16(0);
+	data_resp.WriteUInt8(byStatus);
+	AppendEServerExternalPortTail(data_resp, client);
+	Packet* reply = new Packet(data_resp, OP_EMULEPROT, OP_ESERVER_RELAY_RESPONSE);
+	theStats.AddUpDataOverheadOther(reply->size);
+	client->socket->SendPacket(reply, true, 0, true);
+}
+
+static const DWORD ESERVER_PENDING_RELAY_OWNER_GRACE_MS = 15000;
+
+static bool ForwardPendingEServerRelayPeerInfo(CUpDownClient* client, LPCTSTR pszSource, bool bRequireEServerBuddySupport)
+{
+	if (client == NULL || !client->HasLowID() || theApp.clientlist == NULL)
+		return false;
+
+	EServerRelayRequest* pReq = theApp.clientlist->FindPendingEServerRelayForTarget(client);
+	if (pReq != NULL && pReq->pRequester != NULL && theApp.clientlist->IsServedEServerBuddy(pReq->pRequester)) {
+		if (bRequireEServerBuddySupport && !client->SupportsEServerBuddy()) {
+			if (thePrefs.GetLogNatTraversalEvents()) {
+				AddDebugLogLine(false, _T("[eServerBuddy] %s: Target LowID=%u does not advertise eServer Buddy support; rejecting pending relay"),
+					pszSource, client->GetUserIDHybrid());
+			}
+			SendEServerRelayStatusToClient(pReq->pRequester, ESERVERBUDDY_STATUS_REJECTED);
+			theApp.clientlist->RemovePendingEServerRelayRequest(pReq);
+			return false;
+		}
+
+		if (thePrefs.GetLogNatTraversalEvents()) {
+			AddDebugLogLine(false, _T("[eServerBuddy] %s: Found pending relay for LowID=%u, sending OP_ESERVER_PEER_INFO to %s"),
+				pszSource, client->GetUserIDHybrid(), (LPCTSTR)EscPercent(client->DbgGetClientInfo()));
+		}
+
+		CSafeMemFile data_forward(44);
+		data_forward.WriteUInt32(pReq->dwRequesterIP);
+		data_forward.WriteUInt16(pReq->nRequesterKadPort);
+		data_forward.WriteHash16(pReq->pRequester->GetUserHash());
+		data_forward.WriteHash16(pReq->fileHash);
+		AppendEServerPeerInfoProbeToken(data_forward, client);
+		data_forward.WriteUInt8(ESERVER_PEER_INFO_NATT_HINT_MARKER);
+		data_forward.WriteUInt8(pReq->pRequester->GetConnectOptions(true, true, true));
+		Packet* fwdPacket = new Packet(data_forward, OP_EMULEPROT, OP_ESERVER_PEER_INFO);
+		theStats.AddUpDataOverheadOther(fwdPacket->size);
+		client->socket->SendPacket(fwdPacket, true, 0, true);
+
+		if (thePrefs.GetLogNatTraversalEvents()) {
+			AddDebugLogLine(false, _T("[eServerBuddy] %s: Sent OP_ESERVER_PEER_INFO to target - RequesterIP=%s RequesterPort=%u"),
+				pszSource, (LPCTSTR)ipstr(pReq->dwRequesterIP), pReq->nRequesterKadPort);
+		}
+
+		if (client->HasFreshObservedExternalUdpPort()) {
+			uint16 nObservedPort = client->GetObservedExternalUdpPort();
+			if (nObservedPort != 0)
+				pReq->nTargetKadPort = nObservedPort;
+		}
+		if (pReq->nTargetKadPort == 0) {
+			uint16 nHelloPort = client->GetKadPort();
+			if (nHelloPort == 0)
+				nHelloPort = client->GetUDPPort();
+			if (nHelloPort != 0)
+				pReq->nTargetKadPort = nHelloPort;
+		}
+		if (pReq->dwTargetPublicIP == 0) {
+			const CAddress& targetIP = client->GetIP();
+			if (!targetIP.IsNull() && targetIP.IsPublicIP())
+				pReq->dwTargetPublicIP = targetIP.ToUInt32(false);
+		}
+
+		const uint32 dwEarlyFinalIP = pReq->dwTargetPublicIP;
+		const uint16 nEarlyFinalPort = pReq->nTargetKadPort;
+		if (!client->HasFreshObservedExternalUdpPort() && client->SupportsEServerBuddyExternalUdpPort() && client->GetEServerExtPortProbeToken() != 0) {
+			if (!pReq->bAwaitingTargetExtPort) {
+				pReq->bAwaitingTargetExtPort = true;
+				pReq->dwTargetExtPortWaitStart = ::GetTickCount();
+			}
+			if (thePrefs.GetLogNatTraversalEvents()) {
+				AddDebugLogLine(false, _T("[eServerBuddy] %s: Waiting %u ms for target external UDP probe before local port fallback (LowID=%u)"),
+					pszSource, (UINT)ESERVER_EXT_UDP_PORT_WAIT_TIME, client->GetUserIDHybrid());
+			}
+		} else if (theApp.clientlist->TrySendPendingEServerRelayResponseForTarget(client)) {
+			if (thePrefs.GetLogNatTraversalEvents()) {
+				CAddress sentIP(dwEarlyFinalIP, false);
+				AddDebugLogLine(false, _T("[eServerBuddy] %s: Early final relay response sent for LowID=%u Endpoint=%s:%u"),
+					pszSource, client->GetUserIDHybrid(), (LPCTSTR)ipstr(sentIP), (UINT)nEarlyFinalPort);
+			}
+		}
+		return true;
+	}
+
+	if (pReq != NULL) {
+		const DWORD dwRelayAge = (DWORD)(::GetTickCount() - pReq->dwRequestTime);
+		if (dwRelayAge >= ESERVER_PENDING_RELAY_OWNER_GRACE_MS) {
+			theApp.clientlist->RemovePendingEServerRelayRequest(pReq);
+			if (thePrefs.GetLogNatTraversalEvents()) {
+				AddDebugLogLine(false, _T("[eServerBuddy] %s: Dropped stale pending relay for LowID=%u (age=%u ms)"),
+					pszSource, client->GetUserIDHybrid(), (UINT)dwRelayAge);
+			}
+		} else if (thePrefs.GetLogNatTraversalEvents()) {
+			AddDebugLogLine(false, _T("[eServerBuddy] %s: Pending relay owner not ready yet for LowID=%u (age=%u ms), keeping"),
+				pszSource, client->GetUserIDHybrid(), (UINT)dwRelayAge);
+		}
+	}
+	return false;
+}
+
 #include "UploadQueue.h"
 #include "ServerList.h"
 #include "Server.h"
@@ -79,8 +218,21 @@ static bool AppendEServerPeerInfoProbeToken(CSafeMemFile& data, CUpDownClient* c
 #include "Kademlia/Kademlia/prefs.h"
 #include "ClientUDPSocket.h"
 #include "SHAHashSet.h"
-#include "Log.h"
 #include "SearchList.h"
+
+static void RefreshClientSoftwareDisplayIfChanged(CUpDownClient* client, const CString& strOldSoftware)
+{
+	if (client == NULL || strOldSoftware == client->DbgGetFullClientSoftVer())
+		return;
+	if (theApp.emuledlg == NULL || theApp.emuledlg->transferwnd == NULL)
+		return;
+
+	theApp.emuledlg->transferwnd->GetClientList()->RefreshClient(client, -1, CClientListCtrl::kSortImpactSoftware);
+	theApp.emuledlg->transferwnd->GetUploadList()->RefreshClient(client);
+	theApp.emuledlg->transferwnd->GetQueueList()->RefreshClient(client);
+	theApp.emuledlg->transferwnd->GetDownloadClientsList()->RefreshClient(client);
+}
+
 
 static bool IsClientServerMismatchingCurrentED2KServer(const CUpDownClient* client)
 {
@@ -109,6 +261,68 @@ static bool IsClientKnownOnCurrentED2KServer(const CUpDownClient* client)
 	return !IsClientServerMismatchingCurrentED2KServer(client);
 }
 
+static bool IsOwnLowID(uint32 dwLowID)
+{
+	if (dwLowID == 0)
+		return false;
+
+	const uint32 dwOwnID = theApp.GetID();
+	return dwLowID == dwOwnID || htonl(dwLowID) == dwOwnID;
+}
+
+static bool IsSelfPublicEndpointForDifferentClient(uint32 dwEndpointIP, uint16 nEndpointPort, uint32 dwPeerLowID, const uchar* peerHash)
+{
+	if (dwEndpointIP == 0)
+		return false;
+
+	CAddress endpointAddr(dwEndpointIP, false);
+	CAddress myPublicAddr = theApp.GetPublicIP();
+	if (endpointAddr.IsNull() || myPublicAddr.IsNull() || endpointAddr.GetType() != CAddress::IPv4 || myPublicAddr.GetType() != CAddress::IPv4)
+		return false;
+	if (!endpointAddr.IsPublicIP() || !myPublicAddr.IsPublicIP() || endpointAddr.ToUInt32(false) != myPublicAddr.ToUInt32(false))
+		return false;
+
+	// Different clients behind the same NAT legitimately share our public IP.
+	// Reject only if the relayed endpoint can be our own UDP mapping.
+	if (nEndpointPort != 0) {
+		uint16 nOwnUdpPort = thePrefs.GetBestExternalUdpPort();
+		if (nOwnUdpPort == 0)
+			nOwnUdpPort = thePrefs.GetUDPPort();
+		if (nOwnUdpPort != 0 && nEndpointPort != nOwnUdpPort)
+			return false;
+	}
+
+	if (peerHash != NULL && !isnulmd4(peerHash))
+		return !md4equ(peerHash, thePrefs.GetUserHash());
+
+	if (dwPeerLowID != 0)
+		return !IsOwnLowID(dwPeerLowID);
+
+	return false;
+}
+
+static bool IsUsableEServerRelayEndpoint(uint32 dwEndpointIP, uint16 nEndpointPort, uint32 dwPeerLowID, const uchar* peerHash, LPCTSTR pszContext)
+{
+	CAddress endpointAddr(dwEndpointIP, false);
+	if (dwEndpointIP == 0 || nEndpointPort == 0 || endpointAddr.IsNull() || !endpointAddr.IsPublicIP()) {
+		if (thePrefs.GetLogNatTraversalEvents()) {
+			AddDebugLogLine(false, _T("[eServerBuddy] %s rejected invalid endpoint %s:%u"),
+				pszContext != NULL ? pszContext : _T("Relay endpoint"), (LPCTSTR)ipstr(endpointAddr), nEndpointPort);
+		}
+		return false;
+	}
+
+	if (IsSelfPublicEndpointForDifferentClient(dwEndpointIP, nEndpointPort, dwPeerLowID, peerHash)) {
+		if (thePrefs.GetLogNatTraversalEvents()) {
+			AddDebugLogLine(false, _T("[eServerBuddy] %s rejected self-public endpoint for a different client: %s:%u LowID=%u"),
+				pszContext != NULL ? pszContext : _T("Relay endpoint"), (LPCTSTR)ipstr(endpointAddr), nEndpointPort, dwPeerLowID);
+		}
+		return false;
+	}
+
+	return true;
+}
+
 static bool IsClientTrustedForPeerInfoFallback(const CUpDownClient* client)
 {
 	// Accept only the narrow serving-buddy handshake race while we are connecting.
@@ -121,7 +335,84 @@ static bool IsClientTrustedForPeerInfoFallback(const CUpDownClient* client)
 	return IsClientKnownOnCurrentED2KServer(client);
 }
 
-static const DWORD ESERVER_PENDING_RELAY_OWNER_GRACE_MS = 15000;
+static bool IsClientTrustedForCrossBuddyPeerInfo(const CUpDownClient* client)
+{
+	if (client == NULL || theApp.clientlist == NULL || client->HasLowID() || !client->SupportsEServerBuddy() || client->IsBanned())
+		return false;
+
+	return IsClientKnownOnCurrentED2KServer(client);
+}
+
+static bool IsCrossBuddyPeerInfoSharedFileContextAcceptable(const uchar* fileHash, bool bHasFileContext)
+{
+	return bHasFileContext && theApp.sharedfiles != NULL && theApp.sharedfiles->GetFileByID(fileHash) != NULL;
+}
+
+static const DWORD ESERVER_CROSS_BUDDY_PEERINFO_DUP_SUPPRESS_MS = SEC2MS(30);
+
+struct EServerCrossBuddyPeerInfoDedupEntry
+{
+	DWORD dwTick;
+	uint32 dwSenderIP;
+	uint16 nSenderPort;
+	uchar senderHash[16];
+	uint32 dwPeerIP;
+	uint16 nPeerPort;
+	uchar requesterHash[16];
+	uchar fileHash[16];
+};
+
+static EServerCrossBuddyPeerInfoDedupEntry s_aCrossBuddyPeerInfoDedupEntries[32];
+static UINT s_uCrossBuddyPeerInfoDedupNextEntry = 0;
+
+static void BuildCrossBuddyPeerInfoSenderKey(const CUpDownClient* client, uchar senderHash[16], uint32& dwSenderIP, uint16& nSenderPort)
+{
+	md4clr(senderHash);
+	dwSenderIP = 0;
+	nSenderPort = 0;
+	if (client == NULL)
+		return;
+
+	if (client->HasValidHash())
+		md4cpy(senderHash, client->GetUserHash());
+	if (!client->GetIP().IsNull() && client->GetIP().GetType() == CAddress::IPv4)
+		dwSenderIP = client->GetIP().ToUInt32(false);
+	nSenderPort = client->GetUserPort();
+}
+
+static bool IsDuplicateCrossBuddyPeerInfo(uint32 dwPeerIP, uint16 nPeerPort, const uchar* requesterHash, const uchar* fileHash, const uchar* senderHash, uint32 dwSenderIP, uint16 nSenderPort)
+{
+	const DWORD dwNow = ::GetTickCount();
+
+	for (UINT i = 0; i < _countof(s_aCrossBuddyPeerInfoDedupEntries); ++i) {
+		const EServerCrossBuddyPeerInfoDedupEntry& entry = s_aCrossBuddyPeerInfoDedupEntries[i];
+		if (entry.dwTick == 0 || (DWORD)(dwNow - entry.dwTick) >= ESERVER_CROSS_BUDDY_PEERINFO_DUP_SUPPRESS_MS)
+			continue;
+
+		if (entry.dwSenderIP == dwSenderIP && entry.nSenderPort == nSenderPort
+			&& memcmp(entry.senderHash, senderHash, sizeof(entry.senderHash)) == 0
+			&& entry.dwPeerIP == dwPeerIP && entry.nPeerPort == nPeerPort
+			&& memcmp(entry.requesterHash, requesterHash, sizeof(entry.requesterHash)) == 0
+			&& memcmp(entry.fileHash, fileHash, sizeof(entry.fileHash)) == 0)
+			return true;
+	}
+	return false;
+}
+
+static void RememberCrossBuddyPeerInfo(uint32 dwPeerIP, uint16 nPeerPort, const uchar* requesterHash, const uchar* fileHash, const uchar* senderHash, uint32 dwSenderIP, uint16 nSenderPort)
+{
+	EServerCrossBuddyPeerInfoDedupEntry& entry = s_aCrossBuddyPeerInfoDedupEntries[s_uCrossBuddyPeerInfoDedupNextEntry % _countof(s_aCrossBuddyPeerInfoDedupEntries)];
+	entry.dwTick = ::GetTickCount();
+	entry.dwSenderIP = dwSenderIP;
+	entry.nSenderPort = nSenderPort;
+	md4cpy(entry.senderHash, senderHash);
+	entry.dwPeerIP = dwPeerIP;
+	entry.nPeerPort = nPeerPort;
+	md4cpy(entry.requesterHash, requesterHash);
+	md4cpy(entry.fileHash, fileHash);
+	++s_uCrossBuddyPeerInfoDedupNextEntry;
+}
+
 
 static void RegisterEServerProtocolViolation(CUpDownClient* client, LPCTSTR pszContext)
 {
@@ -146,6 +437,150 @@ static void RegisterEServerProtocolViolation(CUpDownClient* client, LPCTSTR pszC
 #undef THIS_FILE
 static char THIS_FILE[] = __FILE__;
 #endif
+
+static bool GetResolvedP2PListenBindAddr(CString& rstrBindAddr, ADDRESS_FAMILY& rnSocketFamily)
+{
+	rstrBindAddr.Empty();
+	rnSocketFamily = AF_INET6;
+	if (thePrefs.HasExplicitBindSelection()) {
+		thePrefs.RefreshBindResolution();
+		if (thePrefs.GetActiveBindResolveResult() != NBR_Resolved || thePrefs.GetP2PBindAddr() == NULL)
+			return false;
+	}
+	if (thePrefs.GetP2PBindAddr() != NULL) {
+		rstrBindAddr = thePrefs.GetP2PBindAddr();
+		CAddress bindAddress;
+		if (bindAddress.FromString(rstrBindAddr, false) && bindAddress.GetType() == CAddress::IPv4)
+			rnSocketFamily = AF_INET;
+	}
+	return true;
+}
+
+static bool BuildP2PListenEndpoint(const CString& rstrBindAddr, uint16 nPort, sockaddr_in6& endpoint)
+{
+	memset(&endpoint, 0, sizeof(endpoint));
+	endpoint.sin6_family = AF_INET6;
+	endpoint.sin6_port = htons(nPort);
+	if (rstrBindAddr.IsEmpty()) {
+		endpoint.sin6_addr = in6addr_any;
+		return true;
+	}
+
+	sockaddr_storage ss = {};
+	int sslen = sizeof(ss);
+	CStringA strBindAddrA(rstrBindAddr);
+	LPSTR pszBindAddr = const_cast<LPSTR>((LPCSTR)strBindAddrA);
+	if (WSAStringToAddressA(pszBindAddr, AF_INET6, NULL, reinterpret_cast<sockaddr*>(&ss), &sslen) == 0) {
+		endpoint.sin6_addr = reinterpret_cast<sockaddr_in6*>(&ss)->sin6_addr;
+		return true;
+	}
+
+	sockaddr_in sa4 = {};
+	int sa4len = sizeof(sa4);
+	if (WSAStringToAddressA(pszBindAddr, AF_INET, NULL, reinterpret_cast<sockaddr*>(&sa4), &sa4len) == 0) {
+		memset(&endpoint.sin6_addr, 0, sizeof(endpoint.sin6_addr));
+		endpoint.sin6_addr.s6_addr[10] = 0xFF;
+		endpoint.sin6_addr.s6_addr[11] = 0xFF;
+		memcpy(&endpoint.sin6_addr.s6_addr[12], &sa4.sin_addr, sizeof(sa4.sin_addr));
+		return true;
+	}
+
+	return false;
+}
+
+static bool GetCurrentP2PListenEndpoint(CAsyncSocketEx& socket, sockaddr_in6& endpoint)
+{
+	sockaddr_storage ss = {};
+	int sslen = sizeof(ss);
+	if (!socket.GetSockName(reinterpret_cast<sockaddr*>(&ss), &sslen))
+		return false;
+
+	memset(&endpoint, 0, sizeof(endpoint));
+	endpoint.sin6_family = AF_INET6;
+	if (ss.ss_family == AF_INET6) {
+		const sockaddr_in6* pAddr6 = reinterpret_cast<const sockaddr_in6*>(&ss);
+		endpoint.sin6_addr = pAddr6->sin6_addr;
+		endpoint.sin6_port = pAddr6->sin6_port;
+		return true;
+	}
+	if (ss.ss_family == AF_INET) {
+		const sockaddr_in* pAddr4 = reinterpret_cast<const sockaddr_in*>(&ss);
+		memset(&endpoint.sin6_addr, 0, sizeof(endpoint.sin6_addr));
+		endpoint.sin6_addr.s6_addr[10] = 0xFF;
+		endpoint.sin6_addr.s6_addr[11] = 0xFF;
+		memcpy(&endpoint.sin6_addr.s6_addr[12], &pAddr4->sin_addr, sizeof(pAddr4->sin_addr));
+		endpoint.sin6_port = pAddr4->sin_port;
+		return true;
+	}
+	return false;
+}
+
+static bool IsAnyP2PEndpointAddress(const sockaddr_in6& endpoint)
+{
+	return memcmp(&endpoint.sin6_addr, &in6addr_any, sizeof(endpoint.sin6_addr)) == 0;
+}
+
+static bool IsSameP2PEndpoint(const sockaddr_in6& left, const sockaddr_in6& right)
+{
+	return left.sin6_port == right.sin6_port && memcmp(&left.sin6_addr, &right.sin6_addr, sizeof(left.sin6_addr)) == 0;
+}
+
+static bool CanProbeP2PListenEndpoint(const sockaddr_in6& currentEndpoint, const sockaddr_in6& targetEndpoint)
+{
+	if (currentEndpoint.sin6_port != targetEndpoint.sin6_port)
+		return true;
+	if (IsSameP2PEndpoint(currentEndpoint, targetEndpoint))
+		return true;
+	return !IsAnyP2PEndpointAddress(currentEndpoint) && !IsAnyP2PEndpointAddress(targetEndpoint);
+}
+
+static bool CreateP2PListenProbe(CAsyncSocketEx& socket, uint16& rnCreatedPort, ADDRESS_FAMILY& rnCreatedFamily, bool bAllowRandomPortRetry)
+{
+	rnCreatedPort = 0;
+	rnCreatedFamily = AF_UNSPEC;
+	CString strBindAddr;
+	ADDRESS_FAMILY nSocketFamily = AF_INET6;
+	if (!GetResolvedP2PListenBindAddr(strBindAddr, nSocketFamily))
+		return false;
+
+	const uint16 nInitialPort = thePrefs.GetPort();
+	bool bCreated = false;
+	bool bRetriedRandomPort = false;
+	for (int iAttempt = 0; iAttempt < 8; ++iAttempt) {
+		if (socket.Create(thePrefs.GetPort(), SOCK_STREAM, FD_ACCEPT, strBindAddr, nSocketFamily)) {
+			bCreated = true;
+			break;
+		}
+
+		socket.Close();
+		if (!bAllowRandomPortRetry || !thePrefs.IsPortRandomizationOnStartupEnabled())
+			break;
+
+		const uint16 nOldPort = thePrefs.GetPort();
+		uint16 nNewPort = nOldPort;
+		for (int iPortAttempt = 0; iPortAttempt < 8 && nNewPort == nOldPort; ++iPortAttempt)
+			nNewPort = CPreferences::GetRandomTCPPort();
+		if (nNewPort == 0 || nNewPort == nOldPort)
+			break;
+		thePrefs.port = nNewPort;
+		bRetriedRandomPort = true;
+	}
+	if (!bCreated) {
+		thePrefs.port = nInitialPort;
+		return false;
+	}
+	if (!socket.Listen()) {
+		socket.Close();
+		thePrefs.port = nInitialPort;
+		return false;
+	}
+	if (bRetriedRandomPort && thePrefs.IsOpenListenPortsInWindowsFirewallEnabled())
+		theApp.EnsureWindowsFirewallListenPortRules(true);
+
+	rnCreatedPort = thePrefs.GetPort();
+	rnCreatedFamily = nSocketFamily;
+	return true;
+}
 
 // CClientReqSocket
 
@@ -317,7 +752,7 @@ void CClientReqSocket::Safe_Delete()
 	CEMSocket::SetConState(EMS_DISCONNECTED);
 	AsyncSelect(FD_CLOSE);
 	deltimer = ::GetTickCount();
-	if (m_SocketData.hSocket != INVALID_SOCKET || HaveUtpLayer()) // deadlake PROXYSUPPORT - changed to AsyncSocketEx
+	if (m_SocketData.hSocket != INVALID_SOCKET || HaveNatTraversalLayer()) // deadlake PROXYSUPPORT - changed to AsyncSocketEx
 		ShutDown(CAsyncSocket::both);
 	if (client) {
 		client->socket = NULL;
@@ -410,7 +845,7 @@ bool CClientReqSocket::ProcessPacket(const BYTE *packet, uint32 size, UINT opcod
 				(socket != NULL) ? _T("set") : _T("null"),
 				(client && client->socket && client->socket->HaveUtpLayer()) ? 1 : 0,
 				bNewClient ? 1 : 0,
-				client ? (LPCTSTR)EscPercent(client->DbgGetClientInfo()) : _T("<null>"));
+				client ? (LPCTSTR)EscPercent(client->DbgGetClientInfo()) : (LPCTSTR)_T("<null>"));
 		}
 
 		theApp.emuledlg->transferwnd->GetClientList()->RefreshClient(client);			// send a response packet with standard informations
@@ -422,81 +857,8 @@ bool CClientReqSocket::ProcessPacket(const BYTE *packet, uint32 size, UINT opcod
 			if (client)
 				client->ConnectionEstablished();
 
-			// eServer Buddy: Check if this incoming client is a pending relay target
-			// This handles the case where we (HighID buddy) sent a server callback request
-			// and the target LowID client is now connecting to us
-			if (client && client->HasLowID() && !theApp.serverconnect->IsLowID()) {
-				EServerRelayRequest* pReq = theApp.clientlist->FindPendingEServerRelayByLowID(client->GetUserIDHybrid());
-				if (pReq && pReq->pRequester && theApp.clientlist->IsServedEServerBuddy(pReq->pRequester)) {
-					if (thePrefs.GetLogNatTraversalEvents()) {
-						AddDebugLogLine(false, _T("[eServerBuddy] OP_HELLO: Found pending relay for LowID=%u, sending OP_ESERVER_PEER_INFO to %s"),
-							client->GetUserIDHybrid(), (LPCTSTR)EscPercent(client->DbgGetClientInfo()));
-					}
-					
-					// Send OP_ESERVER_PEER_INFO to this newly connected client with requester's info.
-					if (thePrefs.GetDebugClientTCPLevel() > 0)
-						DebugSend("OP_EServerPeerInfo (from Hello)", client);
-					CSafeMemFile data_forward(38);
-					data_forward.WriteUInt32(pReq->dwRequesterIP);
-					data_forward.WriteUInt16(pReq->nRequesterKadPort);
-					data_forward.WriteHash16(pReq->pRequester->GetUserHash());
-					if (!isnulmd4(pReq->fileHash))
-						data_forward.WriteHash16(pReq->fileHash);
-					AppendEServerPeerInfoProbeToken(data_forward, client);
-					Packet* fwdPacket = new Packet(data_forward, OP_EMULEPROT, OP_ESERVER_PEER_INFO);
-					theStats.AddUpDataOverheadOther(fwdPacket->size);
-					// Relay handshake control packets must not wait behind throttled traffic.
-					SendPacket(fwdPacket, true, 0, true);
-					
-					if (thePrefs.GetLogNatTraversalEvents()) {
-						AddDebugLogLine(false, _T("[eServerBuddy] OP_HELLO: Sent OP_ESERVER_PEER_INFO to target - RequesterIP=%s RequesterPort=%u"),
-							(LPCTSTR)ipstr(htonl(pReq->dwRequesterIP)), pReq->nRequesterKadPort);
-					}
-
-					// ACK may be delayed or lost on unstable paths. Prime relay endpoint from this Hello and
-					// try to complete final response early so requester can seed NAT expectation immediately.
-					if (client->HasFreshObservedExternalUdpPort()) {
-						uint16 nObservedPort = client->GetObservedExternalUdpPort();
-						if (nObservedPort != 0)
-							pReq->nTargetKadPort = nObservedPort;
-					}
-					if (pReq->nTargetKadPort == 0) {
-						uint16 nHelloPort = client->GetKadPort();
-						if (nHelloPort == 0)
-							nHelloPort = client->GetUDPPort();
-						if (nHelloPort != 0)
-							pReq->nTargetKadPort = nHelloPort;
-					}
-					if (pReq->dwTargetPublicIP == 0) {
-						const CAddress& targetIP = client->GetIP();
-						if (!targetIP.IsNull() && targetIP.IsPublicIP())
-							pReq->dwTargetPublicIP = targetIP.ToUInt32(false);
-					}
-					uint32 dwEarlyFinalIP = pReq->dwTargetPublicIP;
-					uint16 nEarlyFinalPort = pReq->nTargetKadPort;
-					if (theApp.clientlist->TrySendPendingEServerRelayResponseForTarget(client)) {
-						if (thePrefs.GetLogNatTraversalEvents()) {
-							CAddress sentIP(dwEarlyFinalIP, false);
-							AddDebugLogLine(false, _T("[eServerBuddy] OP_HELLO: Early final relay response sent for LowID=%u Endpoint=%s:%u"),
-								client->GetUserIDHybrid(), (LPCTSTR)ipstr(sentIP), (UINT)nEarlyFinalPort);
-						}
-					}
-				} else if (pReq != NULL) {
-					const DWORD dwRelayAge = (DWORD)(::GetTickCount() - pReq->dwRequestTime);
-					if (dwRelayAge >= ESERVER_PENDING_RELAY_OWNER_GRACE_MS) {
-						theApp.clientlist->RemovePendingEServerRelayByLowID(client->GetUserIDHybrid());
-						if (thePrefs.GetLogNatTraversalEvents()) {
-							AddDebugLogLine(false, _T("[eServerBuddy] OP_HELLO: Dropped stale pending relay for LowID=%u (age=%u ms)"),
-								client->GetUserIDHybrid(), (UINT)dwRelayAge);
-						}
-					} else {
-						if (thePrefs.GetLogNatTraversalEvents()) {
-							AddDebugLogLine(false, _T("[eServerBuddy] OP_HELLO: Pending relay owner not ready yet for LowID=%u (age=%u ms), keeping"),
-								client->GetUserIDHybrid(), (UINT)dwRelayAge);
-						}
-					}
-				}
-			}
+			// eServer Buddy: complete pending server-callback relay for this LowID target.
+			ForwardPendingEServerRelayPeerInfo(client, _T("OP_HELLO"), true);
 
 			ASSERT(client);
 			if (client) {
@@ -701,9 +1063,7 @@ bool CClientReqSocket::ProcessPacket(const BYTE *packet, uint32 size, UINT opcod
 			uchar cfilehash[MDX_DIGEST_SIZE];
 			data.ReadHash16(cfilehash);
 			CPartFile* file = theApp.downloadqueue->GetFileByID(cfilehash);
-			if (file == NULL)
-				client->CheckFailedFileIdReqs(cfilehash);
-			client->ProcessFileStatus(false, data, file);
+			theApp.QueueDownloadFileStatusNetworkCommand(client, file, packet, size, data.GetPosition(), false);
 		}
 		break;
 		case OP_STARTUPLOADREQ:
@@ -733,19 +1093,19 @@ bool CClientReqSocket::ProcessPacket(const BYTE *packet, uint32 size, UINT opcod
 				break;
 
 			if (size == 16) {
-				// NAT-T/uTP connections naturally involve multiple retry attempts due to:
+				// NAT-T connections naturally involve multiple retry attempts due to:
 				// - NAT hole punching process requiring multiple packets
-				// - uTP packet loss and retransmission mechanisms
+				// - UDP transport packet loss and retransmission mechanisms
 				// - Connection establishment through intermediary peers
-				// Therefore, bypass aggressive check entirely for NAT-T/uTP connections
-				bool bHasUtpLayer = (client->socket && client->socket->HaveUtpLayer());
+				// Therefore, bypass aggressive check entirely for NAT-T connections.
+				bool bHasNatTraversalLayer = (client->socket && client->socket->HaveNatTraversalLayer());
 				bool bHasKadPort = (client->GetKadPort() != 0);
-				bool bIsNatTraversalConnection = bHasUtpLayer || bHasKadPort;
+				bool bIsNatTraversalConnection = bHasNatTraversalLayer || bHasKadPort;
 				
 				if (thePrefs.GetLogNatTraversalEvents()) {
-					AddDebugLogLine(DLP_LOW, false, _T("[NatTraversal] OP_STARTUPLOADREQ aggressive check: socket=%s uTP=%d KadPort=%u NAT-T=%d counter=%u for %s"),
+					AddDebugLogLine(DLP_LOW, false, _T("[NatTraversal] OP_STARTUPLOADREQ aggressive check: socket=%s NATLayer=%d KadPort=%u NAT-T=%d counter=%u for %s"),
 						client->socket ? _T("YES") : _T("NULL"),
-						bHasUtpLayer ? 1 : 0,
+						bHasNatTraversalLayer ? 1 : 0,
 						(unsigned)client->GetKadPort(),
 						bIsNatTraversalConnection ? 1 : 0,
 						(unsigned)client->uiULAskingCounter,
@@ -781,11 +1141,11 @@ bool CClientReqSocket::ProcessPacket(const BYTE *packet, uint32 size, UINT opcod
 					if (client->IsDownloading()) {
 							if (client->socket != NULL && client->socket->IsConnected() && client->CheckHandshakeFinished()) {
 								// Client got upload slot - send accept only when socket and handshake are ready.
-								Packet *packet = new Packet(OP_ACCEPTUPLOADREQ, 0);
-								theStats.AddUpDataOverheadFileRequest(packet->size);
+								Packet *acceptPacket = new Packet(OP_ACCEPTUPLOADREQ, 0);
+								theStats.AddUpDataOverheadFileRequest(acceptPacket->size);
 								if (thePrefs.GetDebugClientTCPLevel() > 0)
 									DebugSend("OP_AcceptUploadReq", client);
-								client->SendPacket(packet, true);
+								client->SendPacket(acceptPacket, true);
 								if (thePrefs.GetLogNatTraversalEvents())
 									AddDebugLogLine(DLP_LOW, false, _T("[NatTraversal] Uploader: sent OP_ACCEPTUPLOADREQ to %s (IsDownloading=true)"), (LPCTSTR)EscPercent(client->DbgGetClientInfo()));
 							} else if (thePrefs.GetLogNatTraversalEvents()) {
@@ -797,6 +1157,7 @@ bool CClientReqSocket::ProcessPacket(const BYTE *packet, uint32 size, UINT opcod
 							if (thePrefs.GetLogNatTraversalEvents())
 								AddDebugLogLine(DLP_LOW, false, _T("[NatTraversal] Uploader: sent queue rank to %s (IsDownloading=false)"), (LPCTSTR)EscPercent(client->DbgGetClientInfo()));
 						}
+
 				}
 				else
 					client->CheckFailedFileIdReqs(packet);
@@ -886,7 +1247,7 @@ bool CClientReqSocket::ProcessPacket(const BYTE *packet, uint32 size, UINT opcod
 				
 				if (reqfileNr2 != NULL && reqfileNr2 != reqfileNr1) {
 					// Safe logging: expected file may be NULL when it was deleted during upload
-					const CString sExpectedName = reqfileNr2 ? reqfileNr2->GetFileName() : _T("<NULL>");
+					const CString sExpectedName = reqfileNr2 ? reqfileNr2->GetFileName() : CString(_T("<NULL>"));
 					if (thePrefs.GetLogUlDlEvents())
 						AddProtectionLogLine(false, _T("File hot swapping allowed [ProcessPacket]: (client=%s, expected=%s, asked=%s)"),
 							(LPCTSTR)EscPercent(client->GetUserName()), (LPCTSTR)EscPercent(sExpectedName), (LPCTSTR)EscPercent(reqfileNr1->GetFileName()));
@@ -914,12 +1275,23 @@ bool CClientReqSocket::ProcessPacket(const BYTE *packet, uint32 size, UINT opcod
 			if (thePrefs.GetDebugClientTCPLevel() > 0)
 				DebugRecv("OP_CancelTransfer", client);
 			theStats.AddDownDataOverheadFileRequest(size);
+			if (thePrefs.GetLogNatTraversalEvents()) {
+				AddDebugLogLine(DLP_LOW, false, _T("[NatTraversal] OP_CANCELTRANSFER received from %s (uploadState=%s, file=%s)"),
+					(LPCTSTR)EscPercent(client->DbgGetClientInfo()), client->DbgGetUploadState(),
+					(LPCTSTR)DbgGetFileInfo(client->GetUploadFileID()));
+			}
 			theApp.uploadqueue->RemoveFromUploadQueue(client, _T("Remote client cancelled transfer."));
 			break;
 		case OP_END_OF_DOWNLOAD:
 			if (thePrefs.GetDebugClientTCPLevel() > 0)
 				DebugRecv("OP_EndOfDownload", client, (size >= 16) ? packet : NULL);
 			theStats.AddDownDataOverheadFileRequest(size);
+			if (thePrefs.GetLogNatTraversalEvents()) {
+				AddDebugLogLine(DLP_LOW, false, _T("[NatTraversal] OP_END_OF_DOWNLOAD received from %s (uploadState=%s, fileMatch=%d, file=%s)"),
+					(LPCTSTR)EscPercent(client->DbgGetClientInfo()), client->DbgGetUploadState(),
+					(size >= 16 && md4equ(client->GetUploadFileID(), packet)) ? 1 : 0,
+					(size >= 16) ? (LPCTSTR)DbgGetFileInfo(packet) : (LPCTSTR)_T("<missing>"));
+			}
 			if (size >= 16 && md4equ(client->GetUploadFileID(), packet))
 				theApp.uploadqueue->RemoveFromUploadQueue(client, _T("Remote client ended transfer."));
 			else
@@ -938,7 +1310,7 @@ bool CClientReqSocket::ProcessPacket(const BYTE *packet, uint32 size, UINT opcod
 			if (thePrefs.GetDebugClientTCPLevel() > 0)
 				DebugRecv("OP_HashSetAnswer", client, (size >= 16) ? packet : NULL);
 			theStats.AddDownDataOverheadFileRequest(size);
-			client->ProcessHashSet(packet, size, false);
+			theApp.QueueDownloadHashSetNetworkCommand(client, packet, size, false);
 			break;
 		case OP_SENDINGPART:
 		{
@@ -947,19 +1319,13 @@ bool CClientReqSocket::ProcessPacket(const BYTE *packet, uint32 size, UINT opcod
 				DebugRecv("OP_SendingPart", client, (size >= 16) ? packet : NULL);
 			theStats.AddDownDataOverheadFileRequest(16 + 2 * 4);
 				EDownloadState newDS = DS_NONE;
-				const CPartFile* creqfile = client->GetRequestFile();
+				CPartFile* creqfile = client->GetRequestFile();
 				if (creqfile) {
 					if (!creqfile->IsStopped() && (creqfile->GetStatus() == PS_READY || creqfile->GetStatus() == PS_EMPTY)) {
-						client->ProcessBlockPacket(packet, size, false, false);
-						if (!creqfile->IsStopped()) {
-							UINT uStatus = creqfile->GetStatus();
-							if (uStatus == PS_ERROR)
-								newDS = DS_ONQUEUE;
-							else if (uStatus == PS_PAUSED || uStatus == PS_INSUFFICIENT)
-								newDS = DS_NONE;
-							else
-								newDS = DS_CONNECTED; //any state but DS_NONE or DS_ONQUEUE
-						}
+						if (theApp.QueueDownloadBlockReceiveNetworkCommand(client, creqfile, packet, size, false, false))
+							newDS = DS_CONNECTED;
+						else
+							theApp.QueueNetworkParserFailureEvent(CemuleApp::NetworkParseClientTcp, _T("download-block-receive-queue"), ERROR_NOT_ENOUGH_MEMORY);
 					}
 				}
 				if (newDS != DS_CONNECTED && client) { //client could have been deleted while debugging
@@ -1069,11 +1435,14 @@ bool CClientReqSocket::ProcessPacket(const BYTE *packet, uint32 size, UINT opcod
 				DebugRecv("OP_AskSharedFiles", client);
 			theStats.AddDownDataOverheadOther(size);
 
-			CPtrList list;
+			std::vector<CSharedFileList::SOfferedFilePacketSnapshot> offeredFiles;
 			if (thePrefs.CanSeeShares() == vsfaEverybody || (thePrefs.CanSeeShares() == vsfaFriends && client->IsFriend())) {
 				for (const CKnownFilesMap::CPair* pair = theApp.sharedfiles->m_Files_map.PGetFirstAssoc(); pair != NULL; pair = theApp.sharedfiles->m_Files_map.PGetNextAssoc(pair))
-					if (theApp.sharedfiles->CanClientBrowseSharedFile(pair->value, client) && (!pair->value->IsLargeFile() || client->SupportsLargeFiles()))
-						list.AddTail((void*)pair->value);
+					if (theApp.sharedfiles->CanClientBrowseSharedFile(pair->value, client) && (!pair->value->IsLargeFile() || client->SupportsLargeFiles())) {
+						CSharedFileList::SOfferedFilePacketSnapshot snapshot;
+						if (CSharedFileList::BuildOfferedFilePacketSnapshot(pair->value, snapshot))
+							offeredFiles.push_back(snapshot);
+					}
 				CString m_strTemp = GetResString(_T("REQ_SHAREDFILES"));
 				if (client->GetUserName() == NULL || client->GetUserName()[0] == '\0') {
 					m_strTemp.Replace(_T(" (%u)"), EMPTY);
@@ -1097,9 +1466,9 @@ bool CClientReqSocket::ProcessPacket(const BYTE *packet, uint32 size, UINT opcod
 
 			// now create the memfile for the packet
 			CSafeMemFile tempfile(80);
-			tempfile.WriteUInt32((uint32)list.GetCount());
-			while (!list.IsEmpty())
-				theApp.sharedfiles->CreateOfferedFilePacket(reinterpret_cast<CKnownFile*>(list.RemoveHead()), tempfile, NULL, client);
+			tempfile.WriteUInt32((uint32)offeredFiles.size());
+			for (size_t i = 0; i < offeredFiles.size(); ++i)
+				CSharedFileList::CreateOfferedFilePacket(offeredFiles[i], tempfile, NULL, client);
 
 			// create a packet and send it
 			if (thePrefs.GetDebugClientTCPLevel() > 0)
@@ -1170,13 +1539,16 @@ bool CClientReqSocket::ProcessPacket(const BYTE *packet, uint32 size, UINT opcod
 					AddLogLine(true, m_strTemp, (LPCTSTR)EscPercent(client->GetUserName()), (LPCTSTR)md4str(client->GetUserHash()), (LPCTSTR)EscPercent(strReqDir), (LPCTSTR)GetResString(_T("ACCEPTED")));
 				}
 				ASSERT(data.GetPosition() == data.GetLength());
-				CTypedPtrList<CPtrList, CKnownFile*> list;
+				std::vector<CSharedFileList::SOfferedFilePacketSnapshot> offeredFiles;
 				const CString strOrgReqDir(strReqDir);
 				if (strReqDir == OP_INCOMPLETE_SHARED_FILES) {
 					for (POSITION pos = NULL; ;) { // get all shared files from download queue
 						CPartFile* pFile = theApp.downloadqueue->GetFileNext(pos);
-						if (pFile && pFile->GetStatus(true) == PS_READY && theApp.sharedfiles->CanClientBrowseSharedFile(pFile, client) && (!pFile->IsLargeFile() || client->SupportsLargeFiles()))
-							list.AddTail(pFile);
+						if (pFile && pFile->GetStatus(true) == PS_READY && theApp.sharedfiles->CanClientBrowseSharedFile(pFile, client) && (!pFile->IsLargeFile() || client->SupportsLargeFiles())) {
+							CSharedFileList::SOfferedFilePacketSnapshot snapshot;
+							if (CSharedFileList::BuildOfferedFilePacketSnapshot(pFile, snapshot))
+								offeredFiles.push_back(snapshot);
+						}
 						if (pos == NULL)
 							break;
 					}
@@ -1196,7 +1568,9 @@ bool CClientReqSocket::ProcessPacket(const BYTE *packet, uint32 size, UINT opcod
 								&& theApp.sharedfiles->CanClientBrowseSharedFile(cur_file, client)
 								&& (!cur_file->IsLargeFile() || client->SupportsLargeFiles()))
 							{
-								list.AddTail(cur_file);
+								CSharedFileList::SOfferedFilePacketSnapshot snapshot;
+								if (CSharedFileList::BuildOfferedFilePacketSnapshot(cur_file, snapshot))
+									offeredFiles.push_back(snapshot);
 							}
 						}
 					}
@@ -1208,9 +1582,9 @@ bool CClientReqSocket::ProcessPacket(const BYTE *packet, uint32 size, UINT opcod
 				// Because of this we also have to send an empty shared files list.
 				CSafeMemFile tempfile(80);
 				tempfile.WriteString(strOrgReqDir, client->GetUnicodeSupport());
-				tempfile.WriteUInt32((uint32)list.GetCount());
-				while (!list.IsEmpty())
-					theApp.sharedfiles->CreateOfferedFilePacket(list.RemoveHead(), tempfile, NULL, client);
+				tempfile.WriteUInt32((uint32)offeredFiles.size());
+				for (size_t i = 0; i < offeredFiles.size(); ++i)
+					CSharedFileList::CreateOfferedFilePacket(offeredFiles[i], tempfile, NULL, client);
 
 				if (thePrefs.GetDebugClientTCPLevel() > 0)
 					DebugSend("OP_AskSharedFilesInDirectoryAnswer", client);
@@ -1248,10 +1622,10 @@ bool CClientReqSocket::ProcessPacket(const BYTE *packet, uint32 size, UINT opcod
 					CString m_strTemp = GetResString(_T("SHAREDANSW"));
 					if (client->GetUserName() == NULL || client->GetUserName()[0] == '\0') {
 						m_strTemp.Replace(_T(" (%u)"), EMPTY);
-						AddLogLine(true, m_strTemp, (LPCTSTR)md4str(client->GetUserHash()), (LPCTSTR)EscPercent(strDir));
+						Log(LOG_DEFAULT | LOG_DONTNOTIFY, m_strTemp, (LPCTSTR)md4str(client->GetUserHash()), (LPCTSTR)EscPercent(strDir));
 					} else {
 						m_strTemp.Replace(_T("%u"), _T("%s"));
-						AddLogLine(true, m_strTemp, (LPCTSTR)EscPercent(client->GetUserName()), (LPCTSTR)md4str(client->GetUserHash()), (LPCTSTR)EscPercent(strDir));
+						Log(LOG_DEFAULT | LOG_DONTNOTIFY, m_strTemp, (LPCTSTR)EscPercent(client->GetUserName()), (LPCTSTR)md4str(client->GetUserHash()), (LPCTSTR)EscPercent(strDir));
 					}
 
 					if (thePrefs.GetDebugClientTCPLevel() > 0)
@@ -1285,10 +1659,10 @@ bool CClientReqSocket::ProcessPacket(const BYTE *packet, uint32 size, UINT opcod
 				CString m_strTemp = GetResString(_T("SHAREDANSW2"));
 				if (client->GetUserName() == NULL || client->GetUserName()[0] == '\0') {
 					m_strTemp.Replace(_T(" (%u)"), EMPTY);
-					AddLogLine(true, m_strTemp, (LPCTSTR)md4str(client->GetUserHash()));
+					Log(LOG_STATUSBAR | LOG_DONTNOTIFY, m_strTemp, (LPCTSTR)md4str(client->GetUserHash()));
 				} else {
 					m_strTemp.Replace(_T("%u"), _T("%s"));
-					AddLogLine(true, m_strTemp, (LPCTSTR)EscPercent(client->GetUserName()), (LPCTSTR)md4str(client->GetUserHash()));
+					Log(LOG_STATUSBAR | LOG_DONTNOTIFY, m_strTemp, (LPCTSTR)EscPercent(client->GetUserName()), (LPCTSTR)md4str(client->GetUserHash()));
 				}
 			}
 		}
@@ -1306,10 +1680,10 @@ bool CClientReqSocket::ProcessPacket(const BYTE *packet, uint32 size, UINT opcod
 				CString m_strTemp = GetResString(_T("SHAREDINFO1"));
 				if (client->GetUserName() == NULL || client->GetUserName()[0] == '\0') {
 					m_strTemp.Replace(_T(" (%u)"), EMPTY);
-					AddLogLine(true, m_strTemp, (LPCTSTR)md4str(client->GetUserHash()), (LPCTSTR)EscPercent(strDir));
+					Log(LOG_DEFAULT | LOG_DONTNOTIFY, m_strTemp, (LPCTSTR)md4str(client->GetUserHash()), (LPCTSTR)EscPercent(strDir));
 				} else {
 					m_strTemp.Replace(_T("%u"), _T("%s"));
-					AddLogLine(true, m_strTemp, (LPCTSTR)EscPercent(client->GetUserName()), (LPCTSTR)md4str(client->GetUserHash()), (LPCTSTR)EscPercent(strDir));
+					Log(LOG_DEFAULT | LOG_DONTNOTIFY, m_strTemp, (LPCTSTR)EscPercent(client->GetUserName()), (LPCTSTR)md4str(client->GetUserHash()), (LPCTSTR)EscPercent(strDir));
 				}
 
 				client->ProcessSharedFileList(packet + data.GetPosition(), (uint32)(size - data.GetPosition()), strDir);
@@ -1318,10 +1692,10 @@ bool CClientReqSocket::ProcessPacket(const BYTE *packet, uint32 size, UINT opcod
 					CString m_strTemp = GetResString(_T("SHAREDINFO2"));
 					if (client->GetUserName() == NULL || client->GetUserName()[0] == '\0') {
 						m_strTemp.Replace(_T(" (%u)"), EMPTY);
-						AddLogLine(true, m_strTemp, (LPCTSTR)md4str(client->GetUserHash()));
+						Log(LOG_STATUSBAR | LOG_DONTNOTIFY, m_strTemp, (LPCTSTR)md4str(client->GetUserHash()));
 					} else {
 						m_strTemp.Replace(_T("%u"), _T("%s"));
-						AddLogLine(true, m_strTemp, (LPCTSTR)EscPercent(client->GetUserName()), (LPCTSTR)md4str(client->GetUserHash()));
+						Log(LOG_STATUSBAR | LOG_DONTNOTIFY, m_strTemp, (LPCTSTR)EscPercent(client->GetUserName()), (LPCTSTR)md4str(client->GetUserHash()));
 					}
 				}
 
@@ -1344,10 +1718,10 @@ bool CClientReqSocket::ProcessPacket(const BYTE *packet, uint32 size, UINT opcod
 				CString m_strTemp = GetResString(_T("SHAREDANSW3"));
 				if (client->GetUserName() == NULL || client->GetUserName()[0] == '\0') {
 					m_strTemp.Replace(_T(" (%u)"), EMPTY);
-					AddLogLine(true, m_strTemp, (LPCTSTR)md4str(client->GetUserHash()), (LPCTSTR)EscPercent(strDir));
+					Log(LOG_DEFAULT | LOG_DONTNOTIFY, m_strTemp, (LPCTSTR)md4str(client->GetUserHash()), (LPCTSTR)EscPercent(strDir));
 				} else {
 					m_strTemp.Replace(_T("%u"), _T("%s"));
-					AddLogLine(true, m_strTemp, (LPCTSTR)EscPercent(client->GetUserName()), (LPCTSTR)md4str(client->GetUserHash()), (LPCTSTR)EscPercent(strDir));
+					Log(LOG_DEFAULT | LOG_DONTNOTIFY, m_strTemp, (LPCTSTR)EscPercent(client->GetUserName()), (LPCTSTR)md4str(client->GetUserHash()), (LPCTSTR)EscPercent(strDir));
 				}
 			}
 		}
@@ -1422,15 +1796,16 @@ bool CClientReqSocket::ProcessPacket(const BYTE *packet, uint32 size, UINT opcod
 		GetPeerName((LPSOCKADDR)&sockAddr, &nSockAddrLen);
 		IP.FromSA((SOCKADDR*)&sockAddr, nSockAddrLen);
 
+		const CString strError(CExceptionStr(*ex));
 		if (thePrefs.GetVerbose()) {
-			AddDebugLogLine(false, _T("[ProcessPacket]: Client with IP=%s caused an exception, disconnecting client: %s"), IP.ToStringC(), (LPCTSTR)EscPercent(CString(CExceptionStr(*ex))));
+			AddDebugLogLine(false, _T("[ProcessPacket]: Client with IP=%s caused an exception, disconnecting client: %s"), IP.ToStringC(), (LPCTSTR)EscPercent(strError));
 			PacketToDebugLogLine(_T("eMule"), packet, size, opcode);
 		}
 
 		ex->Delete();
 
 		if (client)
-			client->SetDownloadState(DS_ERROR, _T("[ProcessPacket]: An exception occured while processing eDonkey packet: ") + EscPercent(CString(CExceptionStr(*ex))));
+			client->SetDownloadState(DS_ERROR, _T("[ProcessPacket]: An exception occured while processing eDonkey packet: ") + EscPercent(strError));
 
 		if (thePrefs.IsBanWrongPackage()) {
 			if (client) {
@@ -1443,7 +1818,7 @@ bool CClientReqSocket::ProcessPacket(const BYTE *packet, uint32 size, UINT opcod
 			}
 		}
 		
-		Disconnect(_T("[ProcessPacket]: An exception occured while processing eDonkey packet: ") + EscPercent(CString(CExceptionStr(*ex))));
+		Disconnect(_T("[ProcessPacket]: An exception occured while processing eDonkey packet: ") + EscPercent(strError));
 		return false;
 	} catch (...) {
 		CAddress IP;
@@ -1512,7 +1887,9 @@ bool CClientReqSocket::ProcessExtPacket(const BYTE *packet, uint32 size, UINT op
 						reqfile = theApp.downloadqueue->GetFileByID(fileIdent.GetMD4Hash());
 						if (reqfile == NULL || (uint64)((CPartFile*)reqfile)->GetCompletedSize() < PARTSIZE) {
 							bNotFound = true;
-							client->CheckFailedFileIdReqs(fileIdent.GetMD4Hash());
+							const bool bBenignSourceExchangeProbe = client->SupportsEServerBuddy() && IsSourceExchangeOnlyMultiPacketTail(data_in);
+							if (!bBenignSourceExchangeProbe)
+								client->CheckFailedFileIdReqs(fileIdent.GetMD4Hash());
 						}
 					}
 					if (!bNotFound && !reqfile->GetFileIdentifier().CompareRelaxed(fileIdent)) {
@@ -1528,7 +1905,9 @@ bool CClientReqSocket::ProcessExtPacket(const BYTE *packet, uint32 size, UINT op
 						reqfile = theApp.downloadqueue->GetFileByID(reqfilehash);
 						if (reqfile == NULL || (uint64)((CPartFile*)reqfile)->GetCompletedSize() < PARTSIZE) {
 							bNotFound = true;
-							client->CheckFailedFileIdReqs(reqfilehash);
+							const bool bBenignSourceExchangeProbe = client->SupportsEServerBuddy() && IsSourceExchangeOnlyMultiPacketTail(data_in);
+							if (!bBenignSourceExchangeProbe)
+								client->CheckFailedFileIdReqs(reqfilehash);
 						}
 					}
 					if (!bNotFound && nSize != 0 && nSize != reqfile->GetFileSize()) {
@@ -1772,7 +2151,22 @@ bool CClientReqSocket::ProcessExtPacket(const BYTE *packet, uint32 size, UINT op
 						if (thePrefs.GetDebugClientTCPLevel() > 0)
 							DebugRecv("OP_MPFileStatus", client, packet);
 
-						client->ProcessFileStatus(false, data_in, reqfile);
+						{
+							const ULONGLONG uFileStatusPosition = data_in.GetPosition();
+							uint16 nED2KPartCount = 0;
+							bool bQueueFileStatus = reqfile->GetStatus() != PS_COMPLETE && reqfile->GetStatus() != PS_COMPLETING;
+							if (bQueueFileStatus) {
+								nED2KPartCount = data_in.ReadUInt16();
+								bQueueFileStatus = nED2KPartCount == 0 || reqfile->GetED2KPartCount() == nED2KPartCount;
+								data_in.Seek(static_cast<LONGLONG>(uFileStatusPosition), CFile::begin);
+							}
+							if (bQueueFileStatus) {
+								theApp.QueueDownloadFileStatusNetworkCommand(client, reqfile, packet, size, uFileStatusPosition, false);
+								data_in.Seek(static_cast<LONGLONG>(uFileStatusPosition + sizeof(uint16)), CFile::begin);
+								if (nED2KPartCount > 0)
+									data_in.Seek(static_cast<LONGLONG>((static_cast<ULONGLONG>(reqfile->GetPartCount()) + 7ull) / 8ull), CFile::current);
+							}
+						}
 						break;
 					case OP_AICHFILEHASHANS:
 						if (thePrefs.GetDebugClientTCPLevel() > 0)
@@ -1798,7 +2192,11 @@ bool CClientReqSocket::ProcessExtPacket(const BYTE *packet, uint32 size, UINT op
 			break;
 		case OP_EMULEINFO:
 			theStats.AddDownDataOverheadOther(uRawSize);
-			client->ProcessMuleInfoPacket(packet, size);
+			{
+				const CString strOldSoftware = client->DbgGetFullClientSoftVer();
+				client->ProcessMuleInfoPacket(packet, size);
+				RefreshClientSoftwareDisplayIfChanged(client, strOldSoftware);
+			}
 			client->ProcessBanMessage();
 			if (thePrefs.GetDebugClientTCPLevel() > 0) {
 				DebugRecv("OP_EmuleInfo", client);
@@ -1814,7 +2212,11 @@ bool CClientReqSocket::ProcessExtPacket(const BYTE *packet, uint32 size, UINT op
 			break;
 		case OP_EMULEINFOANSWER:
 			theStats.AddDownDataOverheadOther(uRawSize);
-			client->ProcessMuleInfoPacket(packet, size);
+			{
+				const CString strOldSoftware = client->DbgGetFullClientSoftVer();
+				client->ProcessMuleInfoPacket(packet, size);
+				RefreshClientSoftwareDisplayIfChanged(client, strOldSoftware);
+			}
 			client->ProcessBanMessage();
 			if (thePrefs.GetDebugClientTCPLevel() > 0) {
 				DebugRecv("OP_EmuleInfoAnswer", client);
@@ -1945,11 +2347,8 @@ bool CClientReqSocket::ProcessExtPacket(const BYTE *packet, uint32 size, UINT op
 				if (file == NULL)
 					client->CheckFailedFileIdReqs(hash);
 				else if (file->IsPartFile()) {
-					//set the client's answer time
-					client->SetLastSrcAnswerTime();
-					//and set the file's last answer time
-					static_cast<CPartFile*>(file)->SetLastAnsweredTime();
-					static_cast<CPartFile*>(file)->AddClientSources(&data, client->GetSourceExchange1Version(), false, client);
+					CPartFile *pPartFile = static_cast<CPartFile*>(file);
+					theApp.QueueDownloadSourceExchangeNetworkCommand(client, pPartFile, packet, size, data.GetPosition(), client->GetSourceExchange1Version(), false);
 				}
 			}
 			break;
@@ -1968,11 +2367,8 @@ bool CClientReqSocket::ProcessExtPacket(const BYTE *packet, uint32 size, UINT op
 				if (file == NULL)
 					client->CheckFailedFileIdReqs(hash);
 				else if (file->IsPartFile()) {
-					//set the client's answer time
-					client->SetLastSrcAnswerTime();
-					//and set the file's last answer time
-					static_cast<CPartFile*>(file)->SetLastAnsweredTime();
-					static_cast<CPartFile*>(file)->AddClientSources(&data, byVersion, true, client);
+					CPartFile *pPartFile = static_cast<CPartFile*>(file);
+					theApp.QueueDownloadSourceExchangeNetworkCommand(client, pPartFile, packet, size, data.GetPosition(), byVersion, true);
 				}
 			}
 			break;
@@ -2057,7 +2453,7 @@ bool CClientReqSocket::ProcessExtPacket(const BYTE *packet, uint32 size, UINT op
 					DebugRecv("OP_Callback", client);
 
 				if (thePrefs.GetLogNatTraversalEvents())
-					DebugLog(_T("[NATTTESTMODE: OP_CALLBACK] target=%s size=%u\n"), (LPCTSTR)client->DbgGetClientInfo(), (unsigned)uRawSize);
+					DebugLog(_T("[NatTraversal: OP_CALLBACK] target=%s size=%u\n"), (LPCTSTR)client->DbgGetClientInfo(), (unsigned)uRawSize);
 				theStats.AddDownDataOverheadFileRequest(uRawSize);
 
 				if (!Kademlia::CKademlia::IsRunning())
@@ -2183,9 +2579,9 @@ bool CClientReqSocket::ProcessExtPacket(const BYTE *packet, uint32 size, UINT op
 						}
 					}
 
-					if (bRequestMalformed || (bMagicProofSeen && !bMagicProofValid)) {
+					if (bRequestMalformed || !bMagicProofSeen || !bMagicProofValid) {
 						if (thePrefs.GetLogNatTraversalEvents()) {
-							DebugLog(_T("[eServerBuddy] OP_ESERVER_BUDDY_REQUEST rejected due to invalid/malformed magic proof from %s (peerSupports=%u seen=%u valid=%u malformed=%u size=%u)"),
+							DebugLog(_T("[eServerBuddy] OP_ESERVER_BUDDY_REQUEST rejected due to missing/invalid magic proof from %s (peerSupports=%u seen=%u valid=%u malformed=%u size=%u)"),
 								(LPCTSTR)EscPercent(client->DbgGetClientInfo()),
 								client->SupportsEServerBuddyMagicProof() ? 1 : 0,
 								bMagicProofSeen ? 1 : 0,
@@ -2195,6 +2591,32 @@ bool CClientReqSocket::ProcessExtPacket(const BYTE *packet, uint32 size, UINT op
 						}
 						if (thePrefs.GetDebugClientTCPLevel() > 0)
 							DebugSend("OP_EServerBuddyAck (rejected-magicproof)", client);
+						CSafeMemFile data_reject(2);
+						data_reject.WriteUInt8(ESERVERBUDDY_STATUS_REJECTED);
+						data_reject.WriteUInt8(ESERVERBUDDY_REJECT_REASON_MAGIC_PROOF);
+						Packet* reply = new Packet(data_reject, OP_EMULEPROT, OP_ESERVER_BUDDY_ACK);
+						theStats.AddUpDataOverheadOther(reply->size);
+						SendPacket(reply);
+						break;
+					}
+
+					const CServer* pCurrentServer = (theApp.serverconnect != NULL && theApp.serverconnect->IsConnected()) ? theApp.serverconnect->GetCurrentServer() : NULL;
+					const uint32 dwCurrentServerIP = (pCurrentServer != NULL) ? pCurrentServer->GetIP() : 0;
+					const uint16 nCurrentServerPort = (pCurrentServer != NULL) ? pCurrentServer->GetPort() : 0;
+					const bool bRequestServerMatchesCurrent = bRequestServerInfoSeen
+						&& dwCurrentServerIP != 0 && nCurrentServerPort != 0
+						&& dwRequestServerIP == dwCurrentServerIP && nRequestServerPort == nCurrentServerPort;
+
+					if (bRequestServerInfoSeen && !bRequestServerMatchesCurrent) {
+						if (thePrefs.GetLogNatTraversalEvents()) {
+							AddDebugLogLine(false, _T("[eServerBuddy] OP_ESERVER_BUDDY_REQUEST rejected due to server mismatch from %s (request=%s:%u current=%s:%u)"),
+								(LPCTSTR)EscPercent(client->DbgGetClientInfo()),
+								(LPCTSTR)ipstr(dwRequestServerIP), nRequestServerPort,
+								(LPCTSTR)ipstr(dwCurrentServerIP), nCurrentServerPort);
+						}
+						RegisterEServerProtocolViolation(client, _T("BuddyRequestWrongServer"));
+						if (thePrefs.GetDebugClientTCPLevel() > 0)
+							DebugSend("OP_EServerBuddyAck (rejected-server)", client);
 						CSafeMemFile data_reject(1);
 						data_reject.WriteUInt8(ESERVERBUDDY_STATUS_REJECTED);
 						Packet* reply = new Packet(data_reject, OP_EMULEPROT, OP_ESERVER_BUDDY_ACK);
@@ -2203,15 +2625,34 @@ bool CClientReqSocket::ProcessExtPacket(const BYTE *packet, uint32 size, UINT op
 						break;
 					}
 
-					if (!bMagicProofSeen && client->SupportsEServerBuddyMagicProof() && thePrefs.GetLogNatTraversalEvents()) {
-						DebugLog(_T("[eServerBuddy] OP_ESERVER_BUDDY_REQUEST from %s has no magic proof extension; accepting for compatibility"),
-							(LPCTSTR)EscPercent(client->DbgGetClientInfo()));
-					}
-
-					if (bRequestServerInfoSeen) {
+					if (bRequestServerMatchesCurrent) {
+						const bool bHadStaleServerInfo = IsClientServerInfoKnown(client) && IsClientServerMismatchingCurrentED2KServer(client);
 						client->SetServerIP(dwRequestServerIP);
 						client->SetServerPort(nRequestServerPort);
 						client->SetReportedServerIP(dwRequestServerIP);
+						if (bHadStaleServerInfo && thePrefs.GetLogNatTraversalEvents()) {
+							AddDebugLogLine(false, _T("[eServerBuddy] OP_ESERVER_BUDDY_REQUEST refreshed stale requester server context from request: %s server=%s:%u"),
+								(LPCTSTR)EscPercent(client->DbgGetClientInfo()),
+								(LPCTSTR)ipstr(dwRequestServerIP), nRequestServerPort);
+						}
+					}
+
+					const bool bExistingServerKnown = IsClientServerInfoKnown(client);
+					const bool bExistingServerMismatch = bExistingServerKnown && IsClientServerMismatchingCurrentED2KServer(client);
+					if (bExistingServerMismatch) {
+						if (thePrefs.GetLogNatTraversalEvents()) {
+							AddDebugLogLine(false, _T("[eServerBuddy] OP_ESERVER_BUDDY_REQUEST rejected because existing client server differs from current eServer: %s"),
+								(LPCTSTR)EscPercent(client->DbgGetClientInfo()));
+						}
+						RegisterEServerProtocolViolation(client, _T("BuddyRequestWrongServer"));
+						if (thePrefs.GetDebugClientTCPLevel() > 0)
+							DebugSend("OP_EServerBuddyAck (rejected-known-server)", client);
+						CSafeMemFile data_reject(1);
+						data_reject.WriteUInt8(ESERVERBUDDY_STATUS_REJECTED);
+						Packet* reply = new Packet(data_reject, OP_EMULEPROT, OP_ESERVER_BUDDY_ACK);
+						theStats.AddUpDataOverheadOther(reply->size);
+						SendPacket(reply);
+						break;
 					}
 
 					// Diagnostic: Log all pre-checks
@@ -2328,50 +2769,8 @@ bool CClientReqSocket::ProcessExtPacket(const BYTE *packet, uint32 size, UINT op
 				theStats.AddUpDataOverheadOther(reply->size);
 				SendPacket(reply);
 
-				// Check for pending relay requests for this newly connected buddy client
-				// If a relay was queued before this client connected, forward PEER_INFO now
-					if (client && client->HasLowID()) {
-						EServerRelayRequest* pReq = theApp.clientlist->FindPendingEServerRelayByLowID(client->GetUserIDHybrid());
-						if (pReq && pReq->pRequester && theApp.clientlist->IsServedEServerBuddy(pReq->pRequester)) {
-							if (thePrefs.GetLogNatTraversalEvents()) {
-								AddDebugLogLine(false, _T("[eServerBuddy] OP_ESERVER_BUDDY_REQUEST: Found pending relay for LowID=%u, sending OP_ESERVER_PEER_INFO to %s"),
-									client->GetUserIDHybrid(), (LPCTSTR)EscPercent(client->DbgGetClientInfo()));
-							}
-						
-						// Send OP_ESERVER_PEER_INFO to this buddy client with requester's info
-						CSafeMemFile data_forward(38); // 4+2+16+16 = IP + Port + RequesterHash + FileHash
-						data_forward.WriteUInt32(pReq->dwRequesterIP);
-						data_forward.WriteUInt16(pReq->nRequesterKadPort);
-						data_forward.WriteHash16(pReq->pRequester->GetUserHash());
-						// Include file hash for download context
-						if (!isnulmd4(pReq->fileHash))
-							data_forward.WriteHash16(pReq->fileHash);
-						AppendEServerPeerInfoProbeToken(data_forward, client);
-						Packet* fwdPacket = new Packet(data_forward, OP_EMULEPROT, OP_ESERVER_PEER_INFO);
-						theStats.AddUpDataOverheadOther(fwdPacket->size);
-						// Relay handshake control packets must not wait behind throttled traffic.
-						SendPacket(fwdPacket, true, 0, true);
-						
-						if (thePrefs.GetLogNatTraversalEvents()) {
-							AddDebugLogLine(false, _T("[eServerBuddy] OP_ESERVER_BUDDY_REQUEST: Sent OP_ESERVER_PEER_INFO to target - RequesterIP=%s RequesterPort=%u"),
-								(LPCTSTR)ipstr(htonl(pReq->dwRequesterIP)), pReq->nRequesterKadPort);
-						}
-						} else if (pReq != NULL) {
-							const DWORD dwRelayAge = (DWORD)(::GetTickCount() - pReq->dwRequestTime);
-							if (dwRelayAge >= ESERVER_PENDING_RELAY_OWNER_GRACE_MS) {
-								theApp.clientlist->RemovePendingEServerRelayByLowID(client->GetUserIDHybrid());
-								if (thePrefs.GetLogNatTraversalEvents()) {
-									AddDebugLogLine(false, _T("[eServerBuddy] OP_ESERVER_BUDDY_REQUEST: Dropped stale pending relay for LowID=%u (age=%u ms)"),
-										client->GetUserIDHybrid(), (UINT)dwRelayAge);
-								}
-							} else {
-								if (thePrefs.GetLogNatTraversalEvents()) {
-									AddDebugLogLine(false, _T("[eServerBuddy] OP_ESERVER_BUDDY_REQUEST: Pending relay owner not ready yet for LowID=%u (age=%u ms), keeping"),
-										client->GetUserIDHybrid(), (UINT)dwRelayAge);
-								}
-							}
-						}
-					}
+				// eServer Buddy: complete pending server-callback relay for this LowID target.
+				ForwardPendingEServerRelayPeerInfo(client, _T("OP_ESERVER_BUDDY_REQUEST"), false);
 				}
 			break;
 
@@ -2399,56 +2798,88 @@ bool CClientReqSocket::ProcessExtPacket(const BYTE *packet, uint32 size, UINT op
 				}
 
 				uint8 byStatus = packet[0];
+				const uint8 byRejectReason = (size >= 2) ? packet[1] : ESERVERBUDDY_REJECT_REASON_NONE;
 
 					if (byStatus == ESERVERBUDDY_STATUS_ACCEPTED) {
-						// Accepted!
 						uint32 dwServerIP = 0;
 						uint16 nServerPort = 0;
-					uint32 dwProbeToken = 0;
+						uint32 dwProbeToken = 0;
+						bool bServerInfoSeen = false;
+						bool bServerVerified = false;
 
-					// Read server info if present
-					if (size >= 7) {
-						CSafeMemFile data_in(packet + 1, size - 1);
-						dwServerIP = data_in.ReadUInt32();
-						nServerPort = data_in.ReadUInt16();
-						UNREFERENCED_PARAMETER(dwServerIP);
-						UNREFERENCED_PARAMETER(nServerPort);
+						if (size >= 7) {
+							CSafeMemFile data_in(packet + 1, size - 1);
+							dwServerIP = data_in.ReadUInt32();
+							nServerPort = data_in.ReadUInt16();
+							bServerInfoSeen = dwServerIP != 0 && nServerPort != 0;
 
-						if ((data_in.GetLength() - data_in.GetPosition()) >= sizeof(uint32)) {
-							dwProbeToken = data_in.ReadUInt32();
+							if ((data_in.GetLength() - data_in.GetPosition()) >= sizeof(uint32))
+								dwProbeToken = data_in.ReadUInt32();
 						}
-					}
-					if (dwProbeToken != 0)
-						client->SetEServerExtPortProbeToken(dwProbeToken);
-					else
-						client->SetEServerExtPortProbeToken(0);
+						if (dwProbeToken != 0)
+							client->SetEServerExtPortProbeToken(dwProbeToken);
+						else
+							client->SetEServerExtPortProbeToken(0);
+
+						CServer* pCurrentServer = (theApp.serverconnect != NULL && theApp.serverconnect->IsConnected()) ? theApp.serverconnect->GetCurrentServer() : NULL;
+						const uint32 dwCurrentServerIP = (pCurrentServer != NULL) ? pCurrentServer->GetIP() : 0;
+						const uint16 nCurrentServerPort = (pCurrentServer != NULL) ? pCurrentServer->GetPort() : 0;
+						if (bServerInfoSeen) {
+							if (dwServerIP != dwCurrentServerIP || nServerPort != nCurrentServerPort) {
+								if (thePrefs.GetLogNatTraversalEvents()) {
+									DebugLog(_T("[eServerBuddy] OP_ESERVER_BUDDY_ACK rejected due to server mismatch from %s (ack=%s:%u current=%s:%u)"),
+										(LPCTSTR)EscPercent(client->DbgGetClientInfo()),
+										(LPCTSTR)ipstr(dwServerIP), nServerPort,
+										(LPCTSTR)ipstr(dwCurrentServerIP), nCurrentServerPort);
+								}
+								client->OnEServerBuddyRejectedGeneric();
+								AddLogLine(true, GetResString(_T("ESERVER_BUDDY_REJECTED")), (LPCTSTR)EscPercent(client->DbgGetClientInfo()));
+								theApp.clientlist->SetServingEServerBuddy(NULL, Disconnected);
+								break;
+							}
+							client->SetServerIP(dwServerIP);
+							client->SetServerPort(nServerPort);
+							client->SetReportedServerIP(dwServerIP);
+							bServerVerified = true;
+						} else if (IsClientKnownOnCurrentED2KServer(client))
+							bServerVerified = true;
+
+						if (bServerVerified)
+							client->TouchEServerBuddyValidServerPing();
+						else
+							client->SetLastEServerBuddyValidServerPing(0);
 
 						client->OnEServerBuddyAccepted();
 						theApp.clientlist->SetServingEServerBuddy(client, Connected);
 					} else if (byStatus == ESERVERBUDDY_STATUS_SLOTSFULL) {
 						client->OnEServerBuddyRejected();
-						AddLogLine(true, _T("eServer Buddy slots full: %s"), (LPCTSTR)EscPercent(client->DbgGetClientInfo()));
+						AddLogLine(true, GetResString(_T("ESERVER_BUDDY_SLOTS_FULL")), (LPCTSTR)EscPercent(client->DbgGetClientInfo()));
+						theApp.clientlist->SetServingEServerBuddy(NULL, Disconnected);
 					} else {
-						client->OnEServerBuddyRejectedGeneric();
-						AddLogLine(true, _T("eServer Buddy rejected: %s"), (LPCTSTR)EscPercent(client->DbgGetClientInfo()));
+						const bool bProofReject = byStatus == ESERVERBUDDY_STATUS_REJECTED
+							&& byRejectReason == ESERVERBUDDY_REJECT_REASON_MAGIC_PROOF;
+						if (bProofReject)
+							client->OnEServerBuddyProofRejected();
+						else
+							client->OnEServerBuddyRejectedGeneric();
+						AddLogLine(true, GetResString(_T("ESERVER_BUDDY_REJECTED")), (LPCTSTR)EscPercent(client->DbgGetClientInfo()));
+						theApp.clientlist->SetServingEServerBuddy(NULL, Disconnected);
 
 						if (thePrefs.GetLogNatTraversalEvents())
-							DebugLog(_T("[eServerBuddy] OP_ESERVER_BUDDY_ACK generic reject status=%u from %s"), byStatus, (LPCTSTR)EscPercent(client->DbgGetClientInfo()));
+							DebugLog(_T("[eServerBuddy] OP_ESERVER_BUDDY_ACK reject status=%u reason=%u from %s"), byStatus, byRejectReason, (LPCTSTR)EscPercent(client->DbgGetClientInfo()));
 					}
 				}
 				break;
 
 		case OP_ESERVER_BUDDY_PING:
 		{
-			// Keepalive ping from buddy
+			// Keepalive ping from buddy.
 			if (thePrefs.GetDebugClientTCPLevel() > 0)
 				DebugRecv("OP_EServerBuddyPing", client);
 			theStats.AddDownDataOverheadOther(uRawSize);
 
-			// Verify this is from our buddy or a served buddy
-			bool bServingBuddy = (theApp.clientlist->GetServingEServerBuddy() == client);
-			bool bServedBuddy = theApp.clientlist->IsServedEServerBuddy(client);
-
+			const bool bServingBuddy = (theApp.clientlist->GetServingEServerBuddy() == client);
+			const bool bServedBuddy = theApp.clientlist->IsServedEServerBuddy(client);
 			if (!bServingBuddy && !bServedBuddy)
 				break;
 
@@ -2464,24 +2895,40 @@ bool CClientReqSocket::ProcessExtPacket(const BYTE *packet, uint32 size, UINT op
 			};
 
 			uint32 dwBuddyServerIP = 0;
-			bool bBuddyIsHighID = true; // Backward compatibility with old keepalive format (4-byte payload)
+			uint16 nBuddyServerPort = 0;
+			bool bBuddyServerPortSeen = false;
+			bool bBuddyIsHighID = true;
+			bool bPingResponse = false;
 			if (size >= 4) {
 				CSafeMemFile data_in(packet, size);
 				dwBuddyServerIP = data_in.ReadUInt32();
 				if ((data_in.GetLength() - data_in.GetPosition()) >= sizeof(uint8)) {
 					const uint8 byPingFlags = data_in.ReadUInt8();
 					bBuddyIsHighID = (byPingFlags & ESERVERBUDDY_PING_FLAG_HIGHID) != 0;
+					bPingResponse = (byPingFlags & ESERVERBUDDY_PING_FLAG_RESPONSE) != 0;
+				}
+				if ((data_in.GetLength() - data_in.GetPosition()) >= sizeof(uint16)) {
+					nBuddyServerPort = data_in.ReadUInt16();
+					bBuddyServerPortSeen = nBuddyServerPort != 0;
 				}
 			}
 
+			CServer* pCurrentServer = (theApp.serverconnect != NULL && theApp.serverconnect->IsConnected()) ? theApp.serverconnect->GetCurrentServer() : NULL;
 			if (dwBuddyServerIP != 0) {
-				if (theApp.serverconnect && theApp.serverconnect->IsConnected() && theApp.serverconnect->GetCurrentServer()) {
-					const uint32 dwOurServerIP = theApp.serverconnect->GetCurrentServer()->GetIP();
-					if (dwBuddyServerIP != dwOurServerIP) {
+				if (pCurrentServer != NULL) {
+					const uint32 dwOurServerIP = pCurrentServer->GetIP();
+					const uint16 nOurServerPort = pCurrentServer->GetPort();
+					if (dwBuddyServerIP != dwOurServerIP || (bBuddyServerPortSeen && nBuddyServerPort != nOurServerPort)) {
 						if (thePrefs.GetDebugClientTCPLevel() > 0)
 							DebugLog(_T("OP_EServerBuddyPing: Server mismatch, disconnecting buddy"));
 						DisconnectBuddyByPingRule();
 						break;
+					}
+
+					if (bBuddyServerPortSeen) {
+						client->SetServerIP(dwBuddyServerIP);
+						client->SetServerPort(nBuddyServerPort);
+						client->SetReportedServerIP(dwBuddyServerIP);
 					}
 				}
 
@@ -2492,36 +2939,37 @@ bool CClientReqSocket::ProcessExtPacket(const BYTE *packet, uint32 size, UINT op
 					break;
 				}
 
-				if (bServingBuddy)
+				if (bServingBuddy && (bBuddyServerPortSeen || IsClientKnownOnCurrentED2KServer(client)))
 					client->TouchEServerBuddyValidServerPing();
 			}
-			else {
-				if (bServingBuddy) {
-					const DWORD dwLastValid = client->GetLastEServerBuddyValidServerPing();
-					if (dwLastValid != 0 && (DWORD)(::GetTickCount() - dwLastValid) >= ESERVERBUDDY_STALE_SERVER_GRACE_TIME) {
-						if (thePrefs.GetDebugClientTCPLevel() > 0)
-							DebugLog(_T("OP_EServerBuddyPing: Buddy has no server for too long, disconnecting"));
-						DisconnectBuddyByPingRule();
-						break;
-					}
+			else if (bServingBuddy) {
+				const DWORD dwLastValid = client->GetLastEServerBuddyValidServerPing();
+				if (dwLastValid != 0 && (DWORD)(::GetTickCount() - dwLastValid) >= ESERVERBUDDY_STALE_SERVER_GRACE_TIME) {
+					if (thePrefs.GetDebugClientTCPLevel() > 0)
+						DebugLog(_T("OP_EServerBuddyPing: Buddy has no server for too long, disconnecting"));
+					DisconnectBuddyByPingRule();
+					break;
 				}
 			}
 
-			// Send pong response with our server IP
-			if (thePrefs.GetDebugClientTCPLevel() > 0)
-				DebugSend("OP_EServerBuddyPing (pong)", client);
-			CSafeMemFile data_pong(5);
-			uint8 byPongFlags = 0;
-			if (theApp.serverconnect && theApp.serverconnect->IsConnected() && theApp.serverconnect->GetCurrentServer())
-				data_pong.WriteUInt32(theApp.serverconnect->GetCurrentServer()->GetIP());
-			else
-				data_pong.WriteUInt32(0);
-			if (theApp.serverconnect && theApp.serverconnect->IsConnected() && !theApp.serverconnect->IsLowID())
-				byPongFlags |= ESERVERBUDDY_PING_FLAG_HIGHID;
-			data_pong.WriteUInt8(byPongFlags);
-			Packet* pong = new Packet(data_pong, OP_EMULEPROT, OP_ESERVER_BUDDY_PING);
-			theStats.AddUpDataOverheadOther(pong->size);
-			SendPacket(pong);
+			if (!bPingResponse) {
+				if (thePrefs.GetDebugClientTCPLevel() > 0)
+					DebugSend("OP_EServerBuddyPing (pong)", client);
+				CSafeMemFile data_pong(7);
+				uint8 byPongFlags = ESERVERBUDDY_PING_FLAG_RESPONSE;
+				if (pCurrentServer != NULL)
+					data_pong.WriteUInt32(pCurrentServer->GetIP());
+				else
+					data_pong.WriteUInt32(0);
+				if (theApp.serverconnect && theApp.serverconnect->IsConnected() && !theApp.serverconnect->IsLowID())
+					byPongFlags |= ESERVERBUDDY_PING_FLAG_HIGHID;
+				const uint16 nPongServerPort = (pCurrentServer != NULL) ? pCurrentServer->GetPort() : 0;
+				data_pong.WriteUInt8(byPongFlags);
+				data_pong.WriteUInt16(nPongServerPort);
+				Packet* pong = new Packet(data_pong, OP_EMULEPROT, OP_ESERVER_BUDDY_PING);
+				theStats.AddUpDataOverheadOther(pong->size);
+				SendPacket(pong);
+			}
 		}
 		break;
 
@@ -2604,7 +3052,7 @@ bool CClientReqSocket::ProcessExtPacket(const BYTE *packet, uint32 size, UINT op
 						nRequesterPort = nObservedPort;
 				}
 
-				// Read optional file hash for download context (similar to KAD Rendezvous)
+				// Read optional file hash for download context. Keep relay requests legacy-sized for Beta15 buddies.
 				uchar fileHash[MDX_DIGEST_SIZE];
 				md4clr(fileHash);
 				bool bHasFileContext = false;
@@ -2612,40 +3060,44 @@ bool CClientReqSocket::ProcessExtPacket(const BYTE *packet, uint32 size, UINT op
 					data_in.ReadHash16(fileHash);
 					if (!isnulmd4(fileHash)) {
 						bHasFileContext = true;
-						if (thePrefs.GetLogNatTraversalEvents()) {
+						if (thePrefs.GetLogNatTraversalEvents())
 							AddDebugLogLine(false, _T("[eServerBuddy] File context received: %s"), (LPCTSTR)md4str(fileHash));
-						}
 					}
+				}
+				uint8 byRequesterConnectOptions = client->GetConnectOptions(true, true, true);
+				bool bRequesterOptionsFromPacket = false;
+				if ((data_in.GetLength() - data_in.GetPosition()) >= sizeof(uint8)) {
+					byRequesterConnectOptions = data_in.ReadUInt8();
+					bRequesterOptionsFromPacket = true;
 				}
 
 				if (thePrefs.GetLogNatTraversalEvents()) {
-					AddDebugLogLine(false, _T("[eServerBuddy] Relay request details: targetLowID=%u requesterIP=%s requesterPort=%u FileHash=%s"),
-						dwTargetLowID, (LPCTSTR)ipstr(htonl(dwRequesterIP)), nRequesterPort,
-						bHasFileContext ? (LPCTSTR)md4str(fileHash) : _T("NULL"));
+					AddDebugLogLine(false, _T("[eServerBuddy] Relay request details: targetLowID=%u requesterIP=%s requesterPort=%u FileHash=%s Options=0x%02X Source=%s"),
+						dwTargetLowID, (LPCTSTR)ipstr(dwRequesterIP), nRequesterPort,
+						bHasFileContext ? (LPCTSTR)md4str(fileHash) : (LPCTSTR)_T("NULL"), byRequesterConnectOptions,
+						bRequesterOptionsFromPacket ? _T("packet") : _T("requester-hello"));
 				}
 
-				// Choose requester IP with anti-spoof preference:
-				// 1) Prefer public observed endpoint from the TCP session.
-				// 2) Fallback to requester's declared public IP for legacy edge cases.
-				uint32 dwObservedIP = client->GetIP().ToUInt32(false);  // Network byte order
+				// Prefer a public declared IP from a validated served buddy.
+				// Observed TCP IP is only a fallback because VPN/bind routes can differ per connection.
+				uint32 dwObservedIP = client->GetIP().ToUInt32(false);
 				CAddress requesterAddr(dwRequesterIP, false);
 				CAddress observedAddr(dwObservedIP, false);
 
 				const bool bRequesterIsPublic = (dwRequesterIP != 0 && requesterAddr.IsPublicIP());
 				const bool bObservedIsPublic = (dwObservedIP != 0 && observedAddr.IsPublicIP());
 
-				if (bObservedIsPublic) {
-					dwRequesterIP = dwObservedIP;
-					if (bRequesterIsPublic && dwRequesterIP != requesterAddr.ToUInt32(false)) {
-						if (thePrefs.GetLogNatTraversalEvents()) {
-							AddDebugLogLine(false, _T("[eServerBuddy] Relay requester IP mismatch. Using observed endpoint %s instead of declared %s"),
-								(LPCTSTR)ipstr(observedAddr), (LPCTSTR)ipstr(requesterAddr));
-						}
+				if (bRequesterIsPublic) {
+					if (bObservedIsPublic && dwObservedIP != dwRequesterIP && thePrefs.GetLogNatTraversalEvents()) {
+						AddDebugLogLine(false, _T("[eServerBuddy] Relay requester IP mismatch. Keeping declared endpoint %s instead of observed TCP %s"),
+							(LPCTSTR)ipstr(requesterAddr), (LPCTSTR)ipstr(observedAddr));
 					}
-				} else if (bRequesterIsPublic) {
+				} else if (bObservedIsPublic) {
+					dwRequesterIP = dwObservedIP;
+					requesterAddr = observedAddr;
 					if (thePrefs.GetLogNatTraversalEvents()) {
-						AddDebugLogLine(false, _T("[eServerBuddy] Relay using declared requester IP (observed not public): %s"),
-							(LPCTSTR)ipstr(requesterAddr));
+						AddDebugLogLine(false, _T("[eServerBuddy] Relay requester declared IP unavailable, using observed TCP IP %s"),
+							(LPCTSTR)ipstr(observedAddr));
 					}
 				} else {
 					if (thePrefs.GetLogNatTraversalEvents()) {
@@ -2673,24 +3125,16 @@ bool CClientReqSocket::ProcessExtPacket(const BYTE *packet, uint32 size, UINT op
 					break;
 				}
 
-				// Find the target by LowID (ServerID) since we're on the same server
-				// Note: dwTargetLowID is already in LowID format, we need to convert to hybrid format
+				// Find the target by LowID (ServerID) on the same current server.
+				// Use the full server IP:port context when matching served eServer buddies.
 				uint32 dwOurServerIP = 0;
-				if (theApp.serverconnect && theApp.serverconnect->IsConnected() && theApp.serverconnect->GetCurrentServer())
+				uint16 nOurServerPort = 0;
+				if (theApp.serverconnect && theApp.serverconnect->IsConnected() && theApp.serverconnect->GetCurrentServer()) {
 					dwOurServerIP = theApp.serverconnect->GetCurrentServer()->GetIP();
-				
-				CUpDownClient* pTarget = theApp.clientlist->FindServedEServerBuddyByLowID(dwOurServerIP, dwTargetLowID);
-				const bool bServedTargetServerInfoStale = (pTarget != NULL && dwOurServerIP != 0 && pTarget->GetServerIP() != dwOurServerIP);
-				if (bServedTargetServerInfoStale && theApp.serverconnect && theApp.serverconnect->GetCurrentServer()) {
-					pTarget->SetServerIP(dwOurServerIP);
-					pTarget->SetServerPort(theApp.serverconnect->GetCurrentServer()->GetPort());
-					if (thePrefs.GetLogNatTraversalEvents()) {
-						AddDebugLogLine(false, _T("[eServerBuddy] Relay target matched served buddy by LowID despite stale server metadata, refreshing to %s:%u for %s"),
-							(LPCTSTR)ipstr(dwOurServerIP),
-							theApp.serverconnect->GetCurrentServer()->GetPort(),
-							(LPCTSTR)EscPercent(pTarget->DbgGetClientInfo()));
-					}
+					nOurServerPort = theApp.serverconnect->GetCurrentServer()->GetPort();
 				}
+				
+				CUpDownClient* pTarget = theApp.clientlist->FindServedEServerBuddyByLowID(dwOurServerIP, nOurServerPort, dwTargetLowID);
 				if (pTarget == NULL)
 					pTarget = theApp.clientlist->FindClientByServerID(dwOurServerIP, htonl(dwTargetLowID));
 
@@ -2708,18 +3152,23 @@ bool CClientReqSocket::ProcessExtPacket(const BYTE *packet, uint32 size, UINT op
 
 						// Store/update pending relay before forwarding.
 						// ACK may return very quickly and must find relay context.
-						theApp.clientlist->AddPendingEServerRelayByLowID(client, dwTargetLowID, dwRequesterIP, nRequesterPort, fileHash);
+						if (!theApp.clientlist->AddPendingEServerRelayByLowID(client, dwTargetLowID, dwRequesterIP, nRequesterPort, fileHash)) {
+							SendEServerRelayStatusToClient(client, ESERVERBUDDY_STATUS_REJECTED);
+							break;
+						}
 						
 						// Send OP_ESERVER_PEER_INFO with requester info and file context
 						if (thePrefs.GetDebugClientTCPLevel() > 0)
 							DebugSend("OP_EServerPeerInfo", pTarget);
-					CSafeMemFile data_forward(38);  // IP(4) + Port(2) + RequesterHash(16) + FileHash(16)
-					data_forward.WriteUInt32(dwRequesterIP);
-					data_forward.WriteUInt16(nRequesterPort);
-					data_forward.WriteHash16(client->GetUserHash()); // Requester's hash
-					data_forward.WriteHash16(fileHash);  // File hash for download context
-					AppendEServerPeerInfoProbeToken(data_forward, pTarget);
-					Packet* fwdPacket = new Packet(data_forward, OP_EMULEPROT, OP_ESERVER_PEER_INFO);
+						CSafeMemFile data_forward(44);  // IP(4) + Port(2) + RequesterHash(16) + FileHash(16) + [ProbeToken(4)] + marker/options(2)
+						data_forward.WriteUInt32(dwRequesterIP);
+						data_forward.WriteUInt16(nRequesterPort);
+						data_forward.WriteHash16(client->GetUserHash()); // Requester's hash
+						data_forward.WriteHash16(fileHash);  // File hash for download context
+						AppendEServerPeerInfoProbeToken(data_forward, pTarget);
+						data_forward.WriteUInt8(ESERVER_PEER_INFO_NATT_HINT_MARKER);
+						data_forward.WriteUInt8(byRequesterConnectOptions);
+						Packet* fwdPacket = new Packet(data_forward, OP_EMULEPROT, OP_ESERVER_PEER_INFO);
 					theStats.AddUpDataOverheadOther(fwdPacket->size);
 					// Relay handshake control packets must not wait behind throttled traffic.
 					pTarget->socket->SendPacket(fwdPacket, true, 0, true);
@@ -2749,6 +3198,12 @@ bool CClientReqSocket::ProcessExtPacket(const BYTE *packet, uint32 size, UINT op
 					}
 					
 					if (theApp.serverconnect && theApp.serverconnect->IsConnected()) {
+						// Store pending relay before requesting server callback so a quick target connection can match it.
+						if (!theApp.clientlist->AddPendingEServerRelayByLowID(client, dwTargetLowID, dwRequesterIP, nRequesterPort, fileHash)) {
+							SendEServerRelayStatusToClient(client, ESERVERBUDDY_STATUS_REJECTED);
+							break;
+						}
+
 						if (thePrefs.GetLogNatTraversalEvents()) {
 							AddDebugLogLine(false, _T("[eServerBuddy] Requesting Server Callback for Target LowID=%u"), dwTargetLowID);
 						}
@@ -2760,11 +3215,6 @@ bool CClientReqSocket::ProcessExtPacket(const BYTE *packet, uint32 size, UINT op
 							DebugSend("OP_CallbackRequest (relay)", pTarget);
 						theStats.AddUpDataOverheadServer(cbPacket->size);
 						theApp.serverconnect->SendPacket(cbPacket);
-						
-						// Store pending relay info so we can complete it when/if target connects to us
-						// Note: Server callback makes target connect to US (HighID) via TCP
-						// Store by LowID since we don't have the hash yet
-						theApp.clientlist->AddPendingEServerRelayByLowID(client, dwTargetLowID, dwRequesterIP, nRequesterPort, fileHash);
 						
 						// Send "forwarding" response to requester
 						if (thePrefs.GetDebugClientTCPLevel() > 0)
@@ -2846,7 +3296,7 @@ bool CClientReqSocket::ProcessExtPacket(const BYTE *packet, uint32 size, UINT op
 						if (thePrefs.GetLogNatTraversalEvents()) {
 							AddDebugLogLine(false, _T("[eServerBuddy] OP_ESERVER_RELAY_RESPONSE: FileHash=%s (partfile=%s)"),
 								(LPCTSTR)md4str(fileHash),
-								pTargetFile ? (LPCTSTR)EscPercent(pTargetFile->GetFileName()) : _T("NOT FOUND"));
+								pTargetFile ? (LPCTSTR)EscPercent(pTargetFile->GetFileName()) : (LPCTSTR)_T("NOT FOUND"));
 						}
 					}
 				}
@@ -2855,8 +3305,25 @@ bool CClientReqSocket::ProcessExtPacket(const BYTE *packet, uint32 size, UINT op
 					uint16 nExternalPort = data_in.ReadUInt16();
 					uint8 byExternalSrc = data_in.ReadUInt8();
 					if (nExternalPort != 0
-						&& (byExternalSrc == ESERVER_EXT_UDP_PORT_SRC_KAD || byExternalSrc == ESERVER_EXT_UDP_PORT_SRC_ESERVER_BUDDY))
-						thePrefs.SetEServerDiscoveredExternalUdpPort(nExternalPort, byExternalSrc);
+						&& (byExternalSrc == ESERVER_EXT_UDP_PORT_SRC_KAD || byExternalSrc == ESERVER_EXT_UDP_PORT_SRC_ESERVER_BUDDY)) {
+						CAddress publicAddr = theApp.GetPublicIP();
+						uint32 dwPublicIP = (!publicAddr.IsNull() && publicAddr.GetType() == CAddress::IPv4) ? publicAddr.ToUInt32(false) : 0;
+						uint32 dwServerIP = 0;
+						uint16 nServerPort = 0;
+						if (theApp.serverconnect != NULL && theApp.serverconnect->IsConnected() && theApp.serverconnect->GetCurrentServer() != NULL) {
+							dwServerIP = theApp.serverconnect->GetCurrentServer()->GetIP();
+							nServerPort = theApp.serverconnect->GetCurrentServer()->GetPort();
+						}
+						uint32 dwBuddyIP = (!client->GetIP().IsNull() && client->GetIP().GetType() == CAddress::IPv4) ? client->GetIP().ToUInt32(false) : 0;
+						thePrefs.SetEServerDiscoveredExternalUdpPort(nExternalPort, byExternalSrc, dwPublicIP, dwServerIP, nServerPort, dwBuddyIP);
+					}
+				}
+
+				uint8 byTargetConnectOptions = 0;
+				bool bHasTargetConnectOptions = false;
+				if ((data_in.GetLength() - data_in.GetPosition()) >= sizeof(uint8)) {
+					byTargetConnectOptions = data_in.ReadUInt8();
+					bHasTargetConnectOptions = true;
 				}
 
 				if (byStatus == ESERVERBUDDY_STATUS_FORWARDING) {
@@ -2870,21 +3337,24 @@ bool CClientReqSocket::ProcessExtPacket(const BYTE *packet, uint32 size, UINT op
 					if (thePrefs.GetLogNatTraversalEvents()) {
 						AddDebugLogLine(false, _T("[eServerBuddy] OP_ESERVER_RELAY_RESPONSE: Relay success - Target=%s:%u LowID=%u FileHash=%s"),
 							(LPCTSTR)ipstr(targetAddr), nTargetKadPort, dwTargetLowID,
-							bHasFileContext ? (LPCTSTR)md4str(fileHash) : _T("NULL"));
+							bHasFileContext ? (LPCTSTR)md4str(fileHash) : (LPCTSTR)_T("NULL"));
 					}
+					if (!IsUsableEServerRelayEndpoint(dwTargetIP, nTargetKadPort, dwTargetLowID, NULL, _T("OP_ESERVER_RELAY_RESPONSE")))
+						break;
 
-					// Register pending relay context to handle client object merging/recreation
-					// This ensures reqfile is restored when uTP connection is established
+					CServer* pCurrentServer = (theApp.serverconnect != NULL) ? theApp.serverconnect->GetCurrentServer() : NULL;
+					uint32 dwOurServerIP = (pCurrentServer != NULL) ? pCurrentServer->GetIP() : 0;
+					uint16 nOurServerPort = (pCurrentServer != NULL) ? pCurrentServer->GetPort() : 0;
+
+					// Register pending relay context to handle client object merging/recreation.
+					// Bind it to the target LowID/server context so endpoint-only matches cannot attach the wrong file.
 					if (bHasFileContext) {
-						theApp.clientlist->AddPendingRelayContext(dwTargetIP, nTargetKadPort, fileHash);
+						theApp.clientlist->AddPendingRelayContext(dwTargetIP, nTargetKadPort, fileHash, dwTargetLowID, dwOurServerIP, nOurServerPort);
 					}
 
 					// First try to find the existing source client by LowID.
 					// This path preserves request-file context and avoids ambiguous same-IP matches.
 					CUpDownClient* pTarget = NULL;
-					CServer* pCurrentServer = (theApp.serverconnect != NULL) ? theApp.serverconnect->GetCurrentServer() : NULL;
-					uint32 dwOurServerIP = (pCurrentServer != NULL) ? pCurrentServer->GetIP() : 0;
-					uint16 nOurServerPort = (pCurrentServer != NULL) ? pCurrentServer->GetPort() : 0;
 
 					if (dwTargetLowID != 0 && dwOurServerIP != 0) {
 						pTarget = theApp.clientlist->FindClientByServerID(dwOurServerIP, htonl(dwTargetLowID));
@@ -2901,24 +3371,30 @@ bool CClientReqSocket::ProcessExtPacket(const BYTE *packet, uint32 size, UINT op
 						}
 					}
 
-					// Fallback by endpoint must use UDP/Kad port matching.
-					// Using FindClientByIP(ip, port) here is incorrect because it compares TCP port.
-					if (pTarget == NULL && nTargetKadPort != 0) {
-						pTarget = theApp.clientlist->FindClientByIP_KadPort(targetAddr, nTargetKadPort);
-						if (pTarget == NULL)
-							pTarget = theApp.clientlist->FindClientByIP_UDP(targetAddr, nTargetKadPort);
+					// Resolve the live endpoint source independently from the LowID server source.
+					// If both belong to the same file, canonicalize them before starting NAT-T.
+					CUpDownClient* pEndpointTarget = NULL;
+					if (nTargetKadPort != 0) {
+						pEndpointTarget = theApp.downloadqueue->GetDownloadClientByIP_UDP(targetAddr, nTargetKadPort, false);
+						if (pEndpointTarget == NULL)
+							pEndpointTarget = theApp.clientlist->FindClientByIP_KadPort(targetAddr, nTargetKadPort);
+						if (pEndpointTarget == NULL)
+							pEndpointTarget = theApp.clientlist->FindClientByIP_UDP(targetAddr, nTargetKadPort);
+					}
+					CUpDownClient* pServingBuddy = theApp.clientlist->GetServingEServerBuddy();
+					if (pEndpointTarget == pServingBuddy)
+						pEndpointTarget = NULL;
+					if (pTarget == NULL)
+						pTarget = pEndpointTarget;
+					else if (pEndpointTarget != NULL && pEndpointTarget != pTarget && pTargetFile != NULL)
+						pTarget = theApp.downloadqueue->CanonicalizeEServerRelaySource(pTargetFile, pTarget, pEndpointTarget);
 
-						if (pTarget != NULL) {
-							if (thePrefs.GetLogNatTraversalEvents()) {
-								AddDebugLogLine(false, _T("[eServerBuddy] Found source client by endpoint %s:%u (reqfile=%s)"),
-									(LPCTSTR)ipstr(targetAddr),
-									nTargetKadPort,
-									pTarget->GetRequestFile() ? _T("SET") : _T("NULL"));
-							}
-						}
+					if (pEndpointTarget != NULL && thePrefs.GetLogNatTraversalEvents()) {
+						AddDebugLogLine(false, _T("[eServerBuddy] Found source client by endpoint %s:%u (reqfile=%s)"),
+							(LPCTSTR)ipstr(targetAddr), nTargetKadPort,
+							pEndpointTarget->GetRequestFile() ? _T("SET") : _T("NULL"));
 					}
 
-					CUpDownClient* pServingBuddy = theApp.clientlist->GetServingEServerBuddy();
 					if (pTarget != NULL && pTarget == pServingBuddy) {
 						if (thePrefs.GetLogNatTraversalEvents()) {
 							AddDebugLogLine(false, _T("[eServerBuddy] Ignoring serving buddy as relay target candidate: %s"),
@@ -2946,11 +3422,18 @@ bool CClientReqSocket::ProcessExtPacket(const BYTE *packet, uint32 size, UINT op
 						}
 					}
 					
-					// Update client with NAT traversal info - the public IP we just learned
-				pTarget->SetIP(targetAddr);
-				pTarget->SetKadPort(nTargetKadPort);
-				pTarget->SetUDPPort(nTargetKadPort);
-				pTarget->SetNatTraversalSupport(true);
+					// Update client with NAT traversal endpoint info.
+					// Transport capability is negotiated end-to-end with direct NAT-T CAPS frames.
+					// Do not inherit QUIC/uTP support from buddy payloads or same-IP client heuristics.
+					pTarget->SetIP(targetAddr);
+					pTarget->SetKadPort(nTargetKadPort);
+					pTarget->SetUDPPort(nTargetKadPort);
+					pTarget->SetNatTraversalSupport(true);
+					pTarget->ClearDirectNatTraversalCaps();
+					if (bHasTargetConnectOptions && thePrefs.GetLogNatTraversalEvents()) {
+						AddDebugLogLine(false, _T("[eServerBuddy] OP_ESERVER_RELAY_RESPONSE: ignored buddy-carried target transport options=0x%02X; waiting for direct CAPS"), byTargetConnectOptions);
+					}
+
 
 					// Register NAT expectation for requester side fallback.
 					// If initial uTP socket resets, on_utp_accept can still recover via MatchNatExpectation.
@@ -2967,6 +3450,12 @@ bool CClientReqSocket::ProcessExtPacket(const BYTE *packet, uint32 size, UINT op
 					uint16 buddyWin = thePrefs.GetNatTraversalPortWindow();
 					uint16 buddySweepWin = thePrefs.GetNatTraversalSweepWindow();
 					uint16 buddySweepSpan = std::min<uint16>(buddyWin, buddySweepWin);
+					const bool bNatUdpReady = theApp.clientudp != NULL && (theApp.clientudp->IsNatTraversalEndpointReady() || theApp.clientudp->EnsureNatTraversalEndpointReady(_T("eServer relay response")));
+					if (!bNatUdpReady) {
+						if (thePrefs.GetLogNatTraversalEvents())
+							AddDebugLogLine(false, _T("[eServerBuddy] OP_ESERVER_RELAY_RESPONSE: local UDP endpoint is not ready; cannot start NAT-T for target %s:%u"), (LPCTSTR)ipstr(targetAddr), nTargetKadPort);
+						break;
+					}
 
 					if (theApp.clientudp) {
 						for (int i = 0; i < 12; ++i) {
@@ -2992,29 +3481,47 @@ bool CClientReqSocket::ProcessExtPacket(const BYTE *packet, uint32 size, UINT op
 							(LPCTSTR)ipstr(targetAddr), nTargetKadPort);
 					}
 					
-					// Proceed immediately to uTP connect - Waiting causes NAT mapping TTL to expire
+					// Proceed immediately to the selected NAT-T connect - waiting causes NAT mapping TTL to expire
 				}
 
-				// Reset connecting state so TryToConnect can proceed
-				// Client may be in WaitCallback state from initial relay request
-				pTarget->ResetConnectingState();
-				if (thePrefs.GetLogNatTraversalEvents()) {
-					AddDebugLogLine(false, _T("[eServerBuddy] Reset connecting state for TryToConnect"));
+				const uint8 kBuddyRelayRetries = 2;
+				const bool bRefreshActiveRelay = pTarget->IsEServerRelayNatTGuardActive();
+				if (!bRefreshActiveRelay)
+					pTarget->MarkNatTRendezvous(kBuddyRelayRetries, true);
+				pTarget->QueueDeferredNatConnect(targetAddr, nTargetKadPort, buddySweepSpan);
+				pTarget->ArmEServerRelayNatTGuard();
+				if (theApp.clientudp != NULL)
+					theApp.clientudp->RequestNatTraversalCaps(pTarget, targetAddr, nTargetKadPort);
+				const bool bCanUseDirectCapsForQuic = thePrefs.IsNatTraversalQuicAllowed() && CQuicNatSocket::IsRuntimeAvailable();
+				const bool bTargetKnownQuicFromHello = bCanUseDirectCapsForQuic && !pTarget->NeedsDirectNatTraversalCapsRefresh() && pTarget->GetNatTraversalQuicSupport();
+				const bool bIgnoreTargetCachedLegacyForCapsRefresh = bCanUseDirectCapsForQuic && pTarget->NeedsDirectNatTraversalCapsRefresh();
+				const bool bTargetKnownLegacyWithoutQuic = (!bIgnoreTargetCachedLegacyForCapsRefresh && pTarget->HasReceivedHelloInfo() && !pTarget->GetNatTraversalQuicSupport())
+					|| pTarget->CanUseLegacyUtpAfterDirectCapsTimeout(DIRECT_NATT_CAPS_LEGACY_TIMEOUT_MS);
+				const bool bCanStartNatTraversalConnect = (pTarget->HasDirectNatTraversalCaps() && pTarget->GetPreferredNatTraversalTransport() != NATT_TRANSPORT_NONE)
+					|| bTargetKnownQuicFromHello
+					|| (thePrefs.IsNatTraversalUtpAllowed() && (!bCanUseDirectCapsForQuic || bTargetKnownLegacyWithoutQuic));
+				if (bCanStartNatTraversalConnect) {
+					const bool bNatTraversalConnectInProgress = pTarget->socket != NULL && pTarget->socket->HaveNatTraversalLayer();
+					const EConnectingState eConnectingState = pTarget->GetConnectingState();
+					const bool bPromotableCallbackState = eConnectingState == CCS_SERVERCALLBACK || eConnectingState == CCS_KADCALLBACK;
+					if (!bNatTraversalConnectInProgress && pTarget->socket == NULL && eConnectingState != CCS_NONE && !bPromotableCallbackState) {
+						pTarget->ResetConnectingState();
+						theApp.clientlist->RemoveConnectingClient(pTarget);
+					}
+					pTarget->TryToConnect(true, false, NULL, true);
+				} else if (thePrefs.GetLogNatTraversalEvents()) {
+					AddDebugLogLine(false, _T("[eServerBuddy] OP_ESERVER_RELAY_RESPONSE: waiting for direct NAT-T CAPS from target %s:%u before selecting QUIC/uTP"), (LPCTSTR)ipstr(targetAddr), nTargetKadPort);
 				}
-
-						const uint8 kBuddyRelayRetries = 2;
-						pTarget->MarkNatTRendezvous(kBuddyRelayRetries, true);
-						pTarget->QueueDeferredNatConnect(targetAddr, nTargetKadPort, buddySweepSpan);
-						pTarget->ArmEServerRelayNatTGuard();
-
-				// Try to connect to peer via uTP if available
-				// If pTarget has m_reqfile set (found by LowID), file request will be triggered!
-				pTarget->TryToConnect(true, false, NULL, true);
 
 				} else {
-					// Relay failed
+					// Legacy failure responses do not carry target identity. Recover only when the recent request maps to one client.
+					bool bAmbiguousRelayTarget = false;
+					CUpDownClient* pFailedTarget = theApp.clientlist->FindUniqueRecentEServerRelayTargetForBuddy(client, &bAmbiguousRelayTarget);
+					const bool bDirectFallbackQueued = pFailedTarget != NULL
+						&& pFailedTarget->QueueDirectNatTraversalAfterEServerRelayFailure(_T("eServer relay failed; trying direct NAT-T"));
 					if (thePrefs.GetLogNatTraversalEvents()) {
-						AddDebugLogLine(false, _T("[eServerBuddy] OP_ESERVER_RELAY_RESPONSE: Relay failed (status=%u)"), byStatus);
+						AddDebugLogLine(false, _T("[eServerBuddy] OP_ESERVER_RELAY_RESPONSE: Relay failed (status=%u, directFallback=%u, ambiguousTarget=%u)"),
+							byStatus, bDirectFallbackQueued ? 1u : 0u, bAmbiguousRelayTarget ? 1u : 0u);
 					}
 				}
 			}
@@ -3023,12 +3530,11 @@ bool CClientReqSocket::ProcessExtPacket(const BYTE *packet, uint32 size, UINT op
 
 		case OP_ESERVER_PEER_INFO:
 			{
-				// HighID buddy is telling us (LowID) about another LowID client that wants to connect
-				// This is received after server callback - we may not have established buddy relationship yet
+				// HighID buddy is telling us (LowID) about another LowID client that wants to connect.
+				// This is received after server callback; we may not have established buddy relationship yet.
 				if (thePrefs.GetLogNatTraversalEvents()) {
 					AddDebugLogLine(DLP_DEFAULT, false, _T("[eServerBuddy] *** OP_ESERVER_PEER_INFO HANDLER ENTERED *** from %s"), (LPCTSTR)EscPercent(client->DbgGetClientInfo()));
-					AddDebugLogLine(false, _T("[eServerBuddy] OP_ESERVER_PEER_INFO received from %s"), 
-						(LPCTSTR)EscPercent(client->DbgGetClientInfo()));
+					AddDebugLogLine(false, _T("[eServerBuddy] OP_ESERVER_PEER_INFO received from %s"), (LPCTSTR)EscPercent(client->DbgGetClientInfo()));
 				}
 				if (thePrefs.GetDebugClientTCPLevel() > 0)
 					DebugRecv("OP_EServerPeerInfo", client);
@@ -3038,7 +3544,59 @@ bool CClientReqSocket::ProcessExtPacket(const BYTE *packet, uint32 size, UINT op
 					&& (theApp.clientlist->GetEServerBuddyStatus() == Connected || theApp.clientlist->GetEServerBuddyStatus() == Connecting);
 				const bool bFallbackTrustedSender = !bFromServingBuddy
 					&& IsClientTrustedForPeerInfoFallback(client);
-				if (!bFromServingBuddy && !bFallbackTrustedSender) {
+				const bool bTrustedCrossBuddySender = !bFromServingBuddy && !bFallbackTrustedSender
+					&& IsClientTrustedForCrossBuddyPeerInfo(client);
+
+				if (size < 6) { // 4 (IP) + 2 (port)
+					RegisterEServerProtocolViolation(client, _T("PeerInfoMalformed"));
+					break;
+				}
+
+				CSafeMemFile data_in(packet, size);
+				uint32 dwPeerIP = data_in.ReadUInt32();
+				uint16 nPeerPort = data_in.ReadUInt16();
+
+				// Optionally read requester's hash if present. Cross-buddy packets require it.
+				uchar requesterHash[16];
+				md4clr(requesterHash);
+				if (size >= 22) {
+					data_in.ReadHash16(requesterHash);
+					if (thePrefs.GetLogNatTraversalEvents())
+						AddDebugLogLine(false, _T("[eServerBuddy] OP_ESERVER_PEER_INFO: RequesterHash=%s"), (LPCTSTR)md4str(requesterHash));
+				}
+				const bool bHasRequesterHash = !isnulmd4(requesterHash);
+
+				// Read optional file hash for download context.
+				uchar fileHash[MDX_DIGEST_SIZE];
+				md4clr(fileHash);
+				bool bHasFileContext = false;
+				if (size >= 38 && (size - data_in.GetPosition()) >= MDX_DIGEST_SIZE) {
+					data_in.ReadHash16(fileHash);
+					if (!isnulmd4(fileHash)) {
+						bHasFileContext = true;
+						if (thePrefs.GetLogNatTraversalEvents())
+							AddDebugLogLine(false, _T("[eServerBuddy] OP_ESERVER_PEER_INFO: FileHash=%s (download context)"), (LPCTSTR)md4str(fileHash));
+					}
+				}
+
+				// Tail compatibility:
+				// legacy: IP+Port+[Hash]+[FileHash]+[ProbeToken]
+				// new:    IP+Port+[Hash]+[FileHash]+[ProbeToken]+Marker+RequesterOptions
+				uint8 byRequesterConnectOptions = 0;
+				bool bPeerInfoHasRequesterOptions = false;
+				uint32 dwProbeToken = 0;
+				UINT uPeerInfoTail = (UINT)(data_in.GetLength() - data_in.GetPosition());
+				if (uPeerInfoTail == sizeof(uint32) || uPeerInfoTail == sizeof(uint32) + 2) {
+					dwProbeToken = data_in.ReadUInt32();
+					uPeerInfoTail -= sizeof(uint32);
+				}
+				if (uPeerInfoTail == 2 && packet[(UINT)data_in.GetPosition()] == ESERVER_PEER_INFO_NATT_HINT_MARKER) {
+					data_in.ReadUInt8();
+					byRequesterConnectOptions = data_in.ReadUInt8();
+					bPeerInfoHasRequesterOptions = true;
+				}
+
+				if (!bFromServingBuddy && !bFallbackTrustedSender && !bTrustedCrossBuddySender) {
 					if (thePrefs.GetLogNatTraversalEvents()) {
 						AddDebugLogLine(false, _T("[eServerBuddy] OP_ESERVER_PEER_INFO rejected from unauthorized sender: %s"),
 							(LPCTSTR)EscPercent(client->DbgGetClientInfo()));
@@ -3047,161 +3605,141 @@ bool CClientReqSocket::ProcessExtPacket(const BYTE *packet, uint32 size, UINT op
 					break;
 				}
 
-				if (size < 6)	// 4 (IP) + 2 (port)
-					break;
-
-				CSafeMemFile data_in(packet, size);
-				uint32 dwPeerIP = data_in.ReadUInt32();
-				uint16 nPeerPort = data_in.ReadUInt16();
-				
-				// Optionally read requester's hash if present
-				uchar requesterHash[16];
-				md4clr(requesterHash);
-				if (size >= 22) {
-					data_in.ReadHash16(requesterHash);
-					if (thePrefs.GetLogNatTraversalEvents()) {
-						AddDebugLogLine(false, _T("[eServerBuddy] OP_ESERVER_PEER_INFO: RequesterHash=%s"), (LPCTSTR)md4str(requesterHash));
-					}
-				}
-				const bool bHasRequesterHash = !isnulmd4(requesterHash);
 				if (!bHasRequesterHash && !bFromServingBuddy) {
 					if (thePrefs.GetLogNatTraversalEvents()) {
 						AddDebugLogLine(false, _T("[eServerBuddy] OP_ESERVER_PEER_INFO rejected (missing requester hash) from %s"),
 							(LPCTSTR)EscPercent(client->DbgGetClientInfo()));
 					}
-					RegisterEServerProtocolViolation(client, _T("PeerInfoMissingRequesterHash"));
+					if (!bTrustedCrossBuddySender)
+						RegisterEServerProtocolViolation(client, _T("PeerInfoMissingRequesterHash"));
 					break;
 				}
 
-				// Read optional file hash for download context (similar to KAD Rendezvous)
-				uchar fileHash[MDX_DIGEST_SIZE];
-				md4clr(fileHash);
-				bool bHasFileContext = false;
-				if (size >= 38 && (size - data_in.GetPosition()) >= MDX_DIGEST_SIZE) {
-					data_in.ReadHash16(fileHash);
-					if (!isnulmd4(fileHash)) {
-						bHasFileContext = true;
-						if (thePrefs.GetLogNatTraversalEvents()) {
-							AddDebugLogLine(false, _T("[eServerBuddy] OP_ESERVER_PEER_INFO: FileHash=%s (download context)"), (LPCTSTR)md4str(fileHash));
-						}
-					}
-				}
-
-				uint32 dwProbeToken = 0;
-				if ((data_in.GetLength() - data_in.GetPosition()) >= sizeof(uint32)) {
-					dwProbeToken = data_in.ReadUInt32();
-					if (dwProbeToken != 0)
-						client->SetEServerExtPortProbeToken(dwProbeToken);
-				}
-				if (!thePrefs.HasValidExternalUdpPort() && client->GetEServerExtPortProbeToken() != 0)
-					client->SendEServerUdpProbe();
-
-				// NOTE: dwPeerIP is in network byte order (from GetIP().ToUInt32(false))
-				// WriteUInt32/ReadUInt32 preserve the original byte order value
-				// CAddress constructor with 'false' expects network byte order
-				CAddress peerAddr(dwPeerIP, false);
-				if (!peerAddr.IsPublicIP() || nPeerPort == 0) {
+				if (bTrustedCrossBuddySender && !IsCrossBuddyPeerInfoSharedFileContextAcceptable(fileHash, bHasFileContext)) {
 					if (thePrefs.GetLogNatTraversalEvents()) {
-						AddDebugLogLine(false, _T("[eServerBuddy] OP_ESERVER_PEER_INFO rejected invalid endpoint %s:%u"),
-							(LPCTSTR)ipstr(peerAddr), nPeerPort);
+						AddDebugLogLine(false, _T("[eServerBuddy] OP_ESERVER_PEER_INFO ignored from cross-buddy without shared file context: %s"),
+							(LPCTSTR)md4str(fileHash));
 					}
+					break;
+				}
+
+				// NOTE: dwPeerIP is in network byte order.
+				CAddress peerAddr(dwPeerIP, false);
+				if (!IsUsableEServerRelayEndpoint(dwPeerIP, nPeerPort, 0, bHasRequesterHash ? requesterHash : NULL, _T("OP_ESERVER_PEER_INFO"))) {
 					RegisterEServerProtocolViolation(client, _T("PeerInfoInvalidEndpoint"));
 					break;
 				}
+
+				if (bTrustedCrossBuddySender) {
+					if (!client->CanAcceptEServerPeerInfo()) {
+						if (thePrefs.GetLogNatTraversalEvents()) {
+							AddDebugLogLine(false, _T("[eServerBuddy] OP_ESERVER_PEER_INFO rejected by cross-buddy rate limit from %s"),
+								(LPCTSTR)EscPercent(client->DbgGetClientInfo()));
+						}
+						RegisterEServerProtocolViolation(client, _T("PeerInfoRateLimited"));
+						break;
+					}
+
+					uchar senderHash[16];
+					uint32 dwSenderIP = 0;
+					uint16 nSenderPort = 0;
+					BuildCrossBuddyPeerInfoSenderKey(client, senderHash, dwSenderIP, nSenderPort);
+					if (IsDuplicateCrossBuddyPeerInfo(dwPeerIP, nPeerPort, requesterHash, fileHash, senderHash, dwSenderIP, nSenderPort)) {
+						if (thePrefs.GetLogNatTraversalEvents()) {
+							AddDebugLogLine(false, _T("[eServerBuddy] OP_ESERVER_PEER_INFO ignored duplicate cross-buddy request from %s for %s:%u"),
+								(LPCTSTR)EscPercent(client->DbgGetClientInfo()), (LPCTSTR)ipstr(peerAddr), nPeerPort);
+						}
+						break;
+					}
+					RememberCrossBuddyPeerInfo(dwPeerIP, nPeerPort, requesterHash, fileHash, senderHash, dwSenderIP, nSenderPort);
+
+					if (thePrefs.GetLogNatTraversalEvents()) {
+						AddDebugLogLine(false, _T("[eServerBuddy] OP_ESERVER_PEER_INFO accepted from trusted cross-buddy sender: %s"),
+							(LPCTSTR)EscPercent(client->DbgGetClientInfo()));
+					}
+				}
+
+				if (dwProbeToken != 0)
+					client->SetEServerExtPortProbeToken(dwProbeToken);
+				if (!thePrefs.HasValidExternalUdpPort() && client->GetEServerExtPortProbeToken() != 0)
+					client->SendEServerUdpProbe();
 				if (thePrefs.GetLogNatTraversalEvents()) {
 					AddDebugLogLine(false, _T("[eServerBuddy] OP_ESERVER_PEER_INFO: Peer info received - IP=%s Port=%u (rawIP=0x%08X)"),
 						(LPCTSTR)ipstr(peerAddr), nPeerPort, dwPeerIP);
 				}
 
-				// Send ACK to the buddy (sender of this packet) with our external KAD port
-				if (thePrefs.GetDebugClientTCPLevel() > 0)
-					DebugSend("OP_EServerPeerInfoAck", client);
+				// Build the ACK only after the local NAT-T endpoint is ready.
+				// QUIC is server/client oriented; releasing the requester before the passive endpoint exists races the first Initial packet.
+				const bool bNatUdpReadyForPeerInfo = theApp.clientudp != NULL && theApp.clientudp->EnsureNatTraversalEndpointReady(_T("eServer peer info"));
+				if (!bNatUdpReadyForPeerInfo) {
+					if (thePrefs.GetLogNatTraversalEvents())
+						AddDebugLogLine(false, _T("[eServerBuddy] OP_ESERVER_PEER_INFO ignored: local UDP endpoint is not ready for requester %s:%u"), (LPCTSTR)ipstr(peerAddr), nPeerPort);
+					break;
+				}
 
-				// Prefer external UDP port for NAT traversal, fallback to local UDP port
 				uint16 nMyKadPort = thePrefs.GetBestExternalUdpPort();
+				const bool bBlindLocalAckPort = (nMyKadPort == 0);
 				if (nMyKadPort == 0)
 					nMyKadPort = thePrefs.GetUDPPort();
+				if (bBlindLocalAckPort && thePrefs.GetLogNatTraversalEvents())
+					AddDebugLogLine(false, _T("[eServerBuddy] OP_ESERVER_PEER_INFO: external UDP port not verified, ACK uses local UDP port %u"), nMyKadPort);
 
-				// Get our public IP to send to the buddy
-				// The buddy will forward this to the requester for hole punching
 				CAddress myPublicAddr = theApp.GetPublicIP();
 				uint32 dwMyPublicIP = 0;
-				if (!myPublicAddr.IsNull() && myPublicAddr.GetType() == CAddress::IPv4) {
-					dwMyPublicIP = myPublicAddr.ToUInt32(false);  // Network byte order
-				}
+				if (!myPublicAddr.IsNull() && myPublicAddr.GetType() == CAddress::IPv4)
+					dwMyPublicIP = myPublicAddr.ToUInt32(false);
+				bool bPeerInfoAckSent = false;
+				auto SendDeferredPeerInfoAck = [&]()
+				{
+					if (bPeerInfoAckSent)
+						return;
+					if (thePrefs.GetDebugClientTCPLevel() > 0)
+						DebugSend("OP_EServerPeerInfoAck", client);
+					CSafeMemFile data_ack(6);
+					data_ack.WriteUInt16(nMyKadPort);
+					data_ack.WriteUInt32(dwMyPublicIP);
+					Packet* ackPacket = new Packet(data_ack, OP_EMULEPROT, OP_ESERVER_PEER_INFO_ACK);
+					theStats.AddUpDataOverheadOther(ackPacket->size);
+					SendPacket(ackPacket, true, 0, true);
+					bPeerInfoAckSent = true;
+					if (thePrefs.GetLogNatTraversalEvents()) {
+						AddDebugLogLine(false, _T("[eServerBuddy] OP_ESERVER_PEER_INFO: Sent ACK with MyKadPort=%u MyPublicIP=%s"),
+							nMyKadPort, (LPCTSTR)ipstr(myPublicAddr));
+					}
+				};
 
-				// ACK format: KadPort(2) + PublicIP(4) = 6 bytes
-				CSafeMemFile data_ack(6);
-				data_ack.WriteUInt16(nMyKadPort);
-				data_ack.WriteUInt32(dwMyPublicIP);  // Add our public IP
-				Packet* ackPacket = new Packet(data_ack, OP_EMULEPROT, OP_ESERVER_PEER_INFO_ACK);
-				theStats.AddUpDataOverheadOther(ackPacket->size);
-				SendPacket(ackPacket, true, 0, true);
-				
-				if (thePrefs.GetLogNatTraversalEvents()) {
-					AddDebugLogLine(false, _T("[eServerBuddy] OP_ESERVER_PEER_INFO: Sent ACK with MyKadPort=%u MyPublicIP=%s"), 
-						nMyKadPort, (LPCTSTR)ipstr(myPublicAddr));
-				}
-
-
-				// Now we need to initiate hole punch and uTP connection to the requester
-				// This is similar to what happens in OP_RENDEZVOUS handler
-				
-				// Find or create client object for the requester
-				// We must distinguish by BOTH IP AND PORT, not just IP!
-				// The sender (Buddy) and the requester may share the same public IP
-				// but use different ports (NAT scenario with Instance1 and Instance4 both behind 46.197.1.119)
+				// Find or create client object for the requester.
 				CUpDownClient* pPeer = NULL;
-				
-				// First, try to find by user hash if available
-				if (bHasRequesterHash)
-					pPeer = theApp.clientlist->FindClientByUserHash(requesterHash, peerAddr, nPeerPort);
-				
-				// Then, try to find by IP AND KAD Port (both must match!)
-				// Use FindClientByIP_KadPort because nPeerPort is a UDP port!
-				// FindClientByIP expects a TCP port, which would fail or return the wrong client.
-				if (!pPeer)
+				if (bHasRequesterHash) {
+					pPeer = theApp.clientlist->FindClientByUserHashAndKadEndpoint(requesterHash, peerAddr, nPeerPort);
+					if (!pPeer) {
+						CUpDownClient* pEndpointPeer = theApp.clientlist->FindClientByIP_KadPort(peerAddr, nPeerPort);
+						if (pEndpointPeer != NULL && (!pEndpointPeer->HasValidHash() || md4equ(pEndpointPeer->GetUserHash(), requesterHash)))
+							pPeer = pEndpointPeer;
+						else if (pEndpointPeer != NULL && thePrefs.GetLogNatTraversalEvents())
+							AddDebugLogLine(DLP_LOW, false, _T("[eServerBuddy] OP_ESERVER_PEER_INFO ignored endpoint client with different hash: %s"), (LPCTSTR)EscPercent(pEndpointPeer->DbgGetClientInfo()));
+					}
+				} else
 					pPeer = theApp.clientlist->FindClientByIP_KadPort(peerAddr, nPeerPort);
-				
-				// Safety check: Never bind to the sender or an unrelated hash.
-				// Sender may be the buddy before we establish the serving buddy relationship.
+
 				if (pPeer && pPeer == client) {
 					if (thePrefs.GetLogNatTraversalEvents())
 						AddDebugLogLine(DLP_LOW, false, _T("[eServerBuddy] WARNING: Found sender instead of requester. Forcing new client creation."));
 					pPeer = NULL;
 				}
 
-				if (pPeer && bHasRequesterHash && pPeer->HasValidHash() && memcmp(pPeer->GetUserHash(), requesterHash, 16) != 0) {
-					if (thePrefs.GetLogNatTraversalEvents())
-						AddDebugLogLine(DLP_LOW, false, _T("[eServerBuddy] WARNING: Hash mismatch for requester. Forcing new client creation."));
-					pPeer = NULL;
-				}
-
-				// Safety check: Ensure we didn't find our own Buddy!
-				// In NAT loopback scenarios (Instance1 and Instance4 on same IP), we might accidentally find Buddy.
-				// But Buddy's KadPort should be different from Requester's KadPort.
 				CUpDownClient* pServingBuddy = theApp.clientlist->GetServingEServerBuddy();
 				if (pPeer && pPeer == pServingBuddy) {
 					if (thePrefs.GetLogNatTraversalEvents())
 						AddDebugLogLine(DLP_LOW, false, _T("[eServerBuddy] WARNING: Found Buddy instead of Requester! Forcing new client creation."));
-					pPeer = NULL; 
-				} else if (pPeer) {
-					if (thePrefs.GetLogNatTraversalEvents())
-						AddDebugLogLine(DLP_DEFAULT, false, _T("[eServerBuddy] Found existing client by IP+KadPort: %s"), (LPCTSTR)EscPercent(pPeer->DbgGetClientInfo()));
+					pPeer = NULL;
 				}
 
-				// Always create a new client for the requester if not found by hash or IP+KadPort
-				if (!pPeer) {
-					pPeer = new CUpDownClient(NULL, 0, dwPeerIP, 0, 0, true);
+				const bool bNewPeer = (pPeer == NULL);
+				if (bNewPeer) {
+					pPeer = new CUpDownClient(NULL, 0, 0, 0, 0, true);
 					if (bHasRequesterHash)
 						pPeer->SetUserHash(requesterHash, true);
-					theApp.clientlist->AddClient(pPeer);
-					if (thePrefs.GetLogNatTraversalEvents()) {
-						AddDebugLogLine(false, _T("[eServerBuddy] OP_ESERVER_PEER_INFO: Created NEW client for requester %s:%u"),
-							(LPCTSTR)ipstr(peerAddr), nPeerPort);
-					}
-					if (thePrefs.GetLogNatTraversalEvents())
-						AddDebugLogLine(DLP_DEFAULT, false, _T("[eServerBuddy] Created NEW client for requester %s:%u"), (LPCTSTR)ipstr(peerAddr), nPeerPort);
 				} else {
 					if (bHasRequesterHash && !pPeer->HasValidHash())
 						pPeer->SetUserHash(requesterHash, true);
@@ -3211,29 +3749,50 @@ bool CClientReqSocket::ProcessExtPacket(const BYTE *packet, uint32 size, UINT op
 					}
 				}
 
-					bool bWeAreUploader = false;
-					if (bHasFileContext) {
-						CKnownFile* sharedFile = theApp.sharedfiles->GetFileByID(fileHash);
-						if (sharedFile != NULL) {
-							if (isnulmd4(pPeer->GetUploadFileID()))
-								pPeer->SetUploadFileID(sharedFile);
-							bWeAreUploader = true;
-						} else {
-							CPartFile* reqFile = theApp.downloadqueue->GetFileByID(fileHash);
-							if (reqFile != NULL && pPeer->GetRequestFile() == NULL)
-								pPeer->SetRequestFile(reqFile);
-						}
+				ENatTraversalTransport eRequesterRelayTransportHint = NATT_TRANSPORT_NONE;
+				if (bPeerInfoHasRequesterOptions) {
+					if ((byRequesterConnectOptions & CONNECT_OPT_NAT_TRAVERSAL_QUIC) != 0 && thePrefs.IsNatTraversalQuicAllowed() && CQuicNatSocket::IsRuntimeAvailable())
+						eRequesterRelayTransportHint = NATT_TRANSPORT_QUIC;
+					else if ((byRequesterConnectOptions & CONNECT_OPT_NAT_TRAVERSAL_UTP) != 0 && thePrefs.IsNatTraversalUtpAllowed())
+						eRequesterRelayTransportHint = NATT_TRANSPORT_UTP;
+					if (thePrefs.GetLogNatTraversalEvents()) {
+						AddDebugLogLine(false, _T("[eServerBuddy] OP_ESERVER_PEER_INFO: requester transport hint options=0x%02X selected=%u"),
+							byRequesterConnectOptions, (UINT)eRequesterRelayTransportHint);
 					}
+				}
+				pPeer->ClearDirectNatTraversalCaps();
 
-				// Set NAT traversal info
+				bool bWeAreUploader = false;
+				CKnownFile* pRelaySharedFile = NULL;
+				if (bHasFileContext) {
+					CKnownFile* sharedFile = theApp.sharedfiles->GetFileByID(fileHash);
+					if (sharedFile != NULL) {
+						pRelaySharedFile = sharedFile;
+						if (isnulmd4(pPeer->GetUploadFileID()))
+							pPeer->SetUploadFileID(sharedFile);
+						bWeAreUploader = true;
+					} else if (!bTrustedCrossBuddySender) {
+						CPartFile* reqFile = theApp.downloadqueue->GetFileByID(fileHash);
+						if (reqFile != NULL && pPeer->GetRequestFile() == NULL)
+							pPeer->SetRequestFile(reqFile);
+					}
+				}
+
+				// Set NAT traversal info after role validation and before the client becomes visible in the list.
 				pPeer->SetKadPort(nPeerPort);
 				pPeer->SetUDPPort(nPeerPort);
 				pPeer->SetNatTraversalSupport(true);
 				CAddress peerAddrCopy = peerAddr;
 				pPeer->SetIP(peerAddrCopy);
+				if (bNewPeer) {
+					theApp.clientlist->AddClient(pPeer);
+					if (thePrefs.GetLogNatTraversalEvents()) {
+						AddDebugLogLine(false, _T("[eServerBuddy] OP_ESERVER_PEER_INFO: Created NEW client for requester %s:%u"),
+							(LPCTSTR)ipstr(peerAddr), nPeerPort);
+					}
+				}
 
-				// Register NAT expectation so OP_HOLEPUNCH handler finds the correct client
-				// This ensures incoming hole punch packets are matched to this peer, not the buddy
+				// Register NAT expectation so OP_HOLEPUNCH handler finds the correct client.
 				if (theApp.clientudp) {
 					theApp.clientudp->SeedNatTraversalExpectation(pPeer, peerAddr, nPeerPort);
 					if (thePrefs.GetLogNatTraversalEvents()) {
@@ -3241,27 +3800,27 @@ bool CClientReqSocket::ProcessExtPacket(const BYTE *packet, uint32 size, UINT op
 							(LPCTSTR)ipstr(peerAddr), nPeerPort);
 					}
 				}
-				
-				// Send hole punch burst to requester - this opens our NAT for incoming uTP
-				if (thePrefs.GetLogNatTraversalEvents()) {
-					AddDebugLogLine(false, _T("[eServerBuddy] OP_ESERVER_PEER_INFO: Sending hole punch burst to %s:%u"),
-						(LPCTSTR)ipstr(peerAddr), nPeerPort);
-				}
-					uint16 win = thePrefs.GetNatTraversalPortWindow();
-					uint16 sweepWin = thePrefs.GetNatTraversalSweepWindow();
-					uint16 span = std::min<uint16>(win, sweepWin);
-					if (theApp.clientudp) {
-						// Keep packet count aligned with rendezvous bursts.
-							for (int i = 0; i < 12; ++i) {
-								Packet* hp = new Packet(OP_EMULEPROT);
-								hp->opcode = OP_HOLEPUNCH;
-								theApp.clientudp->SendPacket(hp, peerAddr, nPeerPort, false, NULL, false, 0);
-							}
-							for (uint16 off = 1; off <= span; ++off) {
-								if (nPeerPort > off) {
-									Packet* hp = new Packet(OP_EMULEPROT);
-									hp->opcode = OP_HOLEPUNCH;
-								theApp.clientudp->SendPacket(hp, peerAddr, (uint16)(nPeerPort - off), false, NULL, false, 0);
+
+				// Send hole punch burst to requester.
+				uint16 win = thePrefs.GetNatTraversalPortWindow();
+				uint16 sweepWin = thePrefs.GetNatTraversalSweepWindow();
+				uint16 span = std::min<uint16>(win, sweepWin);
+				bool bNatUdpReady = bNatUdpReadyForPeerInfo;
+				if (theApp.clientudp && bNatUdpReady) {
+					if (thePrefs.GetLogNatTraversalEvents()) {
+						AddDebugLogLine(false, _T("[eServerBuddy] OP_ESERVER_PEER_INFO: Sending hole punch burst to %s:%u"),
+							(LPCTSTR)ipstr(peerAddr), nPeerPort);
+					}
+					for (int i = 0; i < 12; ++i) {
+						Packet* hp = new Packet(OP_EMULEPROT);
+						hp->opcode = OP_HOLEPUNCH;
+						theApp.clientudp->SendPacket(hp, peerAddr, nPeerPort, false, NULL, false, 0);
+					}
+					for (uint16 off = 1; off <= span; ++off) {
+						if (nPeerPort > off) {
+							Packet* hp = new Packet(OP_EMULEPROT);
+							hp->opcode = OP_HOLEPUNCH;
+							theApp.clientudp->SendPacket(hp, peerAddr, (uint16)(nPeerPort - off), false, NULL, false, 0);
 						}
 						if (nPeerPort + off <= 65535) {
 							Packet* hp = new Packet(OP_EMULEPROT);
@@ -3269,31 +3828,100 @@ bool CClientReqSocket::ProcessExtPacket(const BYTE *packet, uint32 size, UINT op
 							theApp.clientudp->SendPacket(hp, peerAddr, (uint16)(nPeerPort + off), false, NULL, false, 0);
 						}
 					}
-					if (thePrefs.GetLogNatTraversalEvents()) {
+					if (thePrefs.GetLogNatTraversalEvents())
 						AddDebugLogLine(false, _T("[eServerBuddy] OP_ESERVER_PEER_INFO: Sent 12 OP_HOLEPUNCH packets"));
-					}
-				}
+				} else if (thePrefs.GetLogNatTraversalEvents())
+					AddDebugLogLine(false, _T("[eServerBuddy] OP_ESERVER_PEER_INFO: NAT-T UDP socket is not ready; skipping hole punch burst to %s:%u"), (LPCTSTR)ipstr(peerAddr), nPeerPort);
 
-					// Keep dual-active behavior for relay data channel.
-					// Passive-only uploader mode can stall after initial payload on some NAT paths.
-					if (bWeAreUploader) {
-					if (thePrefs.GetLogNatTraversalEvents()) {
-						AddDebugLogLine(false, _T("[eServerBuddy] OP_ESERVER_PEER_INFO: Uploader side detected, using dual-active uTP connect for relay stability to %s:%u"),
-							(LPCTSTR)ipstr(peerAddr), nPeerPort);
-					}
-					}
-					if (thePrefs.GetLogNatTraversalEvents()) {
-						AddDebugLogLine(false, _T("[eServerBuddy] OP_ESERVER_PEER_INFO: Initiating ACTIVE uTP connect to %s:%u"),
-							(LPCTSTR)ipstr(peerAddr), nPeerPort);
-					}
+					const bool bPeerHasLiveNat = pPeer->socket != NULL && pPeer->socket->IsConnected() && pPeer->socket->HaveNatTraversalLayer();
+					const bool bPeerIsActiveTransfer = pPeer->GetDownloadState() == DS_DOWNLOADING || pPeer->GetUploadState() == US_UPLOADING || pPeer->GetUploadState() == US_CONNECTING;
 					const uint8 kPeerRelayRetries = 2;
-					pPeer->MarkNatTRendezvous(kPeerRelayRetries, true);
-					pPeer->QueueDeferredNatConnect(peerAddr, nPeerPort, span);
-					pPeer->ArmEServerRelayNatTGuard();
-					pPeer->TryToConnect(true, false, NULL, true);
-
-				}
-				break;
+					const bool bCanUseDirectCapsForQuic = thePrefs.IsNatTraversalQuicAllowed() && CQuicNatSocket::IsRuntimeAvailable();
+					auto CreatePassiveUtpEndpoint = [&]() -> bool
+					{
+						if (!bWeAreUploader || !thePrefs.IsNatTraversalUtpAllowed())
+							return false;
+						if (pPeer->socket != NULL) {
+							if (pPeer->socket->IsConnected())
+								return pPeer->socket->HaveUtpLayer();
+							if (pPeer->socket->HaveUtpLayer())
+								return true;
+							if (!pPeer->socket->HaveNatTraversalLayer())
+								return false;
+							pPeer->ResetPendingNatTraversalForEndpointChange(_T("eServer requester selected uTP"));
+						}
+						pPeer->socket = static_cast<CClientReqSocket*>(RUNTIME_CLASS(CClientReqSocket)->CreateObject());
+						pPeer->socket->SetClient(pPeer);
+						if (!pPeer->socket->Create()) {
+							DWORD dwLastError = ::WSAGetLastError();
+							if (thePrefs.GetLogNatTraversalEvents())
+								AddDebugLogLine(false, _T("[eServerBuddy] OP_ESERVER_PEER_INFO: passive uTP socket create failed err=%lu for requester %s:%u"), dwLastError, (LPCTSTR)ipstr(peerAddr), nPeerPort);
+							pPeer->socket->Safe_Delete();
+							return false;
+						}
+						pPeer->socket->InitUtpSupport();
+						if (!pPeer->socket->HaveNatTraversalLayer())
+							return false;
+						pPeer->SetUtpLocalInitiator(false);
+						pPeer->ResetUtpFlowControl();
+						pPeer->ClearUtpQueuedPackets();
+						pPeer->ArmEServerRelayNatTGuard();
+						if (thePrefs.GetLogNatTraversalEvents())
+							AddDebugLogLine(false, _T("[eServerBuddy] OP_ESERVER_PEER_INFO: passive uTP endpoint created for requester %s:%u"), (LPCTSTR)ipstr(peerAddr), nPeerPort);
+						return true;
+					};
+					if (theApp.clientudp != NULL)
+						theApp.clientudp->RequestNatTraversalCaps(pPeer, peerAddr, nPeerPort);
+					if (bPeerHasLiveNat && bPeerIsActiveTransfer) {
+						if (thePrefs.GetLogNatTraversalEvents()) {
+							AddDebugLogLine(false, _T("[eServerBuddy] OP_ESERVER_PEER_INFO: Keeping existing active NAT-T transfer while direct CAPS refresh runs for %s:%u"),
+								(LPCTSTR)ipstr(peerAddr), nPeerPort);
+						}
+					} else if (bWeAreUploader && eRequesterRelayTransportHint == NATT_TRANSPORT_QUIC && theApp.clientudp != NULL) {
+						theApp.clientudp->StartPassiveQuicNatEndpoint(pPeer, peerAddr, nPeerPort, true);
+					} else if (bWeAreUploader && eRequesterRelayTransportHint == NATT_TRANSPORT_UTP) {
+						CreatePassiveUtpEndpoint();
+					} else if (pPeer->HasDirectNatTraversalCaps()) {
+						const bool bPeerKnownQuicForPassive = pPeer->HasDirectNatTraversalQuicSupport();
+						if (bWeAreUploader && thePrefs.IsNatTraversalQuicAllowed() && bPeerKnownQuicForPassive && CQuicNatSocket::IsRuntimeAvailable() && theApp.clientudp != NULL)
+							theApp.clientudp->StartPassiveQuicNatEndpoint(pPeer, peerAddr, nPeerPort);
+						else if (thePrefs.IsNatTraversalUtpAllowed() && pPeer->HasDirectNatTraversalUtpSupport()) {
+							if (!CreatePassiveUtpEndpoint()) {
+								pPeer->MarkNatTRendezvous(kPeerRelayRetries, true);
+								pPeer->QueueDeferredNatConnect(peerAddr, nPeerPort, span);
+								pPeer->ArmEServerRelayNatTGuard();
+								pPeer->TryToConnect(true, false, NULL, true);
+							}
+						}
+					} else {
+						const bool bPeerKnownQuicFromHello = bCanUseDirectCapsForQuic && !pPeer->NeedsDirectNatTraversalCapsRefresh() && pPeer->GetNatTraversalQuicSupport();
+						const bool bIgnorePeerCachedLegacyForCapsRefresh = bCanUseDirectCapsForQuic && pPeer->NeedsDirectNatTraversalCapsRefresh();
+						const bool bPeerKnownLegacyWithoutQuic = (!bIgnorePeerCachedLegacyForCapsRefresh && pPeer->HasReceivedHelloInfo() && !pPeer->GetNatTraversalQuicSupport()) || pPeer->CanUseLegacyUtpAfterDirectCapsTimeout(DIRECT_NATT_CAPS_LEGACY_TIMEOUT_MS);
+						if (bPeerKnownQuicFromHello && bWeAreUploader && theApp.clientudp != NULL) {
+							theApp.clientudp->StartPassiveQuicNatEndpoint(pPeer, peerAddr, nPeerPort);
+						} else if (bPeerKnownQuicFromHello) {
+							pPeer->MarkNatTRendezvous(kPeerRelayRetries, true);
+							pPeer->QueueDeferredNatConnect(peerAddr, nPeerPort, span);
+							pPeer->ArmEServerRelayNatTGuard();
+							pPeer->TryToConnect(true, false, NULL, true);
+						} else if (thePrefs.IsNatTraversalUtpAllowed() && (!bCanUseDirectCapsForQuic || bPeerKnownLegacyWithoutQuic)) {
+							if (!CreatePassiveUtpEndpoint()) {
+								pPeer->MarkNatTRendezvous(kPeerRelayRetries, true);
+								pPeer->QueueDeferredNatConnect(peerAddr, nPeerPort, span);
+								pPeer->ArmEServerRelayNatTGuard();
+								pPeer->TryToConnect(true, false, NULL, true);
+							}
+						} else {
+							pPeer->MarkNatTRendezvous(kPeerRelayRetries, true);
+							pPeer->QueueDeferredNatConnect(peerAddr, nPeerPort, span);
+							pPeer->ArmEServerRelayNatTGuard();
+							if (thePrefs.GetLogNatTraversalEvents())
+								AddDebugLogLine(false, _T("[eServerBuddy] OP_ESERVER_PEER_INFO: waiting for direct NAT-T CAPS from requester %s:%u before selecting QUIC/uTP"), (LPCTSTR)ipstr(peerAddr), nPeerPort);
+						}
+					}
+					SendDeferredPeerInfoAck();
+			}
+			break;
 
 		case OP_ESERVER_PEER_INFO_ACK:
 			{
@@ -3340,7 +3968,7 @@ bool CClientReqSocket::ProcessExtPacket(const BYTE *packet, uint32 size, UINT op
 					dwTargetPublicIP = data_in.ReadUInt32();
 				}
 
-				// Find pending relay request for this target using LowID (must match AddPendingEServerRelayByLowID)
+				// Find the exact pending relay request for this target.
 				uint32 dwTargetLowID = client->GetUserIDHybrid();
 				if (dwTargetLowID == 0) {
 					if (thePrefs.GetDebugClientTCPLevel() > 0)
@@ -3348,7 +3976,7 @@ bool CClientReqSocket::ProcessExtPacket(const BYTE *packet, uint32 size, UINT op
 					break;
 				}
 
-				EServerRelayRequest* pReq = theApp.clientlist->FindPendingEServerRelayByLowID(dwTargetLowID);
+				EServerRelayRequest* pReq = theApp.clientlist->FindPendingEServerRelayForTarget(client);
 				if (!pReq) {
 					if (thePrefs.GetDebugClientTCPLevel() > 0)
 						DebugLog(_T("OP_EServerPeerInfoAck: No pending relay found for LowID=%u (%s)"), dwTargetLowID, (LPCTSTR)EscPercent(client->DbgGetClientInfo()));
@@ -3360,7 +3988,7 @@ bool CClientReqSocket::ProcessExtPacket(const BYTE *packet, uint32 size, UINT op
 						AddDebugLogLine(false, _T("[eServerBuddy] OP_ESERVER_PEER_INFO_ACK rejected: pending requester no longer served (LowID=%u)"),
 							dwTargetLowID);
 					}
-					theApp.clientlist->RemovePendingEServerRelayByLowID(dwTargetLowID);
+					theApp.clientlist->RemovePendingEServerRelayRequest(pReq);
 					RegisterEServerProtocolViolation(client, _T("PeerInfoAckRequesterNotServed"));
 					break;
 				}
@@ -3370,7 +3998,7 @@ bool CClientReqSocket::ProcessExtPacket(const BYTE *packet, uint32 size, UINT op
 						AddDebugLogLine(false, _T("[eServerBuddy] OP_ESERVER_PEER_INFO_ACK rejected: requester/target collision for LowID=%u"),
 							dwTargetLowID);
 					}
-					theApp.clientlist->RemovePendingEServerRelayByLowID(dwTargetLowID);
+					theApp.clientlist->RemovePendingEServerRelayRequest(pReq);
 					RegisterEServerProtocolViolation(client, _T("PeerInfoAckRequesterCollision"));
 					break;
 				}
@@ -3380,20 +4008,24 @@ bool CClientReqSocket::ProcessExtPacket(const BYTE *packet, uint32 size, UINT op
 				}
 				pReq->dwTargetPublicIP = dwTargetPublicIP;
 				pReq->nTargetKadPort = nTargetKadPort;
-				pReq->bAwaitingTargetExtPort = false;
 
-				// Try immediate final response first using ACK/fallback ports.
-				// External UDP probe is a best-effort optimization and must not block relay completion.
-				if (theApp.clientlist->TrySendPendingEServerRelayResponseForTarget(client))
-					break;
-
-				if (!client->HasFreshObservedExternalUdpPort() && client->GetEServerExtPortProbeToken() != 0) {
-					pReq->bAwaitingTargetExtPort = true;
+				if (!client->HasFreshObservedExternalUdpPort() && client->SupportsEServerBuddyExternalUdpPort() && client->GetEServerExtPortProbeToken() != 0) {
+					if (!pReq->bAwaitingTargetExtPort) {
+						pReq->bAwaitingTargetExtPort = true;
+						pReq->dwTargetExtPortWaitStart = ::GetTickCount();
+					}
 					if (thePrefs.GetLogNatTraversalEvents()) {
-						AddDebugLogLine(false, _T("[eServerBuddy] OP_ESERVER_PEER_INFO_ACK: Immediate final response failed, waiting for external port probe from target"));
+						AddDebugLogLine(false, _T("[eServerBuddy] OP_ESERVER_PEER_INFO_ACK: Waiting %u ms for target external UDP probe before local port fallback (LowID=%u)"),
+							(UINT)ESERVER_EXT_UDP_PORT_WAIT_TIME, dwTargetLowID);
 					}
 					break;
 				}
+
+				pReq->bAwaitingTargetExtPort = false;
+				pReq->dwTargetExtPortWaitStart = 0;
+
+				if (theApp.clientlist->TrySendPendingEServerRelayResponseForTarget(client))
+					break;
 
 				if (thePrefs.GetLogNatTraversalEvents()) {
 					AddDebugLogLine(false, _T("[eServerBuddy] OP_ESERVER_PEER_INFO_ACK: Failed to send final relay response for LowID=%u"), dwTargetLowID);
@@ -3440,24 +4072,6 @@ bool CClientReqSocket::ProcessExtPacket(const BYTE *packet, uint32 size, UINT op
 				uchar reqfilehash[MDX_DIGEST_SIZE];
 				data_in.ReadHash16(reqfilehash);
 				
-				// Try to read hint endpoint (requester self-reported endpoint) from end of packet
-				CAddress hintIP;
-				uint16 hintPort = 0;
-				UINT consumed = (UINT)data_in.GetPosition();
-				if (size > consumed && (size - consumed) >= 6) {
-					// Peek last 6 bytes to check if it's a hint endpoint
-					UINT hintOffset = size - 6;
-					if (hintOffset >= consumed) {
-						uint32 hintIPv4 = PeekUInt32(packet + hintOffset);
-						uint16 hintPortValue = PeekUInt16(packet + hintOffset + 4);
-						if (hintIPv4 != 0 && hintPortValue != 0) {
-							hintIP = CAddress(hintIPv4, false);
-							hintPort = hintPortValue;
-							if (thePrefs.GetLogNatTraversalEvents())
-								DebugLog(_T("[NatTraversal] OP_REASKCALLBACKTCP: Read hint endpoint %s:%u (buddy-observed: %s:%u)"), (LPCTSTR)ipstr(hintIP), hintPort, (LPCTSTR)ipstr(destip), destport);
-						}
-					}
-				}
 				if (thePrefs.GetDebugClientTCPLevel() > 0)
 					DebugRecv("OP_ReaskCallbackTCP", client, reqfilehash);
 
@@ -3555,7 +4169,7 @@ bool CClientReqSocket::ProcessExtPacket(const BYTE *packet, uint32 size, UINT op
 					} else {
 						DebugLogWarning(_T("Client UDP socket; OP_REASKCALLBACKTCP; reqfile does not match"));
 						TRACE(_T("reqfile:         %s\n"), (LPCTSTR)DbgGetFileInfo(reqfile->GetFileHash()));
-						TRACE(_T("sender->GetRequestFile(): %s\n"), sender->GetRequestFile() ? (LPCTSTR)DbgGetFileInfo(sender->GetRequestFile()->GetFileHash()) : _T("(null)"));
+						AddDebugLogLine(DLP_VERYLOW, false, _T("sender->GetRequestFile(): %s\n"), sender->GetRequestFile() ? (LPCTSTR)DbgGetFileInfo(sender->GetRequestFile()->GetFileHash()) : (LPCTSTR)_T("(null)"));
 					}
 					} else {
 						// sender not in upload queue - this is a NAT-T callback request
@@ -3591,35 +4205,16 @@ bool CClientReqSocket::ProcessExtPacket(const BYTE *packet, uint32 size, UINT op
 								if (theApp.clientudp->GetUtpContext() != NULL) {
 									// Helper lambda to add expected peer endpoint
 									auto AddExpectedPeer = [&](const CAddress& peerIP, uint16 peerPort) {
-										if (peerIP.IsNull() || peerPort == 0)
-											return;
-										sockaddr_storage saddr = {0};
-										socklen_t slen = 0;
-										if (peerIP.GetType() == CAddress::IPv4) {
-											sockaddr_in* sa4 = (sockaddr_in*)&saddr;
-											sa4->sin_family = AF_INET;
-											sa4->sin_port = htons(peerPort);
-											sa4->sin_addr.s_addr = htonl(peerIP.ToUInt32(false));
-											slen = sizeof(sockaddr_in);
-										} else if (peerIP.GetType() == CAddress::IPv6) {
-											sockaddr_in6* sa6 = (sockaddr_in6*)&saddr;
-											sa6->sin6_family = AF_INET6;
-											sa6->sin6_port = htons(peerPort);
-											memcpy(&sa6->sin6_addr, peerIP.Data(), 16);
-											slen = sizeof(sockaddr_in6);
-										}
-										if (slen > 0) {
-											theApp.clientudp->ExpectPeer((const sockaddr*)&saddr, slen);
+										sockaddr_storage saddr = {};
+										int slen = 0;
+										if (theApp.clientudp->BuildUtpPeerEndpoint(peerIP, peerPort, saddr, slen)) {
+											theApp.clientudp->ExpectPeer(reinterpret_cast<const sockaddr*>(&saddr), slen);
 											if (thePrefs.GetLogNatTraversalEvents())
 												DebugLog(_T("[NatTraversal][OP_REASKCALLBACKTCP][Receiver] uTP layer ready, expecting peer from %s:%u"), (LPCTSTR)ipstr(peerIP), peerPort);
 										}
 									};
 									
-									// Add hint endpoint first (requester self-reported, preferred for NAT-T)
-									if (!hintIP.IsNull() && hintPort != 0)
-										AddExpectedPeer(hintIP, hintPort);
-									
-									// Add buddy-observed endpoint as fallback
+									// The callback header contains the requester endpoint observed by the buddy.
 									AddExpectedPeer(destip, destport);
 								}
 								
@@ -3752,7 +4347,7 @@ bool CClientReqSocket::ProcessExtPacket(const BYTE *packet, uint32 size, UINT op
 
 					if (reqfileNr2 != NULL && reqfileNr2 != reqfileNr1) {
 						// Safe logging: expected file may be NULL when it was deleted during upload
-						const CString sExpectedName = reqfileNr2 ? reqfileNr2->GetFileName() : _T("<NULL>");
+						const CString sExpectedName = reqfileNr2 ? reqfileNr2->GetFileName() : CString(_T("<NULL>"));
 						if (thePrefs.GetLogUlDlEvents()) {
 							AddProtectionLogLine(false, _T("File hot swapping allowed [ProcessExtPacket]: (client=%s, expected=%s, asked=%s)"),
 								(LPCTSTR)EscPercent(client->GetUserName()), (LPCTSTR)EscPercent(sExpectedName), (LPCTSTR)EscPercent(reqfileNr1->GetFileName()));
@@ -3799,19 +4394,13 @@ bool CClientReqSocket::ProcessExtPacket(const BYTE *packet, uint32 size, UINT op
 				bool b64 = (opcode != OP_COMPRESSEDPART);
 				theStats.AddDownDataOverheadFileRequest(16 + (b64 ? 8 : 4) + (bCompress ? 4 : 8));
 				EDownloadState newDS = DS_NONE;
-				const CPartFile *creqfile = client->GetRequestFile();
+				CPartFile *creqfile = client->GetRequestFile();
 				if (creqfile) {
 					if (!creqfile->IsStopped() && (creqfile->GetStatus() == PS_READY || creqfile->GetStatus() == PS_EMPTY)) {
-						client->ProcessBlockPacket(packet, size, bCompress, b64);
-						if (!creqfile->IsStopped()) {
-							UINT uStatus = creqfile->GetStatus();
-							if (uStatus == PS_ERROR)
-								newDS = DS_ONQUEUE;
-							else if (uStatus == PS_PAUSED || uStatus == PS_INSUFFICIENT)
-								newDS = DS_NONE;
-							else
-								newDS = DS_CONNECTED; //any state but DS_NONE or DS_ONQUEUE
-						}
+						if (theApp.QueueDownloadBlockReceiveNetworkCommand(client, creqfile, packet, size, bCompress, b64))
+							newDS = DS_CONNECTED;
+						else
+							theApp.QueueNetworkParserFailureEvent(bCompress ? CemuleApp::NetworkParseCompressedBlock : CemuleApp::NetworkParseClientTcp, _T("download-block-receive-queue"), ERROR_NOT_ENOUGH_MEMORY);
 					}
 				}
 					if (newDS != DS_CONNECTED && client) { //client could have been deleted while debugging
@@ -3861,7 +4450,7 @@ bool CClientReqSocket::ProcessExtPacket(const BYTE *packet, uint32 size, UINT op
 			if (thePrefs.GetDebugClientTCPLevel() > 0)
 				DebugRecv("OP_HashSetAnswer2", client);
 			theStats.AddDownDataOverheadFileRequest(size);
-			client->ProcessHashSet(packet, size, true);
+			theApp.QueueDownloadHashSetNetworkCommand(client, packet, size, true);
 			break;
 		case OP_HASHSETREQUEST2:
 			if (thePrefs.GetDebugClientTCPLevel() > 0)
@@ -3917,15 +4506,16 @@ bool CClientReqSocket::ProcessExtPacket(const BYTE *packet, uint32 size, UINT op
 		GetPeerName((LPSOCKADDR)&sockAddr, &nSockAddrLen);
 		IP.FromSA((SOCKADDR*)&sockAddr, nSockAddrLen);
 
+		const CString strError(CExceptionStr(*ex));
 		if (thePrefs.GetVerbose()) {
-			AddDebugLogLine(false, _T("[ProcessExtPacket]: Client with IP=%s caused an exception, disconnecting client: %s"), IP.ToStringC(), (LPCTSTR)EscPercent(CString(CExceptionStr(*ex))));
+			AddDebugLogLine(false, _T("[ProcessExtPacket]: Client with IP=%s caused an exception, disconnecting client: %s"), IP.ToStringC(), (LPCTSTR)EscPercent(strError));
 			PacketToDebugLogLine(_T("eMule"), packet, size, opcode);
 		}
 
 		ex->Delete();
 
 		if (client)
-			client->SetDownloadState(DS_ERROR, _T("[ProcessExtPacket]: An exception occured while processing eDonkey packet: ") + EscPercent(CString(CExceptionStr(*ex))));
+			client->SetDownloadState(DS_ERROR, _T("[ProcessExtPacket]: An exception occured while processing eDonkey packet: ") + EscPercent(strError));
 
 		if (thePrefs.IsBanWrongPackage()) {
 			if (client) {
@@ -3938,7 +4528,7 @@ bool CClientReqSocket::ProcessExtPacket(const BYTE *packet, uint32 size, UINT op
 			}
 		}
 		
-		Disconnect(_T("[ProcessExtPacket]: An exception occured while processing eDonkey packet: ") + EscPercent(CString(CExceptionStr(*ex))));
+		Disconnect(_T("[ProcessExtPacket]: An exception occured while processing eDonkey packet: ") + EscPercent(strError));
 		return false;
 	} catch (...) {
 		CAddress IP;
@@ -4032,12 +4622,12 @@ void CClientReqSocket::OnConnect(int nErrorCode)
 		//This socket may have been delayed by SP2 protection, lets make sure it doesn't time out instantly.
 		ResetTimeOutTimer();
 		
-		// For uTP connections, trigger full connection establishment when socket connects
-		// (for TCP, ConnectionEstablished is called from OnReceive after first packet)
-		if (client && HaveUtpLayer()) {
+		// For NAT-T connections, trigger full connection establishment when the transport connects.
+		// For TCP, ConnectionEstablished is called from OnReceive after the first packet.
+		if (client && HaveNatTraversalLayer()) {
 			CEMSocket::SetConState(EMS_CONNECTED);
 			if (thePrefs.GetLogNatTraversalEvents())
-				DebugLog(_T("[NatTraversal] OnConnect: uTP connection established, triggering ConnectionEstablished, %s"), (LPCTSTR)EscPercent(client->DbgGetClientInfo()));
+				DebugLog(_T("[NatTraversal] OnConnect: NAT-T connection established, triggering ConnectionEstablished, %s"), (LPCTSTR)EscPercent(client->DbgGetClientInfo()));
 			client->ConnectionEstablished();
 		}
 	}
@@ -4180,8 +4770,59 @@ void CClientReqSocket::OnReceive(int nErrorCode)
 
 bool CClientReqSocket::Create()
 {
+	if (HaveQuicNatLayer()) {
+		theApp.listensocket->AddConnection();
+		if (CAsyncSocketEx::Create(0, SOCK_STREAM, FD_WRITE | FD_READ | FD_CLOSE | FD_CONNECT, CString(), AF_UNSPEC))
+			return true;
+
+		const int nLastError = ::WSAGetLastError();
+		if (nLastError != 0)
+			::WSASetLastError(nLastError);
+		return false;
+	}
+
+	CString strBindAddr;
+	ADDRESS_FAMILY nSocketFamily = AF_INET6;
+	const bool bAllowDefaultBindRetry = client != NULL && client->ConsumeAllowAnyBindOnNextServerCallbackConnect();
+
+	if (!GetResolvedP2PListenBindAddr(strBindAddr, nSocketFamily)) {
+		if (!bAllowDefaultBindRetry)
+			return false;
+		if (thePrefs.GetLogNatTraversalEvents()) {
+			AddDebugLogLine(false, _T("[eServerBuddy] Server callback socket bind resolution failed; retrying with default bind for %s"),
+				client != NULL ? (LPCTSTR)EscPercent(client->DbgGetClientInfo()) : (LPCTSTR)_T("<null>"));
+		}
+		strBindAddr.Empty();
+		nSocketFamily = AF_INET6;
+	}
+
 	theApp.listensocket->AddConnection();
-	return (CAsyncSocketEx::Create(0, SOCK_STREAM, FD_WRITE | FD_READ | FD_CLOSE | FD_CONNECT, thePrefs.GetBindAddr(), AF_INET6));
+	if (CAsyncSocketEx::Create(0, SOCK_STREAM, FD_WRITE | FD_READ | FD_CLOSE | FD_CONNECT, strBindAddr, nSocketFamily))
+		return true;
+
+	const int nFirstError = ::WSAGetLastError();
+	if (bAllowDefaultBindRetry && !strBindAddr.IsEmpty()) {
+		if (thePrefs.GetLogNatTraversalEvents()) {
+			AddDebugLogLine(false, _T("[eServerBuddy] Server callback socket create failed on configured bind (err=%u); retrying with default bind for %s"),
+				nFirstError, client != NULL ? (LPCTSTR)EscPercent(client->DbgGetClientInfo()) : (LPCTSTR)_T("<null>"));
+		}
+		CAsyncSocketEx::Close();
+		CString strDefaultBind;
+		if (CAsyncSocketEx::Create(0, SOCK_STREAM, FD_WRITE | FD_READ | FD_CLOSE | FD_CONNECT, strDefaultBind, AF_INET6)) {
+			if (thePrefs.GetLogNatTraversalEvents()) {
+				AddDebugLogLine(false, _T("[eServerBuddy] Server callback socket created with default bind for %s"),
+					client != NULL ? (LPCTSTR)EscPercent(client->DbgGetClientInfo()) : (LPCTSTR)_T("<null>"));
+			}
+			return true;
+		}
+		const int nSecondError = ::WSAGetLastError();
+		::WSASetLastError(nSecondError != 0 ? nSecondError : (nFirstError != 0 ? nFirstError : WSAEINVAL));
+		return false;
+	}
+
+	if (nFirstError != 0)
+		::WSASetLastError(nFirstError);
+	return false;
 }
 
 SocketSentBytes CClientReqSocket::SendControlData(uint32 maxNumberOfBytesToSend, uint32 overchargeMaxBytesToSend)
@@ -4247,28 +4888,122 @@ CListenSocket::~CListenSocket()
 	KillAllSockets();
 }
 
-bool CListenSocket::Rebind()
+CListenSocket::ERebindResult CListenSocket::Rebind(bool bForce)
 {
-	if (thePrefs.GetPort() == m_port)
-		return false;
+	if (!bForce && thePrefs.GetPort() == m_port)
+		return RebindNoChange;
 
-	Close();
-	KillAllSockets();
+	if (GetSocketHandle() == INVALID_SOCKET)
+		return StartListening(false) ? RebindSucceeded : RebindFailedKeptOldSocket;
+	if (!bForce && !thePrefs.CanApplyRuntimePortRebind())
+		return RebindRequiresRestart;
 
-	return StartListening();
+	CString strBindAddr;
+	ADDRESS_FAMILY nSocketFamily = AF_INET6;
+	if (!GetResolvedP2PListenBindAddr(strBindAddr, nSocketFamily))
+		return RebindFailedKeptOldSocket;
+
+	sockaddr_in6 currentEndpoint = {};
+	sockaddr_in6 targetEndpoint = {};
+	const bool bHaveCurrentEndpoint = GetCurrentP2PListenEndpoint(*this, currentEndpoint);
+	if (!BuildP2PListenEndpoint(strBindAddr, thePrefs.GetPort(), targetEndpoint))
+		return RebindFailedKeptOldSocket;
+
+	if (bHaveCurrentEndpoint) {
+		if (IsSameP2PEndpoint(currentEndpoint, targetEndpoint))
+			return RebindNoChange;
+		if (!CanProbeP2PListenEndpoint(currentEndpoint, targetEndpoint))
+			return RebindRequiresRestart;
+	}
+	else if (thePrefs.GetPort() == m_port)
+		return RebindRequiresRestart;
+
+	CAsyncSocketEx newSocket;
+	uint16 nCreatedPort = 0;
+	ADDRESS_FAMILY nCreatedFamily = AF_UNSPEC;
+	if (!CreateP2PListenProbe(newSocket, nCreatedPort, nCreatedFamily, false))
+		return RebindFailedKeptOldSocket;
+
+	SOCKET hNewSocket = newSocket.Detach();
+	const ADDRESS_FAMILY nOldFamily = GetFamily();
+	SOCKET hOldSocket = Detach();
+	if (!Attach(hNewSocket, FD_ACCEPT)) {
+		VERIFY(closesocket(hNewSocket) != SOCKET_ERROR);
+		if (hOldSocket != INVALID_SOCKET) {
+			VERIFY(Attach(hOldSocket, FD_ACCEPT));
+			VERIFY(SetFamily(nOldFamily));
+		}
+		return RebindFailedKeptOldSocket;
+	}
+	VERIFY(SetFamily(nCreatedFamily));
+
+	if (hOldSocket != INVALID_SOCKET)
+		VERIFY(closesocket(hOldSocket) != SOCKET_ERROR);
+
+	bListening = true;
+	m_port = nCreatedPort;
+	return RebindSucceeded;
 }
 
-bool CListenSocket::StartListening()
+bool CListenSocket::StartListening(bool bAllowRandomPortRetry)
 {
 	bListening = true;
+	if (thePrefs.HasExplicitBindSelection()) {
+		thePrefs.RefreshBindResolution();
+		if (thePrefs.GetActiveBindResolveResult() != NBR_Resolved || thePrefs.GetP2PBindAddr() == NULL)
+			return false;
+	}
+
+	CString strBindAddr;
+	ADDRESS_FAMILY nSocketFamily = AF_INET6;
+	if (!GetResolvedP2PListenBindAddr(strBindAddr, nSocketFamily))
+		return false;
 
 	// Creating the socket with SO_REUSEADDR may solve LowID issues if emule was restarted
 	// quickly or started after a crash, but(!) it will also create another problem. If the
 	// socket is already used by some other application (e.g. a 2nd emule), we though bind
 	// to that socket leading to the situation that 2 applications are listening on the same
 	// port!
-	if (!Create(thePrefs.GetPort(), SOCK_STREAM, FD_ACCEPT, thePrefs.GetBindAddr(), AF_INET6))
+	bool bCreated = false;
+	bool bRetriedRandomPort = false;
+	const bool bCanRetryRandomPort = bAllowRandomPortRetry && !theApp.IsNetworkSocketCreationBlockedByBind() && (thePrefs.IsPortRandomizationOnStartupEnabled() || thePrefs.IsConfiguredPortAutoGenerated());
+	for (int iAttempt = 0; iAttempt < 8; ++iAttempt) {
+		if (Create(thePrefs.GetPort(), SOCK_STREAM, FD_ACCEPT, strBindAddr, nSocketFamily)) {
+			bCreated = true;
+			break;
+		}
+
+		const int nSocketError = WSAGetLastError();
+		DebugLogError(_T("TCP listen socket create failed: port=%u, configured=%u, randomize=%u, autoGenerated=%u, bind=\"%s\", family=%d, blocked=%u, error=%d (%s)"),
+			thePrefs.GetPort(),
+			thePrefs.GetConfiguredPort(),
+			thePrefs.IsPortRandomizationOnStartupEnabled() ? 1 : 0,
+			thePrefs.IsConfiguredPortAutoGenerated() ? 1 : 0,
+			(LPCTSTR)strBindAddr,
+			static_cast<int>(nSocketFamily),
+			theApp.IsNetworkSocketCreationBlockedByBind() ? 1 : 0,
+			nSocketError,
+			(LPCTSTR)EscPercent(GetErrorMessage(nSocketError, 1)));
+
+		Close();
+		if (!bCanRetryRandomPort)
+			break;
+
+		const uint16 nOldPort = thePrefs.GetPort();
+		uint16 nNewPort = nOldPort;
+		for (int iPortAttempt = 0; iPortAttempt < 8 && nNewPort == nOldPort; ++iPortAttempt)
+			nNewPort = CPreferences::GetRandomTCPPort();
+		if (nNewPort == 0 || nNewPort == nOldPort)
+			break;
+		thePrefs.port = nNewPort;
+		bRetriedRandomPort = true;
+	}
+	if (!bCreated)
 		return false;
+	if (!thePrefs.IsPortRandomizationOnStartupEnabled())
+		thePrefs.AcceptAutoGeneratedPort(thePrefs.GetPort());
+	if (bRetriedRandomPort && thePrefs.IsOpenListenPortsInWindowsFirewallEnabled())
+		theApp.EnsureWindowsFirewallListenPortRules(true);
 
 	// Rejecting a connection with conditional WSAAccept and not using SO_CONDITIONAL_ACCEPT
 	// -------------------------------------------------------------------------------------
@@ -4310,6 +5045,22 @@ bool CListenSocket::StartListening()
 
 	m_port = thePrefs.GetPort();
 	return true;
+}
+
+
+bool CListenSocket::RecreateListeningSocket()
+{
+	Close();
+	bListening = false;
+	m_port = 0;
+	return StartListening(false);
+}
+
+void CListenSocket::CloseForIpGuardBlock()
+{
+	Close();
+	bListening = false;
+	m_port = 0;
 }
 
 void CListenSocket::ReStartListening()
@@ -4551,6 +5302,27 @@ void CListenSocket::KillAllSockets()
 			CUpDownClient::SafeDelete(pClient);
 		} else
 			delete cur_socket;
+	}
+}
+
+void CListenSocket::DisconnectAllSockets(LPCTSTR pszReason)
+{
+	CArray<CClientReqSocket*, CClientReqSocket*> aSockets;
+	aSockets.SetSize(socket_list.GetCount());
+	INT_PTR nIndex = 0;
+	for (POSITION pos = socket_list.GetHeadPosition(); pos != NULL;)
+		aSockets[nIndex++] = socket_list.GetNext(pos);
+
+	for (INT_PTR i = 0; i < nIndex; ++i) {
+		CClientReqSocket* pSocket = aSockets[i];
+		if (pSocket != NULL && IsValidSocket(pSocket))
+			pSocket->Disconnect(pszReason);
+	}
+
+	for (INT_PTR i = 0; i < nIndex; ++i) {
+		CClientReqSocket* pSocket = aSockets[i];
+		if (pSocket != NULL && IsValidSocket(pSocket) && pSocket->deletethis)
+			pSocket->Close();
 	}
 }
 

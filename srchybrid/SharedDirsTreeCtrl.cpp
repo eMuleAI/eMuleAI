@@ -36,6 +36,13 @@
 #include <functional>
 #include <windows.h>
 
+#ifndef TVM_SETEXTENDEDSTYLE
+#define TVM_SETEXTENDEDSTYLE (TV_FIRST + 44)
+#endif
+#ifndef TVS_EX_DOUBLEBUFFER
+#define TVS_EX_DOUBLEBUFFER 0x0004
+#endif
+
 // Forward declarations for long-path helpers used below
 static void EnumSubdirectoriesLongPath(const CString& dir, const std::function<void(const CString&)>& cb);
 static bool IsAccessibleDirectoryLongPath(const CString& dir);
@@ -147,21 +154,6 @@ namespace
 		signature.AddPath(normalized);
 	}
 
-	void AccumulateIncomingTreeStructureRecursive(const CString& root, CMapStringToPtr& seen, STreeStructureSignature& signature, int nLevel)
-	{
-		const int MAX_TREE_STRUCTURE_RECURSION_DEPTH = 500;
-		if (nLevel >= MAX_TREE_STRUCTURE_RECURSION_DEPTH)
-			return;
-
-		const CString normalized = NormalizeTreeStructurePath(root);
-		if (!MarkTreeStructurePathSeen(normalized, seen))
-			return;
-
-		signature.AddPath(normalized);
-		EnumSubdirectoriesLongPath(normalized, [&seen, &signature, nLevel](const CString& childFullPath) {
-			AccumulateIncomingTreeStructureRecursive(childFullPath, seen, signature, nLevel + 1);
-		});
-	}
 
 	CString BuildSharedTreePathKey(const CString& path)
 	{
@@ -193,24 +185,6 @@ namespace
 		return false;
 	}
 
-	void AccumulateEffectiveSharedTreeStructureRecursive(const CString& root, CMapStringToPtr& seen, STreeStructureSignature& signature, int nLevel)
-	{
-		const int MAX_TREE_STRUCTURE_RECURSION_DEPTH = 500;
-		if (nLevel >= MAX_TREE_STRUCTURE_RECURSION_DEPTH)
-			return;
-
-		const CString normalized = NormalizeTreeStructurePath(root);
-		if (!MarkTreeStructurePathSeen(normalized, seen))
-			return;
-
-		signature.AddPath(normalized);
-		EnumSubdirectoriesLongPath(normalized, [&seen, &signature, nLevel](const CString& childFullPath) {
-			if (!IsEffectivelySharedDirectory(childFullPath))
-				return;
-
-			AccumulateEffectiveSharedTreeStructureRecursive(childFullPath, seen, signature, nLevel + 1);
-		});
-	}
 
 	CDirectoryItem* InsertSharedDirectoryItem(CSharedDirsTreeCtrl* pThis, CDirectoryItem* pParentItem, const CString& path, bool bTopFolder, bool bAccessible, bool& rbShowWarning)
 	{
@@ -222,57 +196,18 @@ namespace
 			rbShowWarning = true;
 		}
 
+		if (thePrefs.GetAutoShareSubdirs() && bAccessible) {
+			TVITEM tvi = {};
+			tvi.mask = TVIF_CHILDREN;
+			tvi.hItem = pNewItem->m_htItem;
+			tvi.cChildren = I_CHILDRENCALLBACK;
+			pThis->SetItem(&tvi);
+		}
+
 		pParentItem->liSubDirectories.AddTail(pNewItem);
 		return pNewItem;
 	}
 
-	bool HasExplicitSharedDescendant(const CString& basePath, const CStringList& liExplicitDirs)
-	{
-		CString strBase(basePath);
-		slosh(strBase);
-		if (strBase.IsEmpty())
-			return false;
-
-		for (POSITION pos = liExplicitDirs.GetHeadPosition(); pos != NULL;) {
-			CString strExplicit(liExplicitDirs.GetNext(pos));
-			slosh(strExplicit);
-			if (strExplicit.IsEmpty() || EqualPaths(strExplicit, strBase))
-				continue;
-			if (IsSubDirectoryOf(strExplicit, strBase))
-				return true;
-		}
-
-		return false;
-	}
-
-	void BuildSharedDirectoryTreeRecursive(CSharedDirsTreeCtrl* pThis, CDirectoryItem* pParentItem, const CString& basePath, const CStringList& liExplicitDirs, int nLevel, bool& rbShowWarning, bool bParentAccessible, CMapStringToPtr& rInsertedItems)
-	{
-		constexpr int MAX_RECURSION_DEPTH = 500;
-		if (nLevel >= MAX_RECURSION_DEPTH) {
-			CString strMore = _T("...");
-			CDirectoryItem* pMore = new CDirectoryItem(CString());
-			pMore->m_htItem = pThis->InsertItem(TVIF_TEXT | TVIF_PARAM | TVIF_IMAGE | TVIF_SELECTEDIMAGE, strMore, 5, 5, 0, 0, (LPARAM)pMore, pParentItem->m_htItem, TVI_LAST);
-			pParentItem->liSubDirectories.AddTail(pMore);
-			return;
-		}
-
-		if (!bParentAccessible)
-			return;
-
-		EnumSubdirectoriesLongPath(basePath, [pThis, pParentItem, &liExplicitDirs, nLevel, &rbShowWarning, &rInsertedItems](const CString& childFullPath) {
-			const bool bChildShared = IsEffectivelySharedDirectory(childFullPath);
-			if (bChildShared) {
-				const bool bAccessible = IsAccessibleDirectoryLongPath(childFullPath);
-				CDirectoryItem* pNewItem = InsertSharedDirectoryItem(pThis, pParentItem, childFullPath, false, bAccessible, rbShowWarning);
-				rInsertedItems.SetAt(BuildSharedTreePathKey(childFullPath), pNewItem);
-				BuildSharedDirectoryTreeRecursive(pThis, pNewItem, childFullPath, liExplicitDirs, nLevel + 1, rbShowWarning, bAccessible, rInsertedItems);
-				return;
-			}
-
-			if (HasExplicitSharedDescendant(childFullPath, liExplicitDirs))
-				BuildSharedDirectoryTreeRecursive(pThis, pParentItem, childFullPath, liExplicitDirs, nLevel + 1, rbShowWarning, true, rInsertedItems);
-		});
-	}
 
 	struct SSharedTreeEntry
 	{
@@ -372,7 +307,6 @@ namespace
 				current.bAccessible = IsAccessibleDirectoryLongPath(current.strPath);
 				current.pItem = InsertSharedDirectoryItem(pThis, pRoot, current.strPath, true, current.bAccessible, rbShowWarning);
 				mapInsertedItems.SetAt(BuildSharedTreePathKey(current.strPath), current.pItem);
-				BuildSharedDirectoryTreeRecursive(pThis, current.pItem, current.strPath, liDirs, 0, rbShowWarning, current.bAccessible, mapInsertedItems);
 			}
 
 			std::vector<SSharedTreeEntry> aExplicitEntries;
@@ -509,6 +443,7 @@ BEGIN_MESSAGE_MAP(CSharedDirsTreeCtrl, CTreeCtrl)
 	ON_WM_CANCELMODE()
 	ON_WM_LBUTTONUP()
 	ON_WM_SYSCOLORCHANGE()
+	ON_WM_ERASEBKGND()
 	ON_NOTIFY_REFLECT(TVN_ITEMEXPANDING, OnTvnItemexpanding)
 	ON_NOTIFY_REFLECT(TVN_GETDISPINFO, OnTvnGetdispinfo)
 	ON_NOTIFY_REFLECT(TVN_BEGINDRAG, OnTvnBeginDrag)
@@ -543,7 +478,13 @@ void CSharedDirsTreeCtrl::Initialize(CSharedFilesCtrl *pSharedFilesCtrl)
 
 	m_bUseIcons = true;
 	SetAllIcons();
+	SendMessage(TVM_SETEXTENDEDSTYLE, TVS_EX_DOUBLEBUFFER, TVS_EX_DOUBLEBUFFER);
 	LocalizeSkeleton();
+}
+
+BOOL CSharedDirsTreeCtrl::OnEraseBkgnd(CDC*)
+{
+	return TRUE;
 }
 
 void CSharedDirsTreeCtrl::OnSysColorChange()
@@ -896,32 +837,47 @@ void CSharedDirsTreeCtrl::FilterTreeAddSubDirectories(CDirectoryItem *pDirectory
 	}
 }
 
-// Helper: recursively add real filesystem subdirectories under a virtual tree node (used for Incoming folder)
+// Helper: add immediate filesystem subdirectories under a virtual tree node (used for Incoming folder)
 static void FilterTreeAddIncomingSubdirectories(CSharedDirsTreeCtrl* pThis, CDirectoryItem* pParent, const CString& basePath, int nLevel, bool &rbShowWarning)
 {
-    constexpr int MAX_RECURSION_DEPTH = 50;
-    if (nLevel >= MAX_RECURSION_DEPTH) {
-        CString strMore = _T("...");
-        CDirectoryItem *pMore = new CDirectoryItem(CString());
-        pMore->m_htItem = pThis->InsertItem(TVIF_TEXT | TVIF_PARAM | TVIF_IMAGE | TVIF_SELECTEDIMAGE, strMore, 5, 5, 0, 0, (LPARAM)pMore, pParent->m_htItem, TVI_LAST);
-        pParent->liSubDirectories.AddTail(pMore);
-        return;
-    }
+	UNREFERENCED_PARAMETER(nLevel);
 
-    // enumerate immediate subdirectories using long-path aware helper
-    EnumSubdirectoriesLongPath(basePath, [pThis, pParent, nLevel, &rbShowWarning](const CString& childFullPath) {
-        bool bAccessible = IsAccessibleDirectoryLongPath(childFullPath);
-        const CString &strName = GetFolderLabel(childFullPath, false, bAccessible);
-        CDirectoryItem *pNewItem = new CDirectoryItem(childFullPath);
-        pNewItem->m_htItem = pThis->InsertItem(TVIF_TEXT | TVIF_PARAM | TVIF_IMAGE | TVIF_SELECTEDIMAGE, strName, 5, 5, 0, 0, (LPARAM)pNewItem, pParent->m_htItem, TVI_SORT);
-        if (!bAccessible) {
-            pThis->SetItemState(pNewItem->m_htItem, INDEXTOOVERLAYMASK(2), TVIS_OVERLAYMASK);
-            rbShowWarning = true;
-        }
-        pParent->liSubDirectories.AddTail(pNewItem);
-        // recurse
-        FilterTreeAddIncomingSubdirectories(pThis, pNewItem, childFullPath, nLevel + 1, rbShowWarning);
-    });
+	// Add only the visible level. Deep expansion is handled lazily by TVN_ITEMEXPANDING.
+	EnumSubdirectoriesLongPath(basePath, [pThis, pParent, &rbShowWarning](const CString& childFullPath) {
+		const bool bAccessible = IsAccessibleDirectoryLongPath(childFullPath);
+		const CString strName(GetFolderLabel(childFullPath, false, bAccessible));
+		CDirectoryItem *pNewItem = new CDirectoryItem(childFullPath);
+		pNewItem->m_htItem = pThis->InsertItem(TVIF_TEXT | TVIF_PARAM | TVIF_IMAGE | TVIF_SELECTEDIMAGE, strName, 5, 5, 0, 0, (LPARAM)pNewItem, pParent->m_htItem, TVI_SORT);
+		if (!bAccessible) {
+			pThis->SetItemState(pNewItem->m_htItem, INDEXTOOVERLAYMASK(2), TVIS_OVERLAYMASK);
+			rbShowWarning = true;
+		}
+
+		TVITEM tvi = {};
+		tvi.mask = TVIF_CHILDREN;
+		tvi.hItem = pNewItem->m_htItem;
+		tvi.cChildren = bAccessible ? I_CHILDRENCALLBACK : 0;
+		pThis->SetItem(&tvi);
+		pParent->liSubDirectories.AddTail(pNewItem);
+	});
+}
+
+static void FilterTreeAddAutoSharedImmediateSubdirectories(CSharedDirsTreeCtrl* pThis, CDirectoryItem* pParent, const CString& basePath, bool& rbShowWarning)
+{
+	EnumSubdirectoriesLongPath(basePath, [pThis, pParent, &rbShowWarning](const CString& childFullPath) {
+		if (!IsEffectivelySharedDirectory(childFullPath))
+			return;
+
+		const bool bAccessible = IsAccessibleDirectoryLongPath(childFullPath);
+		CDirectoryItem* pNewItem = InsertSharedDirectoryItem(pThis, pParent, childFullPath, false, bAccessible, rbShowWarning);
+		if (pNewItem != NULL && bAccessible) {
+			TVITEM tvi = {};
+			tvi.mask = TVIF_CHILDREN;
+			tvi.hItem = pNewItem->m_htItem;
+			tvi.cChildren = I_CHILDRENCALLBACK;
+			pThis->SetItem(&tvi);
+		}
+	});
 }
 
 void CSharedDirsTreeCtrl::FilterTreeReloadTree()
@@ -953,51 +909,29 @@ void CSharedDirsTreeCtrl::FilterTreeReloadTree()
 	m_bCreatingTree = false;
 	m_ullLastTreeStructCRC = ComputeTreeStructureCRC(); // Update structure signature after a successful rebuild
 	SetRedraw(TRUE);
-	RedrawWindow(NULL, NULL, RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN);
+	Invalidate(FALSE);
 }
 
 // Build a stable signature for the currently visible filter tree structure. Shared directories and incoming
-// subdirectories are expanded recursively only when auto-share makes them visible in the tree model.
+// subdirectory changes are detected from persisted roots only; visible tree branches expand lazily.
 ULONGLONG CSharedDirsTreeCtrl::ComputeTreeStructureCRC() const
 {
-	CMapStringToPtr seen; // Avoid duplicate roots and reparse-point loops.
+	CMapStringToPtr seen;
 	STreeStructureSignature signature;
+
+	// Keep this signature cheap. The previous implementation recursively scanned every shared
+	// directory from the UI thread and could freeze the Files window for large trees.
+	AccumulateTreeStructurePath(thePrefs.GetAutoShareSubdirs() ? _T("<auto-share-subdirs:on>") : _T("<auto-share-subdirs:off>"), seen, signature);
+
 	CStringList sharedDirs;
 	thePrefs.CopySharedDirectoryList(sharedDirs);
-	const bool bIncludeSharedSubdirs = thePrefs.GetAutoShareSubdirs();
-	CStringList sharedRootDirs;
 	for (POSITION pos = sharedDirs.GetHeadPosition(); pos != NULL;)
-		sharedRootDirs.AddTail(sharedDirs.GetNext(pos));
-	if (bIncludeSharedSubdirs)
-		CPreferences::CollapseSharedDirsToRoots(sharedRootDirs);
+		AccumulateTreeStructurePath(sharedDirs.GetNext(pos), seen, signature);
 
-	for (POSITION pos = sharedRootDirs.GetHeadPosition(); pos != NULL; ) {
-		const CString strSharedDir(sharedRootDirs.GetNext(pos));
-		if (bIncludeSharedSubdirs)
-			AccumulateEffectiveSharedTreeStructureRecursive(strSharedDir, seen, signature, 0);
-		else
-			AccumulateTreeStructurePath(strSharedDir, seen, signature);
-	}
-
-	if (bIncludeSharedSubdirs)
-		for (POSITION pos = sharedDirs.GetHeadPosition(); pos != NULL; )
-			AccumulateTreeStructurePath(sharedDirs.GetNext(pos), seen, signature);
-
-	const bool bIncludeIncomingSubdirs = thePrefs.GetAutoShareSubdirs();
-	const CString strMainIncomingDir = thePrefs.GetMuleDirectory(EMULE_INCOMINGDIR);
-	if (bIncludeIncomingSubdirs)
-		AccumulateIncomingTreeStructureRecursive(strMainIncomingDir, seen, signature, 0);
-	else
-		AccumulateTreeStructurePath(strMainIncomingDir, seen, signature);
-
+	AccumulateTreeStructurePath(thePrefs.GetMuleDirectory(EMULE_INCOMINGDIR), seen, signature);
 	for (INT_PTR i = 0; i < thePrefs.GetCatCount(); ++i) {
 		const Category_Struct* pCat = thePrefs.GetCategory(i);
-		if (pCat == NULL)
-			continue;
-
-		if (bIncludeIncomingSubdirs)
-			AccumulateIncomingTreeStructureRecursive(pCat->strIncomingPath, seen, signature, 0);
-		else
+		if (pCat != NULL)
 			AccumulateTreeStructurePath(pCat->strIncomingPath, seen, signature);
 	}
 
@@ -1433,6 +1367,214 @@ static void EnumSubdirectoriesLongPath(const CString& dir, const std::function<v
 #endif
 }
 
+static CString NormalizeFileSystemTreeRefreshPath(const CString& rawPath)
+{
+	CString path(rawPath);
+	if (!path.IsEmpty())
+		slosh(path);
+	return path;
+}
+
+static CDirectoryItem* FindSpecialDirectoryItem(CDirectoryItem* pRoot, ESpecialDirectoryItems eItemType)
+{
+	if (pRoot == NULL)
+		return NULL;
+
+	for (POSITION pos = pRoot->liSubDirectories.GetHeadPosition(); pos != NULL;) {
+		CDirectoryItem* pChild = pRoot->liSubDirectories.GetNext(pos);
+		if (pChild != NULL && pChild->m_eItemType == eItemType)
+			return pChild;
+	}
+
+	return NULL;
+}
+
+static CString GetFileSystemTreeRefreshParentPath(const CString& rawPath)
+{
+	CString path(NormalizeFileSystemTreeRefreshPath(rawPath));
+	if (path.IsEmpty())
+		return CString();
+
+	unslosh(path);
+	if (path.IsEmpty())
+		return CString();
+
+	if (!::PathRemoveFileSpec(path.GetBuffer())) {
+		path.ReleaseBuffer();
+		return CString();
+	}
+
+	path.ReleaseBuffer();
+	slosh(path);
+	return path;
+}
+
+static CDirectoryItem* FindLoadedDirectoryItemRecursive(CDirectoryItem* pRoot, const CString& targetPath)
+{
+	if (pRoot == NULL)
+		return NULL;
+
+	if (!pRoot->m_strFullPath.IsEmpty() && EqualPaths(pRoot->m_strFullPath, targetPath))
+		return pRoot;
+
+	for (POSITION pos = pRoot->liSubDirectories.GetHeadPosition(); pos != NULL;) {
+		CDirectoryItem* pChild = pRoot->liSubDirectories.GetNext(pos);
+		CDirectoryItem* pMatch = FindLoadedDirectoryItemRecursive(pChild, targetPath);
+		if (pMatch != NULL)
+			return pMatch;
+	}
+
+	return NULL;
+}
+
+static bool IsTreeItemExpanded(const CTreeCtrl* pTree, HTREEITEM hItem)
+{
+	return pTree != NULL && hItem != NULL && (pTree->GetItemState(hItem, TVIS_EXPANDED) & TVIS_EXPANDED) != 0;
+}
+
+static bool IsSharedRefreshTargetAncestor(const CDirectoryItem* pCandidate, const CDirectoryItem* pOther)
+{
+	if (pCandidate == NULL || pOther == NULL)
+		return false;
+	if (pCandidate == pOther)
+		return true;
+	if (pCandidate->m_eItemType == SDI_DIRECTORY)
+		return true;
+	if (pCandidate->m_strFullPath.IsEmpty() || pOther->m_strFullPath.IsEmpty())
+		return false;
+	return IsSubDirectoryOf(pOther->m_strFullPath, pCandidate->m_strFullPath);
+}
+
+static bool IsDirectoryItemSameOrDescendantOf(const CDirectoryItem* pCandidate, const CDirectoryItem* pAncestor)
+{
+	if (pCandidate == NULL || pAncestor == NULL)
+		return false;
+	if (pCandidate == pAncestor)
+		return true;
+	if (!pAncestor->m_strFullPath.IsEmpty() && !pCandidate->m_strFullPath.IsEmpty()) {
+		if (EqualPaths(pCandidate->m_strFullPath, pAncestor->m_strFullPath))
+			return true;
+		if (IsSubDirectoryOf(pCandidate->m_strFullPath, pAncestor->m_strFullPath))
+			return true;
+	}
+	return pAncestor->m_eItemType == SDI_DIRECTORY && pCandidate->m_eItemType == SDI_NO && !pCandidate->m_strFullPath.IsEmpty();
+}
+
+static void SortComparablePaths(std::vector<CString>& paths)
+{
+	std::sort(paths.begin(), paths.end(), [](const CString& left, const CString& right) {
+		return left.CompareNoCase(right) < 0;
+	});
+}
+
+static void CollectImmediateSubdirectoryPaths(const CString& rootPath, std::vector<CString>& outPaths)
+{
+	outPaths.clear();
+	EnumSubdirectoriesLongPath(rootPath, [&outPaths](const CString& childFullPath) {
+		CString normalized(NormalizeFileSystemTreeRefreshPath(childFullPath));
+		if (!normalized.IsEmpty())
+			outPaths.push_back(normalized);
+	});
+	SortComparablePaths(outPaths);
+}
+
+static bool ImmediateFileSystemChildrenDiffer(const CDirectoryItem* pParent)
+{
+	if (pParent == NULL || pParent->m_strFullPath.IsEmpty() || !IsAccessibleDirectoryLongPath(pParent->m_strFullPath))
+		return false;
+
+	std::vector<CString> diskChildren;
+	std::vector<CString> loadedChildren;
+	CollectImmediateSubdirectoryPaths(pParent->m_strFullPath, diskChildren);
+	loadedChildren.reserve((size_t)pParent->liSubDirectories.GetCount());
+
+	for (POSITION pos = pParent->liSubDirectories.GetHeadPosition(); pos != NULL;) {
+		const CDirectoryItem* pChild = pParent->liSubDirectories.GetNext(pos);
+		if (pChild == NULL || pChild->m_strFullPath.IsEmpty())
+			continue;
+
+		CString normalized(NormalizeFileSystemTreeRefreshPath(pChild->m_strFullPath));
+		if (!normalized.IsEmpty())
+			loadedChildren.push_back(normalized);
+	}
+
+	SortComparablePaths(loadedChildren);
+	if (loadedChildren.size() != diskChildren.size())
+		return true;
+
+	for (size_t i = 0; i < loadedChildren.size(); ++i) {
+		if (!EqualPaths(loadedChildren[i], diskChildren[i]))
+			return true;
+	}
+
+	return false;
+}
+
+static HTREEITEM DetermineRefreshFallbackSelection(const std::vector<CDirectoryItem*>& refreshParents, const CDirectoryItem* pSelected)
+{
+	if (pSelected == NULL)
+		return NULL;
+
+	for (size_t i = 0; i < refreshParents.size(); ++i) {
+		CDirectoryItem* pParent = refreshParents[i];
+		if (pParent != NULL && pParent->m_htItem != NULL && IsDirectoryItemSameOrDescendantOf(pSelected, pParent))
+			return pParent->m_htItem;
+	}
+
+	return NULL;
+}
+
+static void RestoreRefreshedSelection(CSharedDirsTreeCtrl* pTree, CDirectoryItem* pRoot, CDirectoryItem* pOldSelectedItem, HTREEITEM hFallbackSelection)
+{
+	if (pTree == NULL || pRoot == NULL)
+		return;
+
+	if (pOldSelectedItem != NULL) {
+		const HTREEITEM hOldSelection = pRoot->FindItem(pOldSelectedItem);
+		if (hOldSelection != NULL) {
+			pTree->Select(hOldSelection, TVGN_CARET);
+			pTree->EnsureVisible(hOldSelection);
+			return;
+		}
+	}
+
+	if (hFallbackSelection != NULL && pTree->GetSelectedItem() != hFallbackSelection) {
+		pTree->Select(hFallbackSelection, TVGN_CARET);
+		pTree->EnsureVisible(hFallbackSelection);
+	}
+}
+
+static CDirectoryItem* FindLoadedSharedRefreshParent(CSharedDirsTreeCtrl* pTree, CDirectoryItem* pSharedRoot, const CString& changedDir)
+{
+	if (pTree == NULL || pSharedRoot == NULL)
+		return NULL;
+
+	const CString normalizedChanged(NormalizeFileSystemTreeRefreshPath(changedDir));
+	if (normalizedChanged.IsEmpty())
+		return NULL;
+
+	CDirectoryItem* pLoadedChanged = FindLoadedDirectoryItemRecursive(pSharedRoot, normalizedChanged);
+	if (pLoadedChanged != NULL && pLoadedChanged->m_htItem != NULL) {
+		HTREEITEM hParent = pTree->GetParentItem(pLoadedChanged->m_htItem);
+		if (hParent != NULL) {
+			CDirectoryItem* pParent = reinterpret_cast<CDirectoryItem*>(pTree->GetItemData(hParent));
+			if (pParent != NULL && IsTreeItemExpanded(pTree, pParent->m_htItem))
+				return pParent;
+		}
+	}
+
+	CString probe(GetSharedTreeParentPath(normalizedChanged));
+	while (!probe.IsEmpty()) {
+		CDirectoryItem* pLoadedParent = FindLoadedDirectoryItemRecursive(pSharedRoot, probe);
+		if (pLoadedParent != NULL && pLoadedParent->m_htItem != NULL && IsTreeItemExpanded(pTree, pLoadedParent->m_htItem))
+			return pLoadedParent;
+
+		probe = GetSharedTreeParentPath(probe);
+	}
+
+	return NULL;
+}
+
 // Long-path aware helper: check directory accessibility/existence
 static bool IsAccessibleDirectoryLongPath(const CString& dir)
 {
@@ -1536,6 +1678,223 @@ void CSharedDirsTreeCtrl::FileSystemTreeAddSubdirectories(CDirectoryItem *pRoot)
 	});
 }
 
+void CSharedDirsTreeCtrl::RefreshVisibleFileSystemBranches(const CStringArray& changedDirs)
+{
+	if (changedDirs.GetCount() == 0 || m_pRootUnsharedDirectries == NULL)
+		return;
+
+	std::vector<CDirectoryItem*> refreshParents;
+	refreshParents.reserve((size_t)changedDirs.GetCount());
+
+	for (INT_PTR i = 0; i < changedDirs.GetCount(); ++i) {
+		const CString parentPath(GetFileSystemTreeRefreshParentPath(changedDirs[i]));
+		if (parentPath.IsEmpty())
+			continue;
+
+		CDirectoryItem* pParent = FindLoadedDirectoryItemRecursive(m_pRootUnsharedDirectries, parentPath);
+		if (pParent == NULL || pParent->m_htItem == NULL || !IsTreeItemExpanded(this, pParent->m_htItem))
+			continue;
+
+		bool bSkip = false;
+		for (size_t k = 0; k < refreshParents.size();) {
+			CDirectoryItem* pExisting = refreshParents[k];
+			if (IsDirectoryItemSameOrDescendantOf(pParent, pExisting)) {
+				bSkip = true;
+				break;
+			}
+
+			if (IsDirectoryItemSameOrDescendantOf(pExisting, pParent)) {
+				refreshParents.erase(refreshParents.begin() + k);
+				continue;
+			}
+
+			++k;
+		}
+
+		if (!bSkip)
+			refreshParents.push_back(pParent);
+	}
+
+	if (refreshParents.empty())
+		return;
+
+	CDirectoryItem* pOldSelectedItem = NULL;
+	CDirectoryItem* pSelectedItem = GetSelectedFilter();
+	HTREEITEM hFallbackSelection = DetermineRefreshFallbackSelection(refreshParents, pSelectedItem);
+	if (pSelectedItem != NULL)
+		pOldSelectedItem = pSelectedItem->CloneContent();
+
+	SetRedraw(FALSE);
+	if (hFallbackSelection != NULL && GetSelectedItem() != hFallbackSelection)
+		Select(hFallbackSelection, TVGN_CARET);
+
+	for (size_t i = 0; i < refreshParents.size(); ++i) {
+		CDirectoryItem* pParent = refreshParents[i];
+		DeleteChildItems(pParent);
+		FileSystemTreeAddSubdirectories(pParent);
+
+		TVITEM tvi = {};
+		tvi.mask = TVIF_CHILDREN;
+		tvi.hItem = pParent->m_htItem;
+		tvi.cChildren = FileSystemTreeHasSubdirectories(pParent->m_strFullPath) ? I_CHILDRENCALLBACK : 0;
+		SetItem(&tvi);
+	}
+
+	FileSystemTreeUpdateShareState();
+	FileSystemTreeUpdateBoldState();
+	RestoreRefreshedSelection(this, m_pRootUnsharedDirectries, pOldSelectedItem, hFallbackSelection);
+	delete pOldSelectedItem;
+	SetRedraw(TRUE);
+	Invalidate(FALSE);
+}
+
+bool CSharedDirsTreeCtrl::RefreshVisibleFileSystemBranchesIfNeeded()
+{
+	if (!::IsWindow(m_hWnd) || !IsWindowVisible() || m_pRootUnsharedDirectries == NULL || m_pRootUnsharedDirectries->m_htItem == NULL || !IsTreeItemExpanded(this, m_pRootUnsharedDirectries->m_htItem))
+		return false;
+
+	std::vector<CDirectoryItem*> refreshParents;
+	const int nVisibleCount = static_cast<int>(GetVisibleCount());
+	const int nVisibleBudget = (nVisibleCount + 4 > 16) ? (nVisibleCount + 4) : 16;
+	HTREEITEM hItem = GetFirstVisibleItem();
+	for (int i = 0; hItem != NULL && i < nVisibleBudget; ++i, hItem = GetNextVisibleItem(hItem)) {
+		CDirectoryItem* pItem = reinterpret_cast<CDirectoryItem*>(GetItemData(hItem));
+		if (pItem == NULL || pItem->m_eItemType != SDI_UNSHAREDDIRECTORY || !IsTreeItemExpanded(this, hItem))
+			continue;
+		if (!ImmediateFileSystemChildrenDiffer(pItem))
+			continue;
+
+		bool bSkip = false;
+		for (size_t k = 0; k < refreshParents.size();) {
+			CDirectoryItem* pExisting = refreshParents[k];
+			if (IsDirectoryItemSameOrDescendantOf(pItem, pExisting)) {
+				bSkip = true;
+				break;
+			}
+
+			if (IsDirectoryItemSameOrDescendantOf(pExisting, pItem)) {
+				refreshParents.erase(refreshParents.begin() + k);
+				continue;
+			}
+
+			++k;
+		}
+
+		if (!bSkip)
+			refreshParents.push_back(pItem);
+	}
+
+	if (refreshParents.empty())
+		return false;
+
+	CDirectoryItem* pOldSelectedItem = NULL;
+	CDirectoryItem* pSelectedItem = GetSelectedFilter();
+	HTREEITEM hFallbackSelection = DetermineRefreshFallbackSelection(refreshParents, pSelectedItem);
+	if (pSelectedItem != NULL)
+		pOldSelectedItem = pSelectedItem->CloneContent();
+
+	SetRedraw(FALSE);
+	if (hFallbackSelection != NULL && GetSelectedItem() != hFallbackSelection)
+		Select(hFallbackSelection, TVGN_CARET);
+
+	for (size_t i = 0; i < refreshParents.size(); ++i) {
+		CDirectoryItem* pParent = refreshParents[i];
+		DeleteChildItems(pParent);
+		FileSystemTreeAddSubdirectories(pParent);
+
+		TVITEM tvi = {};
+		tvi.mask = TVIF_CHILDREN;
+		tvi.hItem = pParent->m_htItem;
+		tvi.cChildren = FileSystemTreeHasSubdirectories(pParent->m_strFullPath) ? I_CHILDRENCALLBACK : 0;
+		SetItem(&tvi);
+	}
+
+	FileSystemTreeUpdateShareState();
+	FileSystemTreeUpdateBoldState();
+	RestoreRefreshedSelection(this, m_pRootUnsharedDirectries, pOldSelectedItem, hFallbackSelection);
+	delete pOldSelectedItem;
+	SetRedraw(TRUE);
+	Invalidate(FALSE);
+	return true;
+}
+
+void CSharedDirsTreeCtrl::RefreshVisibleSharedBranches(const CStringArray& changedDirs)
+{
+	if (changedDirs.GetCount() == 0 || m_pRootDirectoryItem == NULL)
+		return;
+
+	CDirectoryItem* pSharedRoot = FindSpecialDirectoryItem(m_pRootDirectoryItem, SDI_DIRECTORY);
+	if (pSharedRoot == NULL || pSharedRoot->m_htItem == NULL || !IsTreeItemExpanded(this, pSharedRoot->m_htItem))
+		return;
+
+	CStringList sharedDirs;
+	thePrefs.CopySharedDirectoryList(sharedDirs);
+
+	std::vector<CDirectoryItem*> refreshParents;
+	refreshParents.reserve((size_t)changedDirs.GetCount());
+
+	for (INT_PTR i = 0; i < changedDirs.GetCount(); ++i) {
+		CDirectoryItem* pRefreshParent = FindLoadedSharedRefreshParent(this, pSharedRoot, changedDirs[i]);
+		if (pRefreshParent == NULL || pRefreshParent->m_htItem == NULL)
+			continue;
+
+		bool bSkip = false;
+		for (size_t k = 0; k < refreshParents.size();) {
+			CDirectoryItem* pExisting = refreshParents[k];
+			if (IsSharedRefreshTargetAncestor(pExisting, pRefreshParent)) {
+				bSkip = true;
+				break;
+			}
+
+			if (IsSharedRefreshTargetAncestor(pRefreshParent, pExisting)) {
+				refreshParents.erase(refreshParents.begin() + k);
+				continue;
+			}
+
+			++k;
+		}
+
+		if (!bSkip)
+			refreshParents.push_back(pRefreshParent);
+	}
+
+	if (refreshParents.empty())
+		return;
+
+	CDirectoryItem* pOldSelectedItem = NULL;
+	CDirectoryItem* pSelectedItem = GetSelectedFilter();
+	HTREEITEM hFallbackSelection = DetermineRefreshFallbackSelection(refreshParents, pSelectedItem);
+	if (pSelectedItem != NULL)
+		pOldSelectedItem = pSelectedItem->CloneContent();
+
+	SetRedraw(FALSE);
+	if (hFallbackSelection != NULL && GetSelectedItem() != hFallbackSelection)
+		Select(hFallbackSelection, TVGN_CARET);
+
+	for (size_t i = 0; i < refreshParents.size(); ++i) {
+		CDirectoryItem* pParent = refreshParents[i];
+		DeleteChildItems(pParent);
+
+		bool bShowWarning = false;
+		if (pParent->m_eItemType == SDI_DIRECTORY)
+			BuildSharedDirectoryTree(this, pParent, sharedDirs, bShowWarning);
+		else {
+			const bool bParentAccessible = IsAccessibleDirectoryLongPath(pParent->m_strFullPath);
+			if (thePrefs.GetAutoShareSubdirs() && bParentAccessible)
+				FilterTreeAddAutoSharedImmediateSubdirectories(this, pParent, pParent->m_strFullPath, bShowWarning);
+			else
+				FilterTreeAddSubDirectories(pParent, sharedDirs, 0, bShowWarning, bParentAccessible);
+		}
+
+		SetItemState(pParent->m_htItem, bShowWarning ? INDEXTOOVERLAYMASK(2) : 0, TVIS_OVERLAYMASK);
+	}
+
+	RestoreRefreshedSelection(this, m_pRootDirectoryItem, pOldSelectedItem, hFallbackSelection);
+	delete pOldSelectedItem;
+	SetRedraw(TRUE);
+	Invalidate(FALSE);
+}
+
 int CSharedDirsTreeCtrl::AddSystemIcon(HICON hIcon, int nSystemListPos)
 {
 	int nPos;
@@ -1554,17 +1913,20 @@ void CSharedDirsTreeCtrl::OnTvnItemexpanding(LPNMHDR pNMHDR, LRESULT *pResult)
 
 	LPNMTREEVIEW pNMTreeView = reinterpret_cast<LPNMTREEVIEW>(pNMHDR);
 	CDirectoryItem *pExpanded = reinterpret_cast<CDirectoryItem*>(pNMTreeView->itemNew.lParam);
-	if (pExpanded != NULL) {
+	if (pExpanded != NULL && pNMTreeView->action == TVE_EXPAND) {
 		if (pExpanded->m_eItemType == SDI_UNSHAREDDIRECTORY && !pExpanded->m_strFullPath.IsEmpty()) {
-			// remove all sub-items
 			DeleteChildItems(pExpanded);
-			// fetch all subdirectories and add them to the node
 			FileSystemTreeAddSubdirectories(pExpanded);
 		} else if (pExpanded->m_eItemType == SDI_FILESYSTEMPARENT) {
 			DeleteChildItems(pExpanded);
 			FileSystemTreeCreateTree();
+		} else if (pExpanded->m_eItemType == SDI_NO && thePrefs.GetAutoShareSubdirs() && !pExpanded->m_strFullPath.IsEmpty()) {
+			DeleteChildItems(pExpanded);
+			bool bShowWarning = false;
+			FilterTreeAddAutoSharedImmediateSubdirectories(this, pExpanded, pExpanded->m_strFullPath, bShowWarning);
+			SetItemState(pExpanded->m_htItem, bShowWarning ? INDEXTOOVERLAYMASK(2) : 0, TVIS_OVERLAYMASK);
 		}
-	} else
+	} else if (pExpanded == NULL)
 		ASSERT(0);
 
 	SetRedraw(TRUE);
@@ -1576,8 +1938,9 @@ void CSharedDirsTreeCtrl::DeleteChildItems(CDirectoryItem *pParent)
 {
 	while (!pParent->liSubDirectories.IsEmpty()) {
 		CDirectoryItem *pToDelete = pParent->liSubDirectories.RemoveHead();
-		DeleteItem(pToDelete->m_htItem);
 		DeleteChildItems(pToDelete);
+		if (pToDelete->m_htItem != NULL && ::IsWindow(m_hWnd))
+			DeleteItem(pToDelete->m_htItem);
 		delete pToDelete;
 	}
 }
@@ -1730,19 +2093,24 @@ void CSharedDirsTreeCtrl::EditSharedDirectories(const CDirectoryItem *pDir, bool
 		// A 'Share' or 'Unshare' was invoked for a certain tree view item within the "All Directories" tree, thus we know the tree view item handle which needs to be updated for showing the new share state.
 		FileSystemTreeSetShareState(pDir, bUpdateLoadedChildren);
 
-	FileSystemTreeUpdateBoldState();
+	if (pDir->m_eItemType == SDI_UNSHAREDDIRECTORY) {
+		if (bUpdateLoadedChildren)
+			FileSystemTreeUpdateBoldState(pDir);
+		else
+			SetItemState(pDir->m_htItem, ((FileSystemTreeHasSharedSubdirectory(pDir->m_strFullPath, true) || FileSystemTreeIsShared(pDir->m_strFullPath)) ? TVIS_BOLD : 0), TVIS_BOLD);
+	} else
+		FileSystemTreeUpdateBoldState();
 
 	if (theApp.sharedfiles != NULL)
 		theApp.sharedfiles->Save();
 
 	CemuleDlg* pDlg = theApp.emuledlg;
 	if (pDlg && pDlg->sharedfileswnd && ::IsWindow(pDlg->sharedfileswnd->m_hWnd))
-		::PostMessage(pDlg->sharedfileswnd->m_hWnd, UM_AUTO_RELOAD_SHARED_FILES, 1, 0);
+		pDlg->sharedfileswnd->PostAutoReloadSharedFilesAsync(1);
 
-	if (GetSelectedFilter() != NULL && GetSelectedFilter()->m_eItemType == SDI_UNSHAREDDIRECTORY) // if in file system view, update the list to reflect the changes in the checkboxes
-		m_pSharedFilesCtrl->UpdateWindow(); 
+	if (GetSelectedFilter() != NULL && GetSelectedFilter()->m_eItemType == SDI_UNSHAREDDIRECTORY && m_pSharedFilesCtrl != NULL) // if in file system view, update the list to reflect the changes in the checkboxes
+		m_pSharedFilesCtrl->Invalidate(FALSE);
 	thePrefs.SaveSharedFolders();
-	Reload(true);
 }
 
 void CSharedDirsTreeCtrl::Reload(bool bForce)
@@ -1860,7 +2228,6 @@ void CSharedDirsTreeCtrl::OnTvnBeginDrag(LPNMHDR pNMHDR, LRESULT *pResult)
 
 	/* redraw item being dragged, otherwise it remains (looking) selected */
 	InvalidateRect(&rcItem, TRUE);
-	UpdateWindow();
 
 	/* Hide the mouse cursor, and direct mouse input to this window */
 	SetCapture();
@@ -1937,7 +2304,7 @@ void CSharedDirsTreeCtrl::CancelMode()
 
 	delete m_pDraggingItem;
 	m_pDraggingItem = NULL;
-	RedrawWindow();
+	Invalidate(FALSE);
 }
 
 void CSharedDirsTreeCtrl::OnCancelMode()

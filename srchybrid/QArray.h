@@ -112,6 +112,6 @@ public:
 //
 template <class T, class TP> void CQArray<T, TP>::QuickSort(BOOL bAscending/* = TRUE*/)
 {
-	if (GetSize() > 1)
-		::QuickSort(GetData(), (int)GetSize(), bAscending);
+	if (this->GetSize() > 1)
+		::QuickSort(this->GetData(), (int)this->GetSize(), bAscending);
 }

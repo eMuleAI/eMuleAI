@@ -820,8 +820,7 @@ void CMuleToolbarCtrl::Refresh()
 
 	if (m_iPreviousHeight == rToolbarRect.Height()) {
 		theApp.emuledlg->ResizeSpeedGraph();
-		Invalidate();
-		RedrawWindow();
+		Invalidate(FALSE);
 	} else {
 		m_iPreviousHeight = rToolbarRect.Height();
 
@@ -853,8 +852,7 @@ void CMuleToolbarCtrl::Refresh()
 
 		theApp.emuledlg->ResizeSpeedGraph();
 
-		theApp.emuledlg->Invalidate();
-		theApp.emuledlg->RedrawWindow();
+		theApp.emuledlg->Invalidate(FALSE);
 	}
 }
 
@@ -974,15 +972,21 @@ void CMuleToolbarCtrl::OnSettingChange(UINT uFlags, LPCTSTR lpszSection)
 
 void CMuleToolbarCtrl::PressMuleButton(int nID)
 {
+	CRect rcOldButton;
+	const bool bInvalidateOldButton = (m_iLastPressedButton != -1 && GetRect(m_iLastPressedButton, &rcOldButton));
+
 	// Customization might splits up the button-group, so we have to (un-)press them on our own
 	if (m_iLastPressedButton != -1)
 		CheckButton(m_iLastPressedButton, FALSE);
 	CheckButton(nID, TRUE);
 	m_iLastPressedButton = nID;
 
-	// Force full repaint in case UI thread was blocked
-	InvalidateRect(nullptr, FALSE);
-	UpdateWindow();
+	if (bInvalidateOldButton)
+		InvalidateRect(&rcOldButton, FALSE);
+
+	CRect rcNewButton;
+	if (GetRect(nID, &rcNewButton))
+		InvalidateRect(&rcNewButton, FALSE);
 }
 
 void CMuleToolbarCtrl::UpdateIdealSize()

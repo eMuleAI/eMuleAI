@@ -1,4 +1,4 @@
-//This file is part of eMule AI
+﻿//This file is part of eMule AI
 //Copyright (C)2002-2026 Merkur ( strEmail.Format("%s@%s", "devteam", "emule-project.net") / https://www.emule-project.net )
 //Copyright (C)2026 eMule AI
 //
@@ -18,6 +18,7 @@
 #pragma once
 #include "ResizableLib\ResizableFormView.h"
 #include "SearchListCtrl.h"
+#include "SearchList.h"
 #include "ButtonsTabCtrl.h"
 #include "ClosableTabCtrl.h"
 #include "DropDownButton.h"
@@ -29,10 +30,12 @@
 #include "ProgressCtrlX.h"
 #include "ToolTipCtrlX.h"
 #include "UpdownClient.h"
+#include <vector>
 
 class CCustomAutoComplete;
 class Packet;
 class CSafeMemFile;
+class CSearchFile;
 class CSearchParamsWnd;
 struct SSearchParams;
 
@@ -92,8 +95,14 @@ public:
 	void	Localize();
 
 	void	StartSearch(SSearchParams *pParams);
+	void	StartSearchFromCommand(SSearchParams *pParams);
+	void	StartWebSearchFromCommand(SSearchParams *pParams);
 	bool	SearchMore();
 	void	CancelSearch(uint32 uSearchID = 0);
+	void	CancelSearchFromCommand(uint32 uSearchID);
+	bool	HasActiveChunkedSearchDownload() const;
+	void	CancelActiveChunkedSearchDownload();
+	bool	GetActiveChunkedSearchDownloadProgress(CString& strTitle, CString& strBody, CString& strCancelAndExit, CString& strWaitAndExit, UINT& uDone, UINT& uTotal) const;
 
 	bool	DoNewEd2kSearch(SSearchParams *pParams);
 	void	CancelEd2kSearch();
@@ -111,12 +120,14 @@ public:
 	void	SearchRelatedFiles(CPtrList &listFiles);
 
 	void	DownloadSelected();
-	void	DownloadSelected(bool bPaused, bool bBypassDownloadChecker = false);
+	void	DownloadSelected(bool bPaused, bool bBypassDownloadValidator = false);
 
 	bool	CanDeleteSearches() const			{ return (searchselect.GetItemCount() > 0); };
 	void	DeleteSearch(uint32 uSearchID);
 	void	DeleteAllSearches();
 	void	DeleteSelectedSearch();
+	bool	StartChunkedCleanUpSearchResults(int iTab);
+	bool	StartChunkedCleanUpAllSearchResults();
 
 	bool	CreateNewTab(SSearchParams *pParams, bool bActiveIcon = true, bool bShowResults = true);
 	void	ShowSearchSelector(bool visible);
@@ -124,6 +135,8 @@ public:
 	void	UpdateCatTabs();
 
 	SSearchParams* GetSearchResultsParams(uint32 uSearchID) const;
+	void RefreshSearchTabActivityAnimation();
+	void EnsureActiveTabLoaded();
 
 	uint32	GetFilterColumn() const				{ return m_nFilterColumn; }
 
@@ -155,24 +168,84 @@ protected:
 	uint32		m_nFilterColumn;
 	unsigned	m_servercount;
 	int			m_iSentMoreReq;
+	bool		m_bEd2kMoreResultsAvailable;
 	bool		m_b64BitSearchPacket;
 	bool		m_globsearch;
 	bool		m_cancelled;
 	CStringArray	m_astrFilterTemp;
 	bool			m_bColumnDiff;
 	bool			m_bDeferredSearchListRefreshPending;
+	struct SChunkedSearchDownloadItem
+	{
+		SChunkedSearchDownloadItem();
+
+		std::vector<BYTE> m_data;
+		CString m_strSelectedFileName;
+		SSearchResultId m_resultId;
+		SSearchResultId m_originalParentId;
+		bool m_bSnapshotBuilt;
+		uint32 m_nSearchID;
+		uint32 m_nServerIP;
+		uint16 m_nServerPort;
+		UINT m_uServerAvail;
+		UINT m_uKadPublishInfo;
+		std::vector<CSearchFile::SClient> m_clients;
+		bool m_bKademlia;
+		bool m_bServerUDPAnswer;
+		bool m_bPreviewPossible;
+		bool m_bMultipleAICHFound;
+	};
+
+	CTypedPtrList<CPtrList, SChunkedSearchDownloadItem*> m_chunkedSearchDownloadItems;
+	bool			m_bChunkedSearchDownloadPending;
+	bool			m_bChunkedSearchDownloadPaused;
+	bool			m_bChunkedSearchDownloadBypassValidator;
+	int				m_iChunkedSearchDownloadCat;
+	bool			m_bChunkedSearchDownloadNeedsRefresh;
+	bool			m_bChunkedSearchDownloadBulkAddActive;
+	UINT			m_uChunkedSearchDownloadTotal;
+	std::vector<uint32> m_vecChunkedSearchCleanupIDs;
+	INT_PTR			m_iNextChunkedSearchCleanupID;
+	uint32			m_uChunkedSearchCleanupDeleted;
+	bool			m_bChunkedSearchCleanupPending;
+	bool			m_bChunkedSearchCleanupActive;
 	CString			m_strFullFilterExpr;
 	uint32			m_nFilterColumnLastApplied;
+	UINT_PTR		m_uTimerSearchTabActivity;
+	UINT			m_uSearchTabActivityFrame;
+	int			m_iSearchTabActivityImageBase;
 
 	bool StartNewSearch(SSearchParams *pParams);
 	void SearchStarted();
 	void SearchCancelled(uint32 uSearchID);
+	SSearchParams* GetActiveSearchResultsParams() const;
+	void UpdateMoreButtonState(const SSearchParams *pParams);
 	void ShowResults(const SSearchParams *pParams);
 	void SetAllIcons();
 	void SetSearchResultsIcon(uint32 uSearchID, int iImage);
 	void SetActiveSearchResultsIcon(uint32 uSearchID);
 	void SetInactiveSearchResultsIcon(uint32 uSearchID);
+	void EnsureSearchTabActivityTimer();
+	void StopSearchTabActivityTimer();
+	bool UpdateSearchTabActivityAnimation();
+	bool IsSearchTabActivityActive(const SSearchParams *pParams) const;
+	int GetSearchTabBaseImage(const SSearchParams *pParams) const;
+	bool IsSearchCleanupActiveForSearch(uint32 nSearchID) const;
 	void EnsureFilterControlLayout();
+	void ClearChunkedSearchDownloadItems();
+	void ClearChunkedSearchCleanup();
+	bool QueueChunkedSearchCleanupTab(int iTab);
+	bool ScheduleChunkedSearchCleanup();
+	void FinishChunkedSearchCleanup();
+	bool QueueChunkedSearchDownloadItem(CSearchFile *pSelectedFile);
+	bool BuildChunkedSearchDownloadItem(CSearchFile *pSelectedFile, SChunkedSearchDownloadItem &item) const;
+	bool EnsureChunkedSearchDownloadSnapshot(SChunkedSearchDownloadItem &item) const;
+	CSearchFile* CreateChunkedSearchDownloadFile(const SChunkedSearchDownloadItem &item) const;
+	bool ScheduleChunkedSearchDownload();
+	void ExecuteSearchDownloadCommand(CTypedPtrList<CPtrList, CSearchFile*> &selectedList, bool bPaused, bool bBypassDownloadValidator);
+	CSearchFile* GetListedSearchFileById(const SSearchResultId &id) const;
+	void RequestDeferredSearchListRefresh();
+	void UpdateChunkedSearchDownloadOverlay();
 
 
 	virtual void OnInitialUpdate();
@@ -202,5 +275,7 @@ protected:
 	afx_msg void OnBnClickedComplete();
 	afx_msg void OnSize(UINT nType, int cx, int cy);
 	afx_msg LRESULT OnDeferredSearchListRefresh(WPARAM, LPARAM);
+	afx_msg LRESULT OnProcessChunkedSearchDownload(WPARAM, LPARAM);
+	afx_msg LRESULT OnProcessChunkedSearchCleanup(WPARAM, LPARAM);
 	afx_msg HBRUSH OnCtlColor(CDC* pDC, CWnd* pWnd, UINT nCtlColor);
 };

@@ -107,7 +107,7 @@ CCollectionFile::CCollectionFile(CAbstractFile *pAbstractFile) : CAbstractFile(p
 	CCollectionFile::UpdateFileRatingCommentAvail();
 }
 
-bool CCollectionFile::InitFromLink(const CString &sLink)
+bool CCollectionFile::InitFromLink(const CString &sLink, CString *pstrError, bool bLogError)
 {
 	CED2KLink *pLink = NULL;
 	CED2KFileLink *pFileLink = NULL;
@@ -119,9 +119,12 @@ bool CCollectionFile::InitFromLink(const CString &sLink)
 		if (!pFileLink)
 			throw GetResString(_T("ERR_NOTAFILELINK"));
 	} catch (const CString &error) {
+		if (pstrError != NULL)
+			*pstrError = error;
 		CString strBuffer;
 		strBuffer.Format(GetResString(_T("ERR_INVALIDLINK")), (LPCTSTR)error);
-		LogError(LOG_STATUSBAR, (LPCTSTR)GetResString(_T("ERR_LINKERROR")), (LPCTSTR)strBuffer);
+		if (bLogError)
+			LogError(LOG_STATUSBAR, (LPCTSTR)GetResString(_T("ERR_LINKERROR")), (LPCTSTR)strBuffer);
 		delete pLink;
 		return false;
 	}

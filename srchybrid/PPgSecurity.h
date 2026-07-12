@@ -15,6 +15,12 @@ public:
 	CPPgSecurity();
 	static CString GetStoredIPFilterUpdateURL();
 	static bool UpdateIPFilterFromURL(const CString &url, bool bInteractive = true);
+	static bool IsIPFilterDownloadActive();
+	static bool GetIPFilterDownloadOverlayInfo(CString& strTitle, CString& strDetail, UINT& uDone, UINT& uTotal);
+	static void FinishIPFilterDownloadOverlayDelay();
+	static void CancelIPFilterDownload();
+	static LRESULT OnIPFilterDownloadProgress(LPARAM lParam);
+	static LRESULT OnIPFilterDownloadFinished(LPARAM lParam);
 
 	void Localize();
 	void DeleteDDB();

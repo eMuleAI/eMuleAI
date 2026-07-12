@@ -25,12 +25,44 @@
 #include "Log.h"
 #include <future>				// std::packaged_task, std::future
 
-static const wchar_t* kBBPropDarkHdr = L"BB_DarkHdr";
-static const wchar_t* kBBPropHdrHover = L"BB_DarkHdrHover";
-static const wchar_t* kBBPropHdrSortCol = L"BB_SortCol";
-static const wchar_t* kBBPropHdrSortDir = L"BB_SortDir"; // 1: up, 0: down
-static const wchar_t* kBBPropMigrationDetailsError = L"BB_MigrationDetailsError";
+static const wchar_t* kDarkModePropHeader = L"EMAI_DarkHdr";
+static const wchar_t* kDarkModePropHeaderHover = L"EMAI_DarkHdrHover";
+static const wchar_t* kDarkModePropHeaderSortCol = L"EMAI_SortCol";
+static const wchar_t* kDarkModePropHeaderSortDir = L"EMAI_SortDir"; // 1: up, 0: down
+static const wchar_t* kDarkModePropMigrationDetailsError = L"EMAI_MigrationDetailsError";
 static const DWORD kThemeTimeoutMs = 50; // Max wait for theming when guarding against hangs
+
+static int GetDarkHeaderHoverItem(HWND hWnd)
+{
+	HANDLE hHover = GetProp(hWnd, kDarkModePropHeaderHover);
+	return hHover != NULL ? ((int)(INT_PTR)hHover - 1) : -1;
+}
+
+static void SetDarkHeaderHoverItem(HWND hWnd, int iItem)
+{
+	if (iItem >= 0)
+		SetProp(hWnd, kDarkModePropHeaderHover, (HANDLE)(INT_PTR)(iItem + 1));
+	else
+		RemoveProp(hWnd, kDarkModePropHeaderHover);
+}
+
+static int HitTestDarkHeaderItem(HWND hWnd, POINT ptClient)
+{
+	HDHITTESTINFO hti{};
+	hti.pt = ptClient;
+	const int iItem = (int)SendMessage(hWnd, HDM_HITTEST, 0, (LPARAM)&hti);
+	return ((hti.flags & HHT_ONHEADER) && iItem >= 0) ? iItem : -1;
+}
+
+static void InvalidateDarkHeaderItem(HWND hWnd, int iItem)
+{
+	if (iItem < 0)
+		return;
+
+	RECT rcItem{};
+	if (Header_GetItemRect(hWnd, iItem, &rcItem))
+		InvalidateRect(hWnd, &rcItem, FALSE);
+}
 
 static bool ApplyThemeToWindowWithTimeout(HWND hWnd, bool bForceRedraw, bool bForceWindowsTheme);
 static const COLORREF s_aIrcColorsLight[16] =
@@ -98,7 +130,7 @@ void GetSystemDarkModeStatus() {
 
 // Switch color scheme for the entire application or a specific window and its children
 void ApplyTheme(HWND hWnd) {
-	if (hWnd == nullptr || theApp.IsClosing())
+	if (hWnd == nullptr || !::IsWindow(hWnd) || theApp.IsClosing())
 		return;
 
 	// Apply Dark Mode to the current window (control)
@@ -106,32 +138,15 @@ void ApplyTheme(HWND hWnd) {
 
 	HWND hChild = GetWindow(hWnd, GW_CHILD); // Get the first child control
 	while (hChild != nullptr) {
+		HWND hNextChild = GetWindow(hChild, GW_HWNDNEXT);
 		// Recursively apply Dark Mode to all child controls
 		ApplyTheme(hChild);
-		hChild = GetWindow(hChild, GW_HWNDNEXT);
+		hChild = hNextChild;
 	}
 
 	// This is the main window, so we also need to update other specific elements
 	if (hWnd == AfxGetMainWnd()->GetSafeHwnd()) {
-		BOOL m_bDarkMode = IsDarkModeEnabled();
-		if (m_bDarkMode) {
-			// Setup log text colors
-			if (thePrefs.m_crLogError == RGB(255, 0, 0))
-				thePrefs.m_crLogError = RGB(255, 102, 102);		// Light Red
-			if (thePrefs.m_crLogWarning == RGB(128, 0, 128))
-				thePrefs.m_crLogWarning = RGB(186, 85, 211);	// Light Purple (Orchid)
-			if (thePrefs.m_crLogSuccess == RGB(0, 0, 255))
-				thePrefs.m_crLogSuccess = RGB(173, 216, 255);	// Very Light Blue
-		} else {
-			// Setup log text colors
-			if (thePrefs.m_crLogError == RGB(255, 102, 102))	// Light Red
-				thePrefs.m_crLogError = RGB(255, 0, 0);
-			if (thePrefs.m_crLogWarning == RGB(186, 85, 211))	// Light Purple (Orchid)
-				thePrefs.m_crLogWarning = RGB(128, 0, 128);
-			if (thePrefs.m_crLogSuccess == RGB(173, 216, 255))	// Very Light Blue
-				thePrefs.m_crLogSuccess = RGB(0, 0, 255);
-		}
-
+		// Log text colors are resolved when log lines are rendered. Do not mutate saved preferences here.
 		theApp.emuledlg->toolbar->UpdateBackground();
 		AfxGetMainWnd()->SendMessage(WM_SYSCOLORCHANGE);
 
@@ -147,8 +162,8 @@ void ApplyTheme(HWND hWnd) {
 				GetWindowText(hwndChild, caption, 256);
 
 				if (_tcscmp(className, WC_LISTVIEW) == 0 && _tcscmp(caption, _T("Internet Explorer")) == 0) {
-					DWORD_PTR bb = 0; 
-					if (!GetWindowSubclass(hwndChild, CustomListViewProc, /*uIdSubclass=*/1, &bb))
+					DWORD_PTR subclassRefData = 0; 
+					if (!GetWindowSubclass(hwndChild, CustomListViewProc, /*uIdSubclass=*/1, &subclassRefData))
 						SetWindowSubclass(hwndChild, CustomListViewProc, /*uIdSubclass=*/1, /*dwRefData=*/0);
 					return FALSE; // stop after subclassing this ListView
 				} else if (_tcscmp(className, WC_SCROLLBAR) == 0)
@@ -158,7 +173,7 @@ void ApplyTheme(HWND hWnd) {
 			}, 0);
 		}
 
-		RedrawWindow(hWnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW | RDW_ALLCHILDREN | RDW_FRAME); // Invalidate and repaint every child window
+		RedrawWindow(hWnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_FRAME);
 		SetWindowPos(hWnd, nullptr, 0, 0, 0, 0, SWP_NOZORDER | SWP_NOMOVE | SWP_NOSIZE | SWP_FRAMECHANGED); // Force non-client area (title bar, borders) to be repainted
 
 		// Deactivate then reactivate the windows non-client area. This help to force redrawing title bar.
@@ -193,8 +208,7 @@ void ApplyThemeToWindow(HWND hWnd, bool bForceRedraw, bool bForceWindowsTheme)
 	// Idempotent subclassing on a conservative whitelist of control classes
 	wchar_t className[256] = { 0 };
 	GetClassName(hWnd, className, _countof(className));
-	if  ((wcscmp(className, WC_LISTVIEW) == 0) ||
-		(wcscmp(className, WC_TREEVIEW) == 0) ||
+	if  ((wcscmp(className, WC_TREEVIEW) == 0) ||
 		(wcscmp(className, WC_HEADER) == 0) ||
 		(wcscmp(className, WC_TABCONTROL) == 0) ||
 		(wcscmp(className, TOOLBARCLASSNAME) == 0) ||
@@ -243,26 +257,27 @@ void ApplyThemeToWindow(HWND hWnd, bool bForceRedraw, bool bForceWindowsTheme)
 
 		if (wcscmp(className, WC_BUTTON) == 0 && uType != BS_DEFPUSHBUTTON && uType != BS_PUSHBUTTON &&
 		   (uType == BS_CHECKBOX || uType == BS_AUTOCHECKBOX || uType == BS_3STATE || uType == BS_AUTO3STATE || uType == BS_RADIOBUTTON || uType == BS_AUTORADIOBUTTON)) {
-			DWORD_PTR bbBtn = 0; 
-			if (!GetWindowSubclass(hWnd, ButtonSubclassProc, /*uIdSubclass=*/1, &bbBtn))
+			DWORD_PTR subclassRefButton = 0; 
+			if (!GetWindowSubclass(hWnd, ButtonSubclassProc, /*uIdSubclass=*/1, &subclassRefButton))
 				SetWindowSubclass(hWnd, ButtonSubclassProc, /*uIdSubclass=*/1,/*dwRefData=*/0);
 		} else if (wcscmp(className, WC_LISTVIEW) == 0) { // If this is a listview, subclass its header
 			HWND hHeader = ListView_GetHeader(hWnd); // Get the header control handle for this list control
 			if (hHeader) { // Guard against NULL header handles.
 				// Idempotent: if already marked, just ensure style and skip
-				if (GetProp(hHeader, L"BB_DarkHdr")) {
+				if (GetProp(hHeader, kDarkModePropHeader)) {
 					LONG_PTR style = GetWindowLongPtr(hHeader, GWL_STYLE);
 					SetWindowLongPtr(hHeader, GWL_STYLE, style | HDS_HOTTRACK); // Ensure hot tracking
 				} else {
-					DWORD_PTR bbHdr = 0;
-					if (!GetWindowSubclass(hHeader, HeaderSubclassProc, /*uIdSubclass=*/1, &bbHdr)) {
+					DWORD_PTR subclassRefHeader = 0;
+					if (!GetWindowSubclass(hHeader, HeaderSubclassProc, /*uIdSubclass=*/1, &subclassRefHeader)) {
 						SetWindowSubclass(hHeader, HeaderSubclassProc, /*uIdSubclass=*/1, /*dwRefData=*/0);
-						SetProp(hHeader, L"BB_SortCol", (HANDLE)(INT_PTR)-1); // Initialize sort state
-						SetProp(hHeader, L"BB_SortDir", (HANDLE)(INT_PTR)1);
+						SetProp(hHeader, kDarkModePropHeaderSortCol, (HANDLE)(INT_PTR)-1); // Initialize sort state
+						SetProp(hHeader, kDarkModePropHeaderSortDir, (HANDLE)(INT_PTR)1);
+						SetDarkHeaderHoverItem(hHeader, -1);
 					}
 					LONG_PTR style = GetWindowLongPtr(hHeader, GWL_STYLE);
 					SetWindowLongPtr(hHeader, GWL_STYLE, style | HDS_HOTTRACK);
-					SetProp(hHeader, L"BB_DarkHdr", (HANDLE)1);
+					SetProp(hHeader, kDarkModePropHeader, (HANDLE)1);
 				}
 			}
 		}
@@ -309,8 +324,8 @@ void ApplyThemeToWindow(HWND hWnd, bool bForceRedraw, bool bForceWindowsTheme)
 		if ((style & (CBS_OWNERDRAWFIXED | CBS_OWNERDRAWVARIABLE)) == 0) // Only enforce owner-draw if not already owner-drawn (fixed or variable).
 			::SetWindowLong(hWnd, GWL_STYLE, style | CBS_OWNERDRAWFIXED | CBS_HASSTRINGS);
 		
-		DWORD_PTR bbCmb = 0;
-		if (!GetWindowSubclass(hWnd, ComboBoxSubclassProc, /*uIdSubclass=*/1, &bbCmb)) // Idempotent subclassing for combobox (avoid duplicate SetWindowSubclass).
+		DWORD_PTR subclassRefCombo = 0;
+		if (!GetWindowSubclass(hWnd, ComboBoxSubclassProc, /*uIdSubclass=*/1, &subclassRefCombo)) // Idempotent subclassing for combobox (avoid duplicate SetWindowSubclass).
 			SetWindowSubclass(hWnd, ComboBoxSubclassProc, /*uIdSubclass=*/1, /*dwRefData=*/0);
 
 		// Apply DarkMode theme to the drop-down list portion
@@ -323,12 +338,12 @@ void ApplyThemeToWindow(HWND hWnd, bool bForceRedraw, bool bForceWindowsTheme)
 			}
 		}
 	} else if (wcscmp(className, WC_EDIT) == 0) { // Attach DarkMode compatible context menus to all Edit controls
-		DWORD_PTR bbEdit = 0;
-		if (!GetWindowSubclass(hWnd, DarkEditSubclassProc, /*uIdSubclass=*/1, &bbEdit))
+		DWORD_PTR subclassRefEdit = 0;
+		if (!GetWindowSubclass(hWnd, DarkEditSubclassProc, /*uIdSubclass=*/1, &subclassRefEdit))
 			SetWindowSubclass(hWnd, DarkEditSubclassProc, /*uIdSubclass=*/1, /*dwRefData=*/0);
 	} else if (wcscmp(className, DATETIMEPICK_CLASS) == 0) { // handle DateTimePicker
-		DWORD_PTR bbDT = 0;
-		if (!GetWindowSubclass(hWnd, DateTimeSubclassProc, /*uIdSubclass=*/1, &bbDT))
+		DWORD_PTR subclassRefDateTime = 0;
+		if (!GetWindowSubclass(hWnd, DateTimeSubclassProc, /*uIdSubclass=*/1, &subclassRefDateTime))
 			SetWindowSubclass(hWnd, DateTimeSubclassProc, /*uIdSubclass=*/1, /*dwRefData=*/0);
 	} else if (wcscmp(className, UPDOWN_CLASS) == 0) { // SpinButton used by overflowing tab controls
 		HWND hParent = GetParent(hWnd);
@@ -339,15 +354,15 @@ void ApplyThemeToWindow(HWND hWnd, bool bForceRedraw, bool bForceWindowsTheme)
 				// Use the custom painter on every supported Windows version because the stock dark theme
 				// can render inactive tab-scroll glyphs black until hover.
 				SetWindowTheme(hWnd, L"", L"");
-				DWORD_PTR bbSpin = 0;
-				if (!GetWindowSubclass(hWnd, SpinButtonSubclassProc, /*uIdSubclass=*/1, &bbSpin))
+				DWORD_PTR subclassRefSpin = 0;
+				if (!GetWindowSubclass(hWnd, SpinButtonSubclassProc, /*uIdSubclass=*/1, &subclassRefSpin))
 					SetWindowSubclass(hWnd, SpinButtonSubclassProc, /*uIdSubclass=*/1, /*dwRefData=*/0);
 			}
 		}
 	}
 
 	if (bForceRedraw) {
-		RedrawWindow(hWnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW | RDW_ALLCHILDREN | RDW_FRAME); // Invalidate and repaint every child window
+		RedrawWindow(hWnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_FRAME);
 		SetWindowPos(hWnd, nullptr, 0, 0, 0, 0, SWP_NOZORDER | SWP_NOMOVE | SWP_NOSIZE | SWP_FRAMECHANGED); // Force non-client area (title bar, borders) to be repainted
 	}
 }
@@ -599,7 +614,7 @@ HBRUSH HandleCtlColor(HWND hWnd, CDC* pDC, HWND hChild, UINT nCtlColor)
 
 	int ctrlId = ::GetDlgCtrlID(hChild);
 
-	if (hChild != NULL && GetProp(hChild, kBBPropMigrationDetailsError)) {
+	if (hChild != NULL && GetProp(hChild, kDarkModePropMigrationDetailsError)) {
 		pDC->SetBkColor(GetCustomSysColor(COLOR_WINDOW));
 		pDC->SetTextColor(thePrefs.GetLogErrorColor());
 		return CDarkMode::m_brDefault;
@@ -1511,17 +1526,17 @@ LRESULT CALLBACK HeaderSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM 
 		if (pItem && (pItem->mask & HDI_FORMAT)) {
 			const int iItem = static_cast<int>(wParam);
 			if (pItem->fmt & HDF_SORTUP) {
-				SetProp(hWnd, kBBPropHdrSortCol, (HANDLE)(INT_PTR)iItem);
-				SetProp(hWnd, kBBPropHdrSortDir, (HANDLE)(INT_PTR)1);
+				SetProp(hWnd, kDarkModePropHeaderSortCol, (HANDLE)(INT_PTR)iItem);
+				SetProp(hWnd, kDarkModePropHeaderSortDir, (HANDLE)(INT_PTR)1);
 				RECT rc{}; Header_GetItemRect(hWnd, iItem, &rc); InvalidateRect(hWnd, &rc, FALSE);
 			} else if (pItem->fmt & HDF_SORTDOWN) {
-				SetProp(hWnd, kBBPropHdrSortCol, (HANDLE)(INT_PTR)iItem);
-				SetProp(hWnd, kBBPropHdrSortDir, (HANDLE)(INT_PTR)0);
+				SetProp(hWnd, kDarkModePropHeaderSortCol, (HANDLE)(INT_PTR)iItem);
+				SetProp(hWnd, kDarkModePropHeaderSortDir, (HANDLE)(INT_PTR)0);
 				RECT rc{}; Header_GetItemRect(hWnd, iItem, &rc); InvalidateRect(hWnd, &rc, FALSE);
 			} else {
-				int cur = (int)(INT_PTR)GetProp(hWnd, kBBPropHdrSortCol);
+				int cur = (int)(INT_PTR)GetProp(hWnd, kDarkModePropHeaderSortCol);
 				if (cur == iItem) {
-					SetProp(hWnd, kBBPropHdrSortCol, (HANDLE)(INT_PTR)-1);
+					SetProp(hWnd, kDarkModePropHeaderSortCol, (HANDLE)(INT_PTR)-1);
 					RECT rc{}; Header_GetItemRect(hWnd, iItem, &rc); InvalidateRect(hWnd, &rc, FALSE);
 				}
 			}
@@ -1529,15 +1544,38 @@ LRESULT CALLBACK HeaderSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM 
 		return lr;
 	}
 
+	case WM_ERASEBKGND:
+		if (IsDarkModeEnabled())
+			return TRUE;
+		break;
+
 	case WM_PAINT:
 		{
 			if (!IsDarkModeEnabled())
 				break;
 
 			PAINTSTRUCT ps{};
-			HDC hdc = BeginPaint(hWnd, &ps);
-			if (hdc) {
+			HDC hdcPaint = BeginPaint(hWnd, &ps);
+			if (hdcPaint) {
 				RECT rcHeader{}; GetClientRect(hWnd, &rcHeader);
+				const int iWidth = rcHeader.right - rcHeader.left;
+				const int iHeight = rcHeader.bottom - rcHeader.top;
+				HDC hdcBuffer = NULL;
+				HBITMAP hbmBuffer = NULL;
+				HGDIOBJ hbmOld = NULL;
+				bool bBuffered = false;
+				if (iWidth > 0 && iHeight > 0) {
+					hdcBuffer = CreateCompatibleDC(hdcPaint);
+					if (hdcBuffer != NULL) {
+						hbmBuffer = CreateCompatibleBitmap(hdcPaint, iWidth, iHeight);
+						if (hbmBuffer != NULL) {
+							hbmOld = SelectObject(hdcBuffer, hbmBuffer);
+							bBuffered = hbmOld != NULL && hbmOld != HGDI_ERROR;
+						}
+					}
+				}
+				HDC hdc = bBuffered ? hdcBuffer : hdcPaint;
+
 				HBRUSH br = CreateSolidBrush(GetCustomSysColor(COLOR_WINDOW));
 				FillRect(hdc, &rcHeader, br);
 				DeleteObject(br);
@@ -1546,11 +1584,11 @@ LRESULT CALLBACK HeaderSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM 
 				HFONT hOldFont = hFont ? (HFONT)SelectObject(hdc, hFont) : nullptr;
 				const int count = Header_GetItemCount(hWnd);
 
-				const int  hover   = (int)(INT_PTR)GetProp(hWnd, kBBPropHdrHover);
-				int        sortCol = (int)(INT_PTR)GetProp(hWnd, kBBPropHdrSortCol);
-				int        sortDir = (int)(INT_PTR)GetProp(hWnd, kBBPropHdrSortDir);
+				const int  hover   = GetDarkHeaderHoverItem(hWnd);
+				int        sortCol = (int)(INT_PTR)GetProp(hWnd, kDarkModePropHeaderSortCol);
+				int        sortDir = (int)(INT_PTR)GetProp(hWnd, kDarkModePropHeaderSortDir);
 
-				if (sortCol == 0 && GetProp(hWnd, kBBPropHdrSortCol) == nullptr)
+				if (sortCol == 0 && GetProp(hWnd, kDarkModePropHeaderSortCol) == nullptr)
 					sortCol = -1;
 
 				if (sortCol < 0) {
@@ -1562,8 +1600,8 @@ LRESULT CALLBACK HeaderSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM 
 						}
 					}
 
-					SetProp(hWnd, kBBPropHdrSortCol, (HANDLE)(INT_PTR)sortCol);
-					SetProp(hWnd, kBBPropHdrSortDir, (HANDLE)(INT_PTR)sortDir);
+					SetProp(hWnd, kDarkModePropHeaderSortCol, (HANDLE)(INT_PTR)sortCol);
+					SetProp(hWnd, kDarkModePropHeaderSortDir, (HANDLE)(INT_PTR)sortDir);
 				}
 
 				HIMAGELIST himl = (HIMAGELIST)SendMessage(hWnd, HDM_GETIMAGELIST, 0, 0);
@@ -1619,14 +1657,15 @@ LRESULT CALLBACK HeaderSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM 
 					else
 						dt |= DT_LEFT;
 
-					// Reserve space for arrow only when it will sit to the right of the text (right/center align),
-					// so we avoid overlap like in the screenshots. For left-align, we will clamp on paint.
+					// Keep the sort indicator at the right edge, like the native header image layout.
 					int arrowW = (usesImageRight ? imgW : 10);
-					if (usesImageRight || hasSortFlagArrow) {
-						if (dt & (DT_RIGHT | DT_CENTER)) rcText.right -= (paddingX + arrowW + gapArrow);
-						else rcText.right -= paddingX;
-					} else
+					if (usesImageRight || hasSortFlagArrow)
+						rcText.right -= (paddingX + arrowW + gapArrow);
+					else
 						rcText.right -= paddingX;
+
+					if (rcText.right < rcText.left)
+						rcText.right = rcText.left;
 
 					SetBkMode(hdc, TRANSPARENT);
 					SetTextColor(hdc, clrText);
@@ -1639,67 +1678,61 @@ LRESULT CALLBACK HeaderSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM 
 						ImageList_Draw(himl, hdi.iImage, hdc, xImg, yImg, ILD_NORMAL);
 					}
 
-					
-					SIZE sz{}; // Compute rendered text bounds to place arrow just after the text.
-					GetTextExtentPoint32(hdc, textBuf, (int)wcslen(textBuf), &sz);
-
-					int availW = max(0, rcText.right - rcText.left);
-					int wUsed  = min(sz.cx, availW);
-					int textLeft = rcText.left;
-
-					if (dt & DT_CENTER)
-						textLeft = rcText.left + (availW - wUsed) / 2;
-					else if (dt & DT_RIGHT)
-						textLeft = rcText.right - wUsed; // Right aligned inside rcText
-
-					int textRight = textLeft + wUsed;
-
-					// Draw arrow near text: use header image if header uses right-side image for sort,
-					// otherwise draw a small triangle.
+					// Draw the right-side sort indicator.
 					if (usesImageRight || hasSortFlagArrow) {
-						int cx = textRight + gapArrow;
-						int rightClamp = rcItem.right - paddingX - (usesImageRight ? imgW : 6);
-
-						if (cx > rightClamp)
-							cx = rightClamp;
-
 						int cy = (rcItem.top + rcItem.bottom) / 2;
 
 						if (usesImageRight) {
+							int xImg = rcItem.right - paddingX - imgW;
 							int yImg = rcItem.top + ((rcItem.bottom - rcItem.top) - imgH) / 2;
-							ImageList_Draw(himl, hdi.iImage, hdc, cx, yImg, ILD_NORMAL);
+							if (xImg >= rcItem.left + paddingX)
+								ImageList_Draw(himl, hdi.iImage, hdc, xImg, yImg, ILD_NORMAL);
 						} else {
-							POINT tri[3];
-							HPEN hPen = CreatePen(PS_SOLID, 1, clrText);
-							HBRUSH hBr = CreateSolidBrush(clrText);
-							HGDIOBJ oldPen = SelectObject(hdc, hPen);
-							HGDIOBJ oldBr  = SelectObject(hdc, hBr);
-							if (hasUp) {
-								tri[0] = { cx - 5, cy + 2 };
-								tri[1] = { cx + 5, cy + 2 };
-								tri[2] = { cx,     cy - 3 };
-								Polygon(hdc, tri, 3);
-							} else if (hasDown) {
-								tri[0] = { cx - 5, cy - 2 };
-								tri[1] = { cx + 5, cy - 2 };
-								tri[2] = { cx,     cy + 3 };
-								Polygon(hdc, tri, 3);
+							int cx = rcItem.right - paddingX - 5;
+							if (cx >= rcItem.left + paddingX + 5) {
+								POINT tri[3];
+								HPEN hPen = CreatePen(PS_SOLID, 1, clrText);
+								HBRUSH hBr = CreateSolidBrush(clrText);
+								HGDIOBJ oldPen = SelectObject(hdc, hPen);
+								HGDIOBJ oldBr  = SelectObject(hdc, hBr);
+								if (hasUp) {
+									tri[0] = { cx - 5, cy + 2 };
+									tri[1] = { cx + 5, cy + 2 };
+									tri[2] = { cx,     cy - 3 };
+									Polygon(hdc, tri, 3);
+								} else if (hasDown) {
+									tri[0] = { cx - 5, cy - 2 };
+									tri[1] = { cx + 5, cy - 2 };
+									tri[2] = { cx,     cy + 3 };
+									Polygon(hdc, tri, 3);
+								}
+								SelectObject(hdc, oldPen);
+								SelectObject(hdc, oldBr);
+								DeleteObject(hPen);
+								DeleteObject(hBr);
 							}
-							SelectObject(hdc, oldPen);
-							SelectObject(hdc, oldBr);
-							DeleteObject(hPen);
-							DeleteObject(hBr);
 						}
 					}
 
-					RECT rcSep{ rcItem.right - 2, rcItem.top, rcItem.right - 1, rcItem.bottom };
-					HBRUSH brSep = CreateSolidBrush(GetCustomSysColor(COLOR_3DSHADOW));
-					FillRect(hdc, &rcSep, brSep);
-					DeleteObject(brSep);
+					if (rcItem.right > rcItem.left) {
+						RECT rcSep{ rcItem.right - 1, rcItem.top, rcItem.right, rcItem.bottom };
+						HBRUSH brSep = CreateSolidBrush(GetCustomSysColor(COLOR_3DSHADOW));
+						FillRect(hdc, &rcSep, brSep);
+						DeleteObject(brSep);
+					}
 				}
 
 				if (hOldFont)
 					SelectObject(hdc, hOldFont);
+
+				if (bBuffered) {
+					BitBlt(hdcPaint, rcHeader.left, rcHeader.top, iWidth, iHeight, hdcBuffer, 0, 0, SRCCOPY);
+					SelectObject(hdcBuffer, hbmOld);
+				}
+				if (hbmBuffer != NULL)
+					DeleteObject(hbmBuffer);
+				if (hdcBuffer != NULL)
+					DeleteDC(hdcBuffer);
 
 				EndPaint(hWnd, &ps);
 				return 0;
@@ -1713,47 +1746,47 @@ LRESULT CALLBACK HeaderSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM 
 			TrackMouseEvent(&tme);
 
 			POINT pt{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
-			HDHITTESTINFO hti{}; hti.pt = pt;
-			int hit = (int)SendMessage(hWnd, HDM_HITTEST, 0, (LPARAM)&hti);
-			int prev = (int)(INT_PTR)GetProp(hWnd, kBBPropHdrHover);
-			int now = ((hti.flags & HHT_ONHEADER) && hit >= 0) ? hit : -1;
+			const int prev = GetDarkHeaderHoverItem(hWnd);
+			const int now = HitTestDarkHeaderItem(hWnd, pt);
 
 			if (now != prev) {
-				if (prev >= 0) {
-					RECT rcPrev{};
-					Header_GetItemRect(hWnd, prev, &rcPrev);
-					InvalidateRect(hWnd, &rcPrev, FALSE);
-				}
-
-				if (now  >= 0) {
-					RECT rcNow{};
-					Header_GetItemRect(hWnd, now,  &rcNow);
-					InvalidateRect(hWnd, &rcNow,  FALSE);
-				}
-
-				SetProp(hWnd, kBBPropHdrHover, (HANDLE)(INT_PTR)now);
+				InvalidateDarkHeaderItem(hWnd, prev);
+				InvalidateDarkHeaderItem(hWnd, now);
+				SetDarkHeaderHoverItem(hWnd, now);
 			}
 		}
 		break;
 
 	case WM_MOUSELEAVE:
 		{
-			int prev = (int)(INT_PTR)GetProp(hWnd, kBBPropHdrHover);
-			if (prev >= 0) {
-				RECT rcPrev{};
-				Header_GetItemRect(hWnd, prev, &rcPrev);
-				InvalidateRect(hWnd, &rcPrev, FALSE);
+			int now = -1;
+			POINT ptScreen{};
+			if (::GetCursorPos(&ptScreen)) {
+				POINT ptClient = ptScreen;
+				if (::ScreenToClient(hWnd, &ptClient))
+					now = HitTestDarkHeaderItem(hWnd, ptClient);
 			}
-			SetProp(hWnd, kBBPropHdrHover, (HANDLE)(INT_PTR)-1);
+
+			const int prev = GetDarkHeaderHoverItem(hWnd);
+			if (now != prev) {
+				InvalidateDarkHeaderItem(hWnd, prev);
+				InvalidateDarkHeaderItem(hWnd, now);
+				SetDarkHeaderHoverItem(hWnd, now);
+			}
+
+			if (now >= 0) {
+				TRACKMOUSEEVENT tme{ sizeof(TRACKMOUSEEVENT), TME_LEAVE, hWnd, 0 };
+				TrackMouseEvent(&tme);
+			}
 		}
 		break;
 
 	case WM_NCDESTROY:
 		RemoveWindowSubclass(hWnd, HeaderSubclassProc, /*uIdSubclass=*/1);
-		RemoveProp(hWnd, kBBPropDarkHdr);
-		RemoveProp(hWnd, kBBPropHdrHover);
-		RemoveProp(hWnd, kBBPropHdrSortCol);
-		RemoveProp(hWnd, kBBPropHdrSortDir);
+		RemoveProp(hWnd, kDarkModePropHeader);
+		RemoveProp(hWnd, kDarkModePropHeaderHover);
+		RemoveProp(hWnd, kDarkModePropHeaderSortCol);
+		RemoveProp(hWnd, kDarkModePropHeaderSortDir);
 		break;
 	}
 	return DefSubclassProc(hWnd, uMsg, wParam, lParam);
@@ -1927,32 +1960,28 @@ int CDarkMode::MessageBox(LPCTSTR lpszText, UINT nType, UINT nHelpId)
 
 int CDarkMode::MessageBoxWithCaption(LPCTSTR lpszText, LPCTSTR lpszCaption, UINT nType, UINT nHelpId)
 {
+	CWnd* pMainWnd = AfxGetMainWnd();
+	if (pMainWnd != NULL && !::IsWindow(pMainWnd->GetSafeHwnd()))
+		pMainWnd = NULL;
+
 	// if system in light mode, use standard MessageBox with custom caption
 	if (!IsDarkModeEnabled()) {
-		CWnd* pMainWnd = AfxGetMainWnd();
 		CString caption((lpszCaption != NULL && lpszCaption[0] != _T('\0')) ? lpszCaption : AfxGetAppName());
-		return ::MessageBox(pMainWnd ? pMainWnd->GetSafeHwnd() : NULL, lpszText, caption, nType);
+		return ::MessageBoxEx(pMainWnd ? pMainWnd->GetSafeHwnd() : NULL, lpszText, caption, nType, thePrefs.GetLanguageID());
 	}
 
 	// dark mode
-	CDarkModeMessageBoxDlg dlg(lpszText, nType, lpszCaption);
+	CDarkModeMessageBoxDlg dlg(lpszText, nType, lpszCaption, pMainWnd);
 	return dlg.DoModal();
 }
 
-int CDarkMode::MessageBox(UINT nResID, UINT nType, UINT /*nHelpId*/)
+int CDarkMode::MessageBox(UINT nResID, UINT nType, UINT nHelpId)
 {
-	// if system in light mode, use original
-	if (!IsDarkModeEnabled())
-		return AfxMessageBox(nResID, nType);
-
-	// load string resource and show themed dialog
 	CString text;
-	BOOL ok = text.LoadString(nResID);
-	if (!ok)
+	if (!text.LoadString(nResID))
 		return AfxMessageBox(nResID, nType);
 
-	CDarkModeMessageBoxDlg dlg(text, nType, NULL);
-	return dlg.DoModal();
+	return MessageBox((LPCTSTR)text, nType, nHelpId);
 }
 
 // ---------------------------------------------------------------------------
@@ -2009,7 +2038,7 @@ BOOL CDarkModeMessageBoxDlg::OnInitDialog()
 
 	// Set static control text before layout
 	SetDlgItemText(IDC_DARKMODE_TEXT, m_text);
-	SetWindowText(m_caption.IsEmpty() ? AfxGetAppName() : m_caption);
+	SetWindowText(m_caption.IsEmpty() ? AfxGetAppName() : (LPCTSTR)m_caption);
 	HICON hIcon = CDarkMode::GetCustomSysIcon(m_type & MB_ICONMASK);
 
 	if (HICON hIcon = CDarkMode::GetCustomSysIcon(m_type & MB_ICONMASK))
@@ -2019,6 +2048,14 @@ BOOL CDarkModeMessageBoxDlg::OnInitDialog()
 	ResizeToFitText();
 	CreateButtons();
 	ApplyTheme(m_hWnd);
+	CWnd* pParentWnd = GetParent();
+	if (pParentWnd != NULL && ::IsWindow(pParentWnd->GetSafeHwnd()))
+		CenterWindow(pParentWnd);
+	else
+		CenterWindow();
+	if ((m_type & MB_TOPMOST) != 0)
+		SetWindowPos(&CWnd::wndTopMost, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+	SetForegroundWindow();
 	return TRUE;
 }
 

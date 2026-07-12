@@ -70,7 +70,8 @@ enum EBadClientCategory {
 	PR_MANUAL,				//Banned or punished manually via the client context menu by the user
 	PR_BADHASHSOFT,			//User Hash Soft
 	PR_TCPERRORFLOODER,		//TCP Error Flooder
-	PR_WRONGPACKAGE			//Wrong Package
+	PR_WRONGPACKAGE,			//Wrong Package
+	PR_UPLOADREQUESTABUSE	//Upload Request Abuse
 };
 
 enum EPunishment {

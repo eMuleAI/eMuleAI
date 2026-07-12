@@ -53,19 +53,78 @@
 #include "ChatWnd.h"
 #include "TransferDlg.h"
 #include "FriendList.h"
+#include "Friend.h"
 #include "InputBox.h"
 #include "ClientDetailDialog.h"
 #include "eMuleAI/DarkMode.h"
+#include <gdiplus.h>
+#pragma comment(lib, "gdiplus.lib")
 
 namespace
 {
 	const int kSearchResultsFilterDefaultLeft = -18;
 	const int kSearchResultsFilterMinGapFromComplete = 4;
 	const int kSearchResultsFilterRightMargin = 4;
+	const UINT kLargeChunkedSearchDownloadSourceDeferCount = 1000;
+
+	bool TryAddSearchPacketPayloadSizes(uint32 uLeftPayloadSize, ULONGLONG ullRightPayloadSize, uint32& ruCombinedPayloadSize)
+	{
+		if (ullRightPayloadSize > 0xFFFFFFFFui64)
+			return false;
+		const uint32 uRightPayloadSize = static_cast<uint32>(ullRightPayloadSize);
+		if (uLeftPayloadSize > 0xFFFFFFFFu - uRightPayloadSize)
+			return false;
+		ruCombinedPayloadSize = uLeftPayloadSize + uRightPayloadSize;
+		return true;
+	}
+
+	DWORD GetRecentSearchDownloadInputAgeMs(DWORD dwNow)
+	{
+		LASTINPUTINFO lastInput;
+		memset(&lastInput, 0, sizeof(lastInput));
+		lastInput.cbSize = sizeof(lastInput);
+		return ::GetLastInputInfo(&lastInput) ? static_cast<DWORD>(dwNow - lastInput.dwTime) : static_cast<DWORD>(-1);
+	}
+
+	void GetChunkedSearchDownloadSliceLimits(DWORD &dwSliceBudgetMs, UINT &uMaxItemsPerSlice)
+	{
+		const DWORD dwNow = ::GetTickCount();
+		const UINT uQueueStatus = HIWORD(::GetQueueStatus(QS_KEY | QS_MOUSE | QS_PAINT | QS_TIMER | QS_POSTMESSAGE));
+		const bool bInputPending = (uQueueStatus & (QS_KEY | QS_MOUSE)) != 0;
+		const bool bPaintPending = (uQueueStatus & QS_PAINT) != 0;
+		const bool bDispatchPending = (uQueueStatus & (QS_TIMER | QS_POSTMESSAGE)) != 0;
+		const DWORD dwInputAge = GetRecentSearchDownloadInputAgeMs(dwNow);
+
+		if (bInputPending || dwInputAge < 250) {
+			dwSliceBudgetMs = 3;
+			uMaxItemsPerSlice = 64;
+			return;
+		}
+		if (bPaintPending || bDispatchPending) {
+			dwSliceBudgetMs = 5;
+			uMaxItemsPerSlice = 192;
+			return;
+		}
+		if (dwInputAge < 1000) {
+			dwSliceBudgetMs = 8;
+			uMaxItemsPerSlice = 512;
+			return;
+		}
+
+		dwSliceBudgetMs = 16;
+		uMaxItemsPerSlice = 2048;
+	}
+
+	bool IsSearchKnownTypeAlreadyOwned(CSearchFile::EKnownType eKnownType)
+	{
+		return eKnownType == CSearchFile::Shared || eKnownType == CSearchFile::Downloading;
+	}
 
 	enum
 	{
-		WM_SEARCHRESULTSWND_DEFERRED_REFRESH = WM_APP + 4061
+		WM_SEARCHRESULTSWND_DEFERRED_REFRESH = WM_APP + 4061,
+		WM_SEARCHRESULTSWND_CHUNKED_DOWNLOAD = WM_APP + 4062,
+		WM_SEARCHRESULTSWND_CHUNKED_CLEANUP = WM_APP + 4063
 	};
 }
 
@@ -82,7 +141,10 @@ extern LPCTSTR g_aszInvKadKeywordChars;
 enum ESearchTimerID
 {
 	TimerServerTimeout = 1,
-	TimerGlobalSearch
+	TimerGlobalSearch,
+	TimerChunkedSearchDownload,
+	TimerChunkedSearchCleanup,
+	TimerSearchTabActivity
 };
 
 enum ESearchResultImage
@@ -98,6 +160,155 @@ enum ESearchResultImage
 
 namespace
 {
+
+	const UINT kSearchTabActivityIntervalMs = 130;
+	const UINT kSearchTabActivityFrameCount = 10;
+	const int kSearchTabActivityIconSize = 16;
+
+	Gdiplus::Color BlendSearchTabActivityColor(const Gdiplus::Color& crBase, const Gdiplus::Color& crAccent, BYTE uAccentWeight)
+	{
+		const BYTE uBaseWeight = static_cast<BYTE>(255 - uAccentWeight);
+		return Gdiplus::Color(
+			static_cast<BYTE>((static_cast<UINT>(crBase.GetA()) * uBaseWeight + static_cast<UINT>(crAccent.GetA()) * uAccentWeight) / 255),
+			static_cast<BYTE>((static_cast<UINT>(crBase.GetR()) * uBaseWeight + static_cast<UINT>(crAccent.GetR()) * uAccentWeight) / 255),
+			static_cast<BYTE>((static_cast<UINT>(crBase.GetG()) * uBaseWeight + static_cast<UINT>(crAccent.GetG()) * uAccentWeight) / 255),
+			static_cast<BYTE>((static_cast<UINT>(crBase.GetB()) * uBaseWeight + static_cast<UINT>(crAccent.GetB()) * uAccentWeight) / 255));
+	}
+
+	Gdiplus::Color GetSearchTabActivityAccentColor(UINT uFrame)
+	{
+		static const Gdiplus::Color s_acrAccentPalette[kSearchTabActivityFrameCount] =
+		{
+			Gdiplus::Color(255, 255, 70, 96),
+			Gdiplus::Color(255, 255, 126, 54),
+			Gdiplus::Color(255, 255, 214, 58),
+			Gdiplus::Color(255, 170, 230, 62),
+			Gdiplus::Color(255, 76, 222, 118),
+			Gdiplus::Color(255, 62, 222, 214),
+			Gdiplus::Color(255, 64, 158, 255),
+			Gdiplus::Color(255, 116, 106, 255),
+			Gdiplus::Color(255, 196, 82, 255),
+			Gdiplus::Color(255, 255, 78, 184)
+		};
+		return s_acrAccentPalette[uFrame % kSearchTabActivityFrameCount];
+	}
+
+	void DrawSearchTabActivityFrame(Gdiplus::Graphics& graphics, UINT uFrame)
+	{
+		const Gdiplus::Color crOutlineBase(255, 30, 32, 44);
+		const Gdiplus::RectF rcArc(2.15f, 2.15f, 11.7f, 11.7f);
+		const Gdiplus::REAL fSegmentAngle = 360.0f / static_cast<Gdiplus::REAL>(kSearchTabActivityFrameCount);
+		const Gdiplus::REAL fSweepAngle = fSegmentAngle - 8.0f;
+		const UINT uHeadSegment = uFrame % kSearchTabActivityFrameCount;
+
+		graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+		graphics.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
+		graphics.Clear(Gdiplus::Color(0, 0, 0, 0));
+
+		for (UINT i = 0; i < kSearchTabActivityFrameCount; ++i) {
+			const UINT uPaletteIndex = (i + uFrame) % kSearchTabActivityFrameCount;
+			const UINT uDelta = (i + kSearchTabActivityFrameCount - uHeadSegment) % kSearchTabActivityFrameCount;
+			const Gdiplus::Color crPalette = GetSearchTabActivityAccentColor(uPaletteIndex);
+			const Gdiplus::Color crSegment = BlendSearchTabActivityColor(Gdiplus::Color(255, 82, 86, 104), crPalette, uDelta == 0 ? 255 : 232);
+			const Gdiplus::Color crOutline = BlendSearchTabActivityColor(crOutlineBase, crPalette, uDelta == 0 ? 172 : 132);
+			const Gdiplus::REAL fStartAngle = -90.0f + (static_cast<Gdiplus::REAL>(i) * fSegmentAngle);
+
+			Gdiplus::Pen outlinePen(crOutline, 3.45f);
+			outlinePen.SetStartCap(Gdiplus::LineCapRound);
+			outlinePen.SetEndCap(Gdiplus::LineCapRound);
+			graphics.DrawArc(&outlinePen, rcArc, fStartAngle, fSweepAngle);
+
+			Gdiplus::Pen fillPen(crSegment, uDelta == 0 ? 2.95f : 2.6f);
+			fillPen.SetStartCap(Gdiplus::LineCapRound);
+			fillPen.SetEndCap(Gdiplus::LineCapRound);
+			graphics.DrawArc(&fillPen, rcArc, fStartAngle, fSweepAngle);
+		}
+
+		const Gdiplus::Color crCenter = BlendSearchTabActivityColor(Gdiplus::Color(180, 42, 36, 72), GetSearchTabActivityAccentColor(uFrame), 96);
+		Gdiplus::SolidBrush centerBrush(crCenter);
+		graphics.FillEllipse(&centerBrush, 5.45f, 5.45f, 5.1f, 5.1f);
+		Gdiplus::SolidBrush centerHighlight(BlendSearchTabActivityColor(crCenter, Gdiplus::Color(230, 255, 255, 255), 50));
+		graphics.FillEllipse(&centerHighlight, 6.25f, 6.05f, 1.9f, 1.9f);
+	}
+
+	HICON CreateSearchTabActivityFrameIcon(UINT uFrame)
+	{
+		BITMAPV5HEADER bi = {};
+		bi.bV5Size = sizeof(bi);
+		bi.bV5Width = kSearchTabActivityIconSize;
+		bi.bV5Height = -kSearchTabActivityIconSize;
+		bi.bV5Planes = 1;
+		bi.bV5BitCount = 32;
+		bi.bV5Compression = BI_BITFIELDS;
+		bi.bV5RedMask = 0x00FF0000;
+		bi.bV5GreenMask = 0x0000FF00;
+		bi.bV5BlueMask = 0x000000FF;
+		bi.bV5AlphaMask = 0xFF000000;
+
+		void *pBits = NULL;
+		HDC hScreenDC = ::GetDC(NULL);
+		HBITMAP hColorBitmap = ::CreateDIBSection(hScreenDC, reinterpret_cast<BITMAPINFO*>(&bi), DIB_RGB_COLORS, &pBits, NULL, 0);
+		::ReleaseDC(NULL, hScreenDC);
+		if (hColorBitmap == NULL || pBits == NULL) {
+			if (hColorBitmap != NULL)
+				::DeleteObject(hColorBitmap);
+			return NULL;
+		}
+
+		::ZeroMemory(pBits, static_cast<size_t>(kSearchTabActivityIconSize * kSearchTabActivityIconSize * 4));
+		{
+			Gdiplus::Bitmap bitmap(kSearchTabActivityIconSize, kSearchTabActivityIconSize, kSearchTabActivityIconSize * 4, PixelFormat32bppPARGB, static_cast<BYTE*>(pBits));
+			Gdiplus::Graphics graphics(&bitmap);
+			DrawSearchTabActivityFrame(graphics, uFrame);
+		}
+
+		HBITMAP hMaskBitmap = ::CreateBitmap(kSearchTabActivityIconSize, kSearchTabActivityIconSize, 1, 1, NULL);
+		ICONINFO ii = {};
+		ii.fIcon = TRUE;
+		ii.hbmColor = hColorBitmap;
+		ii.hbmMask = hMaskBitmap;
+		HICON hIcon = ::CreateIconIndirect(&ii);
+		::DeleteObject(hMaskBitmap);
+		::DeleteObject(hColorBitmap);
+		return hIcon;
+	}
+
+	int GetSearchTabStaticImage(const SSearchParams *pParams)
+	{
+		if (pParams == NULL)
+			return sriServer;
+		if (pParams->bClientSharedFiles)
+			return sriClient;
+		if (pParams->eType == SearchTypeKademlia)
+			return sriKad;
+		if (pParams->eType == SearchTypeEd2kGlobal)
+			return sriGlobal;
+		return sriServer;
+	}
+
+	int AddSearchTabActivityImages(CImageList& imageList)
+	{
+		const int iBaseImage = imageList.GetImageCount();
+		ULONG_PTR gdiplusToken = 0;
+		Gdiplus::GdiplusStartupInput startupInput;
+		if (Gdiplus::GdiplusStartup(&gdiplusToken, &startupInput, NULL) != Gdiplus::Ok)
+			return -1;
+
+		for (UINT uFrame = 0; uFrame < kSearchTabActivityFrameCount; ++uFrame) {
+			HICON hIcon = CreateSearchTabActivityFrameIcon(uFrame);
+			if (hIcon == NULL || imageList.Add(hIcon) < 0) {
+				if (hIcon != NULL)
+					::DestroyIcon(hIcon);
+				Gdiplus::GdiplusShutdown(gdiplusToken);
+				return -1;
+			}
+			::DestroyIcon(hIcon);
+		}
+
+		Gdiplus::GdiplusShutdown(gdiplusToken);
+		return iBaseImage;
+	}
+
 	class CScopedSearchClientRef
 	{
 	public:
@@ -237,6 +448,8 @@ BEGIN_MESSAGE_MAP(CSearchResultsWnd, CResizableFormView)
 	ON_BN_CLICKED(IDC_CHECK_COMPLETE, OnBnClickedComplete)
 	ON_WM_SIZE()
 	ON_MESSAGE(WM_SEARCHRESULTSWND_DEFERRED_REFRESH, OnDeferredSearchListRefresh)
+	ON_MESSAGE(WM_SEARCHRESULTSWND_CHUNKED_DOWNLOAD, OnProcessChunkedSearchDownload)
+	ON_MESSAGE(WM_SEARCHRESULTSWND_CHUNKED_CLEANUP, OnProcessChunkedSearchCleanup)
 END_MESSAGE_MAP()
 
 CSearchResultsWnd::CSearchResultsWnd(CWnd* /*pParent*/)
@@ -249,6 +462,7 @@ CSearchResultsWnd::CSearchResultsWnd(CWnd* /*pParent*/)
 	, m_nFilterColumn()
 	, m_servercount()
 	, m_iSentMoreReq()
+	, m_bEd2kMoreResultsAvailable(false)
 	, m_b64BitSearchPacket()
 	, m_globsearch()
 	, m_cancelled()
@@ -257,17 +471,372 @@ CSearchResultsWnd::CSearchResultsWnd(CWnd* /*pParent*/)
 	, m_astrFilterTemp()
 	, m_bColumnDiff(false)
 	, m_bDeferredSearchListRefreshPending(false)
+	, m_chunkedSearchDownloadItems()
+	, m_bChunkedSearchDownloadPending(false)
+	, m_bChunkedSearchDownloadPaused(false)
+	, m_bChunkedSearchDownloadBypassValidator(false)
+	, m_iChunkedSearchDownloadCat(0)
+	, m_bChunkedSearchDownloadNeedsRefresh(false)
+	, m_bChunkedSearchDownloadBulkAddActive(false)
+	, m_uChunkedSearchDownloadTotal(0)
+	, m_vecChunkedSearchCleanupIDs()
+	, m_iNextChunkedSearchCleanupID(0)
+	, m_uChunkedSearchCleanupDeleted(0)
+	, m_bChunkedSearchCleanupPending(false)
+	, m_bChunkedSearchCleanupActive(false)
 	, m_strFullFilterExpr()
 	, m_nFilterColumnLastApplied()
+	, m_uTimerSearchTabActivity(0)
+	, m_uSearchTabActivityFrame(0)
+	, m_iSearchTabActivityImageBase(-1)
 {
 }
 
 CSearchResultsWnd::~CSearchResultsWnd()
 {
+	ClearChunkedSearchDownloadItems();
+	ClearChunkedSearchCleanup();
+	StopSearchTabActivityTimer();
 	m_ctlSearchListHeader.Detach();
 	delete m_searchpacket;
 	if (m_uTimerLocalServer)
 		VERIFY(KillTimer(m_uTimerLocalServer));
+}
+
+CSearchResultsWnd::SChunkedSearchDownloadItem::SChunkedSearchDownloadItem()
+	: m_bSnapshotBuilt(false)
+	, m_nSearchID(0)
+	, m_nServerIP(0)
+	, m_nServerPort(0)
+	, m_uServerAvail(0)
+	, m_uKadPublishInfo(0)
+	, m_bKademlia(false)
+	, m_bServerUDPAnswer(false)
+	, m_bPreviewPossible(false)
+	, m_bMultipleAICHFound(false)
+{
+}
+
+void CSearchResultsWnd::ClearChunkedSearchDownloadItems()
+{
+	if (::IsWindow(m_hWnd))
+		KillTimer(TimerChunkedSearchDownload);
+	m_bChunkedSearchDownloadPending = false;
+	m_bChunkedSearchDownloadNeedsRefresh = false;
+	m_uChunkedSearchDownloadTotal = 0;
+	UpdateChunkedSearchDownloadOverlay();
+	if (m_bChunkedSearchDownloadBulkAddActive) {
+		m_bChunkedSearchDownloadBulkAddActive = false;
+		if (theApp.downloadqueue != NULL)
+			theApp.downloadqueue->EndBulkAddDownloads();
+	}
+	while (!m_chunkedSearchDownloadItems.IsEmpty())
+		delete m_chunkedSearchDownloadItems.RemoveHead();
+}
+
+void CSearchResultsWnd::ClearChunkedSearchCleanup()
+{
+	if (::IsWindow(m_hWnd))
+		KillTimer(TimerChunkedSearchCleanup);
+	m_vecChunkedSearchCleanupIDs.clear();
+	m_iNextChunkedSearchCleanupID = 0;
+	m_uChunkedSearchCleanupDeleted = 0;
+	m_bChunkedSearchCleanupPending = false;
+	m_bChunkedSearchCleanupActive = false;
+	if (::IsWindow(m_hWnd) && ::IsWindow(searchselect.GetSafeHwnd()))
+		UpdateSearchTabActivityAnimation();
+}
+
+bool CSearchResultsWnd::QueueChunkedSearchCleanupTab(int iTab)
+{
+	TCITEM ti;
+	ti.mask = TCIF_PARAM;
+	if (!searchselect.GetItem(iTab, &ti) || ti.lParam == NULL)
+		return false;
+
+	const uint32 uSearchID = reinterpret_cast<SSearchParams*>(ti.lParam)->dwSearchID;
+	if (uSearchID == 0)
+		return false;
+
+	for (size_t i = 0; i < m_vecChunkedSearchCleanupIDs.size(); ++i)
+		if (m_vecChunkedSearchCleanupIDs[i] == uSearchID)
+			return true;
+
+	m_vecChunkedSearchCleanupIDs.push_back(uSearchID);
+	return true;
+}
+
+bool CSearchResultsWnd::ScheduleChunkedSearchCleanup()
+{
+	if (m_bChunkedSearchCleanupPending || !m_bChunkedSearchCleanupActive || theApp.IsClosing() || !::IsWindow(m_hWnd))
+		return false;
+
+	m_bChunkedSearchCleanupPending = SetTimer(TimerChunkedSearchCleanup, 1, NULL) != 0;
+	if (!m_bChunkedSearchCleanupPending)
+		m_bChunkedSearchCleanupPending = PostMessage(WM_SEARCHRESULTSWND_CHUNKED_CLEANUP, 0, 0) != FALSE;
+	return m_bChunkedSearchCleanupPending;
+}
+
+bool CSearchResultsWnd::StartChunkedCleanUpSearchResults(int iTab)
+{
+	if (m_bChunkedSearchCleanupActive)
+		return true;
+
+	ClearChunkedSearchCleanup();
+	if (!QueueChunkedSearchCleanupTab(iTab) || m_vecChunkedSearchCleanupIDs.empty())
+		return false;
+
+	m_bChunkedSearchCleanupActive = true;
+	EnsureSearchTabActivityTimer();
+	if (!ScheduleChunkedSearchCleanup()) {
+		FinishChunkedSearchCleanup();
+		return false;
+	}
+	return true;
+}
+
+bool CSearchResultsWnd::StartChunkedCleanUpAllSearchResults()
+{
+	if (m_bChunkedSearchCleanupActive)
+		return true;
+
+	ClearChunkedSearchCleanup();
+	for (int iTab = 0; iTab < searchselect.GetItemCount(); ++iTab)
+		QueueChunkedSearchCleanupTab(iTab);
+
+	if (m_vecChunkedSearchCleanupIDs.empty())
+		return false;
+
+	m_bChunkedSearchCleanupActive = true;
+	EnsureSearchTabActivityTimer();
+	if (!ScheduleChunkedSearchCleanup()) {
+		FinishChunkedSearchCleanup();
+		return false;
+	}
+	return true;
+}
+
+void CSearchResultsWnd::FinishChunkedSearchCleanup()
+{
+	const uint32 uDeletedCount = m_uChunkedSearchCleanupDeleted;
+	ClearChunkedSearchCleanup();
+	EnsureSearchTabActivityTimer();
+	uDeletedCount ? AddLogLine(true, GetResString(_T("CLEAN_UP_RESULTS_REMOVED")), uDeletedCount) : AddLogLine(true, GetResString(_T("CLEAN_UP_NO_RESULTS_REMOVED")));
+}
+
+namespace
+{
+	void AddChunkedSearchDownloadClientSnapshot(std::vector<CSearchFile::SClient>& clients, const CSearchFile::SClient& client)
+	{
+		if (!IsValidSearchResultClientIPPort(client.m_nIP, client.m_nPort))
+			return;
+		for (size_t i = 0; i < clients.size(); ++i) {
+			if (clients[i] == client)
+				return;
+		}
+		clients.push_back(client);
+	}
+
+	void AddChunkedSearchDownloadClientSnapshots(std::vector<CSearchFile::SClient>& clients, const CSearchFile* pFile)
+	{
+		if (pFile == NULL)
+			return;
+		if (IsValidSearchResultClientIPPort(pFile->GetClientID(), pFile->GetClientPort()))
+			AddChunkedSearchDownloadClientSnapshot(clients, CSearchFile::SClient(pFile->GetClientID(), pFile->GetClientPort(), pFile->GetClientServerIP(), pFile->GetClientServerPort()));
+		const CSimpleArray<CSearchFile::SClient>& fileClients = pFile->GetClients();
+		for (int i = 0; i < fileClients.GetSize(); ++i)
+			AddChunkedSearchDownloadClientSnapshot(clients, fileClients[i]);
+	}
+}
+
+bool CSearchResultsWnd::BuildChunkedSearchDownloadItem(CSearchFile *pSelectedFile, SChunkedSearchDownloadItem &item) const
+{
+	if (pSelectedFile == NULL || theApp.searchlist == NULL)
+		return false;
+
+	CSearchFile *pParent = pSelectedFile->GetListParent();
+	if (pParent == NULL)
+		pParent = pSelectedFile;
+	if (pParent == NULL || pParent->GetSearchID() == 0)
+		return false;
+
+	SSearchResultId resultId;
+	if (!theApp.searchlist->GetSearchResultId(pSelectedFile, resultId))
+		return false;
+
+	CSafeMemFile data;
+	pParent->StoreToFile(data);
+	const ULONGLONG uLength = data.GetLength();
+	if (uLength == 0 || uLength > static_cast<ULONGLONG>(UINT_MAX))
+		return false;
+
+	item = SChunkedSearchDownloadItem();
+	item.m_resultId = resultId;
+	item.m_data.resize(static_cast<size_t>(uLength));
+	memcpy(&item.m_data[0], data.GetBuffer(), static_cast<size_t>(uLength));
+	item.m_strSelectedFileName = pSelectedFile->GetFileName();
+	item.m_nSearchID = pParent->GetSearchID();
+	item.m_nServerIP = pParent->GetClientServerIP();
+	item.m_nServerPort = pParent->GetClientServerPort();
+	item.m_uServerAvail = pParent->GetIntTagValue(FT_SOURCES);
+	const CSimpleArray<CSearchFile::SServer> &servers = pParent->GetServers();
+	for (int i = 0; i < servers.GetSize(); ++i) {
+		if (servers[i].m_nIP == item.m_nServerIP && servers[i].m_nPort == item.m_nServerPort) {
+			item.m_uServerAvail = servers[i].m_uAvail;
+			break;
+		}
+	}
+	item.m_uKadPublishInfo = pSelectedFile->IsKademlia() ? pSelectedFile->GetKadPublishInfo() : pParent->GetKadPublishInfo();
+	AddChunkedSearchDownloadClientSnapshots(item.m_clients, pParent);
+	if (pSelectedFile != pParent)
+		AddChunkedSearchDownloadClientSnapshots(item.m_clients, pSelectedFile);
+	// Preserve Kad origin from either the selected child or its parent so adding a merged Kad result starts source lookup.
+	item.m_bKademlia = pParent->IsKademlia() || pSelectedFile->IsKademlia();
+	item.m_bServerUDPAnswer = pParent->IsServerUDPAnswer();
+	item.m_bPreviewPossible = pParent->IsPreviewPossible();
+	item.m_bMultipleAICHFound = pParent->HasFoundMultipleAICH();
+	theApp.searchlist->GetSearchResultId(pParent, item.m_originalParentId);
+	item.m_bSnapshotBuilt = true;
+	return true;
+}
+
+bool CSearchResultsWnd::EnsureChunkedSearchDownloadSnapshot(SChunkedSearchDownloadItem &item) const
+{
+	if (item.m_bSnapshotBuilt)
+		return true;
+
+	CSearchFile *pFile = GetListedSearchFileById(item.m_resultId);
+	return pFile != NULL && BuildChunkedSearchDownloadItem(pFile, item);
+}
+
+CSearchFile* CSearchResultsWnd::CreateChunkedSearchDownloadFile(const SChunkedSearchDownloadItem &item) const
+{
+	if (item.m_data.empty() || item.m_nSearchID == 0)
+		return NULL;
+
+	CSafeMemFile data(&item.m_data[0], static_cast<UINT>(item.m_data.size()));
+	CSearchFile *pFile = NULL;
+	try {
+		pFile = new CSearchFile(data, true, item.m_nSearchID, 0, 0, NULL, item.m_bKademlia, item.m_bServerUDPAnswer);
+		pFile->SetClientServerIP(item.m_nServerIP);
+		pFile->SetClientServerPort(item.m_nServerPort);
+		if (item.m_nServerIP != 0 && item.m_nServerPort != 0) {
+			CSearchFile::SServer server(item.m_nServerIP, item.m_nServerPort, item.m_bServerUDPAnswer);
+			server.m_uAvail = item.m_uServerAvail;
+			pFile->AddServer(server);
+		}
+		pFile->SetKadPublishInfo(item.m_uKadPublishInfo);
+		for (size_t i = 0; i < item.m_clients.size(); ++i)
+			pFile->AddClient(item.m_clients[i]);
+		if (item.m_bMultipleAICHFound)
+			pFile->SetFoundMultipleAICH();
+		pFile->SetPreviewPossible(item.m_bPreviewPossible);
+		pFile->SetAFileName(item.m_strSelectedFileName);
+		pFile->SetStrTagValue(FT_FILENAME, item.m_strSelectedFileName);
+		return pFile;
+	} catch (CException *ex) {
+		delete pFile;
+		ex->Delete();
+	} catch (...) {
+		delete pFile;
+		throw;
+	}
+	return NULL;
+}
+
+bool CSearchResultsWnd::QueueChunkedSearchDownloadItem(CSearchFile *pSelectedFile)
+{
+	if (pSelectedFile == NULL || theApp.searchlist == NULL)
+		return false;
+
+	SChunkedSearchDownloadItem *pItem = new SChunkedSearchDownloadItem();
+	if (!theApp.searchlist->GetSearchResultId(pSelectedFile, pItem->m_resultId)) {
+		delete pItem;
+		return false;
+	}
+
+	m_chunkedSearchDownloadItems.AddTail(pItem);
+	return true;
+}
+
+CSearchFile* CSearchResultsWnd::GetListedSearchFileById(const SSearchResultId &id) const
+{
+	return theApp.searchlist != NULL ? theApp.searchlist->GetSearchFileByResultId(id) : NULL;
+}
+
+bool CSearchResultsWnd::ScheduleChunkedSearchDownload()
+{
+	if (m_bChunkedSearchDownloadPending || theApp.IsClosing() || !::IsWindow(m_hWnd))
+		return false;
+
+	m_bChunkedSearchDownloadPending = SetTimer(TimerChunkedSearchDownload, 1, NULL) != 0;
+	if (!m_bChunkedSearchDownloadPending)
+		m_bChunkedSearchDownloadPending = PostMessage(WM_SEARCHRESULTSWND_CHUNKED_DOWNLOAD, 0, 0) != FALSE;
+	return m_bChunkedSearchDownloadPending;
+}
+
+void CSearchResultsWnd::RequestDeferredSearchListRefresh()
+{
+	if (m_bDeferredSearchListRefreshPending)
+		return;
+
+	m_bDeferredSearchListRefreshPending = true;
+	if (!PostMessage(WM_SEARCHRESULTSWND_DEFERRED_REFRESH, 0, 0)) {
+		m_bDeferredSearchListRefreshPending = false;
+		searchlistctrl.ReloadList(true, static_cast<EListStateField>(LSF_SELECTION | LSF_SCROLL));
+	}
+}
+
+bool CSearchResultsWnd::HasActiveChunkedSearchDownload() const
+{
+	return m_uChunkedSearchDownloadTotal > 0 && (!m_chunkedSearchDownloadItems.IsEmpty() || m_bChunkedSearchDownloadPending || m_bChunkedSearchDownloadBulkAddActive);
+}
+
+void CSearchResultsWnd::CancelActiveChunkedSearchDownload()
+{
+	ClearChunkedSearchDownloadItems();
+}
+
+bool CSearchResultsWnd::GetActiveChunkedSearchDownloadProgress(CString& strTitle, CString& strBody, CString& strCancelAndExit, CString& strWaitAndExit, UINT& uDone, UINT& uTotal) const
+{
+	if (!HasActiveChunkedSearchDownload() || m_uChunkedSearchDownloadTotal < BULK_OPERATION_MIN_ITEMS)
+		return false;
+
+	uTotal = m_uChunkedSearchDownloadTotal;
+	const UINT uRemaining = static_cast<UINT>(m_chunkedSearchDownloadItems.GetCount());
+	uDone = (uTotal >= uRemaining) ? (uTotal - uRemaining) : 0;
+	strTitle = GetResString(_T("BULKOP_EXIT_TITLE"));
+	strBody.Format(GetResString(_T("BULKOP_EXIT_ADD_BODY")), uTotal, uDone, uTotal - uDone);
+	strCancelAndExit = GetResString(_T("BULKOP_EXIT_CANCEL_ADD_AND_EXIT"));
+	strWaitAndExit = GetResString(_T("BULKOP_EXIT_FINISH_AND_EXIT"));
+	return true;
+}
+
+void CSearchResultsWnd::UpdateChunkedSearchDownloadOverlay()
+{
+	CDownloadListCtrl *pDownloadList = NULL;
+	if (theApp.emuledlg != NULL && theApp.emuledlg->transferwnd != NULL)
+		pDownloadList = theApp.emuledlg->transferwnd->GetDownloadList();
+
+	if (!HasActiveChunkedSearchDownload() || m_uChunkedSearchDownloadTotal < BULK_OPERATION_MIN_ITEMS) {
+		searchlistctrl.HideOperationOverlay();
+		if (pDownloadList != NULL)
+			pDownloadList->HideMirroredSearchDownloadOverlay();
+		if (theApp.emuledlg != NULL)
+			theApp.emuledlg->RefreshActiveBulkOperationOverlays();
+		return;
+	}
+
+	const UINT uRemaining = static_cast<UINT>(m_chunkedSearchDownloadItems.GetCount());
+	const UINT uDone = (m_uChunkedSearchDownloadTotal >= uRemaining) ? (m_uChunkedSearchDownloadTotal - uRemaining) : 0;
+	CString strDetail;
+	strDetail.Format(GetResString(_T("BULKOP_PROGRESS_FINAL_RELOAD_DETAIL")), uDone, m_uChunkedSearchDownloadTotal);
+	const CString strTitle = GetResString(_T("BULKOP_ADD_DOWNLOADS_TITLE"));
+	searchlistctrl.UpdateOperationOverlay(strTitle, strDetail, uDone, m_uChunkedSearchDownloadTotal, true);
+	if (pDownloadList != NULL)
+		pDownloadList->UpdateMirroredSearchDownloadOverlay(strTitle, strDetail, uDone, m_uChunkedSearchDownloadTotal);
+	if (theApp.emuledlg != NULL)
+		theApp.emuledlg->RefreshActiveBulkOperationOverlays();
 }
 
 void CSearchResultsWnd::OnInitialUpdate()
@@ -380,6 +949,19 @@ BOOL CSearchResultsWnd::PreTranslateMessage(MSG *pMsg)
 			return FALSE;
 		if (pMsg->wParam == VK_ESCAPE)
 			return FALSE;
+		if (pMsg->wParam == VK_F5) {
+			const int iTab = searchselect.GetCurSel();
+			TCITEM ti;
+			ti.mask = TCIF_PARAM;
+			if (iTab >= 0 && searchselect.GetItem(iTab, &ti) && ti.lParam != NULL && theApp.searchlist != NULL) {
+				const uint32 uSearchID = reinterpret_cast<SSearchParams*>(ti.lParam)->dwSearchID;
+				if (uSearchID != 0) {
+					theApp.searchlist->RecalculateSpamRatings(uSearchID, false, false, true);
+					RefreshSearchTabActivityAnimation();
+					return TRUE;
+				}
+			}
+		}
 		if (pMsg->wParam == VK_RETURN && thePrefs.IsDisableFindAsYouType()) {
 			CEditDelayed::SFilterParam* wParam = new CEditDelayed::SFilterParam;
 			wParam->bForceApply = true; // We need to force OnChangeFilter to filter+reload listbox
@@ -419,6 +1001,14 @@ void CSearchResultsWnd::DoDataExchange(CDataExchange *pDX)
 
 void CSearchResultsWnd::StartSearch(SSearchParams *pParams)
 {
+	StartSearchFromCommand(pParams);
+}
+
+void CSearchResultsWnd::StartSearchFromCommand(SSearchParams *pParams)
+{
+	if (pParams == NULL)
+		return;
+
 	switch (pParams->eType) {
 	case SearchTypeAutomatic:
 	case SearchTypeEd2kServer:
@@ -433,8 +1023,73 @@ void CSearchResultsWnd::StartSearch(SSearchParams *pParams)
 	}
 }
 
+void CSearchResultsWnd::StartWebSearchFromCommand(SSearchParams *pParams)
+{
+	if (pParams == NULL)
+		return;
+
+	DeleteAllSearches();
+	bool bStarted = false;
+	try {
+		switch (pParams->eType) {
+		case SearchTypeEd2kServer:
+		case SearchTypeEd2kGlobal:
+			if (theApp.serverconnect != NULL && theApp.serverconnect->IsConnected())
+				bStarted = DoNewEd2kSearch(pParams);
+			break;
+		case SearchTypeKademlia:
+			if (Kademlia::CKademlia::IsRunning() && Kademlia::CKademlia::IsConnected())
+				bStarted = DoNewKadSearch(pParams);
+			break;
+		case SearchTypeAutomatic:
+			if (theApp.serverconnect != NULL && theApp.serverconnect->IsConnected()) {
+				pParams->eType = SearchTypeEd2kServer;
+				bStarted = DoNewEd2kSearch(pParams);
+			} else if (Kademlia::CKademlia::IsRunning() && Kademlia::CKademlia::IsConnected()) {
+				pParams->eType = SearchTypeKademlia;
+				bStarted = DoNewKadSearch(pParams);
+			}
+			break;
+		default:
+			ASSERT(0);
+		}
+	} catch (CMsgBoxException *ex) {
+		ex->Delete();
+	} catch (...) {
+		ASSERT(0);
+	}
+
+	if (bStarted) {
+		SearchStarted();
+		return;
+	}
+
+	delete pParams;
+}
+
 void CSearchResultsWnd::OnTimer(UINT_PTR nIDEvent)
 {
+	if (nIDEvent == TimerSearchTabActivity) {
+		++m_uSearchTabActivityFrame;
+		const bool bHasActiveTab = UpdateSearchTabActivityAnimation();
+		UpdateMoreButtonState(GetActiveSearchResultsParams());
+		if (!bHasActiveTab)
+			StopSearchTabActivityTimer();
+		return;
+	}
+
+	if (nIDEvent == TimerChunkedSearchDownload) {
+		VERIFY(KillTimer(TimerChunkedSearchDownload));
+		OnProcessChunkedSearchDownload(0, 0);
+		return;
+	}
+
+	if (nIDEvent == TimerChunkedSearchCleanup) {
+		VERIFY(KillTimer(TimerChunkedSearchCleanup));
+		OnProcessChunkedSearchCleanup(0, 0);
+		return;
+	}
+
 	CResizableFormView::OnTimer(nIDEvent);
 
 	if (m_uTimerLocalServer != 0 && nIDEvent == m_uTimerLocalServer) {
@@ -473,15 +1128,20 @@ void CSearchResultsWnd::OnTimer(UINT_PTR nIDEvent)
 					data.WriteUInt32(nTagCount);
 					CTag tagFlags(CT_SERVER_UDPSEARCH_FLAGS, SRVCAP_UDP_NEWTAGS_LARGEFILES);
 					tagFlags.WriteNewEd2kTag(data);
-					Packet *pExtSearchPacket = new Packet(OP_GLOBSEARCHREQ3, m_searchpacket->size + (uint32)data.GetLength());
-					data.SeekToBegin();
-					data.Read(pExtSearchPacket->pBuffer, (uint32)data.GetLength());
-					memcpy(pExtSearchPacket->pBuffer + (uint32)data.GetLength(), m_searchpacket->pBuffer, m_searchpacket->size);
-					theStats.AddUpDataOverheadServer(pExtSearchPacket->size);
-					theApp.serverconnect->SendUDPPacket(pExtSearchPacket, toask, true);
-					bRequestSent = true;
-					if (thePrefs.GetDebugServerUDPLevel() > 0)
-						Debug(_T(">>> Sending %s  to server %-21s (%3u of %3u)\n"), _T("OP_GlobSearchReq3"), (LPCTSTR)ipstr(toask->GetAddress(), toask->GetPort()), m_servercount, (unsigned)theApp.serverlist->GetServerCount());
+					uint32 uExtSearchPacketSize = 0;
+					if (TryAddSearchPacketPayloadSizes(m_searchpacket->size, data.GetLength(), uExtSearchPacketSize)) {
+						const uint32 uExtensionSize = static_cast<uint32>(data.GetLength());
+						Packet *pExtSearchPacket = new Packet(OP_GLOBSEARCHREQ3, uExtSearchPacketSize);
+						data.SeekToBegin();
+						data.Read(pExtSearchPacket->pBuffer, uExtensionSize);
+						memcpy(pExtSearchPacket->pBuffer + uExtensionSize, m_searchpacket->pBuffer, m_searchpacket->size);
+						theStats.AddUpDataOverheadServer(pExtSearchPacket->size);
+						theApp.serverconnect->SendUDPPacket(pExtSearchPacket, toask, true);
+						bRequestSent = true;
+						if (thePrefs.GetDebugServerUDPLevel() > 0)
+							Debug(_T(">>> Sending %s  to server %-21s (%3u of %3u)\n"), _T("OP_GlobSearchReq3"), (LPCTSTR)ipstr(toask->GetAddress(), toask->GetPort()), m_servercount, (unsigned)theApp.serverlist->GetServerCount());
+					} else if (thePrefs.GetDebugServerUDPLevel() > 0)
+						Debug(_T(">>> Skipped UDP search extension packet for server %-21s (%3u of %3u): packet size overflow\n"), (LPCTSTR)ipstr(toask->GetAddress(), toask->GetPort()), m_servercount, (unsigned)theApp.serverlist->GetServerCount());
 
 				} else if (toask->GetUDPFlags() & SRV_UDPFLG_EXT_GETFILES) {
 					if (!m_b64BitSearchPacket || toask->SupportsLargeFilesUDP()) {
@@ -567,6 +1227,43 @@ SSearchParams* CSearchResultsWnd::GetSearchResultsParams(uint32 uSearchID) const
 	return NULL;
 }
 
+SSearchParams* CSearchResultsWnd::GetActiveSearchResultsParams() const
+{
+	const int iSel = searchselect.GetCurSel();
+	if (iSel < 0)
+		return NULL;
+
+	TCITEM ti;
+	ti.mask = TCIF_PARAM;
+	return searchselect.GetItem(iSel, &ti) && ti.lParam != NULL ? reinterpret_cast<SSearchParams*>(ti.lParam) : NULL;
+}
+
+void CSearchResultsWnd::UpdateMoreButtonState(const SSearchParams *pParams)
+{
+	if (m_pwndParams == NULL || !::IsWindow(m_pwndParams->m_ctlMore.GetSafeHwnd()))
+		return;
+
+	bool bEnable = false;
+	if (pParams != NULL) {
+		switch (pParams->eType) {
+		case SearchTypeKademlia:
+			break;
+		case SearchTypeEd2kServer:
+		case SearchTypeEd2kGlobal:
+			{
+				const int iMaxMoreRequests = thePrefs.GetEd2kSearchMaxMoreRequests();
+				bEnable = pParams->dwSearchID == m_nEd2kSearchID && m_bEd2kMoreResultsAvailable
+					&& (iMaxMoreRequests == 0 || m_iSentMoreReq < iMaxMoreRequests)
+					&& theApp.serverconnect != NULL && theApp.serverconnect->IsConnected();
+			}
+			break;
+		default:
+			break;
+		}
+	}
+	m_pwndParams->m_ctlMore.EnableWindow(bEnable);
+}
+
 void CSearchResultsWnd::CancelSearch(uint32 uSearchID)
 {
 	if (uSearchID == 0) {
@@ -578,6 +1275,11 @@ void CSearchResultsWnd::CancelSearch(uint32 uSearchID)
 				uSearchID = reinterpret_cast<SSearchParams*>(ti.lParam)->dwSearchID;
 		}
 	}
+	theApp.ExecuteSearchCancelCommand(uSearchID);
+}
+
+void CSearchResultsWnd::CancelSearchFromCommand(uint32 uSearchID)
+{
 	if (uSearchID == 0)
 		return;
 
@@ -611,6 +1313,7 @@ void CSearchResultsWnd::CancelEd2kSearch()
 	m_searchpacket = NULL;
 	m_b64BitSearchPacket = false;
 	m_globsearch = false;
+	m_bEd2kMoreResultsAvailable = false;
 
 	// delete local server timeout timer
 	if (m_uTimerLocalServer) {
@@ -638,6 +1341,7 @@ void CSearchResultsWnd::SearchStarted()
 	if (pWndFocus && pWndFocus->m_hWnd == m_pwndParams->m_ctlStart.m_hWnd)
 		m_pwndParams->m_ctlName.SetFocus();
 	m_pwndParams->m_ctlCancel.EnableWindow(TRUE);
+	EnsureSearchTabActivityTimer();
 }
 
 void CSearchResultsWnd::SearchCancelled(uint32 uSearchID)
@@ -656,6 +1360,8 @@ void CSearchResultsWnd::SearchCancelled(uint32 uSearchID)
 			m_pwndParams->m_ctlStart.EnableWindow(m_pwndParams->m_ctlName.GetWindowTextLength() > 0);
 		}
 	}
+	UpdateMoreButtonState(GetActiveSearchResultsParams());
+	EnsureSearchTabActivityTimer();
 }
 
 void CSearchResultsWnd::LocalEd2kSearchEnd(UINT count, bool bMoreResultsAvailable)
@@ -673,12 +1379,21 @@ void CSearchResultsWnd::LocalEd2kSearchEnd(UINT count, bool bMoreResultsAvailabl
 		else if (!global_search_timer)
 			VERIFY((global_search_timer = SetTimer(TimerGlobalSearch, 750, NULL)) != 0);
 	}
-	m_pwndParams->m_ctlMore.EnableWindow(bMoreResultsAvailable && (MAX_MORE_SEARCH_REQ == 0 || m_iSentMoreReq < MAX_MORE_SEARCH_REQ));
+	m_bEd2kMoreResultsAvailable = bMoreResultsAvailable;
+	UpdateMoreButtonState(GetActiveSearchResultsParams());
 }
 
 void CSearchResultsWnd::AddEd2kSearchResults(UINT count)
 {
-	if (!m_cancelled && (MAX_RESULTS != 0 && count > MAX_RESULTS))
+	const int iMaxResults = thePrefs.GetEd2kSearchMaxResults();
+	if (m_cancelled || iMaxResults == 0)
+		return;
+
+	UINT uTotalResults = count;
+	if (theApp.searchlist != NULL)
+		uTotalResults = max(uTotalResults, theApp.searchlist->GetResultCount(m_nEd2kSearchID));
+
+	if (uTotalResults > static_cast<UINT>(iMaxResults))
 		CancelEd2kSearch();
 }
 
@@ -701,10 +1416,8 @@ void CSearchResultsWnd::DownloadSelected()
 	DownloadSelected(thePrefs.AddNewFilesPaused());
 }
 
-void CSearchResultsWnd::DownloadSelected(bool bPaused, bool bBypassDownloadChecker)
+void CSearchResultsWnd::DownloadSelected(bool bPaused, bool bBypassDownloadValidator)
 {
-	CWaitCursor curWait;
-
 	// Save selected list first. Because it'll be reordered each time when thePrefs.GetGroupKnownAtTheBottom() is active which changes indexes dynamically.
 	CTypedPtrList<CPtrList, CSearchFile*> selectedList;
 	for (POSITION pos = searchlistctrl.GetFirstSelectedItemPosition(); pos != NULL;) {
@@ -713,48 +1426,140 @@ void CSearchResultsWnd::DownloadSelected(bool bPaused, bool bBypassDownloadCheck
 			selectedList.AddTail(reinterpret_cast<CSearchFile*>(searchlistctrl.m_ListedItemsVector[index]));
 	}
 
-	if (!selectedList.IsEmpty()) {
-		bool bNeedsSearchListRefresh = false;
-		CSearchFile* sel_file = selectedList.GetHead();
-		for (POSITION pos = selectedList.GetHeadPosition(); pos != NULL;) {
-			sel_file = selectedList.GetNext(pos);
-			if (sel_file == NULL)
-				continue;
+	if (selectedList.IsEmpty())
+		return;
 
-			// get parent
-			CSearchFile* parent = sel_file->GetListParent();
-			if (parent == NULL)
-				parent = sel_file;
+	ExecuteSearchDownloadCommand(selectedList, bPaused, bBypassDownloadValidator);
+}
 
-			if (parent->IsComplete() == 0 && parent->GetSourceCount() >= 50) {
-				CString strMsg;
-				strMsg.Format(GetResString(_T("ASKDLINCOMPLETE")), (LPCTSTR)sel_file->GetFileName());
-				if (!thePrefs.GetDownloadCheckerSkipIncompleteFileConfirmation() && CDarkMode::MessageBox(strMsg, MB_ICONQUESTION | MB_YESNO | MB_DEFBUTTON2) != IDYES)
-					continue;
-			}
+void CSearchResultsWnd::ExecuteSearchDownloadCommand(CTypedPtrList<CPtrList, CSearchFile*> &selectedList, bool bPaused, bool bBypassDownloadValidator)
+{
+	ClearChunkedSearchDownloadItems();
+	if (theApp.IsClosing())
+		return;
 
-			// create new DL queue entry with all properties of parent (e.g. already received sources!)
-			// but with the filename of the selected listview item.
-			CSearchFile tempFile(parent);
-			tempFile.SetAFileName(sel_file->GetFileName());
-			tempFile.SetStrTagValue(FT_FILENAME, sel_file->GetFileName());
-			theApp.downloadqueue->AddSearchToDownload(&tempFile, bPaused, GetSelectedCat(), bBypassDownloadChecker);
+	m_bChunkedSearchDownloadPaused = bPaused;
+	m_bChunkedSearchDownloadBypassValidator = bBypassDownloadValidator;
+	m_iChunkedSearchDownloadCat = GetSelectedCat();
+	for (POSITION pos = selectedList.GetHeadPosition(); pos != NULL;) {
+		CSearchFile *sel_file = selectedList.GetNext(pos);
+		if (sel_file == NULL)
+			continue;
 
+		CSearchFile* parent = sel_file->GetListParent();
+		if (parent == NULL)
+			parent = sel_file;
+
+		if (theApp.searchlist != NULL)
 			theApp.searchlist->SetSearchItemKnownType(parent);
-			bNeedsSearchListRefresh = true;
+		if (IsSearchKnownTypeAlreadyOwned(parent->GetKnownType())) {
+			searchlistctrl.UpdateSearch(parent);
+			if (sel_file != parent)
+				searchlistctrl.UpdateSearch(sel_file);
+			continue;
+		}
+		if (theApp.downloadqueue != NULL && theApp.downloadqueue->IsFileExisting(parent->GetFileHash(), false)) {
+			if (theApp.searchlist != NULL)
+				theApp.searchlist->SetSearchItemKnownType(parent);
+			searchlistctrl.UpdateSearch(parent);
+			if (sel_file != parent)
+				searchlistctrl.UpdateSearch(sel_file);
+			continue;
 		}
 
-		if (bNeedsSearchListRefresh && !m_bDeferredSearchListRefreshPending) {
-			// Defer the visual refresh until the current command/context-menu processing unwinds.
-			// Reloading the search list synchronously from inside a heavy multi-selection download
-			// command re-enters list-view/UI code while the popup menu loop is still active.
-			m_bDeferredSearchListRefreshPending = true;
-			if (!PostMessage(WM_SEARCHRESULTSWND_DEFERRED_REFRESH, 0, 0)) {
-				m_bDeferredSearchListRefreshPending = false;
-				searchlistctrl.ReloadList(true, static_cast<EListStateField>(LSF_SELECTION | LSF_SCROLL));
-			}
+		if (parent->IsComplete() == 0 && parent->GetSourceCount() >= 50) {
+			CString strMsg;
+			strMsg.Format(GetResString(_T("ASKDLINCOMPLETE")), (LPCTSTR)sel_file->GetFileName());
+			if (!thePrefs.GetDownloadValidatorSkipIncompleteFileConfirmation() && CDarkMode::MessageBox(strMsg, MB_ICONQUESTION | MB_YESNO | MB_DEFBUTTON2) != IDYES)
+				continue;
 		}
+
+		QueueChunkedSearchDownloadItem(sel_file);
 	}
+
+	if (m_chunkedSearchDownloadItems.IsEmpty())
+		return;
+
+	m_uChunkedSearchDownloadTotal = static_cast<UINT>(m_chunkedSearchDownloadItems.GetCount());
+	UpdateChunkedSearchDownloadOverlay();
+	if (theApp.downloadqueue != NULL) {
+		theApp.downloadqueue->BeginBulkAddDownloads(m_uChunkedSearchDownloadTotal >= BULK_OPERATION_MIN_ITEMS);
+		m_bChunkedSearchDownloadBulkAddActive = true;
+	}
+	if (!ScheduleChunkedSearchDownload()) {
+		AddDebugLogLine(DLP_HIGH, false, _T("Chunked search download aborted because the first continuation message could not be posted. remaining=%d\n"), static_cast<int>(m_chunkedSearchDownloadItems.GetCount()));
+		ClearChunkedSearchDownloadItems();
+	}
+}
+
+LRESULT CSearchResultsWnd::OnProcessChunkedSearchDownload(WPARAM, LPARAM)
+{
+	m_bChunkedSearchDownloadPending = false;
+	if (theApp.IsClosing() || !::IsWindow(m_hWnd)) {
+		ClearChunkedSearchDownloadItems();
+		return 0;
+	}
+
+	const DWORD dwSliceStartTick = ::GetTickCount();
+	DWORD dwSliceBudgetMs = 8;
+	UINT uMaxItemsPerSlice = 512;
+	GetChunkedSearchDownloadSliceLimits(dwSliceBudgetMs, uMaxItemsPerSlice);
+	UINT uProcessed = 0;
+	while (!m_chunkedSearchDownloadItems.IsEmpty()) {
+		SChunkedSearchDownloadItem *pItem = m_chunkedSearchDownloadItems.RemoveHead();
+		if (pItem != NULL) {
+			CSearchFile *pDownloadFile = NULL;
+			if (EnsureChunkedSearchDownloadSnapshot(*pItem))
+				pDownloadFile = CreateChunkedSearchDownloadFile(*pItem);
+			if (pDownloadFile != NULL) {
+				CSearchFile *pOriginalParent = GetListedSearchFileById(pItem->m_originalParentId);
+				if (pOriginalParent != NULL)
+					pDownloadFile->SetListParent(pOriginalParent);
+				const bool bDeferSearchSources = m_bChunkedSearchDownloadPaused && m_uChunkedSearchDownloadTotal >= kLargeChunkedSearchDownloadSourceDeferCount;
+				theApp.downloadqueue->AddSearchToDownload(pDownloadFile, m_bChunkedSearchDownloadPaused, m_iChunkedSearchDownloadCat, m_bChunkedSearchDownloadBypassValidator, bDeferSearchSources);
+				if (theApp.searchlist != NULL)
+					theApp.searchlist->RefreshSearchResultKnownType(pItem->m_resultId);
+				m_bChunkedSearchDownloadNeedsRefresh = true;
+			}
+			delete pDownloadFile;
+			delete pItem;
+		}
+		++uProcessed;
+
+		if ((uProcessed & 0x0F) == 0)
+			GetChunkedSearchDownloadSliceLimits(dwSliceBudgetMs, uMaxItemsPerSlice);
+		const DWORD dwElapsed = static_cast<DWORD>(::GetTickCount() - dwSliceStartTick);
+		if (uProcessed >= uMaxItemsPerSlice || (uProcessed != 0 && dwElapsed >= dwSliceBudgetMs))
+			break;
+	}
+
+	DWORD dwSliceElapsed = 0;
+	if (theApp.IsTimeBudgetHardExceeded(dwSliceStartTick, CemuleApp::TimeBudgetSearchResultDownload, &dwSliceElapsed))
+		theApp.TraceTimeBudgetSlice(CemuleApp::TimeBudgetSearchResultDownload, _T("OnProcessChunkedSearchDownload"), dwSliceElapsed, uProcessed, m_chunkedSearchDownloadItems.GetCount());
+
+	if (!m_chunkedSearchDownloadItems.IsEmpty()) {
+		UpdateChunkedSearchDownloadOverlay();
+		if (!ScheduleChunkedSearchDownload()) {
+			const bool bNeedsRefresh = m_bChunkedSearchDownloadNeedsRefresh;
+			AddDebugLogLine(DLP_HIGH, false, _T("Chunked search download aborted because the continuation message could not be posted. processed=%u remaining=%d\n"), uProcessed, static_cast<int>(m_chunkedSearchDownloadItems.GetCount()));
+			ClearChunkedSearchDownloadItems();
+			if (bNeedsRefresh)
+				RequestDeferredSearchListRefresh();
+		}
+	} else {
+		if (m_bChunkedSearchDownloadBulkAddActive) {
+			m_bChunkedSearchDownloadBulkAddActive = false;
+			if (theApp.downloadqueue != NULL)
+				theApp.downloadqueue->EndBulkAddDownloads();
+		}
+		if (m_bChunkedSearchDownloadNeedsRefresh) {
+			m_bChunkedSearchDownloadNeedsRefresh = false;
+			RequestDeferredSearchListRefresh();
+		}
+		m_uChunkedSearchDownloadTotal = 0;
+		UpdateChunkedSearchDownloadOverlay();
+	}
+	return 0;
 }
 
 LRESULT CSearchResultsWnd::OnDeferredSearchListRefresh(WPARAM, LPARAM)
@@ -786,10 +1591,137 @@ void CSearchResultsWnd::SetAllIcons()
 	iml.Add(CTempIconLoader(_T("SearchMethod_SERVER")));
 	iml.Add(CTempIconLoader(_T("SearchMethod_GLOBAL")));
 	iml.Add(CTempIconLoader(_T("SearchMethod_KADEMLIA")));
+	m_iSearchTabActivityImageBase = AddSearchTabActivityImages(iml);
 	searchselect.SetImageList(&iml);
 	m_imlSearchResults.DeleteImageList();
 	m_imlSearchResults.Attach(iml.Detach());
 	searchselect.SetPadding(CSize(12, 3));
+	UpdateSearchTabActivityAnimation();
+}
+
+void CSearchResultsWnd::RefreshSearchTabActivityAnimation()
+{
+	EnsureSearchTabActivityTimer();
+}
+
+void CSearchResultsWnd::EnsureSearchTabActivityTimer()
+{
+	if (!::IsWindow(m_hWnd))
+		return;
+
+	if (UpdateSearchTabActivityAnimation()) {
+		if (m_uTimerSearchTabActivity == 0)
+			m_uTimerSearchTabActivity = SetTimer(TimerSearchTabActivity, kSearchTabActivityIntervalMs, NULL);
+	} else
+		StopSearchTabActivityTimer();
+}
+
+void CSearchResultsWnd::StopSearchTabActivityTimer()
+{
+	if (m_uTimerSearchTabActivity != 0 && ::IsWindow(m_hWnd))
+		VERIFY(KillTimer(m_uTimerSearchTabActivity));
+	m_uTimerSearchTabActivity = 0;
+	m_uSearchTabActivityFrame = 0;
+
+	if (!::IsWindow(searchselect.GetSafeHwnd()))
+		return;
+
+	for (int iTab = 0; iTab < searchselect.GetItemCount(); ++iTab) {
+		TCITEM ti = {};
+		ti.mask = TCIF_PARAM | TCIF_IMAGE;
+		if (searchselect.GetItem(iTab, &ti) && ti.lParam != NULL) {
+			const int iTargetImage = GetSearchTabBaseImage(reinterpret_cast<const SSearchParams*>(ti.lParam));
+			if (ti.iImage != iTargetImage) {
+				ti.iImage = iTargetImage;
+				searchselect.SetItem(iTab, &ti);
+			}
+		}
+	}
+}
+
+bool CSearchResultsWnd::IsSearchTabActivityActive(const SSearchParams *pParams) const
+{
+	if (pParams == NULL)
+		return false;
+	if (IsSearchCleanupActiveForSearch(pParams->dwSearchID))
+		return true;
+
+	if (theApp.searchlist != NULL) {
+		if (theApp.searchlist->IsStartupLoadActiveForSearch(pParams->dwSearchID))
+			return true;
+		if (theApp.searchlist->HasPendingSearchProcessing(pParams->dwSearchID))
+			return true;
+		if (searchlistctrl.m_nResultsID == pParams->dwSearchID && searchlistctrl.m_ListedItemsVector.empty() && theApp.searchlist->GetParentItemCount(pParams->dwSearchID) > 0)
+			return true;
+	}
+
+	if (pParams->bClientSharedFiles)
+		return false;
+
+	switch (pParams->eType) {
+	case SearchTypeEd2kServer:
+		return pParams->dwSearchID == m_nEd2kSearchID && IsLocalEd2kSearchRunning();
+	case SearchTypeEd2kGlobal:
+		return pParams->dwSearchID == m_nEd2kSearchID && (IsLocalEd2kSearchRunning() || IsGlobalEd2kSearchRunning());
+	case SearchTypeKademlia:
+		return Kademlia::CSearchManager::IsSearching(pParams->dwSearchID);
+	default:
+		return false;
+	}
+}
+
+bool CSearchResultsWnd::IsSearchCleanupActiveForSearch(uint32 nSearchID) const
+{
+	if (nSearchID == 0 || !m_bChunkedSearchCleanupActive)
+		return false;
+
+	for (INT_PTR i = m_iNextChunkedSearchCleanupID; i < static_cast<INT_PTR>(m_vecChunkedSearchCleanupIDs.size()); ++i)
+		if (m_vecChunkedSearchCleanupIDs[static_cast<size_t>(i)] == nSearchID)
+			return true;
+
+	return false;
+}
+
+int CSearchResultsWnd::GetSearchTabBaseImage(const SSearchParams *pParams) const
+{
+	if (pParams == NULL)
+		return sriServer;
+	if (pParams->bClientSharedFiles)
+		return sriClient;
+	if (pParams->eType == SearchTypeKademlia)
+		return Kademlia::CSearchManager::IsSearching(pParams->dwSearchID) ? sriKadActice : sriKad;
+	if (pParams->eType == SearchTypeEd2kGlobal)
+		return (pParams->dwSearchID == m_nEd2kSearchID && (IsLocalEd2kSearchRunning() || IsGlobalEd2kSearchRunning())) ? sriGlobalActive : sriGlobal;
+	return (pParams->dwSearchID == m_nEd2kSearchID && IsLocalEd2kSearchRunning()) ? sriServerActive : sriServer;
+}
+
+bool CSearchResultsWnd::UpdateSearchTabActivityAnimation()
+{
+	if (!::IsWindow(searchselect.GetSafeHwnd()))
+		return false;
+
+	bool bHasActiveTab = false;
+	for (int iTab = 0; iTab < searchselect.GetItemCount(); ++iTab) {
+		TCITEM ti = {};
+		ti.mask = TCIF_PARAM | TCIF_IMAGE;
+		if (!searchselect.GetItem(iTab, &ti) || ti.lParam == NULL)
+			continue;
+
+		const SSearchParams *pParams = reinterpret_cast<const SSearchParams*>(ti.lParam);
+		int iTargetImage = GetSearchTabBaseImage(pParams);
+		if (IsSearchTabActivityActive(pParams)) {
+			bHasActiveTab = true;
+			if (m_iSearchTabActivityImageBase >= 0)
+				iTargetImage = m_iSearchTabActivityImageBase + static_cast<int>(m_uSearchTabActivityFrame % kSearchTabActivityFrameCount);
+		}
+
+		if (ti.iImage != iTargetImage) {
+			ti.iImage = iTargetImage;
+			searchselect.SetItem(iTab, &ti);
+		}
+	}
+
+	return bHasActiveTab;
 }
 
 void CSearchResultsWnd::Localize()
@@ -1448,6 +2380,7 @@ bool CSearchResultsWnd::DoNewEd2kSearch(SSearchParams *pParams)
 	// sending a new search request invalidates any previously received 'More'
 	const CWnd *pWndFocus = GetFocus();
 	m_pwndParams->m_ctlMore.EnableWindow(FALSE);
+	m_bEd2kMoreResultsAvailable = false;
 	if (pWndFocus && pWndFocus->m_hWnd == m_pwndParams->m_ctlMore.m_hWnd)
 		m_pwndParams->m_ctlCancel.SetFocus();
 	m_iSentMoreReq = 0;
@@ -1480,11 +2413,25 @@ bool CSearchResultsWnd::DoNewEd2kSearch(SSearchParams *pParams)
 
 bool CSearchResultsWnd::SearchMore()
 {
-	if (!theApp.serverconnect->IsConnected())
+	SSearchParams *pParams = GetActiveSearchResultsParams();
+	if (pParams == NULL)
 		return false;
+
+	if ((pParams->eType != SearchTypeEd2kServer && pParams->eType != SearchTypeEd2kGlobal) || pParams->dwSearchID != m_nEd2kSearchID || theApp.serverconnect == NULL || !theApp.serverconnect->IsConnected()) {
+		UpdateMoreButtonState(pParams);
+		return false;
+	}
+
+	const int iMaxMoreRequests = thePrefs.GetEd2kSearchMaxMoreRequests();
+	if (iMaxMoreRequests != 0 && m_iSentMoreReq >= iMaxMoreRequests) {
+		m_bEd2kMoreResultsAvailable = false;
+		UpdateMoreButtonState(pParams);
+		return false;
+	}
 
 	SetActiveSearchResultsIcon(m_nEd2kSearchID);
 	m_cancelled = false;
+	EnsureSearchTabActivityTimer();
 
 	Packet *packet = new Packet();
 	packet->opcode = OP_QUERY_MORE_RESULT;
@@ -1493,6 +2440,8 @@ bool CSearchResultsWnd::SearchMore()
 	theStats.AddUpDataOverheadServer(packet->size);
 	theApp.serverconnect->SendPacket(packet);
 	++m_iSentMoreReq;
+	m_bEd2kMoreResultsAvailable = false;
+	UpdateMoreButtonState(pParams);
 	return true;
 }
 
@@ -1594,6 +2543,8 @@ bool CSearchResultsWnd::CreateNewTab(SSearchParams *pParams, bool bActiveIcon, b
 	searchselect.UpdateTabToolTips(itemnr);
 	if (bShowResults)
 		searchlistctrl.ReloadList(false, LSF_NONE);
+	UpdateMoreButtonState(pParams);
+	EnsureSearchTabActivityTimer();
 	return true;
 }
 
@@ -1613,6 +2564,7 @@ void CSearchResultsWnd::DeleteSelectedSearch()
 #pragma warning(disable:4701) // potentially uninitialized local variable 'item' used
 void CSearchResultsWnd::DeleteSearch(uint32 uSearchID)
 {
+	ClearChunkedSearchCleanup();
 	Kademlia::CSearchManager::StopSearch(uSearchID, false);
 
 	TCITEM ti;
@@ -1664,12 +2616,14 @@ void CSearchResultsWnd::DeleteSearch(uint32 uSearchID)
 		}
 	} else
 		NoTabItems();
+	EnsureSearchTabActivityTimer();
 }
 #pragma warning(pop)
 
 
 void CSearchResultsWnd::DeleteAllSearches()
 {
+	ClearChunkedSearchCleanup();
 	CancelEd2kSearch();
 
 	CTypedPtrList<CPtrList, SSearchParams*> listSearchParamsToDelete;
@@ -1686,6 +2640,7 @@ void CSearchResultsWnd::DeleteAllSearches()
 
 	while (!listSearchParamsToDelete.IsEmpty())
 		delete listSearchParamsToDelete.RemoveHead();
+	StopSearchTabActivityTimer();
 }
 
 void CSearchResultsWnd::NoTabItems()
@@ -1713,6 +2668,44 @@ void CSearchResultsWnd::NoTabItems()
 		} else if (pWndFocus->m_hWnd == m_pwndParams->m_ctlStart.m_hWnd && !m_pwndParams->m_ctlStart.IsWindowEnabled())
 			m_pwndParams->m_ctlName.SetFocus();
 	}
+	StopSearchTabActivityTimer();
+}
+
+void CSearchResultsWnd::EnsureActiveTabLoaded()
+{
+	if (theApp.IsClosing() || !::IsWindow(m_hWnd) || !::IsWindow(searchselect.GetSafeHwnd()) || !::IsWindow(searchlistctrl.GetSafeHwnd()))
+		return;
+
+	const int iCurSel = searchselect.GetCurSel();
+	if (iCurSel < 0)
+		return;
+
+	TCITEM ti = {};
+	ti.mask = TCIF_PARAM;
+	if (!searchselect.GetItem(iCurSel, &ti) || ti.lParam == NULL)
+		return;
+
+	const SSearchParams *pParams = reinterpret_cast<const SSearchParams*>(ti.lParam);
+	if (pParams == NULL || pParams->dwSearchID == 0)
+		return;
+
+	const int iSearchListItems = searchlistctrl.GetVirtualItemCount();
+	const int iControlItems = searchlistctrl.GetItemCount();
+	bool bReloadNeeded = searchlistctrl.m_nResultsID != pParams->dwSearchID || iControlItems != iSearchListItems;
+	if (!bReloadNeeded && !searchlistctrl.IsListedModelCurrent(pParams->dwSearchID))
+		bReloadNeeded = true;
+	if (!bReloadNeeded && iSearchListItems == 0 && theApp.searchlist != NULL && theApp.searchlist->GetParentItemCount(pParams->dwSearchID) > 0)
+		bReloadNeeded = true;
+	if (!bReloadNeeded) {
+		searchlistctrl.Invalidate(FALSE);
+		return;
+	}
+
+	const EListStateField eReloadState = static_cast<EListStateField>(LSF_SELECTION | LSF_SCROLL);
+	if (theApp.emuledlg != NULL && theApp.emuledlg->activewnd == theApp.emuledlg->searchwnd && !theApp.emuledlg->IsStartupLoadingDialogVisible() && searchlistctrl.IsWindowVisible())
+		searchlistctrl.ReloadList(false, eReloadState);
+	else
+		searchlistctrl.QueueDeferredReload(false, eReloadState, 1);
 }
 
 void CSearchResultsWnd::ShowResults(const SSearchParams *pParams)
@@ -1729,12 +2722,12 @@ void CSearchResultsWnd::ShowResults(const SSearchParams *pParams)
 	else if (pParams->eType == SearchTypeKademlia)
 		m_pwndParams->m_ctlCancel.EnableWindow(Kademlia::CSearchManager::IsSearching(pParams->dwSearchID));
 
+	UpdateMoreButtonState(pParams);
 	searchlistctrl.ReloadList(false, static_cast<EListStateField>(LSF_SELECTION | LSF_SCROLL));
 }
 
 void CSearchResultsWnd::OnSelChangeTab(LPNMHDR, LRESULT *pResult)
 {
-	CWaitCursor curWait; // this may take a while
 	int cur_sel = searchselect.GetCurSel();
 	if (cur_sel >= 0) {
 		TCITEM ti;
@@ -1873,6 +2866,10 @@ void CSearchResultsWnd::ShowSearchSelector(bool visible)
 
 void CSearchResultsWnd::OnDestroy()
 {
+	StopSearchTabActivityTimer();
+	ClearChunkedSearchDownloadItems();
+	ClearChunkedSearchCleanup();
+
 	TCITEM ti;
 	ti.mask = TCIF_PARAM;
 	for (INT_PTR i = searchselect.GetItemCount(); --i >= 0;)
@@ -1994,6 +2991,7 @@ void CSearchResultsSelector::UpdateTabToolTips(int tab)
 	if (m_tooltipTabs.GetSafeHwnd() == NULL)
 		return;
 
+	m_tooltipTabs.ClearHeaderIcon();
 	m_tooltipTabs.DelTool(this, GetSearchSelectorToolId());
 
 	int iTooltipTab = m_nTooltipTabIndex;
@@ -2007,6 +3005,11 @@ void CSearchResultsSelector::UpdateTabToolTips(int tab)
 		strTip = BuildSearchTooltip(iTooltipTab);
 	if (strTip.IsEmpty())
 		return;
+
+	TCITEM ti = {};
+	ti.mask = TCIF_PARAM;
+	if (GetItem(iTooltipTab, &ti) && ti.lParam != NULL)
+		m_tooltipTabs.SetHeaderIcon(GetImageList(), GetSearchTabStaticImage(reinterpret_cast<const SSearchParams*>(ti.lParam)));
 
 	CRect rcItem;
 	GetItemRect(iTooltipTab, &rcItem);
@@ -2184,7 +3187,7 @@ CString CSearchResultsSelector::BuildSharedFilesTooltip(int iTab) const
 	}
 	if (!strCountryCity.IsEmpty()) {
 		const CString strCountryLabel = GetResString(_T("GEOLOCATION"));
-		if (theApp.geolite2 && theApp.geolite2->ShowCountryFlag()) {
+		if (theApp.ipgeolocation && theApp.ipgeolocation->ShowCountryFlag()) {
 			CString strFlagLine;
 			strFlagLine.Format(_T("%s: <flag=%u>%s"), (LPCTSTR)strCountryLabel, pClient->GetCountryFlagIndex(), (LPCTSTR)strCountryCity);
 			AppendTooltipRawLine(strDetails, strFlagLine);
@@ -2193,7 +3196,7 @@ CString CSearchResultsSelector::BuildSharedFilesTooltip(int iTab) const
 		}
 	}
 
-	AppendTooltipLine(strDetails, GetResString(_T("CD_CSOFT")), pClient->GetClientSoftVer().IsEmpty() ? pClient->DbgGetFullClientSoftVer() : pClient->GetClientSoftVer());
+	AppendTooltipLine(strDetails, GetResString(_T("CD_CSOFT")), pClient->DbgGetFullClientSoftVer());
 
 	if (!pClient->GetClientModVer().IsEmpty())
 		AppendTooltipLine(strDetails, GetResString(_T("CD_MOD")), pClient->GetClientModVer());
@@ -2240,9 +3243,24 @@ BOOL CSearchResultsSelector::OnCommand(WPARAM wParam, LPARAM lParam)
 		return TRUE;
 	}
 	case MP_RECHECK_SPAM_BLACKLIST:
-		theApp.searchlist->RecalculateSpamRatings(theApp.emuledlg->searchwnd->m_pwndResults->searchlistctrl.m_nResultsID, false, false, true);
+	{
+		int iTab = GetTabUnderContextMenu();
+		if (iTab < 0)
+			iTab = GetCurSel();
+
+		TCITEM ti;
+		ti.mask = TCIF_PARAM;
+		CSearchResultsWnd* pResultsWnd = theApp.emuledlg != NULL && theApp.emuledlg->searchwnd != NULL ? theApp.emuledlg->searchwnd->m_pwndResults : NULL;
+		if (pResultsWnd != NULL && iTab >= 0 && GetItem(iTab, &ti) && ti.lParam != NULL && theApp.searchlist != NULL) {
+			const uint32 uSearchID = reinterpret_cast<SSearchParams*>(ti.lParam)->dwSearchID;
+			if (uSearchID != 0) {
+				theApp.searchlist->RecalculateSpamRatings(uSearchID, false, false, true);
+				pResultsWnd->RefreshSearchTabActivityAnimation();
+			}
+		}
 
 		return TRUE;
+	}
 	case MP_MERGE_FROM:
 	{
 		int iTab = GetTabUnderContextMenu();
@@ -2279,15 +3297,14 @@ BOOL CSearchResultsSelector::OnCommand(WPARAM wParam, LPARAM lParam)
 	case MP_CLEAN_UP_CURRENT_TAB:
 	{
 		int iTab = GetTabUnderContextMenu();
-		if (iTab >= 0) {
-			uint32 m_uDeletedCount = theApp.emuledlg->searchwnd->m_pwndResults->CleanUpSearchResults(iTab);
-			m_uDeletedCount ? AddLogLine(true, GetResString(_T("CLEAN_UP_RESULTS_REMOVED")), m_uDeletedCount) : AddLogLine(true, GetResString(_T("CLEAN_UP_NO_RESULTS_REMOVED")));
-		}
+		if (iTab >= 0)
+			theApp.emuledlg->searchwnd->m_pwndResults->StartChunkedCleanUpSearchResults(iTab);
 		return TRUE;
 	}
 	case MP_SHOWLIST:
 	case MP_MESSAGE:
 	case MP_ADDFRIEND:
+	case MP_FRIENDSLOT:
 	case MP_DETAIL:
 	case MP_BOOT:
 	case MP_SHOWLIST_AUTO_QUERY:
@@ -2330,6 +3347,15 @@ BOOL CSearchResultsSelector::OnCommand(WPARAM wParam, LPARAM lParam)
 		}
 		case MP_ADDFRIEND:
 			theApp.friendlist->AddFriend(pSelectedClient);
+			return TRUE;
+		case MP_FRIENDSLOT:
+			{
+				CFriend *pFriend = pSelectedClient->GetFriend();
+				if (pFriend != NULL) {
+					pFriend->SetFriendSlot(!pFriend->GetFriendSlot());
+					theApp.friendlist->SaveList();
+				}
+			}
 			return TRUE;
 		case MP_DETAIL:
 		{
@@ -2378,9 +3404,7 @@ BOOL CSearchResultsSelector::OnCommand(WPARAM wParam, LPARAM lParam)
 
 			pUpdateClient->m_strClientNote = inputbox.GetInput();
 			theApp.emuledlg->transferwnd->GetClientList()->RefreshClient(pUpdateClient, -1, CClientListCtrl::kSortImpactNote);
-			theApp.emuledlg->transferwnd->GetUploadList()->RefreshClient(pUpdateClient);
-			theApp.emuledlg->transferwnd->GetQueueList()->RefreshClient(pUpdateClient);
-			theApp.emuledlg->transferwnd->GetDownloadClientsList()->RefreshClient(pUpdateClient);
+			theApp.QueueUploadClientRowsChanged(pUpdateClient, CemuleApp::UploadClientUiTargetUploadList | CemuleApp::UploadClientUiTargetQueueList | CemuleApp::UploadClientUiTargetDownloadClients);
 			theApp.emuledlg->searchwnd->m_pwndResults->searchlistctrl.UpdateTabHeader(0, md4str(pUpdateClient->GetUserHash()), false);
 			return TRUE;
 		}
@@ -2465,8 +3489,11 @@ void CSearchResultsSelector::OnContextMenu(CWnd*, CPoint point)
 				CUpDownClient* pSelectedClient = selectedClientRef.Get();
 				if (pSelectedClient != NULL) {
 					const bool is_ed2k = pSelectedClient->IsEd2kClient();
+					const CFriend *pFriend = pSelectedClient->GetFriend();
 					ClientMenu.AppendMenu(MF_STRING | MF_ENABLED, MP_DETAIL, GetResString(_T("SHOWDETAILS")), _T("CLIENTDETAILS"));
 					ClientMenu.AppendMenu(MF_STRING | ((is_ed2k && !pSelectedClient->IsFriend()) ? MF_ENABLED : MF_GRAYED), MP_ADDFRIEND, GetResString(_T("ADDFRIEND")), _T("ADDFRIEND"));
+					ClientMenu.AppendMenu(MF_STRING | (pFriend != NULL ? MF_ENABLED : MF_GRAYED), MP_FRIENDSLOT, GetResString(_T("FRIENDSLOT")), _T("FRIENDSLOT"));
+					ClientMenu.CheckMenuItem(MP_FRIENDSLOT, (pFriend != NULL && pFriend->GetFriendSlot()) ? MF_CHECKED : MF_UNCHECKED);
 					ClientMenu.AppendMenu(MF_STRING | (is_ed2k ? MF_ENABLED : MF_GRAYED), MP_MESSAGE, GetResString(_T("SEND_MSG")), _T("SENDMESSAGE"));
 					ClientMenu.AppendMenu(MF_STRING | ((is_ed2k && pSelectedClient->GetViewSharedFilesSupport()) ? MF_ENABLED : MF_GRAYED), MP_SHOWLIST, GetResString(_T("VIEWFILES")), _T("VIEWFILES"));
 
@@ -2529,8 +3556,6 @@ void CSearchResultsSelector::OnSize(UINT nType, int cx, int cy)
 
 LRESULT CSearchResultsWnd::OnChangeFilter(WPARAM wParam, LPARAM lParam)
 {
-	CWaitCursor curWait; // this may take a while
-
 	CEditDelayed::SFilterParam* pFilterParam = reinterpret_cast<CEditDelayed::SFilterParam*>(wParam);
 	bool m_bForceApplyFilter = false;
 	uint32 m_nFilterColumnTemp = 0;
@@ -2620,8 +3645,7 @@ BOOL CSearchResultsWnd::OnCommand(WPARAM wParam, LPARAM lParam)
 		return TRUE;
 	case MP_CLEAN_UP_ALL_TABS:
 	{
-		uint32 m_uDeletedCount = CleanUpAllSearchResults();
-		m_uDeletedCount ? AddLogLine(true, GetResString(_T("CLEAN_UP_RESULTS_REMOVED")), m_uDeletedCount) : AddLogLine(true, GetResString(_T("CLEAN_UP_NO_RESULTS_REMOVED")));
+		StartChunkedCleanUpAllSearchResults();
 		return TRUE;
 	}
 	case MP_RECHECK_SPAM_BLACKLIST_FOR_ALL_TABS:
@@ -2659,36 +3683,19 @@ HBRUSH CSearchResultsWnd::OnCtlColor(CDC* pDC, CWnd* pWnd, UINT nCtlColor)
 
 uint32 CSearchResultsWnd::CleanUpSearchResults(int iTab)
 {
-	int m_uDeletedCount = 0;
+	uint32 m_uDeletedCount = 0;
 	TCITEM ti;
 	ti.mask = TCIF_PARAM;
 
 	if (searchselect.GetItem(iTab, &ti) && ti.lParam != NULL) {
-		int m_uSearchID = reinterpret_cast<SSearchParams*>(ti.lParam)->dwSearchID;
-		SearchList* pSearchList = theApp.searchlist->GetSearchListForID(m_uSearchID);
-
-		if (pSearchList) {
+		uint32 m_uSearchID = reinterpret_cast<SSearchParams*>(ti.lParam)->dwSearchID;
+		if (theApp.searchlist != NULL) {
 			CWaitCursor curWait; // This may take a while, so show a wait cursor.
-
-			// Collect all known, spam, or blacklisted files in a vector first.
-			// RemoveResult also deletes child items, so deleting inside the loop is unsafe.
-			std::vector<CSearchFile*> toRemove; // First pass: collect
-			for (POSITION pos = pSearchList->GetHeadPosition(); pos != NULL; ) {
-				CSearchFile* pFile = pSearchList->GetNext(pos);
-
-				if (pFile && (pFile->GetKnownType() || ((thePrefs.IsSearchSpamFilterEnabled() || thePrefs.GetBlacklistAutomatic() || thePrefs.GetBlacklistManual()) && pFile->IsConsideredSpam(true)))) {
-					if (!pFile->GetListParent())
-						++m_uDeletedCount; // Increment the deleted count if this is a parent item
-					toRemove.push_back(pFile);
-				}
-			}
-
-			for (CSearchFile* pFile : toRemove) // Second pass: remove
-				theApp.searchlist->RemoveResult(pFile); 
-
-			if (m_uSearchID == searchlistctrl.m_nResultsID) // If this is the current search results tab, update the search list control.
+			bool bRemovedAny = false;
+			m_uDeletedCount = theApp.searchlist->RemoveCleanUpSearchResults(m_uSearchID, &bRemovedAny);
+			if (bRemovedAny && m_uSearchID == searchlistctrl.m_nResultsID) // If this is the current search results tab, update the search list control.
 				searchlistctrl.ReloadList(false, LSF_SELECTION);
-			else // Otherwise, just update the tab header.
+			else if (bRemovedAny) // Otherwise, just update the tab header.
 				searchlistctrl.UpdateTabHeader(m_uSearchID, EMPTY, false); // Update the tab header to reflect the changes.
 		}
 	}
@@ -2720,6 +3727,37 @@ uint32 CSearchResultsWnd::RecheckAllSearchResults()
 	}
 
 	return m_iTabs;
+}
+
+LRESULT CSearchResultsWnd::OnProcessChunkedSearchCleanup(WPARAM, LPARAM)
+{
+	m_bChunkedSearchCleanupPending = false;
+	if (!m_bChunkedSearchCleanupActive || theApp.IsClosing() || theApp.searchlist == NULL) {
+		ClearChunkedSearchCleanup();
+		return 0;
+	}
+
+	if (m_iNextChunkedSearchCleanupID >= static_cast<INT_PTR>(m_vecChunkedSearchCleanupIDs.size())) {
+		FinishChunkedSearchCleanup();
+		return 0;
+	}
+
+	const uint32 uSearchID = m_vecChunkedSearchCleanupIDs[static_cast<size_t>(m_iNextChunkedSearchCleanupID++)];
+	bool bRemovedAny = false;
+	m_uChunkedSearchCleanupDeleted += theApp.searchlist->RemoveCleanUpSearchResults(uSearchID, &bRemovedAny);
+	if (bRemovedAny) {
+		if (uSearchID == searchlistctrl.m_nResultsID)
+			searchlistctrl.ReloadList(false, LSF_SELECTION);
+		else
+			searchlistctrl.UpdateTabHeader(uSearchID, EMPTY, false);
+	}
+
+	EnsureSearchTabActivityTimer();
+	if (m_iNextChunkedSearchCleanupID >= static_cast<INT_PTR>(m_vecChunkedSearchCleanupIDs.size()))
+		FinishChunkedSearchCleanup();
+	else if (!ScheduleChunkedSearchCleanup())
+		FinishChunkedSearchCleanup();
+	return 0;
 }
 
 BOOL CSearchResultsWnd::MergeSearchResults(uint32 uFromSearchID, uint32 uToSearchID)

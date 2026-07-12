@@ -16,7 +16,7 @@
 
 #if _MSC_VER>=1400
 #pragma warning(push)
-#pragma warning(disable:4350) // behavior change: 'std::auto_ptr<_Ty>::auto_ptr(std::auto_ptr_ref<_Ty>) noexcept' called instead of 'std::auto_ptr<_Ty>::auto_ptr(std::auto_ptr<_Ty> &) noexcept'
+#pragma warning(disable:4350) // behavior change: 'std::unique_ptr<_Ty>::auto_ptr(std::unique_ptr_ref<_Ty>) noexcept' called instead of 'std::unique_ptr<_Ty>::auto_ptr(std::unique_ptr<_Ty> &) noexcept'
 #endif
 
 namespace HighColorTab
@@ -27,21 +27,21 @@ namespace HighColorTab
 	ensure that there is a Win32 image list associated with the CImageList.
 	If this is not the case, a NULL pointer shall be returned.
 
-	Returned image list is wrapped in an std::auto_ptr.
+	Returned image list is wrapped in an std::unique_ptr.
 
 	\sa UpdateImageListFull
 */
 	struct CHighColorListCreator
 	{
 	  /*! Create the image list.
-		  \retval std::auto_ptr<CImageList> Not null if success. */
-		static std::auto_ptr<CImageList> CreateImageList()
+		  \retval std::unique_ptr<CImageList> Not null if success. */
+		static std::unique_ptr<CImageList> CreateImageList()
 		{
-			std::auto_ptr<CImageList> apILNew(new CImageList());
+			std::unique_ptr<CImageList> apILNew(new CImageList());
 			if (FALSE == apILNew->Create(16, 16, theApp.m_iDfltImageListColorFlags | ILC_MASK, 0, 1)) {
 			  // ASSERT: The image list (Win32) creation failed.
 				ASSERT(0);
-				return std::auto_ptr<CImageList>();
+				return std::unique_ptr<CImageList>();
 			}
 			return apILNew;
 		}
@@ -53,7 +53,7 @@ namespace HighColorTab
 
 	  This method provides full customization via policy over image list creation. The policy
 	  must have a method with the signature:
-	  <code>static std::auto_ptr<CImageList> CreateImageList()</code>
+	  <code>static std::unique_ptr<CImageList> CreateImageList()</code>
 
 	  \author Yves Tkaczyk (yves@tkaczyk.net)
 	  \date 02/2004 */
@@ -70,7 +70,7 @@ namespace HighColorTab
 		}
 
 	  // Create the replacement image list via policy.
-		std::auto_ptr<CImageList> apILNew(TListCreator::CreateImageList());
+		std::unique_ptr<CImageList> apILNew(TListCreator::CreateImageList());
 
 		// Reload the icons from the property pages.
 		int nTotalPageCount = rSheet.GetPageCount();

@@ -1,4 +1,4 @@
-//This file is part of eMule AI
+﻿//This file is part of eMule AI
 //Copyright (C)2010-2026 Merkur ( strEmail.Format("%s@%s", "devteam", "emule-project.net") / https://www.emule-project.net )
 //Copyright (C)2026 eMule AI
 //
@@ -44,6 +44,7 @@ CLookupHistory::~CLookupHistory()
 		delete m_aHistoryEntries[i];
 	m_aHistoryEntries.RemoveAll();
 }
+
 
 void CLookupHistory::SetSearchDeleted()
 {

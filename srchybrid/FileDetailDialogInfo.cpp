@@ -1,4 +1,4 @@
-﻿//This file is part of eMule AI
+//This file is part of eMule AI
 //Copyright (C)2002-2026 Merkur ( strEmail.Format("%s@%s", "devteam", "emule-project.net") / https://www.emule-project.net )
 //Copyright (C)2026 eMule AI
 //
@@ -20,6 +20,7 @@
 #include "FileDetailDialogInfo.h"
 #include "UserMsgs.h"
 #include "PartFile.h"
+#include "DownloadQueue.h"
 #include "Preferences.h"
 #include "shahashset.h"
 #include "UpDownClient.h"
@@ -32,6 +33,18 @@ static char THIS_FILE[] = __FILE__;
 #endif
 
 #define	IDT_REFRESH	301
+
+namespace
+{
+	CPartFile* GetLiveFileDetailPartFile(const CSimpleArray<CObject*>* paFiles, int iIndex)
+	{
+		if (paFiles == NULL || iIndex < 0 || iIndex >= paFiles->GetSize() || theApp.downloadqueue == NULL)
+			return NULL;
+		CObject* pObject = (*paFiles)[iIndex];
+		const CKnownFile* pKnownCandidate = static_cast<const CKnownFile*>(pObject);
+		return theApp.downloadqueue->IsPartFile(pKnownCandidate) ? static_cast<CPartFile*>(pObject) : NULL;
+	}
+}
 
 ///////////////////////////////////////////////////////////////////////////////
 // CFileDetailDialogInfo dialog
@@ -51,6 +64,7 @@ CFileDetailDialogInfo::CFileDetailDialogInfo()
 	: CResizablePage(CFileDetailDialogInfo::IDD)
 	, m_paFiles()
 	, m_timer()
+	, m_strSnapshotFileName()
 	, m_bDataChanged()
 	, m_bShowFileTypeWarning()
 {
@@ -113,8 +127,9 @@ void CFileDetailDialogInfo::RefreshData()
 {
 	CString str;
 
-	if (m_paFiles->GetSize() == 1) {
-		CPartFile *file = static_cast<CPartFile*>((*m_paFiles)[0]);
+	const int iFileCount = m_paFiles != NULL ? m_paFiles->GetSize() : 0;
+	CPartFile *file = (iFileCount == 1) ? GetLiveFileDetailPartFile(m_paFiles, 0) : NULL;
+	if (file != NULL) {
 		const CString &fname(file->GetFileName());
 
 		// if file is completed, we output the 'file path' and not the 'part.met file path'
@@ -228,7 +243,7 @@ void CFileDetailDialogInfo::RefreshData()
 		m_bShowFileTypeWarning = showwarning;
 		SetDlgItemText(IDC_FD_X11, str);
 	} else {
-		SetDlgItemText(IDC_FNAME, sm_pszNotAvail);
+		SetDlgItemText(IDC_FNAME, m_strSnapshotFileName.IsEmpty() ? sm_pszNotAvail : (LPCTSTR)m_strSnapshotFileName);
 		SetDlgItemText(IDC_METFILE, sm_pszNotAvail);
 		SetDlgItemText(IDC_FHASH, sm_pszNotAvail);
 
@@ -257,8 +272,12 @@ void CFileDetailDialogInfo::RefreshData()
 	UINT uValidSources = 0;
 	UINT uNNPSources = 0;
 	UINT uA4AFSources = 0;
-	for (int i = m_paFiles->GetSize(); --i >= 0;) {
-		CPartFile *file = static_cast<CPartFile*>((*m_paFiles)[i]);
+	UINT uLiveFileCount = 0;
+	for (int i = iFileCount; --i >= 0;) {
+		CPartFile *file = GetLiveFileDetailPartFile(m_paFiles, i);
+		if (file == NULL)
+			continue;
+		++uLiveFileCount;
 
 		uFileSize += (uint64)file->GetFileSize();
 		uRealFileSize += (uint64)file->GetRealFileSize();
@@ -284,7 +303,7 @@ void CFileDetailDialogInfo::RefreshData()
 
 	if (iAICHHashsetAvailable == 0 && iMD4HashsetAvailable == 0)
 		str = GetResString(_T("NO"));
-	else if (m_paFiles->GetSize() == 1) {
+	else if (uLiveFileCount == 1) {
 		LPCTSTR p;
 		if (iAICHHashsetAvailable != 0 && iMD4HashsetAvailable != 0)
 			p = _T(" (eD2K + AICH)");
@@ -293,7 +312,7 @@ void CFileDetailDialogInfo::RefreshData()
 		else //if (iMD4HashsetAvailable != 0)
 			p = _T(" (eD2K)");
 		str = GetResString(_T("YES")) + p;
-	} else if (iMD4HashsetAvailable == m_paFiles->GetSize() && iMD4HashsetAvailable == iAICHHashsetAvailable)
+	} else if (uLiveFileCount != 0 && iMD4HashsetAvailable == static_cast<int>(uLiveFileCount) && iMD4HashsetAvailable == iAICHHashsetAvailable)
 		str = GetResString(_T("YES")) + _T(" (eD2K + AICH)");
 	else
 		str.Empty();

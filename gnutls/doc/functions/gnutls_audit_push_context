@@ -1,0 +1,14 @@
+
+
+
+
+@deftypefun {void} {gnutls_audit_push_context} (long @var{context})
+@var{context}: an opaque context
+
+Push a new crypto-auditing context to the thread-local context
+stack. The call must match the following @code{gnutls_audit_pop_context()} 
+call. This is useful for the applications that define their own
+probe points for application level protocols.
+
+@strong{Since:} 3.8.11
+@end deftypefun

@@ -132,7 +132,7 @@ void CIrcSocket::OnSend(int iErrorCode)
 void CIrcSocket::OnConnect(int iErrorCode)
 {
 	if (iErrorCode) {
-		LogError(LOG_STATUSBAR, _T("IRC socket: Failed to connect - %s"), (LPCTSTR)GetErrorMessage(iErrorCode, 1));
+		LogError(LOG_STATUSBAR, GetResString(_T("IRC_SOCKET_CONNECT_FAILED")), (LPCTSTR)GetErrorMessage(iErrorCode, 1));
 		m_pIrcMain->Disconnect();
 		return;
 	}
@@ -177,7 +177,7 @@ int CIrcSocket::OnLayerCallback(std::vector<t_callbackMsg> &callbacks)
 					if (iter->str)
 						strError.AppendFormat(_T(" - %hs"), iter->str);
 				}
-				LogWarning(LOG_STATUSBAR, _T("IRC socket: %s"), (LPCTSTR)strError);
+					LogWarning(LOG_STATUSBAR, GetResString(_T("IRC_SOCKET_WARNING")), (LPCTSTR)strError);
 			}
 		}
 		delete[] iter->str;

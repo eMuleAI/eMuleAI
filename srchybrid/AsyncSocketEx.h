@@ -165,6 +165,7 @@ public:
 
 	//Sets the socket family
 	bool SetFamily(ADDRESS_FAMILY nFamily);
+	bool ApplyConfiguredIpv4UnicastInterface();
 
 	//Operations
 	//----------
@@ -232,6 +233,8 @@ public:
 	BOOL AddLayer(CAsyncSocketExLayer *pLayer);
 
 	BOOL HaveUtpLayer(bool bActive = false);
+	BOOL HaveQuicNatLayer(bool bActive = false);
+	BOOL HaveNatTraversalLayer(bool bActive = false);
 
 	//Is a layer attached to the socket?
 	bool IsLayerAttached() const;

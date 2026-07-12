@@ -232,6 +232,9 @@ void CUPnPImplWinServ::StopAsyncFind()
 // Start the discovery of the UPnP gateway devices
 void CUPnPImplWinServ::StartDiscovery(uint16 nTCPPort, uint16 nUDPPort, uint16 nTCPWebPort, bool bSecondTry)
 {
+	if (theApp.IsNetworkActivityBlockedByBind())
+		return;
+
 	if (bSecondTry && m_bSecondTry)	// already did 2 tries
 		return;
 
@@ -790,7 +793,7 @@ HRESULT CUPnPImplWinServ::InvokeAction(ServicePointer pService
 		return E_POINTER;
 
 	m_tLastEvent = ::GetTickCount();
-	CString strInArgs(pszInArgString ? pszInArgString : EMPTY);
+	CString strInArgs(pszInArgString ? pszInArgString : (LPCTSTR)EMPTY);
 
 	CComVariant vaActionArgs, vaArray, vaOutArgs, vaRet;
 	VARIANT **ppVars = NULL;
@@ -1139,7 +1142,7 @@ HRESULT __stdcall CServiceCallback::StateVariableChanged(IUPnPService *pService,
 	}
 
 	DebugLog(_T("UPnP device state variable %s changed to %s in %s")
-		, pszStateVarName, strValue.IsEmpty() ? _T("NULL") : (LPCTSTR)EscPercent(strValue), (LPCTSTR)EscPercent(bsServiceId.m_str));
+		, pszStateVarName, strValue.IsEmpty() ? (LPCTSTR)_T("NULL") : (LPCTSTR)EscPercent(strValue), (LPCTSTR)EscPercent(bsServiceId.m_str));
 
 	return hr;
 }
@@ -1192,7 +1195,7 @@ CString translateUPnPResult(HRESULT hr)
 {
 	if (hr >= UPNP_E_ACTION_SPECIFIC_BASE && hr <= UPNP_E_ACTION_SPECIFIC_MAX)
 		return CString(_T("Action Specific Error"));
-	TCHAR *p;
+	LPCTSTR p;
 	switch (hr) {
 	case UPNP_E_ROOT_ELEMENT_EXPECTED:
 		p = _T("Root Element Expected");

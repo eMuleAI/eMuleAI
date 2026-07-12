@@ -257,6 +257,7 @@ int			GetPathDriveNumber(const CString &path);
 CString		GetShareName(const CString &path);
 EFileType	GetFileTypeEx(CShareableFile *kfile, bool checkextention = true, bool checkfileheader = true, bool nocached = false);
 CString		GetFileTypeName(EFileType ftype);
+bool		GetFileNameWithDetectedExtension(const CString &strFileName, EFileType ftype, CString &strNewFileName, CString *pstrNewExtension = NULL);
 bool		ExtensionIs(LPCTSTR pszFilePath, LPCTSTR pszExt);
 int			IsExtensionTypeOf(EFileType type, const CString &ext);
 uint32		LevenshteinDistance(const CString &str1, const CString &str2);
@@ -324,6 +325,7 @@ BOOL GetExceptionMessage(const CException &ex, LPTSTR lpszErrorMsg, UINT nMaxErr
 LPCTSTR	GetShellExecuteErrMsg(DWORD dwShellExecError);
 CString DbgGetHexDump(const uint8 *data, UINT size); //limited to the first 50 bytes
 void DbgSetThreadName(LPCSTR szThreadName, ...);
+void DbgSetThreadNameByHandle(HANDLE hThread, LPCSTR szThreadName, ...);
 void Debug(LPCTSTR pszFmtMsg, ...);
 void DebugHexDump(const void *data, UINT lenData);
 void DebugHexDump(CFile &file);
@@ -461,11 +463,7 @@ bool strmd4(const CString &rstr, byte *hash);
 //Designed for unsigned integral types because sgn(v0-v1) would fail.
 template <typename T> inline static int CompareUnsigned(const T v0, const T v1)
 {
-#if _MSVC_LANG == 202002L
-	return v0 <=> v1;
-#else
 	return (v0 < v1) ? -1 : static_cast<int>(v0 > v1);
-#endif
 }
 
 inline int CompareUnsignedUndefinedAtBottom(uint32 uSize1, uint32 uSize2, bool bSortAscending)
@@ -782,9 +780,18 @@ template<typename Iter, typename Compare> inline void CombinedSort(Iter begin, I
 		std::sort(std::execution::par, begin, end, comp);
 }
 
+// Helpers for animated UI borders.
+COLORREF GetAnimatedRainbowBorderColor(UINT uPhase);
+void DrawAnimatedRainbowBorder(CDC* pDC, const CRect& rcBorder, UINT uAnimationPhase, int iThickness = 2, int iCornerDiameter = 14);
+
 // Helpers for Windows long path support detection and path preparation.
 bool IsWin32LongPathsEnabled();
 void DetectWin32LongPathsSupportAtStartup();
 CString PreparePathForWin32LongPath(const CString& path);
+CString PrepareDirectoryPathForWin32LongPath(const CString& path);
+bool PathFileExistsLongPath(const CString& path);
+bool DirectoryExistsLongPath(const CString& path);
+bool DeleteFileLongPath(const CString& path);
+bool MoveFileExLongPath(const CString& strExistingFileName, const CString& strNewFileName, DWORD dwFlags);
 FILE* OpenFileStreamSharedReadLongPath(const CString& path, bool bTextMode);
 int OpenCrtReadOnlyLongPath(const CString& path); // Returns CRT fd; -1 on failure

@@ -43,7 +43,7 @@ CString CShareableFile::GetInfoSummary(bool bNoFormatCommands) const
 		_T("%s: %s\n")
 		_T("%s: %s")
 		, (LPCTSTR)GetResString(_T("FD_SIZE")), (LPCTSTR)CastItoXBytes((uint64)GetFileSize())
-		, bNoFormatCommands ? EMPTY : _T("<br_head>")
+		, bNoFormatCommands ? (LPCTSTR)EMPTY : (LPCTSTR)_T("<br_head>")
 		, (LPCTSTR)GetResString(_T("TYPE")), (LPCTSTR)strType
 		, (LPCTSTR)GetResString(_T("FOLDER")), (LPCTSTR)strFolder
 	);

@@ -225,19 +225,15 @@ CObject* CListCtrlItemWalk::GetPrevSelectableItem()
 				m_pListCtrl->SetSelectionMark(iItem);
 				m_pListCtrl->EnsureVisible(iItem, FALSE);
 
-				// Determine whether this is an ownerdata (virtual) list:
 				const bool bOwnerData = (m_pListCtrl->GetStyle() & LVS_OWNERDATA) != 0;
-				// 1) First try the normal GetItemData
-				CObject* pObj = reinterpret_cast<CObject*>(m_pListCtrl->GetItemData(iItem));
-				// 2) If virtual and no item data, try CSharedFilesCtrl lookup
-				if (pObj == nullptr && bOwnerData) {
+				CObject* pObj = NULL;
+				if (bOwnerData) {
 					CMuleListCtrl* pMule = static_cast<CMuleListCtrl*>(m_pListCtrl);
-					CObject* pObj = pMule->GetItemObject(iItem);
-					if (pObj)
-						return pObj;
-				}
+					pObj = pMule->GetItemObject(iItem);
+				} else
+					pObj = reinterpret_cast<CObject*>(m_pListCtrl->GetItemData(iItem));
 
-				if (pObj)
+				if (pObj != NULL)
 					return pObj;
 			}
 		}
@@ -262,19 +258,15 @@ CObject* CListCtrlItemWalk::GetNextSelectableItem()
 				m_pListCtrl->SetSelectionMark(iItem);
 				m_pListCtrl->EnsureVisible(iItem, FALSE);
 
-				// Determine whether this is an ownerdata (virtual) list:
 				const bool bOwnerData = (m_pListCtrl->GetStyle() & LVS_OWNERDATA) != 0;
-				// 1) First try the normal GetItemData
-				CObject * pObj = reinterpret_cast<CObject*>(m_pListCtrl->GetItemData(iItem));
-				// 2) If virtual and no item data, try CSharedFilesCtrl lookup
-				if (pObj == nullptr && bOwnerData) {
+				CObject* pObj = NULL;
+				if (bOwnerData) {
 					CMuleListCtrl* pMule = static_cast<CMuleListCtrl*>(m_pListCtrl);
-					CObject* pObj = pMule->GetItemObject(iItem);
-					if (pObj)
-						return pObj;
-				}
+					pObj = pMule->GetItemObject(iItem);
+				} else
+					pObj = reinterpret_cast<CObject*>(m_pListCtrl->GetItemData(iItem));
 
-				if (pObj)
+				if (pObj != NULL)
 					return pObj;
 			}
 		}

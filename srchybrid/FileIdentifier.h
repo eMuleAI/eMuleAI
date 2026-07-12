@@ -103,6 +103,7 @@ public:
 private:
 	EMFileSize				&m_rFileSize;
 	CArray<uchar*, uchar*>	m_aMD4HashSet;
+	uchar*				m_pucMD4HashSetStorage;
 	CArray<CAICHHash>		m_aAICHPartHashSet;
 };
 

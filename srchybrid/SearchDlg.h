@@ -34,7 +34,7 @@ public:
 	void SearchRelatedFiles(CPtrList &listFiles);
 
 	void DownloadSelected();
-	void DownloadSelected(bool bPaused, bool bBypassDownloadChecker = false);
+	void DownloadSelected(bool bPaused, bool bBypassDownloadValidator = false);
 
 	bool CanDeleteSearches() const;
 	void DeleteSearch(uint32 nSearchID);

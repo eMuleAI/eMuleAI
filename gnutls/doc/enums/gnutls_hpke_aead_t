@@ -1,0 +1,14 @@
+
+
+@c gnutls_hpke_aead_t
+@table @code
+@item GNUTLS_@-HPKE_@-AEAD_@-AES_@-128_@-GCM
+AES-128-GCM
+@item GNUTLS_@-HPKE_@-AEAD_@-AES_@-256_@-GCM
+AES-256-GCM
+@item GNUTLS_@-HPKE_@-AEAD_@-CHACHA20_@-POLY1305
+ChaCha20-Poly1305
+@item GNUTLS_@-HPKE_@-AEAD_@-EXPORT_@-ONLY
+AEAD is unused, export operation only
+Enumeration of HPKE AEAD algorithms.
+@end table

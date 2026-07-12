@@ -91,6 +91,7 @@ namespace
 			_T("SiRoB\n")
 			_T("khaos\n")
 			_T("fox88\n")
+			_T("brand33d\n") 
 			_T("Enig123\n")
 			_T("TAHO\n")
 			_T("Pretender\n")
@@ -118,6 +119,24 @@ namespace
 		},
 		{
 			_T("EMULE_AI_SPECIAL_THANKS_HEADING_TESTERS"),
+			_T("fangguihua1995\n")
+			_T("QICKV8\n")		
+			_T("lzk87\n")
+			_T("Heliotropo\n")
+			_T("Havokdan\n")
+			_T("Andrey23\n")		
+			_T("mistressadmin\n")
+			_T("enone\n")
+			_T("AnneDane\n")
+			_T("edelkas\n")		
+			_T("Aokromes\n")
+			_T("superlent\n")
+			_T("tchara\n")
+			_T("OConnell\n")		
+			_T("potes31\n")
+			_T("lapollarecord\n")
+			_T("tictoc9\n")
+			_T("arturx\n")
 			_T("Sony\n")
 			_T("Monk\n")
 			_T("Myxin\n")
@@ -289,6 +308,30 @@ namespace
 	{
 		static CGdiPlusSession session;
 		return session;
+	}
+
+	bool IsUsableWindowRect(const CRect& rc)
+	{
+		return !rc.IsRectEmpty() && rc.Width() > 0 && rc.Height() > 0;
+	}
+
+	bool GetMonitorWorkRect(HWND hWnd, const CRect& rcHint, CRect& rcWork)
+	{
+		HMONITOR hMonitor = NULL;
+		if (hWnd != NULL && ::IsWindow(hWnd))
+			hMonitor = ::MonitorFromWindow(hWnd, MONITOR_DEFAULTTONEAREST);
+		if (hMonitor == NULL && IsUsableWindowRect(rcHint))
+			hMonitor = ::MonitorFromRect(&rcHint, MONITOR_DEFAULTTONEAREST);
+		if (hMonitor == NULL)
+			return false;
+
+		MONITORINFO monitorInfo = {};
+		monitorInfo.cbSize = sizeof(monitorInfo);
+		if (!::GetMonitorInfo(hMonitor, &monitorInfo))
+			return false;
+
+		rcWork = monitorInfo.rcWork;
+		return IsUsableWindowRect(rcWork);
 	}
 
 	void DrawGlowingTitle(Gdiplus::Graphics& gfx, const CString& strText, const Gdiplus::RectF& rcTitle)
@@ -470,6 +513,93 @@ CSplashScreen::~CSplashScreen()
 	m_imgSpecialThanksBackground.DeleteObject();
 }
 
+void CSplashScreen::RepositionToParent(const CRect* pParentRect)
+{
+	if (GetSafeHwnd() == NULL || !::IsWindow(GetSafeHwnd()))
+		return;
+
+	CRect rcAnchor;
+	bool bAnchorFound = false;
+	if (pParentRect != NULL && IsUsableWindowRect(*pParentRect)) {
+		rcAnchor = *pParentRect;
+		bAnchorFound = true;
+	}
+
+	CWnd* pMainWnd = GetParent();
+	if ((pMainWnd == NULL || pMainWnd->GetSafeHwnd() == NULL || !::IsWindow(pMainWnd->GetSafeHwnd())) && theApp.m_pMainWnd != NULL)
+		pMainWnd = theApp.m_pMainWnd;
+
+	HWND hMainWnd = (pMainWnd != NULL) ? pMainWnd->GetSafeHwnd() : NULL;
+	const bool bMainWndValid = hMainWnd != NULL && ::IsWindow(hMainWnd);
+	const bool bMainWndVisible = bMainWndValid && ::IsWindowVisible(hMainWnd) != FALSE;
+	if (!bAnchorFound && bMainWndValid) {
+		WINDOWPLACEMENT wpMain = {};
+		wpMain.length = sizeof(wpMain);
+		if (::GetWindowPlacement(hMainWnd, &wpMain)) {
+			if (wpMain.showCmd == SW_SHOWMAXIMIZED) {
+				CRect rcHint(wpMain.rcNormalPosition);
+				if (GetMonitorWorkRect(hMainWnd, rcHint, rcAnchor))
+					bAnchorFound = true;
+			} else if (wpMain.showCmd == SW_SHOWMINIMIZED) {
+				CRect rcNormal(wpMain.rcNormalPosition);
+				if (IsUsableWindowRect(rcNormal)) {
+					rcAnchor = rcNormal;
+					bAnchorFound = true;
+				}
+			}
+		}
+	}
+
+	if (!bAnchorFound && !bMainWndVisible) {
+		const WINDOWPLACEMENT& wpMain = thePrefs.EmuleWindowPlacement;
+		if (wpMain.length == sizeof(WINDOWPLACEMENT)) {
+			CRect rcNormal(wpMain.rcNormalPosition);
+			if (wpMain.showCmd == SW_SHOWMAXIMIZED) {
+				if (GetMonitorWorkRect(bMainWndValid ? hMainWnd : NULL, rcNormal, rcAnchor))
+					bAnchorFound = true;
+			} else if (IsUsableWindowRect(rcNormal)) {
+				rcAnchor = rcNormal;
+				bAnchorFound = true;
+			}
+		}
+	}
+
+	if (!bAnchorFound && bMainWndValid) {
+		::GetWindowRect(hMainWnd, &rcAnchor);
+		bAnchorFound = IsUsableWindowRect(rcAnchor);
+	}
+
+	if (!bAnchorFound) {
+		const WINDOWPLACEMENT& wpMain = thePrefs.EmuleWindowPlacement;
+		if (wpMain.length == sizeof(WINDOWPLACEMENT)) {
+			CRect rcNormal(wpMain.rcNormalPosition);
+			if (wpMain.showCmd == SW_SHOWMAXIMIZED) {
+				if (GetMonitorWorkRect(NULL, rcNormal, rcAnchor))
+					bAnchorFound = true;
+			} else if (IsUsableWindowRect(rcNormal)) {
+				rcAnchor = rcNormal;
+				bAnchorFound = true;
+			}
+		}
+	}
+
+	if (!bAnchorFound)
+		return;
+
+	CRect rcSplash;
+	GetWindowRect(&rcSplash);
+	if (!IsUsableWindowRect(rcSplash)) {
+		GetClientRect(&rcSplash);
+		if (!IsUsableWindowRect(rcSplash))
+			return;
+	}
+
+	const CPoint ptCenter = rcAnchor.CenterPoint();
+	const int nSplashLeft = ptCenter.x - (rcSplash.Width() / 2);
+	const int nSplashTop = ptCenter.y - (rcSplash.Height() / 2);
+	SetWindowPos(NULL, nSplashLeft, nSplashTop, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+}
+
 void CSplashScreen::InitializeSpecialThanksScene()
 {
 	m_specialThanksStars.clear();
@@ -508,33 +638,8 @@ BOOL CSplashScreen::OnInitDialog()
 			const int nExtraHeight = m_bAutoClose ? 0 : SPLASH_EXTRA_HEIGHT;
 			const int nSplashWidth = bmp.bmWidth;
 			const int nSplashHeight = bmp.bmHeight + nExtraHeight;
-
-			CPoint ptCenter;
-			bool bCenterFound = false;
-			CWnd* pMainWnd = theApp.m_pMainWnd;
-			if (pMainWnd && pMainWnd->IsWindowVisible()) {
-				CRect rcMain;
-				pMainWnd->GetWindowRect(&rcMain);
-				ptCenter = rcMain.CenterPoint();
-				bCenterFound = true;
-			} else {
-				const WINDOWPLACEMENT& wpMain = thePrefs.EmuleWindowPlacement;
-				if (wpMain.length == sizeof(WINDOWPLACEMENT)) {
-					CRect rcMain(wpMain.rcNormalPosition);
-					ptCenter = rcMain.CenterPoint();
-					bCenterFound = true;
-				}
-			}
-
-			WINDOWPLACEMENT wp = {};
-			GetWindowPlacement(&wp);
-			if (bCenterFound) {
-				wp.rcNormalPosition.left = ptCenter.x - (nSplashWidth / 2);
-				wp.rcNormalPosition.top = ptCenter.y - (nSplashHeight / 2);
-			}
-			wp.rcNormalPosition.right = wp.rcNormalPosition.left + nSplashWidth;
-			wp.rcNormalPosition.bottom = wp.rcNormalPosition.top + nSplashHeight;
-			SetWindowPlacement(&wp);
+			SetWindowPos(NULL, 0, 0, nSplashWidth, nSplashHeight, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+			RepositionToParent();
 
 			if (!m_bAutoClose) {
 				CWnd* pBtn = GetDlgItem(IDC_BTN_THIRDPARTY);

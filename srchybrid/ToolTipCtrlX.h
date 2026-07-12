@@ -20,6 +20,8 @@
 #define TOOLTIP_AUTOFORMAT_SUFFIX _T("\a")
 #define TOOLTIP_AUTOFORMAT_SUFFIX_CH	_T('\a')
 
+class CImageList;
+
 class CToolTipCtrlX : public CToolTipCtrl
 {
 	DECLARE_DYNAMIC(CToolTipCtrlX)
@@ -31,6 +33,8 @@ public:
 	void SetCol1DrawTextFlags(DWORD dwFlags);
 	void SetCol2DrawTextFlags(DWORD dwFlags);
 	void SetFileIconToolTip(bool bEnable)		{ m_bShowFileIcon = bEnable; }
+	void SetHeaderIcon(CImageList *pImageList, int iImage);
+	void ClearHeaderIcon();
 	void SetDeferVisibleUpdates(bool bEnable)	{ m_bDeferVisibleUpdates = bEnable; }
 	void SetMinimumVisibleTime(DWORD dwMilliseconds) { m_dwMinimumVisibleTime = dwMilliseconds; }
 	BOOL SubclassWindow(HWND hWnd);
@@ -57,6 +61,9 @@ protected:
 	TOOLINFO m_tiDeferredTextUpdate;
 	TOOLINFO m_tiDeferredHide;
 	CString m_strDeferredTextUpdate;
+	HIMAGELIST m_hHeaderIconImageList;
+	int m_iHeaderIconImage;
+	CSize m_sizHeaderIcon;
 
 	void ApplyTooltipStyles();
 	void ResetSystemMetrics();

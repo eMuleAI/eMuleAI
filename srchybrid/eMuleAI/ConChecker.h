@@ -4,8 +4,6 @@
 #pragma once
 #include "Preferences.h"
 
-class CWinThread;
-
 #define CONSTATE_NULL			0
 #define CONSTATE_ONLINE			1
 #define CONSTATE_OFFLINE		2
@@ -20,15 +18,15 @@ class CConChecker
 
 		bool	Start();
 		bool	Stop();
-		bool	IsActive();
+		bool	IsActive() const;
+		bool	IsWorkerGenerationActive(LONG lGeneration) const;
+		bool	QueueWorkerCheck(LONG lGeneration, DWORD dwDelayMs);
+		uint8	RunWorkerCheck(LONG lGeneration, LPCTSTR pszServer);
+		void	ApplyWorkerResult(LONG lGeneration, uint8 uConnectionState);
 
 	private:
-		static UINT ThreadProc(LPVOID pParam);
-		bool CleanupStoppedThread(bool bLogStopped);
-
-	protected:
-		CWinThread*	m_pThread;
-		HANDLE		m_hStopEvent;
-		HWND		m_hNotifyWnd;
+		volatile LONG m_lGeneration;
+		volatile LONG m_lActive;
+		CCriticalSection m_serverLock;
 		CString		m_strConnectionCheckerServer;
 };

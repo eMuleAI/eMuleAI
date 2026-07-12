@@ -365,7 +365,7 @@ BOOL CPPgWebServer::OnApply()
 
 		thePrefs.m_bWebUseUPnP = IsDlgButtonChecked(IDC_WSUPNP) != 0;
 		//add the port to existing mapping without having eMule restarting (if all conditions are met)
-		if (bUPnP != (thePrefs.m_bWebUseUPnP && bWSIsEnabled) && thePrefs.IsUPnPEnabled() && theApp.m_pUPnPFinder != NULL)
+		if (bUPnP != (thePrefs.m_bWebUseUPnP && bWSIsEnabled) && thePrefs.IsUPnPEnabled() && theApp.m_pUPnPFinder != NULL && !theApp.IsNetworkActivityBlockedByBind())
 			theApp.m_pUPnPFinder->GetImplementation()->LateEnableWebServerPort(bUPnP ? 0 : thePrefs.GetWSPort());
 
 		theApp.emuledlg->serverwnd->UpdateMyInfo();
@@ -490,13 +490,13 @@ void CPPgWebServer::OnGenerateCertificate()
 		++opt.serial; //must be positive
 	m_bNewCert = !CertCreate(opt);
 	if (m_bNewCert) {
-		AddLogLine(false, _T("New certificate created; serial %d"), opt.serial);
+			AddLogLine(false, GetResString(_T("CERT_CREATED_SERIAL")), opt.serial);
 		SetDlgItemText(IDC_KEYPATH, fkey);
 		SetDlgItemText(IDC_CERTPATH, fcrt);
 		GetDlgItem(IDC_WEB_GENERATE)->EnableWindow(FALSE);
 		SetModified();
 	} else {
-		LogError(_T("Certificate creation failed"));
+			LogError(GetResString(_T("CERT_CREATION_FAILED")));
 		CDarkMode::MessageBox(GetResString(_T("CERT_ERR_CREATE")));
 		::InterlockedExchange(&m_generating, 0); //re-enable only if failed
 	}

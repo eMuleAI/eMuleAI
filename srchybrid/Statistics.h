@@ -195,10 +195,10 @@ private:
 	std::list<TransferredData> m_AverageUDRO_list;
 };
 
-CStatistics& BB_GetStatistics();
-void BB_FreeStatistics() noexcept;
+CStatistics& GetStatisticsStorage();
+void FreeStatisticsStorage() noexcept;
 
-#define theStats BB_GetStatistics()
+#define theStats GetStatisticsStorage()
 
 #if !defined(_DEBUG) && !defined(_AFXDLL) && _MFC_VER==0x0710
 #define	ALLOC_SLOTS	20

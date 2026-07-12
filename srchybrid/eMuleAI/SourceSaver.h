@@ -1,4 +1,4 @@
-//This file is part of eMule AI
+﻿//This file is part of eMule AI
 //Copyright (C)2026 eMule AI
 
 #pragma once
@@ -6,6 +6,7 @@
 
 class CPartFile;
 class CUpDownClient;
+struct SaveSourcesData;
 
 class CSourceSaver
 {
@@ -27,8 +28,11 @@ public:
 			sourcePort = wSourcePort;
 			serverip = dwServerIP;
 			serverport = wServerPort;
+			partsavailable = 0;
 			expiration = strExpiration;
 			nSrcExchangeVer = uSXVer;
+			bWasDownloading = false;
+			bWasOnQueue = false;
 		}
 
 		CSourceData(CUpDownClient* client, const CString& strExpiration);
@@ -43,6 +47,8 @@ public:
 			partsavailable = pOld->partsavailable;
 			expiration = pOld->expiration;
 			nSrcExchangeVer = pOld->nSrcExchangeVer;
+			bWasDownloading = pOld->bWasDownloading;
+			bWasOnQueue = pOld->bWasOnQueue;
 		}
 
 		bool Compare(CSourceData* tocompare) { return ((sourceIP == tocompare->sourceIP) && (sourcePort == tocompare->sourcePort)); }
@@ -55,17 +61,27 @@ public:
 		uint32	partsavailable;
 		CString	expiration;
 		uint8	nSrcExchangeVer;
+		// Same-session stop/resume state. Not serialized.
+		bool	bWasDownloading;
+		bool	bWasOnQueue;
 	};
 
 	typedef CTypedPtrList<CPtrList, CSourceData*> Sources;
 	Sources sources;
-	TCHAR szslsfilepath[_MAX_PATH];
 
+	static CString GetSourcesFilePath(const CPartFile* file);
 	void LoadSourcesFromFile(CPartFile* file);
 	void SaveSources(CPartFile* file, bool bForce);
+	UINT SaveSourcesOnStop(CPartFile* file);
+	UINT LoadSourcesOnResume(CPartFile* file);
+	SaveSourcesData* BuildSaveSourcesSnapshot(CPartFile* file, bool bForce, bool bMarkInQueue);
+	static bool WriteSourcesSnapshotNow(const SaveSourcesData& data, bool bShutdownFallback);
 	void AddSourcesToDownload(CPartFile* file);
 
 protected:
+	void ClearSources();
+	UINT AddSourcesToDownload(CPartFile* file, Sources& sourceList);
+
 	uint32	m_dwLastTimeLoaded;
 	uint32  m_dwLastTimeSaved;
 	

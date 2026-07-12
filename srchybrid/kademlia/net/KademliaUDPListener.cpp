@@ -36,10 +36,7 @@ their client on the eMule forum.
 #include "clientlist.h"
 #include "ClientUDPSocket.h"
 #include "emule.h"
-#include "emuledlg.h"
 #include "ipfilter.h"
-#include "KadContactListCtrl.h"
-#include "kademliawnd.h"
 #include "listensocket.h"
 #include "Log.h"
 #include "opcodes.h"
@@ -231,7 +228,7 @@ void CKademliaUDPListener::ProcessPacket(const byte *pbyData, uint32 uLenData, u
 	CKademlia::GetPrefs()->SetLastContact();
 	CUDPFirewallTester::Connected();
 	if (bCurCon != CKademlia::GetPrefs()->HasHadContact())
-		theApp.emuledlg->ShowConnectionState();
+		theApp.QueueKadConnectionStateChangedEvent(_T("kad-last-contact"));
 
 	uint8 byOpcode = pbyData[1];
 	switch (InTrackListIsAllowedPacket(uIP, byOpcode, bValidReceiverKey)) {
@@ -777,12 +774,15 @@ void CKademliaUDPListener::Process_KADEMLIA2_RES(const byte *pbyPacketData, uint
 	}
 
 	// Verify that the search is still active and contains no more than the requested numbers of contacts
-	if (uNumContacts > CSearchManager::GetExpectedResponseContactCount(uTarget)) {
-		if (CSearchManager::GetExpectedResponseContactCount(uTarget) == 0)
+	const uint8 uExpectedContactCount = CSearchManager::GetExpectedResponseContactCount(uTarget, uIP, uUDPPort);
+	if (uNumContacts > uExpectedContactCount) {
+		if (uExpectedContactCount == 0)
 			DebugLogWarning(_T("Kad: KADEMLIA2_RES: Search already expired, ignoring answer (sender: %s)"), (LPCTSTR)ipstr(htonl(uIP)));
-		else
+		else {
 			DebugLogWarning(_T("Kad: KADEMLIA2_RES: Contact sent more nodes (%u) than requested (%u), ignoring answer (sender: %s)")
-				, uNumContacts, CSearchManager::GetExpectedResponseContactCount(uTarget), (LPCTSTR)ipstr(htonl(uIP)));
+				, uNumContacts, uExpectedContactCount, (LPCTSTR)ipstr(htonl(uIP)));
+			CSearchManager::ProcessInvalidResponse(uTarget, uIP, uUDPPort);
+		}
 		return;
 	}
 
@@ -791,14 +791,6 @@ void CKademliaUDPListener::Process_KADEMLIA2_RES(const byte *pbyPacketData, uint
 	bool bIsFirewallUDPCheckSearch = false;
 	if (CUDPFirewallTester::IsFWCheckUDPRunning() && CSearchManager::IsFWCheckUDPSearch(uTarget))
 		bIsFirewallUDPCheckSearch = true;
-
-	// Make sure the node is not sending more results than we requested, which is not only a protocol vialoation but most likely a malicous answer.
-	if (uNumContacts > CSearchManager::GetRequestContactCountFor(uTarget))
-	{
-		DebugLogWarning(_T("Node %s sent more contacts than requested on a routing query, ignoring response"), (LPCTSTR)ipstr(ntohl(uIP)));
-		CSearchManager::ProcessInvalidResponse(uTarget, uIP, uUDPPort);
-		return;
-	}
 
 	ContactArray cResults;
 	CUInt128 uIDResult;
@@ -1665,7 +1657,7 @@ void CKademliaUDPListener::Process_KADEMLIA_FIREWALLED_RES(const byte *pbyPacket
 	//Update con state only if something changes.
 	if (CKademlia::GetPrefs()->GetIPAddress() != uFirewalledIP) {
 		CKademlia::GetPrefs()->SetIPAddress(uFirewalledIP);
-		theApp.emuledlg->ShowConnectionState();
+		theApp.QueueKadConnectionStateChangedEvent(_T("kad-firewalled-ip"));
 	}
 	CKademlia::GetPrefs()->IncRecheckIP();
 }
@@ -1728,14 +1720,18 @@ void CKademliaUDPListener::Process_KADEMLIA_FINDSERVINGBUDDY_REQ(const byte *pby
 	contact.SetClientID(userID);
 
 #ifdef NATTTESTMODE
-	// Accept Kad serving buddy requests only from clients which are in our friend list.
-	// Use user hash for lookup to handle friends whose IP may have changed.
-	if (theApp.friendlist == NULL)
-		return; // no friend list -> do not accept and do not respond
+	// Accept Kad serving buddy requests from friends and from clients we already serve as eServer buddies.
+	// The eServer buddy bridge keeps the existing Kad handshake but avoids requiring a duplicate friend entry.
 	uchar achUserHash[16];
 	userID.ToByteArray(achUserHash);
-	if (theApp.friendlist->SearchFriend(achUserHash, CAddress(contact.GetNetIP(), false), uTCPPort) == NULL)
-		return; // not a friend -> do not accept and do not respond
+	CUpDownClient* pServedEServerBuddy = theApp.clientlist != NULL ? theApp.clientlist->FindServedEServerBuddyByHash(achUserHash) : NULL;
+	if (pServedEServerBuddy == NULL) {
+		if (theApp.friendlist == NULL)
+			return; // no friend list -> do not accept and do not respond
+		if (theApp.friendlist->SearchFriend(achUserHash, CAddress(contact.GetNetIP(), false), uTCPPort) == NULL)
+			return; // not a friend -> do not accept and do not respond
+	} else if (thePrefs.GetLogNatTraversalEvents())
+		DebugLog(_T("[eServerBuddy][KadBridge] Accepting Kad serving buddy request from served eServer buddy %s:%hu."), (LPCTSTR)ipstr(htonl(uIP)), uUDPPort);
 #endif
 
 	// Early NAT-T filter for additional served buddy slots: require NAT-T beyond the first slot
@@ -1758,7 +1754,7 @@ void CKademliaUDPListener::Process_KADEMLIA_FINDSERVINGBUDDY_REQ(const byte *pby
 		theApp.clientlist->AddServedBuddy(pNew);
 
 	if (thePrefs.GetLogNatTraversalEvents())
-		DebugLog(_T("[NATTTESTMODE: BuddyReq] accept from %s:%hu, tcp=%hu\n"), (LPCTSTR)ipstr(htonl(uIP)), uUDPPort, contact.GetTCPPort());
+		DebugLog(_T("[NatTraversal: BuddyReq] accept from %s:%hu, tcp=%hu\n"), (LPCTSTR)ipstr(htonl(uIP)), uUDPPort, contact.GetTCPPort());
 
 	CSafeMemFile fileIO2(34);
 	fileIO2.WriteUInt128(ServedBuddyID);
@@ -1809,7 +1805,7 @@ void CKademliaUDPListener::Process_KADEMLIA_FINDSERVINGBUDDY_RES(const byte *pby
 
 		theApp.clientlist->RequestServingBuddy(&contact, byConnectOptions, false);
 		if (thePrefs.GetLogNatTraversalEvents())
-			DebugLog(_T("[NATTTESTMODE: BuddyRes] from %s:%hu, tcp=%hu\n"), (LPCTSTR)ipstr(htonl(uIP)), uUDPPort, uTCPPort);
+			DebugLog(_T("[NatTraversal: BuddyRes] from %s:%hu, tcp=%hu\n"), (LPCTSTR)ipstr(htonl(uIP)), uUDPPort, uTCPPort);
 	}
 }
 
@@ -1843,7 +1839,7 @@ void CKademliaUDPListener::Process_KADEMLIA_CALLBACK_REQ(const byte* pbyPacketDa
 
 	if (pTarget != NULL) {
 		if (thePrefs.GetLogNatTraversalEvents())
-			DebugLog(_T("[NATTTESTMODE: CallbackReq] forward to %s for file=%s from %s\n"), (LPCTSTR)pTarget->DbgGetClientInfo(), (LPCTSTR)md4str(uFile.GetData()), (LPCTSTR)ipstr(htonl(uIP)));
+			DebugLog(_T("[NatTraversal: CallbackReq] forward to %s for file=%s from %s\n"), (LPCTSTR)pTarget->DbgGetClientInfo(), (LPCTSTR)md4str(uFile.GetData()), (LPCTSTR)ipstr(htonl(uIP)));
 
 		if (pTarget->socket == NULL) {
 			// Do not throw here; TCP may not be established yet. Skip gracefully.
@@ -1914,7 +1910,7 @@ void CKademliaUDPListener::Process_KADEMLIA2_PONG(const byte *pbyPacketData, uin
 		if (CUDPFirewallTester::IsFWCheckUDPRunning())
 			CUDPFirewallTester::QueryNextClient();
 	}
-	theApp.emuledlg->ShowConnectionState();
+	theApp.QueueKadConnectionStateChangedEvent(_T("kad-firewall-udp"));
 }
 
 void CKademliaUDPListener::Process_KADEMLIA2_FIREWALLUDP(const byte *pbyPacketData, uint32 uLenPacket, uint32 uIP, const CKadUDPKey& /*senderUDPKey*/)

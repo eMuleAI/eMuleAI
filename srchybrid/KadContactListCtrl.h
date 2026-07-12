@@ -1,4 +1,4 @@
-//This file is part of eMule AI
+﻿//This file is part of eMule AI
 //Copyright (C)2002-2026 Merkur ( strEmail.Format("%s@%s", "devteam", "emule-project.net") / https://www.emule-project.net )
 //Copyright (C)2026 eMule AI
 //
@@ -43,6 +43,7 @@ protected:
 	bool ContactAdd(const Kademlia::CContact *contact);
 	void ContactRem(const Kademlia::CContact *contact);
 	void ContactRef(const Kademlia::CContact *contact);
+	void ClearContactRows();
 
 	void Init();
 	void Localize();
@@ -59,6 +60,9 @@ protected:
 	virtual void DrawItem(LPDRAWITEMSTRUCT lpDrawItemStruct);
 	CImageList	m_ImageList;
 	const CString GetItemDisplayText(const Kademlia::CContact* contact, const int iSubItem) const;
+	void RequestContactRowRedraw(int iItem);
+	bool TryGetContactText(const Kademlia::CContact *contact, int iSubItem, CString& strText) const;
+	bool TryGetContactSortKey(const Kademlia::CContact *contact, int iSubItem, CString& strSortKey) const;
 
 	DECLARE_MESSAGE_MAP()
 	afx_msg void OnLvnColumnClick(LPNMHDR pNMHDR, LRESULT *pResult);

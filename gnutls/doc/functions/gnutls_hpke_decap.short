@@ -1,0 +1,1 @@
+@item @var{int} @ref{gnutls_hpke_decap} (gnutls_hpke_context_t @var{ctx}, const gnutls_datum_t * @var{info}, const gnutls_datum_t * @var{enc}, const gnutls_privkey_t @var{receiver_privkey}, const gnutls_pubkey_t @var{sender_pubkey}, const gnutls_datum_t * @var{psk}, const gnutls_datum_t * @var{psk_id})

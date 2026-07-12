@@ -1294,10 +1294,26 @@ namespace DebugLeakHelper
 #endif
     }
 
+	static bool IsCrtDumpSourceLocationLineW(const wchar_t* message)
+	{
+		if (message == nullptr || wcsstr(message, L") :") == nullptr)
+			return false;
+		return wcsstr(message, L".cpp(") != nullptr || wcsstr(message, L".h(") != nullptr || wcsstr(message, L".hpp(") != nullptr || wcsstr(message, L".inl(") != nullptr;
+	}
+
+	static bool IsCrtDumpSourceLocationLineA(const char* message)
+	{
+		if (message == nullptr || strstr(message, ") :") == nullptr)
+			return false;
+		return strstr(message, ".cpp(") != nullptr || strstr(message, ".h(") != nullptr || strstr(message, ".hpp(") != nullptr || strstr(message, ".inl(") != nullptr;
+	}
+
 	static bool ShouldSuppressRawLeakDumpMessageW(const wchar_t* message)
 	{
 		if (message == nullptr || *message == L'\0')
 			return false;
+		if (::InterlockedCompareExchange(&g_bLeakDumpInProgress, 0, 0) != 0 && IsCrtDumpSourceLocationLineW(message))
+			return true;
 		return wcsstr(message, L"Detected memory leaks!") != nullptr
 			|| wcsstr(message, L"Dumping objects ->") != nullptr
 			|| wcsstr(message, L"Object dump complete.") != nullptr
@@ -1315,6 +1331,8 @@ namespace DebugLeakHelper
 	{
 		if (message == nullptr || *message == '\0')
 			return false;
+		if (::InterlockedCompareExchange(&g_bLeakDumpInProgress, 0, 0) != 0 && IsCrtDumpSourceLocationLineA(message))
+			return true;
 		return strstr(message, "Detected memory leaks!") != nullptr
 			|| strstr(message, "Dumping objects ->") != nullptr
 			|| strstr(message, "Object dump complete.") != nullptr
@@ -1345,14 +1363,17 @@ namespace DebugLeakHelper
         std::size_t msgLen = wcslen(message);
         if (!msgLen)
 			return TRUE;
+		const bool bLeakSourceLocation = ::InterlockedCompareExchange(&g_bLeakDumpInProgress, 0, 0) != 0 && IsCrtDumpSourceLocationLineW(message);
 		if (ShouldSuppressRawLeakDumpMessageW(message)) {
-			std::size_t cap = kDumpBufWCap;
-			std::size_t remaining = (g_dumpBufWLen < cap) ? (cap - g_dumpBufWLen - 1) : 0;
-			if (remaining) {
-				std::size_t toCopy = msgLen < remaining ? msgLen : remaining;
-				wmemcpy(g_dumpBufW + g_dumpBufWLen, message, toCopy);
-				g_dumpBufWLen += toCopy;
-				g_dumpBufW[g_dumpBufWLen] = L'\0';
+			if (!bLeakSourceLocation) {
+				std::size_t cap = kDumpBufWCap;
+				std::size_t remaining = (g_dumpBufWLen < cap) ? (cap - g_dumpBufWLen - 1) : 0;
+				if (remaining) {
+					std::size_t toCopy = msgLen < remaining ? msgLen : remaining;
+					wmemcpy(g_dumpBufW + g_dumpBufWLen, message, toCopy);
+					g_dumpBufWLen += toCopy;
+					g_dumpBufW[g_dumpBufWLen] = L'\0';
+				}
 			}
 			return TRUE;
 		}
@@ -1389,14 +1410,17 @@ namespace DebugLeakHelper
         std::size_t msgLen = strlen(message);
         if (!msgLen)
 			return TRUE;
+		const bool bLeakSourceLocation = ::InterlockedCompareExchange(&g_bLeakDumpInProgress, 0, 0) != 0 && IsCrtDumpSourceLocationLineA(message);
 		if (ShouldSuppressRawLeakDumpMessageA(message)) {
-			std::size_t cap = kDumpBufACap;
-			std::size_t remaining = (g_dumpBufALen < cap) ? (cap - g_dumpBufALen - 1) : 0;
-			if (remaining) {
-				std::size_t toCopy = msgLen < remaining ? msgLen : remaining;
-				memcpy(g_dumpBufA + g_dumpBufALen, message, toCopy);
-				g_dumpBufALen += toCopy;
-				g_dumpBufA[g_dumpBufALen] = '\0';
+			if (!bLeakSourceLocation) {
+				std::size_t cap = kDumpBufACap;
+				std::size_t remaining = (g_dumpBufALen < cap) ? (cap - g_dumpBufALen - 1) : 0;
+				if (remaining) {
+					std::size_t toCopy = msgLen < remaining ? msgLen : remaining;
+					memcpy(g_dumpBufA + g_dumpBufALen, message, toCopy);
+					g_dumpBufALen += toCopy;
+					g_dumpBufA[g_dumpBufALen] = '\0';
+				}
 			}
 			return TRUE;
 		}

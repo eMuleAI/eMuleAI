@@ -153,8 +153,16 @@ BOOL CCollectionCreateDialog::OnInitDialog()
 	AddOrReplaceAnchor(this, IDC_COLLECTIONCREATESIGNCHECK, BOTTOM_LEFT, BOTTOM_RIGHT);
 	EnableSaveRestore(PREF_INI_SECTION);
 
+	m_CollectionListCtrl.SetRedraw(false);
+	m_CollectionListCtrl.BeginBulkInsert();
+	CMuleListCtrl::EUpdateMode eOldCollectionUpdateMode = m_CollectionListCtrl.SetUpdateMode(CMuleListCtrl::none);
 	for (CCollectionFilesMap::CPair *pair = m_pCollection->m_CollectionFilesMap.PGetFirstAssoc(); pair != NULL; pair = m_pCollection->m_CollectionFilesMap.PGetNextAssoc(pair))
 		m_CollectionListCtrl.AddFileToList(pair->value);
+	m_CollectionListCtrl.SetUpdateMode(eOldCollectionUpdateMode);
+	m_CollectionListCtrl.EndBulkInsert();
+	m_CollectionListCtrl.SortByCurrentSettings();
+	m_CollectionListCtrl.SetRedraw(true);
+	m_CollectionListCtrl.Invalidate(FALSE);
 
 	CString strTitle(GetResString(_T("COLLECTIONLIST")));
 	strTitle.AppendFormat(_T(" (%d)"), m_CollectionListCtrl.GetItemCount());
@@ -312,6 +320,7 @@ void CCollectionCreateDialog::OnBnClickedOk()
 
 void CCollectionCreateDialog::UpdateAvailFiles()
 {
+	m_CollectionAvailListCtrl.SetRedraw(false);
 	m_CollectionAvailListCtrl.DeleteAllItems();
 
 	CKnownFilesMap Files_Map;
@@ -320,8 +329,15 @@ void CCollectionCreateDialog::UpdateAvailFiles()
 	else
 		theApp.knownfiles->CopyKnownFileMap(Files_Map);
 
+	m_CollectionAvailListCtrl.BeginBulkInsert();
+	CMuleListCtrl::EUpdateMode eOldAvailUpdateMode = m_CollectionAvailListCtrl.SetUpdateMode(CMuleListCtrl::none);
 	for (CKnownFilesMap::CPair *pair = Files_Map.PGetFirstAssoc(); pair != NULL; pair = Files_Map.PGetNextAssoc(pair))
 		m_CollectionAvailListCtrl.AddFileToList(pair->value);
+	m_CollectionAvailListCtrl.SetUpdateMode(eOldAvailUpdateMode);
+	m_CollectionAvailListCtrl.EndBulkInsert();
+	m_CollectionAvailListCtrl.SortByCurrentSettings();
+	m_CollectionAvailListCtrl.SetRedraw(true);
+	m_CollectionAvailListCtrl.Invalidate(FALSE);
 }
 
 void CCollectionCreateDialog::OnBnClickedCollectionViewShared()

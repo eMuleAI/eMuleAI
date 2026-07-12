@@ -16,6 +16,7 @@
 //along with this program; if not, write to the Free Software
 //Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 #include "stdafx.h"
+#include <memory>
 #include "emule.h"
 #include "UpDownClient.h"
 #include "Opcodes.h"
@@ -48,24 +49,51 @@ static char THIS_FILE[] = __FILE__;
 
 namespace
 {
+	bool GuardUpDownClientMutation(LPCTSTR pszEntryPoint)
+	{
+		return theApp.GuardModelMutation(CemuleApp::ModelMutationUpDownClient, pszEntryPoint);
+	}
+
 	CBarShader* g_pUploadStatusBar = NULL;
 
-	CBarShader& BB_GetUploadStatusBar()
+	CBarShader& GetUploadStatusBar()
 	{
 		if (g_pUploadStatusBar == NULL)
 			g_pUploadStatusBar = new CBarShader(16);
 		return *g_pUploadStatusBar;
 	}
+
+	bool IsQueuedBlockRequestValid(const Requested_Block_Struct *pReqBlock, const CKnownFile *pFile)
+	{
+		if (pReqBlock == NULL || pFile == NULL)
+			return false;
+		if (pReqBlock->StartOffset >= pReqBlock->EndOffset || pReqBlock->EndOffset > pFile->GetFileSize())
+			return false;
+		if (pReqBlock->EndOffset - pReqBlock->StartOffset > EMBLOCKSIZE * 3)
+			return false;
+		if (pFile->IsPartFile() && !static_cast<const CPartFile*>(pFile)->IsCompleteBDSafe(pReqBlock->StartOffset, pReqBlock->EndOffset - 1))
+			return false;
+		return true;
+	}
+
+	bool IsSameUploadBlockRequest(const Requested_Block_Struct *pLeft, const Requested_Block_Struct *pRight)
+	{
+		return pLeft != NULL
+			&& pRight != NULL
+			&& pLeft->StartOffset == pRight->StartOffset
+			&& pLeft->EndOffset == pRight->EndOffset
+			&& md4equ(pLeft->FileID, pRight->FileID);
+	}
 }
 
-#define s_UpStatusBar BB_GetUploadStatusBar()
+#define s_UpStatusBar GetUploadStatusBar()
 
 static bool ResolveSecureIdentForUpload(const CUpDownClient* client, EIdentState& identState, CAddress& scoreIP)
 {
 	scoreIP = client->GetIP();
 	identState = client->Credits()->GetCurrentIdentState(scoreIP);
 
-	if (!(client->socket && client->socket->HaveUtpLayer(true)))
+	if (!(client->socket && client->socket->HaveNatTraversalLayer(true)))
 		return false;
 
 	const CAddress& verifiedIP = client->GetSessionSecureIdentIP();
@@ -133,7 +161,7 @@ void CUpDownClient::DrawUpStatusBar(CDC *dc, const CRect &rect, bool onlygreyrec
 
 	// wistily: UpStatusFix
 	CKnownFile *currequpfile = theApp.sharedfiles->GetFileByID(requpfileid);
-	EMFileSize filesize = currequpfile ? currequpfile->GetFileSize() : PARTSIZE * m_nUpPartCount;
+	EMFileSize filesize = currequpfile ? currequpfile->GetFileSize() : EMFileSize(static_cast<uint64>(PARTSIZE) * static_cast<uint64>(m_nUpPartCount));
 	// wistily: UpStatusFix
 
 	if (filesize > 0ull) {
@@ -156,18 +184,18 @@ void CUpDownClient::DrawUpStatusBar(CDC *dc, const CRect &rect, bool onlygreyrec
 				if (block) {
 					uint64 start = (block->StartOffset / PARTSIZE) * PARTSIZE;
 					s_UpStatusBar.FillRange(start, start + PARTSIZE, crNextSending);
-				}
+		}
 			}
 			if (!pUpClientStruct->m_DoneBlocks_list.IsEmpty()) {
 				block = pUpClientStruct->m_DoneBlocks_list.GetHead();
 				if (block) {
 					uint64 start = (block->StartOffset / PARTSIZE) * PARTSIZE;
 					s_UpStatusBar.FillRange(start, start + PARTSIZE, crNextSending);
-				}
+		}
 				for (POSITION pos = pUpClientStruct->m_DoneBlocks_list.GetHeadPosition();pos != 0;) {
 					block = pUpClientStruct->m_DoneBlocks_list.GetNext(pos);
 					s_UpStatusBar.FillRange(block->StartOffset, block->EndOffset + 1, crSending);
-				}
+		}
 			}
 			lockBlockLists.Unlock();
 		}
@@ -175,14 +203,85 @@ void CUpDownClient::DrawUpStatusBar(CDC *dc, const CRect &rect, bool onlygreyrec
 	}
 }
 
+void CUpDownClient::ResetHighBandwidthSlowUploadTracking()
+{
+	m_dwLastHighBandwidthSlowUploadTick = 0;
+	m_dwLastHighBandwidthPayloadTick = 0;
+	m_uLastHighBandwidthPayloadUp = 0;
+}
+
+bool CUpDownClient::IsHighBandwidthSlowUploadCooldownActive(DWORD curTick) const
+{
+	return m_dwHighBandwidthSlowUploadCooldownUntil != 0 && (int)(curTick - m_dwHighBandwidthSlowUploadCooldownUntil) < 0;
+}
+
+bool CUpDownClient::CanProbeHighBandwidthSlowUploadCooldown(DWORD curTick) const
+{
+	return IsHighBandwidthSlowUploadCooldownActive(curTick) && (m_eHighBandwidthUploadCooldownReason == HBUCR_RequestIdle || m_eHighBandwidthUploadCooldownReason == HBUCR_NoRequest);
+}
+
+void CUpDownClient::SetHighBandwidthSlowUploadCooldown(DWORD curTick, DWORD dwCooldown, EHighBandwidthUploadCooldownReason eReason)
+{
+	if (dwCooldown != 0) {
+		m_dwHighBandwidthSlowUploadCooldownUntil = curTick + dwCooldown;
+		m_eHighBandwidthUploadCooldownReason = eReason;
+	} else {
+		m_dwHighBandwidthSlowUploadCooldownUntil = 0;
+		m_eHighBandwidthUploadCooldownReason = HBUCR_None;
+	}
+}
+
+bool CUpDownClient::ShouldRecycleHighBandwidthSlowUpload(uint32 uTargetDatarate, DWORD curTick, DWORD dwSlowGrace, DWORD dwWarmup, DWORD dwZeroGrace, DWORD dwCooldown, float fThresholdFactor)
+{
+	if (GetUploadState() != US_UPLOADING || GetFriendSlot() || HasCollectionUploadSlot())
+		return false;
+
+	const DWORD dwUpStartTime = GetUpStartTime();
+	if (dwUpStartTime == 0 || (int)(curTick - dwUpStartTime) < (int)dwWarmup) {
+		ResetHighBandwidthSlowUploadTracking();
+		return false;
+	}
+
+	if (IsHighBandwidthSlowUploadCooldownActive(curTick))
+		return false;
+
+	const uint64 uPayloadUp = GetQueueSessionPayloadUp();
+	if (m_dwLastHighBandwidthPayloadTick == 0 || uPayloadUp > m_uLastHighBandwidthPayloadUp) {
+		m_dwLastHighBandwidthPayloadTick = curTick;
+		m_uLastHighBandwidthPayloadUp = uPayloadUp;
+	}
+
+	const bool bZeroRateTooLong = GetUploadDatarate() == 0 && m_dwLastHighBandwidthPayloadTick != 0 && (int)(curTick - m_dwLastHighBandwidthPayloadTick) >= (int)dwZeroGrace;
+	const uint32 uSlowThreshold = max(1024u, static_cast<uint32>(static_cast<float>(uTargetDatarate) * fThresholdFactor));
+	if (!bZeroRateTooLong && GetUploadDatarate() >= uSlowThreshold) {
+		m_dwLastHighBandwidthSlowUploadTick = 0;
+		return false;
+	}
+
+	if (m_dwLastHighBandwidthSlowUploadTick == 0) {
+		m_dwLastHighBandwidthSlowUploadTick = curTick;
+		return false;
+	}
+
+	if ((int)(curTick - m_dwLastHighBandwidthSlowUploadTick) < (int)dwSlowGrace)
+		return false;
+
+	SetHighBandwidthSlowUploadCooldown(curTick, dwCooldown);
+	return true;
+}
+
 void CUpDownClient::SetUploadState(EUploadState eNewState)
 {
+	if (!GuardUpDownClientMutation(_T("CUpDownClient::SetUploadState")))
+		return;
+
 	if (eNewState != m_eUploadState) {
 		if (m_eUploadState == US_UPLOADING) {
 			// Reset upload data rate computation
 			m_nUpDatarate = 0;
 			m_nSumForAvgUpDataRate = 0;
 			m_AverageUDR_list.RemoveAll();
+			ResetHighBandwidthSlowUploadTracking();
 		}
 		if (eNewState == US_UPLOADING) {
 			if (socket != NULL && socket->DropQueuedControlPacket(OP_OUTOFPARTREQS, OP_EDONKEYPROT) && thePrefs.GetLogNatTraversalEvents()) {
@@ -190,6 +289,7 @@ void CUpDownClient::SetUploadState(EUploadState eNewState)
 					(LPCTSTR)EscPercent(DbgGetClientInfo()));
 			}
 			m_fSentOutOfPartReqs = 0;
+			m_dwLastOutOfPartReqsResyncTick = 0;
 		}
 		//Xman remove banned. remark: this method is called recursive
 		if(eNewState == US_BANNED && (m_eUploadState == US_UPLOADING || m_eUploadState == US_CONNECTING))
@@ -270,14 +370,15 @@ const uint32 CUpDownClient::GetScore(const bool sysvalue, const bool isdownloadi
 
 	EIdentState identState = IS_NOTAVAILABLE;
 	CAddress scoreIP;
-	const bool bTrustedUtpSecureIdent = ResolveSecureIdentForUpload(this, identState, scoreIP);
-	const bool bPendingUtpSecureIdent = (socket && socket->HaveUtpLayer(true) && IsSecureIdentRecheckPending() && !bTrustedUtpSecureIdent);
+	const bool bTrustedNatSecureIdent = ResolveSecureIdentForUpload(this, identState, scoreIP);
+	const bool bPendingNatSecureIdent = (socket && socket->HaveNatTraversalLayer(true) && IsSecureIdentRecheckPending() && !bTrustedNatSecureIdent);
 
 	// bad clients (see note in function)
-	if (!bPendingUtpSecureIdent && !bTrustedUtpSecureIdent && identState == IS_IDBADGUY)
+	if (!bPendingNatSecureIdent && !bTrustedNatSecureIdent && identState == IS_IDBADGUY)
 		return 0;
 
-	if (!theApp.sharedfiles->GetFileByID(requpfileid)) //is any file requested?
+	const CKnownFile *pRequestedFile = theApp.sharedfiles->GetFileByID(requpfileid);
+	if (pRequestedFile == NULL) //is any file requested?
 		return 0;
 
 	// friend slot
@@ -305,24 +406,27 @@ const uint32 CUpDownClient::GetScore(const bool sysvalue, const bool isdownloadi
 		dwBaseValue += MIN2MS(::GetTickCount() >= m_dwUploadTime + MIN2MS(15) ? 15 : 30);
 	}
 	float fBaseValue = dwBaseValue / SEC2MS(1.0f);
-	if (thePrefs.UseCreditSystem() && !bPendingUtpSecureIdent)
+	if (thePrefs.UseCreditSystem() && !bPendingNatSecureIdent)
 		fBaseValue *= credits->GetScoreRatio(scoreIP);
 
-	if (!onlybasevalue)
+	if (!onlybasevalue) {
 		fBaseValue *= GetFilePrioAsNumber() / 10.0f;
+		if (thePrefs.IsLowRatioQueueScoreBoostEnabled() && pRequestedFile->GetAllTimeRatio() < thePrefs.GetLowRatioQueueScoreThreshold())
+			fBaseValue += static_cast<float>(thePrefs.GetLowRatioQueueScoreBonus());
+	}
 
 	if (!m_bUploaderPunishmentPreventionActive && !(thePrefs.IsDontPunishFriends() && IsFriend())) {
 		// Check if uTP connection - SecureIdent works differently for uTP due to IP changes during NAT traversal
-		bool bIsUtpConnection = (socket && socket->HaveUtpLayer(true));
+		bool bIsNatTraversalConnection = (socket && socket->HaveNatTraversalLayer(true));
 
-		if (thePrefs.GetVerbose() && bIsUtpConnection && credits) {
+		if (thePrefs.GetVerbose() && bIsNatTraversalConnection && credits) {
 			TRACE(_T("[uTP-SUI] GetScore check: %s - IsUtp=%d IdentState=%d Trusted=%d Pending=%d ScoreIP=%s CurrentIP=%s\n"),
-				(LPCTSTR)GetUserName(), bIsUtpConnection, identState, bTrustedUtpSecureIdent, bPendingUtpSecureIdent,
+				(LPCTSTR)GetUserName(), bIsNatTraversalConnection, identState, bTrustedNatSecureIdent, bPendingNatSecureIdent,
 				(LPCTSTR)scoreIP.ToStringC(), (LPCTSTR)GetIP().ToStringC());
 		}
 
 		// A fresh uTP re-auth should not inherit stale non-SUI penalties from the previous transport session.
-		if (!bPendingUtpSecureIdent) {
+		if (!bPendingNatSecureIdent) {
 			// ==> Punish Clients without SUI - sFrQlXeRt // IsHarderPunishment isn't necessary here since the cost is low
 			if (thePrefs.IsPunishNonSuiMlDonkey() && GetClientSoft() == SO_MLDONKEY & identState != IS_IDENTIFIED)
 				theApp.shield->SetPunishment(this, GetResString(_T("PUNISHMENT_REASON_NON_SUI_MLDONKEY")), PR_NONSUIMLDONKEY);
@@ -352,7 +456,7 @@ const uint32 CUpDownClient::GetScore(const bool sysvalue, const bool isdownloadi
 		}
 	
 		if (IsBadClient()) {
-			if (bPendingUtpSecureIdent && IsNonSuiPunishment(IsBadClient())) {
+			if (bPendingNatSecureIdent && IsNonSuiPunishment(IsBadClient())) {
 				// Ignore stale non-SUI punishment until the current uTP session settles its own SecureIdent result.
 			} else if (m_uPunishment <= P_UPLOADBAN)
 				fBaseValue = 0;
@@ -413,7 +517,7 @@ const bool CUpDownClient::ProcessExtendedInfo(CSafeMemFile &data, CKnownFile *te
 		if (nCompleteCountLast != nCompleteCountNew)
 			tempreqfile->UpdatePartsInfo();
 	}
-	theApp.emuledlg->transferwnd->GetQueueList()->RefreshClient(this);
+	theApp.QueueUploadClientRowsChanged(this, CemuleApp::UploadClientUiTargetQueueList);
 
 	//problem is: if a client just began to download a file, we receive an FNF
 	//later, if it has some chunks we don't find it via passive source finding because 
@@ -489,19 +593,27 @@ void CUpDownClient::AddReqBlock(Requested_Block_Struct *reqblock, bool bSignalIO
 
 	if (reqblock != NULL) {
 		if (GetUploadState() != US_UPLOADING) {
-			const bool bCanRepairUtpUploadState =
+			const bool bCanRepairNatUploadState =
 				socket != NULL
-				&& socket->HaveUtpLayer()
+				&& socket->HaveNatTraversalLayer()
 				&& socket->IsConnected()
 				&& CheckHandshakeFinished()
 				&& theApp.uploadqueue != NULL
 				&& theApp.uploadqueue->IsDownloading(this);
-			if (bCanRepairUtpUploadState) {
+			if (bCanRepairNatUploadState) {
 				if (thePrefs.GetLogNatTraversalEvents()) {
 					AddDebugLogLine(DLP_LOW, false, _T("[NatTraversal] AddReqBlock: repairing upload-state desync (%s) for %s"),
 						DbgGetUploadState(), (LPCTSTR)EscPercent(DbgGetClientInfo()));
-				}
+		}
 				SetUploadState(US_UPLOADING);
+			}
+		}
+
+		if (GetUploadState() != US_UPLOADING && GetUploadState() == US_ONUPLOADQUEUE && theApp.uploadqueue != NULL) {
+			CKnownFile *pQueuedRequestFile = theApp.sharedfiles != NULL ? theApp.sharedfiles->GetFileByID(reqblock->FileID) : NULL;
+			if (IsQueuedBlockRequestValid(reqblock, pQueuedRequestFile) && theApp.uploadqueue->TryAdmitQueuedBlockRequestClient(this)) {
+				if (thePrefs.GetLogUlDlEvents())
+					AddDebugLogLine(DLP_LOW, false, _T("UploadClient: Reopened upload slot after queued block request. %s"), (LPCTSTR)EscPercent(DbgGetClientInfo()));
 			}
 		}
 
@@ -510,6 +622,26 @@ void CUpDownClient::AddReqBlock(Requested_Block_Struct *reqblock, bool bSignalIO
 				AddDebugLogLine(DLP_LOW, false, _T("UploadClient: Client tried to add req block when not in upload slot! Prevented req blocks from being added. %s"), (LPCTSTR)EscPercent(DbgGetClientInfo()));
 			if (thePrefs.GetLogNatTraversalEvents())
 				AddDebugLogLine(DLP_LOW, false, _T("[NatTraversal] AddReqBlock: REJECTED - Not in upload slot (%s) for %s"), DbgGetUploadState(), (LPCTSTR)EscPercent(DbgGetClientInfo()));
+
+			const DWORD dwNow = ::GetTickCount();
+			const bool bCanResyncNatDownloader =
+				socket != NULL
+				&& socket->HaveNatTraversalLayer()
+				&& socket->IsConnected()
+				&& CheckHandshakeFinished()
+				&& !IsBanned()
+				&& (m_fSentOutOfPartReqs == 0 || dwNow - m_dwLastOutOfPartReqsResyncTick >= SEC2MS(30));
+			if (bCanResyncNatDownloader) {
+				CKnownFile* pRequestedFile = theApp.sharedfiles != NULL ? theApp.sharedfiles->GetFileByID(reqblock->FileID) : NULL;
+				if (pRequestedFile != NULL) {
+					if (thePrefs.GetLogNatTraversalEvents()) {
+						AddDebugLogLine(DLP_LOW, false, _T("[NatTraversal] AddReqBlock: sending OP_OUTOFPARTREQS to resync uTP downloader without upload slot, file=%s, client=%s"),
+							(LPCTSTR)EscPercent(pRequestedFile->GetFileName()), (LPCTSTR)EscPercent(DbgGetClientInfo()));
+			}
+					m_dwLastOutOfPartReqsResyncTick = dwNow;
+					SendOutOfPartReqsAndAddToWaitingQueue();
+		}
+			}
 			delete reqblock;
 			return;
 		}
@@ -522,8 +654,11 @@ void CUpDownClient::AddReqBlock(Requested_Block_Struct *reqblock, bool bSignalIO
 					delete reqblock;
 					return;
 				}
-			} else
-				ASSERT(0);
+			} else {
+				DebugLogWarning(_T("AddReqBlock: Collection upload slot requested unknown file, %s"), (LPCTSTR)EscPercent(DbgGetClientInfo()));
+				delete reqblock;
+				return;
+			}
 		}
 
 		CKnownFile *srcfile = theApp.sharedfiles->GetFileByID(reqblock->FileID);
@@ -556,6 +691,7 @@ void CUpDownClient::AddReqBlock(Requested_Block_Struct *reqblock, bool bSignalIO
 		if (srcfile->HideOSInWork() != 0 || bShareOnlyTheNeed) {
 			if (m_abyUpPartStatus == NULL) {
 				DebugLogWarning(_T("AddReqBlock: Missing upload part status for hidden-chunk protected file, %s, %s"), (LPCTSTR)EscPercent(DbgGetClientInfo()), (LPCTSTR)EscPercent(srcfile->GetFileName()));
+				pUploadingClientStruct->m_bIOError = true;
 				delete reqblock;
 				return;
 			}
@@ -565,6 +701,7 @@ void CUpDownClient::AddReqBlock(Requested_Block_Struct *reqblock, bool bSignalIO
 			for (UINT uPart = uStartPart; uPart <= uEndPart && uPart < m_nUpPartCount; ++uPart) {
 				if ((m_abyUpPartStatus[uPart] & (SC_HIDDENBYSOTN | SC_HIDDENBYHIDEOS)) != 0) {
 					DebugLogWarning(_T("AddReqBlock: Hidden upload block requested (part %u), %s, %s"), uPart, (LPCTSTR)EscPercent(DbgGetClientInfo()), (LPCTSTR)EscPercent(srcfile->GetFileName()));
+					pUploadingClientStruct->m_bIOError = true;
 					delete reqblock;
 					return;
 				}
@@ -585,7 +722,7 @@ void CUpDownClient::AddReqBlock(Requested_Block_Struct *reqblock, bool bSignalIO
 
 		CSingleLock lockBlockLists(&pUploadingClientStruct->m_csBlockListsLock, TRUE);
 		if (!lockBlockLists.IsLocked()) {
-			ASSERT(0);
+			DebugLogWarning(_T("AddReqBlock: Could not lock upload block list, %s"), (LPCTSTR)EscPercent(DbgGetClientInfo()));
 			delete reqblock;
 			return;
 		}
@@ -599,7 +736,7 @@ void CUpDownClient::AddReqBlock(Requested_Block_Struct *reqblock, bool bSignalIO
 		const DWORD dwLastUpRequest = GetLastUpRequest();
 		const DWORD dwReaskGapMs = (dwLastUpRequest != 0) ? (dwNow - dwLastUpRequest) : 0;
 		const bool bLongReaskGap = (dwLastUpRequest != 0 && dwReaskGapMs >= kUtpStallReaskGapMs);
-		const bool bIsUtpConnection = (socket != NULL && socket->HaveUtpLayer());
+		const bool bIsNatTraversalConnection = (socket != NULL && socket->HaveNatTraversalLayer());
 
 		uint64 uSentPayloadSnapshot = GetQueueSessionPayloadUp();
 		if (socket != NULL)
@@ -613,8 +750,8 @@ void CUpDownClient::AddReqBlock(Requested_Block_Struct *reqblock, bool bSignalIO
 		const bool bNoProgressGap = (dwLastUpRequest != 0 && dwReaskGapMs >= kUtpNoProgressGapMs && (bNoBufferedPayload || bNoQueuedFilePackets));
 		// Keep long re-ask gap for diagnostics only.
 		// Destructive recovery must be armed strictly by no-progress signal.
-		const bool bRecoveryArmed = bIsUtpConnection && bNoProgressGap;
-		const bool bStaleUtpBufferAccounting = bIsUtpConnection && bLongReaskGap && bNoQueuedFilePackets && uUploadAddedSnapshot > uSentPayloadSnapshot;
+		const bool bRecoveryArmed = bIsNatTraversalConnection && bNoProgressGap;
+		const bool bStaleNatBufferAccounting = bIsNatTraversalConnection && bLongReaskGap && bNoQueuedFilePackets && uUploadAddedSnapshot > uSentPayloadSnapshot;
 
 		bool bResetUploadWindow = false;
 		bool bNeedFlushSendBlocks = false;
@@ -624,25 +761,16 @@ void CUpDownClient::AddReqBlock(Requested_Block_Struct *reqblock, bool bSignalIO
 		uint64 uUploadAddedBeforeReset = uUploadAddedSnapshot;
 		uint64 uUploadAddedAfterReset = uUploadAddedSnapshot;
 
-		if (bStaleUtpBufferAccounting) {
+		if (bStaleNatBufferAccounting) {
 			bResetUploadWindow = true;
 			bResetStaleBufferedAccounting = true;
 		}
 
-		bool bDuplicateDoneBlock = false;
-		for (POSITION pos = pUploadingClientStruct->m_DoneBlocks_list.GetHeadPosition(); pos != NULL;) {
-			const Requested_Block_Struct *cur_reqblock = pUploadingClientStruct->m_DoneBlocks_list.GetNext(pos);
-			if (reqblock->StartOffset == cur_reqblock->StartOffset
-				&& reqblock->EndOffset == cur_reqblock->EndOffset
-				&& md4equ(reqblock->FileID, cur_reqblock->FileID))
-			{
-				bDuplicateDoneBlock = true;
-				break;
-			}
-		}
+		const SUploadBlockRequestKey requestKey(reqblock->StartOffset, reqblock->EndOffset, reqblock->FileID);
+		const bool bDuplicateDoneBlock = pUploadingClientStruct->m_DoneBlocks_keys.find(requestKey) != pUploadingClientStruct->m_DoneBlocks_keys.end();
 
 		if (bDuplicateDoneBlock) {
-			const bool bCanRecoverDoneDuplicate = bRecoveryArmed || bStaleUtpBufferAccounting;
+			const bool bCanRecoverDoneDuplicate = bRecoveryArmed || bStaleNatBufferAccounting;
 			if (!bCanRecoverDoneDuplicate) {
 				delete reqblock;
 				return;
@@ -650,46 +778,46 @@ void CUpDownClient::AddReqBlock(Requested_Block_Struct *reqblock, bool bSignalIO
 
 			while (!pUploadingClientStruct->m_DoneBlocks_list.IsEmpty())
 				delete pUploadingClientStruct->m_DoneBlocks_list.RemoveHead();
+			pUploadingClientStruct->m_DoneBlocks_keys.clear();
 
 			bResetUploadWindow = true;
 			bNeedFlushSendBlocks = true;
 			bClearedDoneBlocks = true;
 		}
 
-		for (POSITION pos = pUploadingClientStruct->m_BlockRequests_queue.GetHeadPosition(); pos != NULL;) {
-			const Requested_Block_Struct *cur_reqblock = pUploadingClientStruct->m_BlockRequests_queue.GetNext(pos);
-			if (reqblock->StartOffset == cur_reqblock->StartOffset
-				&& reqblock->EndOffset == cur_reqblock->EndOffset
-				&& md4equ(reqblock->FileID, cur_reqblock->FileID))
-			{
-				// For armed uTP recovery, queued duplicates are considered stale.
-				// Replace stale duplicate entries with the fresh request.
-				if (bRecoveryArmed) {
-					for (POSITION posScan = pUploadingClientStruct->m_BlockRequests_queue.GetHeadPosition(); posScan != NULL;) {
-						POSITION posRemove = posScan;
-						Requested_Block_Struct *queuedReq = pUploadingClientStruct->m_BlockRequests_queue.GetNext(posScan);
-						if (queuedReq->StartOffset == reqblock->StartOffset
-							&& queuedReq->EndOffset == reqblock->EndOffset
-							&& md4equ(queuedReq->FileID, reqblock->FileID))
-						{
-							pUploadingClientStruct->m_BlockRequests_queue.RemoveAt(posRemove);
-							delete queuedReq;
-							++uRemovedStaleQueued;
-						}
-					}
-					if (uRemovedStaleQueued > 0) {
-						bResetUploadWindow = true;
-						bNeedFlushSendBlocks = true;
-						break;
-					}
-				}
-
+		if (pUploadingClientStruct->m_BlockRequests_keys.find(requestKey) != pUploadingClientStruct->m_BlockRequests_keys.end()) {
+			// For armed uTP recovery, queued duplicates are considered stale.
+			// Replace stale duplicate entries with the fresh request.
+			if (bRecoveryArmed) {
+				for (POSITION posScan = pUploadingClientStruct->m_BlockRequests_queue.GetHeadPosition(); posScan != NULL;) {
+					POSITION posRemove = posScan;
+					Requested_Block_Struct *queuedReq = pUploadingClientStruct->m_BlockRequests_queue.GetNext(posScan);
+					if (IsSameUploadBlockRequest(queuedReq, reqblock)) {
+						pUploadingClientStruct->m_BlockRequests_keys.erase(SUploadBlockRequestKey(queuedReq->StartOffset, queuedReq->EndOffset, queuedReq->FileID));
+						pUploadingClientStruct->m_BlockRequests_queue.RemoveAt(posRemove);
+						delete queuedReq;
+						++uRemovedStaleQueued;
+			}
+		}
+				if (uRemovedStaleQueued > 0) {
+					bResetUploadWindow = true;
+					bNeedFlushSendBlocks = true;
+		}
+			} else {
 				delete reqblock;
 				return;
 			}
 		}
 
-		pUploadingClientStruct->m_BlockRequests_queue.AddTail(reqblock);
+		std::unique_ptr<Requested_Block_Struct> reqblockOwner(reqblock);
+		pUploadingClientStruct->m_BlockRequests_keys.insert(requestKey);
+		try {
+			pUploadingClientStruct->m_BlockRequests_queue.AddTail(reqblockOwner.get());
+		} catch (...) {
+			pUploadingClientStruct->m_BlockRequests_keys.erase(requestKey);
+			throw;
+		}
+		reqblockOwner.release();
 		dbgLastQueueCount = pUploadingClientStruct->m_BlockRequests_queue.GetCount();
 
 		if (bResetUploadWindow) {
@@ -780,7 +908,7 @@ void CUpDownClient::UpdateUploadingStatisticsData()
 	else
 		m_nUpDatarate = 0; // not enough data to calculate trustworthy speed
 
-	theApp.emuledlg->transferwnd->GetUploadList()->RefreshClient(this);
+	theApp.QueueUploadClientRowsChanged(this, CemuleApp::UploadClientUiTargetUploadList);
 	theApp.emuledlg->transferwnd->GetClientList()->RefreshClient(this, -1, CClientListCtrl::kSortImpactTransferredUp);
 }
 
@@ -903,14 +1031,14 @@ void CUpDownClient::AddRequestCount(const uchar *fileid)
 	for (POSITION pos = m_RequestedFiles_list.GetHeadPosition(); pos != NULL;) {
 		Requested_File_Struct *cur_struct = m_RequestedFiles_list.GetNext(pos);
 		if (md4equ(cur_struct->fileid, fileid)) {
-			// NAT-T/uTP connections naturally involve multiple retry attempts due to:
+			// NAT-T connections naturally involve multiple retry attempts due to:
 			// - NAT hole punching process requiring multiple packets
-			// - uTP packet loss and retransmission mechanisms
+			// - NAT-T packet loss and retransmission mechanisms
 			// - Connection establishment through intermediary peers
-			// Therefore, bypass request time limit check entirely for NAT-T/uTP connections
-			bool bHasUtpLayer = (socket && socket->HaveUtpLayer());
+			// Therefore, bypass request time limit check entirely for NAT-T connections
+			bool bHasNatTraversalLayer = (socket && socket->HaveNatTraversalLayer());
 			bool bHasKadPort = (GetKadPort() != 0);
-			bool bIsNatTraversalConnection = bHasUtpLayer || bHasKadPort;
+			bool bIsNatTraversalConnection = bHasNatTraversalLayer || bHasKadPort;
 			
 			if (curTick < cur_struct->lastasked + MIN_REQUESTTIME && !GetFriendSlot() && !bIsNatTraversalConnection) {
 				cur_struct->badrequests += static_cast<uint8>(GetDownloadState() != DS_DOWNLOADING);
@@ -935,6 +1063,7 @@ void  CUpDownClient::UnBan()
 	if (GetConnectIP().IsNull() && isnulmd4(GetUserHash()))
 		return;
 
+	const bool bOnUploadQueue = theApp.uploadqueue != NULL && theApp.uploadqueue->IsOnUploadQueue(this);
 	uiULAskingCounter = 0;
 	tLastSeen = time(NULL);
 
@@ -952,9 +1081,13 @@ void  CUpDownClient::UnBan()
 
 	theApp.clientlist->AddTrackClient(this);
 	theApp.clientlist->RemoveBannedClient(GetConnectIP().ToStringC());
-	SetUploadState(US_NONE);
-	ClearWaitStartTime();
-	theApp.emuledlg->transferwnd->ShowQueueCount(theApp.uploadqueue->GetWaitingUserCount());
+	if (bOnUploadQueue)
+		SetUploadState(US_ONUPLOADQUEUE);
+	else {
+		SetUploadState(US_NONE);
+		ClearWaitStartTime();
+	}
+	theApp.QueueUploadListChangedEvent(CemuleApp::UploadClientUiTargetQueueList, _T("upload-client-ban-state"));
 	for (POSITION pos = m_RequestedFiles_list.GetHeadPosition(); pos != NULL;) {
 		Requested_File_Struct *cur_struct = m_RequestedFiles_list.GetNext(pos);
 		cur_struct->badrequests = 0;
@@ -985,8 +1118,8 @@ const void CUpDownClient::Ban(const CString& strReason, const uint8 uBadClientCa
 		theApp.clientlist->AddBannedClient(GetConnectIP().ToStringC());
 
 	SetUploadState(US_BANNED);
-	theApp.emuledlg->transferwnd->ShowQueueCount(theApp.uploadqueue->GetWaitingUserCount());
-	theApp.emuledlg->transferwnd->GetQueueList()->RefreshClient(this);
+	theApp.QueueUploadListChangedEvent(CemuleApp::UploadClientUiTargetQueueList, _T("upload-client-ban-state"));
+	theApp.QueueUploadClientRowsChanged(this, CemuleApp::UploadClientUiTargetQueueList);
 	if (socket != NULL && socket->IsConnected())
 		socket->ShutDown(CAsyncSocket::receives); // let the socket timeout, since we don't want to risk to delete the client right now. This isn't actually perfect, could be changed later
 }
@@ -1042,26 +1175,27 @@ CEMSocket* CUpDownClient::GetFileUploadSocket(bool bLog)
 
 void CUpDownClient::SetCollectionUploadSlot(bool bValue)
 {
-	ASSERT(!IsDownloading() || bValue == m_bCollectionUploadSlot);
+	if (IsDownloading() && bValue != m_bCollectionUploadSlot && thePrefs.GetLogNatTraversalEvents())
+		AddDebugLogLine(DLP_LOW, false, _T("[NatTraversal] SetCollectionUploadSlot while downloading: %d -> %d for %s"), m_bCollectionUploadSlot ? 1 : 0, bValue ? 1 : 0, (LPCTSTR)EscPercent(DbgGetClientInfo()));
 	m_bCollectionUploadSlot = bValue;
 }
 
 // NAT-T keep-alive for uploader side
 // This function is called from UploadQueue::Process() to maintain NAT mapping
-// for uTP connections. Without this, the uploader's NAT mapping may timeout
+// for NAT-T connections. Without this, the uploader's NAT mapping may timeout
 // during idle periods, causing downloader's re-ask packets to fail.
 void CUpDownClient::CheckNatTraversalKeepAlive()
 {
 	// 1. Is Uploading?
 	if (GetUploadState() != US_UPLOADING) return;
 
-	// 2. Is this a NAT-T/uTP connection?
-	if (!socket || !socket->HaveUtpLayer()) return;
+	// 2. Is this a NAT-T connection?
+	if (!socket || !socket->HaveNatTraversalLayer()) return;
 
 	// 3. Send keep-alive every 10 seconds of inactivity
 	DWORD dwNow = ::GetTickCount();
 	if (dwNow - m_dwLastNatKeepAliveSent > SEC2MS(10)) {
-		// Trigger uTP keep-alive - this sends a minimal ack or ping to keep NAT mapping alive
+		// Trigger NAT-T keep-alive - this sends a minimal ack or ping to keep NAT mapping alive
 		if (thePrefs.GetLogNatTraversalEvents())
 			AddDebugLogLine(DLP_LOW, false, _T("[NatTraversal] Uploader keep-alive: Sending NAT ping for %s"),
 				(LPCTSTR)EscPercent(DbgGetClientInfo()));

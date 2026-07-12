@@ -2,6 +2,7 @@
 //Copyright (C)2026 eMule AI
 
 #include "stdafx.h"
+#include <Richedit.h>
 #include "emule.h"
 #include "MuleStatusbarCtrl.h"
 #include "ClientList.h"
@@ -17,7 +18,7 @@ static char THIS_FILE[]=__FILE__;
 #endif
 
 #define WM_ITEM_HELP			(WM_USER + 0x102 + 1)
-static LPCTSTR kHelpKeyProp = _T("BB_HelpKey");
+static LPCTSTR kHelpKeyProp = _T("BlacklistHelpKey");
 
 ///////////////////////////////////////////////////////////////////////////////
 // CPPgBlacklistPanel dialog
@@ -33,6 +34,8 @@ BEGIN_MESSAGE_MAP(CPPgBlacklistPanel, CPropertyPage)
 	ON_BN_CLICKED(IDC_BLACKLIST_LOG_CHECKBOX, OnSettingsChange)
 	ON_EN_CHANGE(IDC_BLACKLIST_DEFINITIONS_TEXTBOX, OnSettingsChange)
 	ON_WM_CTLCOLOR()
+	ON_WM_SYSCOLORCHANGE()
+	ON_WM_SIZE()
 END_MESSAGE_MAP()
 
 CPPgBlacklistPanel::CPPgBlacklistPanel()
@@ -79,29 +82,110 @@ BOOL CPPgBlacklistPanel::OnApply()
 }
 
 void CPPgBlacklistPanel::ReadBlacklistDefinitionsFromTextbox() {
-	thePrefs.blacklist_list.RemoveAll();
+	CStringList blacklistDefinitions;
 	CString m_strBlacklistDefinitions = NULL;
 	int m_iNewlinePosition = 0;
 	GetDlgItemText(IDC_BLACKLIST_DEFINITIONS_TEXTBOX, m_strBlacklistDefinitions);
 	CString m_strBlacklistLine = m_strBlacklistDefinitions.Tokenize(_T("\r\n"), m_iNewlinePosition);
 	while (m_iNewlinePosition != -1) {
 		m_strBlacklistLine.Trim(_T("\t\r\n")); // Trim '\r' in binary mode.
-		if (m_strBlacklistLine[0] != _T('#') && m_strBlacklistLine[0] != _T('\\')) // If this is not a comment or regex definition line, convert it to lower case for case insensitive comparisons.
-			m_strBlacklistLine.MakeLower();
-		if (!m_strBlacklistLine.IsEmpty())
-			thePrefs.blacklist_list.AddTail(m_strBlacklistLine);
+		if (!m_strBlacklistLine.IsEmpty()) {
+			if (m_strBlacklistLine[0] != _T('#') && m_strBlacklistLine[0] != _T('\\'))
+				m_strBlacklistLine.MakeLower();
+			blacklistDefinitions.AddTail(m_strBlacklistLine);
+		}
 		m_strBlacklistLine = m_strBlacklistDefinitions.Tokenize(_T("\r\n"), m_iNewlinePosition);
 	}
+	thePrefs.ReplaceBlacklistList(blacklistDefinitions);
+}
+
+void CPPgBlacklistPanel::ConfigureBlacklistDefinitionsTextBox()
+{
+	CWnd* pWnd = GetDlgItem(IDC_BLACKLIST_DEFINITIONS_TEXTBOX);
+	if (pWnd == NULL || pWnd->GetSafeHwnd() == NULL)
+		return;
+
+	static const WPARAM kBlacklistDefinitionsTextLimit = 4 * 1024 * 1024;
+	pWnd->SendMessage(EM_LIMITTEXT, kBlacklistDefinitionsTextLimit);
+	pWnd->SendMessage(EM_EXLIMITTEXT, 0, (LPARAM)kBlacklistDefinitionsTextLimit);
+	pWnd->SendMessage(EM_SETEVENTMASK, 0, pWnd->SendMessage(EM_GETEVENTMASK) | ENM_CHANGE);
+}
+
+void CPPgBlacklistPanel::UpdateBlacklistDefinitionsTextBoxColors()
+{
+	CWnd* pWnd = GetDlgItem(IDC_BLACKLIST_DEFINITIONS_TEXTBOX);
+	if (pWnd == NULL || pWnd->GetSafeHwnd() == NULL)
+		return;
+
+	const COLORREF crBackground = GetCustomSysColor(COLOR_WINDOW);
+	const COLORREF crText = GetCustomSysColor(COLOR_WINDOWTEXT);
+	pWnd->SendMessage(EM_SETBKGNDCOLOR, 0, crBackground);
+
+	CHARFORMAT cf = {};
+	cf.cbSize = sizeof(cf);
+	cf.dwMask = CFM_COLOR;
+	cf.dwEffects = 0;
+	cf.crTextColor = crText;
+	pWnd->SendMessage(EM_SETCHARFORMAT, SCF_DEFAULT, (LPARAM)&cf);
+	pWnd->SendMessage(EM_SETCHARFORMAT, SCF_ALL, (LPARAM)&cf);
+	pWnd->Invalidate();
 }
 
 BOOL CPPgBlacklistPanel::OnInitDialog()
 {
 	CPropertyPage::OnInitDialog();
 	InitWindowStyles(this);
+	ConfigureBlacklistDefinitionsTextBox();
 	LoadSettings();
 	Localize();
+	UpdateBlacklistDefinitionsTextBoxColors();
+	UpdateLayout();
 
 	return TRUE;  // return TRUE unless you set the focus to the control. EXCEPTION: OCX Property Pages should return FALSE
+}
+
+void CPPgBlacklistPanel::UpdateLayout()
+{
+	CWnd* pDefinitionsFrame = GetDlgItem(IDC_BLACKLIST_DEF_FRM);
+	CWnd* pDefinitionsText = GetDlgItem(IDC_BLACKLIST_DEFINITIONS_TEXTBOX);
+	CWnd* pInfo = GetDlgItem(IDC_BLACKLIST_PANEL_HELP_TEXTBOX);
+	if (pDefinitionsFrame == NULL || pDefinitionsText == NULL || pInfo == NULL || !::IsWindow(pDefinitionsFrame->GetSafeHwnd()) || !::IsWindow(pDefinitionsText->GetSafeHwnd()) || !::IsWindow(pInfo->GetSafeHwnd()))
+		return;
+
+	CRect rcClient;
+	GetClientRect(&rcClient);
+
+	CRect rcFrame;
+	pDefinitionsFrame->GetWindowRect(&rcFrame);
+	ScreenToClient(&rcFrame);
+
+	CRect rcText;
+	pDefinitionsText->GetWindowRect(&rcText);
+	ScreenToClient(&rcText);
+
+	CRect rcInfo;
+	pInfo->GetWindowRect(&rcInfo);
+	ScreenToClient(&rcInfo);
+
+	const int iBottomMargin = max(1, rcInfo.left);
+	const int iInnerBottomMargin = max(1, rcFrame.bottom - rcText.bottom);
+	const int iInfoTop = max(rcFrame.top + 1, rcClient.bottom - iBottomMargin - rcInfo.Height());
+	rcInfo.OffsetRect(0, iInfoTop - rcInfo.top);
+	pInfo->MoveWindow(&rcInfo);
+
+	rcFrame.bottom = rcInfo.top;
+	if (rcFrame.bottom > rcFrame.top)
+		pDefinitionsFrame->MoveWindow(&rcFrame);
+
+	rcText.bottom = rcFrame.bottom - iInnerBottomMargin;
+	if (rcText.bottom > rcText.top)
+		pDefinitionsText->MoveWindow(&rcText);
+}
+
+void CPPgBlacklistPanel::OnSize(UINT nType, int cx, int cy)
+{
+	CPropertyPage::OnSize(nType, cx, cy);
+	UpdateLayout();
 }
 
 BOOL CPPgBlacklistPanel::OnKillActive()
@@ -198,6 +282,12 @@ BOOL CPPgBlacklistPanel::OnHelpInfo(HELPINFO* /*pHelpInfo*/)
 {
 	OnHelp();
 	return TRUE;
+}
+
+void CPPgBlacklistPanel::OnSysColorChange()
+{
+	CPropertyPage::OnSysColorChange();
+	UpdateBlacklistDefinitionsTextBoxColors();
 }
 
 HBRUSH CPPgBlacklistPanel::OnCtlColor(CDC* pDC, CWnd* pWnd, UINT nCtlColor)

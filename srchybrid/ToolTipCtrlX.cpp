@@ -22,7 +22,7 @@
 #include "emule.h"
 #include "log.h"
 #include "eMuleAI/DarkMode.h"
-#include "eMuleAI/GeoLite2.h"
+#include "eMuleAI/IPGeolocation.h"
 
 #ifdef _DEBUG
 #define new DEBUG_NEW
@@ -186,6 +186,9 @@ CToolTipCtrlX::CToolTipCtrlX()
 	, m_bOwnsWindow(false)
 	, m_bProcessingDeferredMessage(false)
 	, m_uDeferredHideMessage(0)
+	, m_hHeaderIconImageList(NULL)
+	, m_iHeaderIconImage(-1)
+	, m_sizHeaderIcon(0, 0)
 {
 	memset(&m_tiDeferredTextUpdate, 0, sizeof(m_tiDeferredTextUpdate));
 	memset(&m_tiDeferredHide, 0, sizeof(m_tiDeferredHide));
@@ -215,6 +218,33 @@ void CToolTipCtrlX::SetCol1DrawTextFlags(DWORD dwFlags)
 void CToolTipCtrlX::SetCol2DrawTextFlags(DWORD dwFlags)
 {
 	m_dwCol2DrawTextFlags = DFLT_DRAWTEXT_FLAGS | dwFlags;
+}
+
+void CToolTipCtrlX::SetHeaderIcon(CImageList *pImageList, int iImage)
+{
+	ClearHeaderIcon();
+
+	if (pImageList == NULL || pImageList->GetSafeHandle() == NULL || iImage < 0)
+		return;
+
+	IMAGEINFO ii = {};
+	if (!pImageList->GetImageInfo(iImage, &ii))
+		return;
+
+	const CSize sizHeaderIcon(ii.rcImage.right - ii.rcImage.left, ii.rcImage.bottom - ii.rcImage.top);
+	if (sizHeaderIcon.cx <= 0 || sizHeaderIcon.cy <= 0)
+		return;
+
+	m_hHeaderIconImageList = pImageList->GetSafeHandle();
+	m_iHeaderIconImage = iImage;
+	m_sizHeaderIcon = sizHeaderIcon;
+}
+
+void CToolTipCtrlX::ClearHeaderIcon()
+{
+	m_hHeaderIconImageList = NULL;
+	m_iHeaderIconImage = -1;
+	m_sizHeaderIcon = CSize(0, 0);
 }
 
 BOOL CToolTipCtrlX::SubclassWindow(HWND hWnd)
@@ -484,7 +514,17 @@ void CToolTipCtrlX::CustomPaint(LPNMTTCUSTOMDRAW pNMCD)
 
 	const TooltipThemeColors palette = GetTooltipThemeColors();
 	TooltipHeaderIcon headerIcon = {};
-	const bool bHasHeaderIcon = TryGetTooltipHeaderIcon(GetSafeHwnd(), headerIcon);
+	bool bHasHeaderIcon = false;
+	if (m_hHeaderIconImageList != NULL && m_iHeaderIconImage >= 0 && m_sizHeaderIcon.cx > 0 && m_sizHeaderIcon.cy > 0) {
+		headerIcon.pImageList = CImageList::FromHandle(m_hHeaderIconImageList);
+		if (headerIcon.pImageList != NULL) {
+			headerIcon.iImage = m_iHeaderIconImage;
+			headerIcon.size = m_sizHeaderIcon;
+			bHasHeaderIcon = true;
+		}
+	}
+	if (!bHasHeaderIcon)
+		bHasHeaderIcon = TryGetTooltipHeaderIcon(GetSafeHwnd(), headerIcon);
 	pdc->SetTextColor(palette.crValueText);
 
 	// Auto-format the text only if explicitly requested. Otherwise we would also format
@@ -502,8 +542,8 @@ void CToolTipCtrlX::CustomPaint(LPNMTTCUSTOMDRAW pNMCD)
 	const bool bShowHeaderIcon = bHasHeaderIcon && !bShowFileIcon;
 	const int iHeaderIconSpacing = bShowHeaderIcon ? 8 : 0;
 	const int iHeaderIconDrawingWidth = bShowHeaderIcon ? (headerIcon.size.cx + iHeaderIconSpacing) : 0;
-	const bool bFlagsAvailable = theApp.geolite2 && theApp.geolite2->ShowCountryFlag()
-		&& theApp.geolite2->GetFlagImageList() && theApp.geolite2->GetFlagImageList()->GetSafeHandle() != NULL;
+	const bool bFlagsAvailable = theApp.ipgeolocation && theApp.ipgeolocation->ShowCountryFlag()
+		&& theApp.ipgeolocation->GetFlagImageList() && theApp.ipgeolocation->GetFlagImageList()->GetSafeHandle() != NULL;
 	if (bShowFileIcon) {
 		int iPosNL = strText.Find(_T('\n'));
 		if (iPosNL > 0) {
@@ -658,9 +698,9 @@ void CToolTipCtrlX::CustomPaint(LPNMTTCUSTOMDRAW pNMCD)
 					rcDT.left = ptText.x + iMaxCol1Width + iMiddleMargin;
 					rcDT.right = rcDT.left + iMaxCol2Width;
 					pdc->SetTextColor(palette.crValueText);
-					if (bFlagInCol2 && theApp.geolite2 && theApp.geolite2->GetFlagImageList() && theApp.geolite2->GetFlagImageList()->GetSafeHandle() != NULL) {
+					if (bFlagInCol2 && theApp.ipgeolocation && theApp.ipgeolocation->GetFlagImageList() && theApp.ipgeolocation->GetFlagImageList()->GetSafeHandle() != NULL) {
 						const int iPosY = ptText.y + max(0, (iTextHeight - FLAG_HEIGHT) / 2);
-						::ImageList_Draw(theApp.geolite2->GetFlagImageList()->GetSafeHandle(), iFlagIndex, pdc->GetSafeHdc(), rcDT.left, iPosY, ILD_TRANSPARENT);
+						::ImageList_Draw(theApp.ipgeolocation->GetFlagImageList()->GetSafeHandle(), iFlagIndex, pdc->GetSafeHdc(), rcDT.left, iPosY, ILD_TRANSPARENT);
 						rcDT.left += iLineFlagWidth;
 					}
 					if (*pszCol2 != _T('\0'))
@@ -695,13 +735,13 @@ void CToolTipCtrlX::CustomPaint(LPNMTTCUSTOMDRAW pNMCD)
 			} else {
 				if (bLineHasFlag && strLine != _T("<br>") && strLine != _T("<br_head>")) {
 					const int iFlagLineHeight = max(iTextHeight, FLAG_HEIGHT + iLineHeightOff);
-					if (theApp.geolite2 && theApp.geolite2->GetFlagImageList() && theApp.geolite2->GetFlagImageList()->GetSafeHandle() != NULL) {
+					if (theApp.ipgeolocation && theApp.ipgeolocation->GetFlagImageList() && theApp.ipgeolocation->GetFlagImageList()->GetSafeHandle() != NULL) {
 						const int iPosY = ptText.y + max(0, (iFlagLineHeight - FLAG_HEIGHT) / 2);
-						::ImageList_Draw(theApp.geolite2->GetFlagImageList()->GetSafeHandle(), iFlagIndex, pdc->GetSafeHdc(), ptText.x, iPosY, ILD_TRANSPARENT);
+						::ImageList_Draw(theApp.ipgeolocation->GetFlagImageList()->GetSafeHandle(), iFlagIndex, pdc->GetSafeHdc(), ptText.x, iPosY, ILD_TRANSPARENT);
 					}
 					CRect rcLine(ptText.x + iLineFlagWidth, ptText.y, ptText.x + iMaxSingleLineWidth, ptText.y + iFlagLineHeight);
 					pdc->SetTextColor(palette.crValueText);
-					pdc->DrawText(strLineText.IsEmpty() ? _T(" ") : strLineText, rcLine, m_dwCol1DrawTextFlags);
+					pdc->DrawText(strLineText.IsEmpty() ? CString(_T(" ")) : strLineText, rcLine, m_dwCol1DrawTextFlags);
 					ptText.y += iFlagLineHeight;
 				} else {
 					bool bIsBrHeadLine = !bAutoFormatText || (strLine != _T("<br>"));
@@ -721,7 +761,7 @@ void CToolTipCtrlX::CustomPaint(LPNMTTCUSTOMDRAW pNMCD)
 							CFont* pOldFont = m_bCol1Bold ? pdc->SelectObject(&m_fontBold) : NULL;
 							pdc->SetTextColor(bMainTitleDrawn ? palette.crTitleText : palette.crMainTitleText);
 							CRect rcTitle(ptText.x + ((bShowHeaderIcon && !bHeaderIconDrawn && bIsMainTitleLine) ? iHeaderIconDrawingWidth : 0), ptText.y, ptText.x + iMaxSingleLineWidth, ptText.y + iTextHeight);
-							pdc->DrawText(strLineText.IsEmpty() ? _T(" ") : strLineText, rcTitle, m_dwCol1DrawTextFlags);
+							pdc->DrawText(strLineText.IsEmpty() ? CString(_T(" ")) : strLineText, rcTitle, m_dwCol1DrawTextFlags);
 							if (pOldFont)
 								pdc->SelectObject(pOldFont);
 							if (bShowHeaderIcon && !bHeaderIconDrawn && bIsMainTitleLine) {

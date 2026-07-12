@@ -45,6 +45,7 @@ public:
 protected:
 	virtual void DoDataExchange(CDataExchange *pDX);    // DDX/DDV support
 	virtual BOOL OnCommand(WPARAM wParam, LPARAM lParam);
+	virtual void OnOK();
 	//}}AFX_VIRTUAL
 
 // Implementation
@@ -68,8 +69,14 @@ protected:
 	HICON m_hDownArrow;
 
 	UINT m_nExitCode;
+	bool m_bUpdatingControls;
 
 	// Generated message map functions
+	void UpdateSpeedTextControls();
+	void SetSpeedText(UINT nID, uint32 nKBytesPerSec);
+	bool TryGetSpeedText(UINT nID, uint32& rnKBytesPerSec) const;
+	bool UpdateSpeedFromText(UINT nID, bool bCommitText);
+	void CommitSpeedTextControls();
 	afx_msg void OnMouseMove(UINT nFlags, CPoint point);
 	virtual BOOL OnInitDialog();
 	afx_msg void OnChangeDowntxt();

@@ -26,6 +26,27 @@ class CKnownFile;
 
 static void FreeMemory(void *arg);
 
+
+class CArchivePreviewListCtrl : public CListCtrlX
+{
+public:
+	CArchivePreviewListCtrl();
+	void SetReducedDarkCleanup(bool bEnable)				{ m_bReducedDarkCleanup = bEnable; }
+
+protected:
+	bool m_bReducedDarkCleanup;
+	void RedrawAfterHeaderTrack();
+	void DrawReducedDarkItem(LPNMLVCUSTOMDRAW pDraw);
+	void PaintReducedDarkEmptyArea(CDC *pDC);
+
+	DECLARE_MESSAGE_MAP()
+	afx_msg void OnNmCustomDraw(NMHDR *pNMHDR, LRESULT *pResult);
+	afx_msg BOOL OnHdrItemChanging(UINT id, LPNMHDR pNMHDR, LRESULT *pResult);
+	afx_msg BOOL OnHdrItemChanged(UINT id, LPNMHDR pNMHDR, LRESULT *pResult);
+	afx_msg BOOL OnHdrTrack(UINT id, LPNMHDR pNMHDR, LRESULT *pResult);
+	afx_msg BOOL OnHdrEndTrack(UINT id, LPNMHDR pNMHDR, LRESULT *pResult);
+};
+
 ///////////////////////////////////////////////////////////////////////////////
 // CArchivePreviewDlg
 
@@ -50,12 +71,17 @@ protected:
 	const CSimpleArray<CObject*> *m_paFiles;
 	archiveScannerThreadParams_s *m_activeTParams;
 
-	CListCtrlX	m_ContentList;
+	CArchivePreviewListCtrl	m_ContentList;
 	int			m_StoredColWidth2, m_StoredColWidth5;
 	bool		m_bDataChanged;
 	bool		m_bReducedDlg;
 
 	void UpdateArchiveDisplay(bool doscan);
+	void UpdateArchiveListExtendedStyle();
+	void UpdateReducedDarkProgressStyle();
+	bool IsReducedDarkArchivePage() const;
+	void PaintReducedDarkArchiveItemBackground(LPNMLVCUSTOMDRAW pDraw);
+	void PaintReducedDarkArchiveEmptyArea(CDC *pDC);
 	int ShowISOResults(int succ, archiveScannerThreadParams_s *tp);
 	int ShowZipResults(int succ, archiveScannerThreadParams_s *tp);
 	int ShowRarResults(int succ, archiveScannerThreadParams_s *tp);
@@ -70,6 +96,8 @@ protected:
 	CProgressCtrlX m_progressbar;
 
 	DECLARE_MESSAGE_MAP()
+	afx_msg BOOL OnEraseBkgnd(CDC* pDC);
+	afx_msg void OnSysColorChange();
 	afx_msg void OnBnClickedRead();
 	afx_msg void OnBnClickedCreateRestored();
 	afx_msg void OnBnExplain();

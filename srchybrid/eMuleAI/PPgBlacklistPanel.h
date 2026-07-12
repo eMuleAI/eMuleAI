@@ -19,6 +19,8 @@ public:
 	void LocalizeCommonItems(void);
 	void LoadSettings(void);
 	void ReadBlacklistDefinitionsFromTextbox();
+	void ConfigureBlacklistDefinitionsTextBox();
+	void UpdateBlacklistDefinitionsTextBoxColors();
 
 	enum { IDD = IDD_PPG_BLACKLIST_PANEL }; // Dialog Data
 
@@ -32,5 +34,8 @@ protected:
 	afx_msg void OnHelp();
 	afx_msg BOOL OnHelpInfo(HELPINFO* pHelpInfo);
 	afx_msg void OnSettingsChange() { SetModified(); }
+	afx_msg void OnSize(UINT nType, int cx, int cy);
+	afx_msg void OnSysColorChange();
 	afx_msg HBRUSH OnCtlColor(CDC* pDC, CWnd* pWnd, UINT nCtlColor);
+	void UpdateLayout();
 };

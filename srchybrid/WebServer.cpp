@@ -1,5 +1,6 @@
 ﻿#include "stdafx.h"
 #include <locale.h>
+#include <math.h>
 #include <algorithm>
 #include "emule.h"
 #include "StringConversion.h"
@@ -56,6 +57,77 @@ static char THIS_FILE[] = __FILE__;
 
 #define WEB_SERVER_TEMPLATES_VERSION	7
 
+static const INT_PTR WEB_MAX_TABLE_ROWS = 2000;
+static const DWORD WEB_TRANSFER_SNAPSHOT_SYNC_WAIT_MS = 5000;
+static const DWORD WEB_TRANSFER_COMMAND_SNAPSHOT_SYNC_WAIT_MS = 5000;
+static const DWORD WEB_SHARED_FILES_SNAPSHOT_SYNC_WAIT_MS = 5000;
+static const DWORD WEB_TRANSFER_RENAME_PREVIEW_TTL_MS = 15000;
+
+static CString _WebSelectString(bool bCondition, LPCTSTR pszTrue, LPCTSTR pszFalse)
+{
+	return CString(bCondition ? (pszTrue != NULL ? pszTrue : _T("")) : (pszFalse != NULL ? pszFalse : _T("")));
+}
+
+static double WebKBytesPerSecToMbitPerSec(uint32 nKBytesPerSec)
+{
+	return (double)nKBytesPerSec * 8192.0 / 1000000.0;
+}
+
+static bool TryParseWebDisplayDouble(CString strValue, double& rfValue)
+{
+	strValue.Trim();
+	if (strValue.IsEmpty())
+		return false;
+	strValue.Replace(_T(','), _T('.'));
+	LPCTSTR pszText = strValue;
+	LPTSTR pszEnd = NULL;
+	_locale_t locale = _create_locale(LC_NUMERIC, "C");
+	const double fValue = locale != NULL ? _tcstod_l(pszText, &pszEnd, locale) : _tcstod(pszText, &pszEnd);
+	if (locale != NULL)
+		_free_locale(locale);
+	if (pszEnd == pszText || !_finite(fValue))
+		return false;
+	CString strTail(pszEnd);
+	strTail.Trim();
+	if (!strTail.IsEmpty())
+		return false;
+	rfValue = fValue;
+	return true;
+}
+
+static uint32 WebNumericDisplayToKBytesPerSec(double fValue)
+{
+	if (fValue <= 0.0)
+		return 0;
+	if (!thePrefs.GetForceSpeedsToKB())
+		fValue = fValue * 1000000.0 / 8192.0;
+	if (fValue >= (double)UNLIMITED)
+		return UNLIMITED - 1;
+	return (uint32)(fValue + 0.5);
+}
+
+static CString FormatWebSpeedPreferenceValue(uint32 nKBytesPerSec)
+{
+	CString strValue;
+	if (thePrefs.GetForceSpeedsToKB())
+		strValue.Format(_T("%u"), nKBytesPerSec);
+	else {
+		const double fMbitPerSec = WebKBytesPerSecToMbitPerSec(nKBytesPerSec);
+		const double fRounded = floor(fMbitPerSec + 0.5);
+		if (fabs(fMbitPerSec - fRounded) < 0.05)
+			strValue.Format(_T("%.0f"), fMbitPerSec);
+		else
+			strValue.Format(_T("%.1f"), fMbitPerSec);
+	}
+	return strValue;
+}
+
+static uint32 ParseWebSpeedPreferenceValue(const CString& rstrValue)
+{
+	double fValue = 0.0;
+	return TryParseWebDisplayDouble(rstrValue, fValue) ? WebNumericDisplayToKBytesPerSec(fValue) : 0;
+}
+
 //SyruS CQArray-Sorting operators
 bool operator > (QueueUsers &first, QueueUsers &second)
 {
@@ -78,12 +150,287 @@ bool operator < (SearchFileStruct &first, SearchFileStruct &second)
 static BOOL	WSdownloadColumnHidden[8];
 static BOOL	WSuploadColumnHidden[5];
 static BOOL	WSqueueColumnHidden[4];
+
+static void QueueWebDownloadLinks(const CString &strLinks, int iCategory)
+{
+	if (strLinks.IsEmpty())
+		return;
+
+	CemuleApp::SDownloadCommand command;
+	command.m_eType = CemuleApp::DownloadCommandAddFileLinks;
+	command.m_iCat = iCategory;
+	command.m_strRawLinks = strLinks;
+	command.m_strTokenDelimiters = _T(" \t\r\n");
+	CString strOrderingKey;
+	strOrderingKey.Format(_T("webserver:add-downloads:%d"), iCategory);
+	theApp.ExecuteDownloadCommand(command, CemuleApp::BackendCommandSourceWebServer, CemuleApp::BackendCommandOrderingWebRequest, strOrderingKey);
+}
+
+static bool PostWebUiRequestNoWait(UINT uMessage, WPARAM wParam, SWebAsyncRequest *pRequest)
+{
+	if (pRequest == NULL || theApp.IsClosing() || theApp.emuledlg == NULL || !::IsWindow(theApp.emuledlg->m_hWnd))
+		return false;
+
+	pRequest->AddRef();
+	if (!::PostMessage(theApp.emuledlg->m_hWnd, uMessage, wParam, reinterpret_cast<LPARAM>(pRequest))) {
+		pRequest->ReleaseReference();
+		return false;
+	}
+
+	return true;
+}
+
+static void QueueWebUiSnapshotRefresh(UINT uMessage, WPARAM wParam, SWebAsyncRequest *pRequest)
+{
+	if (pRequest == NULL)
+		return;
+	PostWebUiRequestNoWait(uMessage, wParam, pRequest);
+	pRequest->ReleaseReference();
+}
+
+static bool PostWebUiRequestAndWait(UINT uMessage, WPARAM wParam, SWebAsyncRequest *pRequest, DWORD dwTimeout)
+{
+	if (pRequest == NULL || theApp.IsUiThread() || !pRequest->CreateCompletionEvent())
+		return false;
+	if (!PostWebUiRequestNoWait(uMessage, wParam, pRequest))
+		return false;
+	return ::WaitForSingleObject(pRequest->GetCompletionEvent(), dwTimeout) == WAIT_OBJECT_0;
+}
+
+static bool QueueWebSearchStartCommand(const SSearchParams &params, CString &strResponse)
+{
+	SSearchParams *pParams = new SSearchParams(params);
+	CString strOrderingKey;
+	strOrderingKey.Format(_T("webserver:search:%lu"), ::GetTickCount());
+	theApp.ExecuteSearchStartCommand(pParams, CemuleApp::BackendCommandSourceWebServer, CemuleApp::BackendCommandOrderingSearch, strOrderingKey);
+	strResponse = GetResString(_T("SW_SEARCHINGINFO"));
+	strResponse.Remove(_T('&'));
+	return true;
+}
+
+bool CWebServer::_IsTransferCommandRequest(const CString &URL)
+{
+	const CString sOp(_ParseURL(URL, _T("op")));
+	if (!sOp.IsEmpty()) {
+		if (sOp == _T("cancel") || sOp == _T("stop") || sOp == _T("pause") || sOp == _T("resume") || sOp == _T("priolow") || sOp == _T("prionormal") || sOp == _T("priohigh") || sOp == _T("prioauto") || sOp == _T("setcat") || sOp == _T("rename") || sOp == _T("getflc")) {
+			uchar abyFileHash[MDX_DIGEST_SIZE];
+			return strmd4(_ParseURL(URL, _T("file")), abyFileHash);
+		}
+		if (sOp == _T("addfriend") || sOp == _T("removefriend"))
+			return !_ParseURL(URL, _T("userhash")).IsEmpty();
+	}
+	return !_ParseURL(URL, _T("clearcompleted")).IsEmpty() || !_ParseURL(URL, _T("ed2k")).IsEmpty();
+}
+
+bool CWebServer::_ApplyWebTransferRenamePreview(WebTransferSnapshot &snapshot, const CString &strFileHash, const CString &strFileName)
+{
+	if (strFileHash.IsEmpty() || strFileName.IsEmpty())
+		return false;
+
+	const CString strDisplayName(_SpecialChars(strFileName));
+	bool bUpdated = false;
+	for (INT_PTR i = 0; i < snapshot.FilesArray.GetCount(); ++i) {
+		DownloadFiles &file = snapshot.FilesArray[i];
+		if (file.sFileHash.CompareNoCase(strFileHash) != 0)
+			continue;
+		file.sFileName = strDisplayName;
+		file.sFileNameJS = strDisplayName;
+		file.sFileType = _GetWebImageNameForFileType(strDisplayName);
+		file.sED2kLink.Format(_T("ed2k://|file|%s|%I64u|%s|/"), (LPCTSTR)EncodeUrlUtf8(strFileName), file.m_qwFileSize, (LPCTSTR)file.sFileHash);
+		bUpdated = true;
+	}
+	return bUpdated;
+}
+
+void CWebServer::AnnotateWebSearchSnapshot(CQArray<SearchFileStruct, SearchFileStruct> &searchFileArray)
+{
+	for (INT_PTR i = 0; i < searchFileArray.GetCount(); ++i) {
+		SearchFileStruct &searchFile = searchFileArray[i];
+		searchFile.m_strOverlayImage = _T("none");
+		searchFile.m_strTextColor = _T("#ffffff");
+
+		uchar aFileHash[MDX_DIGEST_SIZE];
+		if (searchFile.m_strFileHash.GetLength() != 32 || !DecodeBase16(searchFile.m_strFileHash, 32, aFileHash, _countof(aFileHash)))
+			continue;
+
+		if (theApp.downloadqueue != NULL && theApp.downloadqueue->GetFileByID(aFileHash) != NULL)
+			searchFile.m_strTextColor = _T("#8080ff");
+		else {
+			bool bSameFile = false;
+			if (theApp.sharedfiles != NULL) {
+				CSharedFileList::SWebSharedFileSnapshot webSharedSnapshot;
+				bSameFile = theApp.sharedfiles->CopyWebSharedFileSnapshot(searchFile.m_strFileHash, webSharedSnapshot);
+			}
+			if (!bSameFile && theApp.knownfiles != NULL)
+				bSameFile = (theApp.knownfiles->FindKnownFileByID(aFileHash) != NULL);
+			if (bSameFile)
+				searchFile.m_strTextColor = _T("#ff80ff");
+		}
+	}
+}
+
+static void GetWebSearchList(CWebServer *pThis, CQArray<SearchFileStruct, SearchFileStruct> &searchFileArray, int iSortBy)
+{
+	searchFileArray.RemoveAll();
+	if (pThis == NULL || theApp.searchlist == NULL)
+		return;
+	if (theApp.IsUiThread()) {
+		theApp.searchlist->GetWebList(&searchFileArray, iSortBy, WEB_MAX_TABLE_ROWS);
+		CWebServer::AnnotateWebSearchSnapshot(searchFileArray);
+		pThis->StoreWebSearchSnapshot(iSortBy, searchFileArray);
+		return;
+	}
+
+	const bool bHasCachedSnapshot = pThis->CopyWebSearchSnapshot(iSortBy, searchFileArray);
+	SWebSearchResultsRequest *pRequest = new SWebSearchResultsRequest();
+	pRequest->m_pThis = pThis;
+	pRequest->m_iSortBy = iSortBy;
+	QueueWebUiSnapshotRefresh(WEB_GET_SEARCH_RESULTS, static_cast<WPARAM>(iSortBy), pRequest);
+	if (!bHasCachedSnapshot)
+		searchFileArray.RemoveAll();
+}
+
+static void GetWebSearchDownloadLinks(CWebServer *pThis, const CString &strDownloads, CString &strLinks)
+{
+	strLinks.Empty();
+	if (pThis == NULL || strDownloads.IsEmpty())
+		return;
+	if (theApp.IsUiThread() && theApp.searchlist != NULL) {
+		theApp.searchlist->GetWebDownloadLinksByHashes(strDownloads, strLinks);
+		return;
+	}
+	pThis->BuildWebSearchDownloadLinksFromSnapshot(strDownloads, strLinks);
+}
+
+static bool GetWebHeaderSnapshot(CWebServer *pThis, WebHeaderSnapshot &snapshot)
+{
+	snapshot = WebHeaderSnapshot();
+	if (pThis == NULL)
+		return false;
+	if (theApp.IsUiThread()) {
+		const bool bResult = CWebServer::BuildHeaderSnapshotForWebThread(snapshot);
+		if (bResult)
+			pThis->StoreWebHeaderSnapshot(snapshot);
+		return bResult;
+	}
+
+	const bool bHasCachedSnapshot = pThis->CopyWebHeaderSnapshot(snapshot);
+	SWebHeaderSnapshotRequest *pRequest = new SWebHeaderSnapshotRequest();
+	pRequest->m_pThis = pThis;
+	QueueWebUiSnapshotRefresh(WEB_GET_HEADER_SNAPSHOT, 0, pRequest);
+	return bHasCachedSnapshot;
+}
+
+static bool GetWebSharedFileDownloadInfo(const CString &strFileHash, WebSharedFileDownloadInfo &info)
+{
+	info = WebSharedFileDownloadInfo();
+	if (strFileHash.IsEmpty())
+		return false;
+	return CWebServer::BuildSharedFileDownloadInfoForWebThread(strFileHash, info);
+}
+
+static bool ExecuteWebFriendCommand(const CString &strUserHash, bool bAdd)
+{
+	if (strUserHash.IsEmpty())
+		return false;
+	if (theApp.IsUiThread()) {
+		uchar UserHash[MDX_DIGEST_SIZE];
+		if (!strmd4(strUserHash, UserHash))
+			return false;
+		if (bAdd) {
+			CUpDownClient *cur_client = theApp.clientlist != NULL ? theApp.clientlist->FindClientByUserHash(UserHash) : NULL;
+			if (cur_client == NULL || theApp.friendlist == NULL)
+				return false;
+			theApp.friendlist->AddFriend(cur_client);
+			return true;
+		}
+
+		CFriend *f = theApp.friendlist != NULL ? theApp.friendlist->SearchFriend(UserHash, CAddress(), 0) : NULL;
+		if (f == NULL)
+			return false;
+		theApp.friendlist->RemoveFriend(f);
+		return true;
+	}
+
+	SWebFriendCommandRequest *pRequest = new SWebFriendCommandRequest();
+	pRequest->m_strUserHash = strUserHash;
+	pRequest->m_bAdd = bAdd;
+	const bool bQueued = PostWebUiRequestNoWait(WEB_FRIEND_COMMAND, 0, pRequest);
+	pRequest->ReleaseReference();
+	return bQueued;
+}
+
+static UINT GetWebSharedFilesPriorityAction(const CString &strPriority)
+{
+	if (strPriority == _T("verylow"))
+		return MP_PRIOVERYLOW;
+	if (strPriority == _T("low"))
+		return MP_PRIOLOW;
+	if (strPriority == _T("normal"))
+		return MP_PRIONORMAL;
+	if (strPriority == _T("high"))
+		return MP_PRIOHIGH;
+	if (strPriority == _T("release"))
+		return MP_PRIOVERYHIGH;
+	return MP_PRIOAUTO;
+}
+
+static void QueueWebSharedFilesPriority(const CString &strHash, UINT uAction)
+{
+	if (strHash.GetLength() != 32 || uAction == 0)
+		return;
+
+	uchar fileid[MDX_DIGEST_SIZE];
+	if (!DecodeBase16(strHash, strHash.GetLength(), fileid, _countof(fileid)))
+		return;
+
+	CStringArray astrHashes;
+	astrHashes.Add(md4str(fileid));
+
+	CString strOrderingKey;
+	strOrderingKey.Format(_T("webserver:shared-priority:%s"), (LPCTSTR)astrHashes.GetAt(0));
+	theApp.ExecuteSharedFilesCommand(uAction, astrHashes, CemuleApp::BackendCommandSourceWebServer, CemuleApp::BackendCommandOrderingSharedFiles, strOrderingKey);
+}
+
+static void QueueWebSharedFilesReload()
+{
+	CStringArray astrHashes;
+	theApp.ExecuteSharedFilesCommand(MP_VIEWSHAREDFILES, astrHashes, CemuleApp::BackendCommandSourceWebServer, CemuleApp::BackendCommandOrderingSharedFiles, _T("webserver:shared:reload"));
+}
+
 static BOOL	WSsharedColumnHidden[7];
 static BOOL	WSserverColumnHidden[10];
 static BOOL	WSsearchColumnHidden[4];
 
+WebTransferSnapshot::WebTransferSnapshot()
+	: nCountQueue(0)
+	, nCountQueueBanned(0)
+	, nCountQueueFriend(0)
+	, nCountQueueSecure(0)
+	, nCountQueueBannedSecure(0)
+	, nCountQueueFriendSecure(0)
+	, bStale(false)
+{
+}
+
 CWebServer::CWebServer()
-	: m_Templates()
+	: m_WebSnapshotCacheLock()
+	, m_bHasCachedSearchSnapshot(false)
+	, m_iCachedSearchSortBy(0)
+	, m_CachedSearchFileArray()
+	, m_bHasCachedHeaderSnapshot(false)
+	, m_CachedHeaderSnapshot()
+	, m_bHasCachedServerListSnapshot(false)
+	, m_CachedServerArray()
+	, m_bHasCachedTransferSnapshot(false)
+	, m_iCachedTransferCategory(0)
+	, m_CachedTransferSnapshot()
+	, m_bHasCachedSharedFilesSnapshot(false)
+	, m_CachedSharedArray()
+	, m_bHasCachedCommentList(false)
+	, m_strCachedCommentFileHash()
+	, m_strCachedCommentList()
+	, m_Templates()
 	, m_uCurIP()
 	, m_iSearchSortby(3)
 	, m_nIntruderDetect()
@@ -140,6 +487,186 @@ CWebServer::~CWebServer()
 
 	if (m_bServerWorking)
 		StopSockets();
+}
+
+
+void CWebServer::StoreWebSearchSnapshot(int iSortBy, const CQArray<SearchFileStruct, SearchFileStruct> &searchFileArray)
+{
+	CSingleLock lock(&m_WebSnapshotCacheLock, TRUE);
+	m_iCachedSearchSortBy = iSortBy;
+	m_CachedSearchFileArray.Copy(searchFileArray);
+	m_bHasCachedSearchSnapshot = true;
+}
+
+bool CWebServer::CopyWebSearchSnapshot(int iSortBy, CQArray<SearchFileStruct, SearchFileStruct> &searchFileArray) const
+{
+	CSingleLock lock(&m_WebSnapshotCacheLock, TRUE);
+	if (!m_bHasCachedSearchSnapshot || m_iCachedSearchSortBy != iSortBy)
+		return false;
+	searchFileArray.Copy(m_CachedSearchFileArray);
+	return true;
+}
+
+bool CWebServer::BuildWebSearchDownloadLinksFromSnapshot(const CString &strHashes, CString &strLinks) const
+{
+	strLinks.Empty();
+	CQArray<SearchFileStruct, SearchFileStruct> searchFileArray;
+	{
+		CSingleLock lock(&m_WebSnapshotCacheLock, TRUE);
+		if (!m_bHasCachedSearchSnapshot)
+			return false;
+		searchFileArray.Copy(m_CachedSearchFileArray);
+	}
+
+	CString strRemaining(strHashes);
+	for (int iPos = 0; iPos >= 0;) {
+		CString strHash(strRemaining.Tokenize(_T("|"), iPos));
+		strHash.Trim();
+		if (strHash.GetLength() != 32)
+			continue;
+
+		for (INT_PTR i = 0; i < searchFileArray.GetCount(); ++i) {
+			const SearchFileStruct &searchFile = searchFileArray[i];
+			if (searchFile.m_strFileHash.CompareNoCase(strHash) != 0 || searchFile.m_uFileSize == 0 || searchFile.m_strFileName.IsEmpty())
+				continue;
+
+			CString strLink;
+			strLink.Format(_T("ed2k://|file|%s|%I64u|%s|/"), (LPCTSTR)EncodeUrlUtf8(searchFile.m_strFileName), static_cast<uint64>(searchFile.m_uFileSize), (LPCTSTR)searchFile.m_strFileHash);
+			if (!strLinks.IsEmpty())
+				strLinks += _T("\r\n");
+			strLinks += strLink;
+			break;
+		}
+	}
+	return !strLinks.IsEmpty();
+}
+
+void CWebServer::StoreWebHeaderSnapshot(const WebHeaderSnapshot &snapshot)
+{
+	CSingleLock lock(&m_WebSnapshotCacheLock, TRUE);
+	m_CachedHeaderSnapshot = snapshot;
+	m_bHasCachedHeaderSnapshot = true;
+}
+
+bool CWebServer::CopyWebHeaderSnapshot(WebHeaderSnapshot &snapshot) const
+{
+	CSingleLock lock(&m_WebSnapshotCacheLock, TRUE);
+	if (!m_bHasCachedHeaderSnapshot)
+		return false;
+	snapshot = m_CachedHeaderSnapshot;
+	return true;
+}
+
+void CWebServer::StoreWebServerListSnapshot(const CArray<ServerEntry> &serverArray)
+{
+	CSingleLock lock(&m_WebSnapshotCacheLock, TRUE);
+	m_CachedServerArray.RemoveAll();
+	m_CachedServerArray.Append(serverArray);
+	m_bHasCachedServerListSnapshot = true;
+}
+
+bool CWebServer::CopyWebServerListSnapshot(CArray<ServerEntry> &serverArray) const
+{
+	CSingleLock lock(&m_WebSnapshotCacheLock, TRUE);
+	if (!m_bHasCachedServerListSnapshot)
+		return false;
+	serverArray.RemoveAll();
+	serverArray.Append(m_CachedServerArray);
+	return true;
+}
+
+void CWebServer::StoreWebTransferSnapshot(int iCategory, const WebTransferSnapshot &snapshot)
+{
+	CSingleLock lock(&m_WebSnapshotCacheLock, TRUE);
+	m_iCachedTransferCategory = iCategory;
+	m_CachedTransferSnapshot = snapshot;
+	ApplyWebTransferRenamePreviewsLocked(m_CachedTransferSnapshot);
+	m_bHasCachedTransferSnapshot = true;
+}
+
+bool CWebServer::CopyWebTransferSnapshot(int iCategory, WebTransferSnapshot &snapshot) const
+{
+	CSingleLock lock(&m_WebSnapshotCacheLock, TRUE);
+	if (!m_bHasCachedTransferSnapshot || m_iCachedTransferCategory != iCategory)
+		return false;
+	snapshot = m_CachedTransferSnapshot;
+	ApplyWebTransferRenamePreviewsLocked(snapshot);
+	snapshot.bStale = true;
+	return true;
+}
+
+void CWebServer::RememberWebTransferRenamePreview(const CString &strFileHash, const CString &strFileName)
+{
+	if (strFileHash.IsEmpty() || strFileName.IsEmpty())
+		return;
+
+	CSingleLock lock(&m_WebSnapshotCacheLock, TRUE);
+	for (INT_PTR i = m_PendingTransferRenames.GetSize() - 1; i >= 0; --i) {
+		if (m_PendingTransferRenames[i].m_strFileHash.CompareNoCase(strFileHash) == 0)
+			m_PendingTransferRenames.RemoveAt(i);
+	}
+
+	SWebTransferRenamePreview preview;
+	preview.m_strFileHash = strFileHash;
+	preview.m_strFileName = strFileName;
+	preview.m_dwTick = ::GetTickCount();
+	m_PendingTransferRenames.Add(preview);
+	if (m_bHasCachedTransferSnapshot)
+		_ApplyWebTransferRenamePreview(m_CachedTransferSnapshot, strFileHash, strFileName);
+}
+
+void CWebServer::ApplyWebTransferRenamePreviews(WebTransferSnapshot &snapshot) const
+{
+	CSingleLock lock(&m_WebSnapshotCacheLock, TRUE);
+	ApplyWebTransferRenamePreviewsLocked(snapshot);
+}
+
+void CWebServer::ApplyWebTransferRenamePreviewsLocked(WebTransferSnapshot &snapshot) const
+{
+	const DWORD dwNow = ::GetTickCount();
+	for (INT_PTR i = m_PendingTransferRenames.GetSize() - 1; i >= 0; --i) {
+		const SWebTransferRenamePreview &preview = m_PendingTransferRenames[i];
+		if (static_cast<DWORD>(dwNow - preview.m_dwTick) > WEB_TRANSFER_RENAME_PREVIEW_TTL_MS) {
+			m_PendingTransferRenames.RemoveAt(i);
+			continue;
+		}
+		_ApplyWebTransferRenamePreview(snapshot, preview.m_strFileHash, preview.m_strFileName);
+	}
+}
+
+void CWebServer::StoreWebSharedFilesSnapshot(const CArray<SharedFiles> &sharedArray)
+{
+	CSingleLock lock(&m_WebSnapshotCacheLock, TRUE);
+	m_CachedSharedArray.RemoveAll();
+	m_CachedSharedArray.Append(sharedArray);
+	m_bHasCachedSharedFilesSnapshot = true;
+}
+
+bool CWebServer::CopyWebSharedFilesSnapshot(CArray<SharedFiles> &sharedArray) const
+{
+	CSingleLock lock(&m_WebSnapshotCacheLock, TRUE);
+	if (!m_bHasCachedSharedFilesSnapshot)
+		return false;
+	sharedArray.RemoveAll();
+	sharedArray.Append(m_CachedSharedArray);
+	return true;
+}
+
+void CWebServer::StoreWebCommentList(const CString &strFileHash, const CString &strCommentList)
+{
+	CSingleLock lock(&m_WebSnapshotCacheLock, TRUE);
+	m_strCachedCommentFileHash = strFileHash;
+	m_strCachedCommentList = strCommentList;
+	m_bHasCachedCommentList = !strFileHash.IsEmpty();
+}
+
+bool CWebServer::CopyWebCommentList(const CString &strFileHash, CString &strCommentList) const
+{
+	CSingleLock lock(&m_WebSnapshotCacheLock, TRUE);
+	if (!m_bHasCachedCommentList || m_strCachedCommentFileHash.CompareNoCase(strFileHash) != 0)
+		return false;
+	strCommentList = m_strCachedCommentList;
+	return true;
 }
 
 void CWebServer::_SaveWIConfigArray(BOOL *array, int size, LPCTSTR key)
@@ -268,6 +795,9 @@ void CWebServer::RestartSockets()
 
 void CWebServer::StartServer()
 {
+	if (theApp.IsNetworkActivityBlockedByBind())
+		return;
+
 	if (m_bServerWorking == thePrefs.GetWSIsEnabled())
 		return;
 	m_bServerWorking = thePrefs.GetWSIsEnabled();
@@ -288,7 +818,7 @@ void CWebServer::StartServer()
 	AddLogLine(false, _T("%s: %s%s")
 		, (LPCTSTR)_GetPlainResString(_T("PW_WS"))
 		, (LPCTSTR)status
-		, (bEnabled && thePrefs.GetWebUseHttps()) ? _T(" (HTTPS)") : EMPTY);
+		, (LPCTSTR)_WebSelectString(bEnabled && thePrefs.GetWebUseHttps(), _T(" (HTTPS)"), _T("")));
 }
 
 void CWebServer::StopServer()
@@ -302,23 +832,17 @@ void CWebServer::StopServer()
 
 void CWebServer::_RemoveServer(const CString &sIP, int nPort)
 {
-	CServer *server = theApp.serverlist->GetServerByAddress(sIP, (uint16)nPort);
-	if (server != NULL)
-		SendMessage(theApp.emuledlg->m_hWnd, WEB_GUI_INTERACTION, WEBGUIIA_SERVER_REMOVE, (LPARAM)server);
+	ExecuteServerCommandForWebThread(WEB_SERVER_COMMAND_REMOVE, sIP, nPort);
 }
 
 void CWebServer::_AddToStatic(const CString &sIP, int nPort)
 {
-	CServer *server = theApp.serverlist->GetServerByAddress(sIP, (uint16)nPort);
-	if (server != NULL)
-		SendMessage(theApp.emuledlg->m_hWnd, WEB_GUI_INTERACTION, WEBGUIIA_ADD_TO_STATIC, (LPARAM)server);
+	ExecuteServerCommandForWebThread(WEB_SERVER_COMMAND_ADD_TO_STATIC, sIP, nPort);
 }
 
 void CWebServer::_RemoveFromStatic(const CString &sIP, int nPort)
 {
-	CServer *server = theApp.serverlist->GetServerByAddress(sIP, (uint16)nPort);
-	if (server != NULL)
-		SendMessage(theApp.emuledlg->m_hWnd, WEB_GUI_INTERACTION, WEBGUIIA_REMOVE_FROM_STATIC, (LPARAM)server);
+	ExecuteServerCommandForWebThread(WEB_SERVER_COMMAND_REMOVE_FROM_STATIC, sIP, nPort);
 }
 
 
@@ -345,9 +869,258 @@ CString CWebServer::_SpecialChars(const CString &cstr, bool noquote /*=false*/)
 
 void CWebServer::_ConnectToServer(const CString &sIP, int nPort)
 {
-	CServer *server = theApp.serverlist->GetServerByAddress(sIP, (uint16)nPort);
-	if (server != NULL)
-		SendMessage(theApp.emuledlg->m_hWnd, WEB_GUI_INTERACTION, WEBGUIIA_CONNECTTOSERVER, (LPARAM)server);
+	ExecuteServerCommandForWebThread(WEB_SERVER_COMMAND_CONNECT, sIP, nPort);
+}
+
+static int NormalizeWebServerPreference(int nPriority)
+{
+	switch (nPriority) {
+	case SRV_PR_LOW:
+	case SRV_PR_NORMAL:
+	case SRV_PR_HIGH:
+		return nPriority;
+	default:
+		return SRV_PR_NORMAL;
+	}
+}
+
+static bool ExecuteServerCommandForWebThreadImpl(WebServerCommand eCommand, const CString &sIP, int nPort, const CString &sName, const CString &sDescription, bool bStatic, int nPriority, bool bAddToStatic, bool bConnectNow)
+{
+	if (theApp.emuledlg == NULL || !::IsWindow(theApp.emuledlg->m_hWnd))
+		return false;
+
+	CString strIP(sIP);
+	strIP.Trim();
+
+	switch (eCommand) {
+	case WEB_SERVER_COMMAND_ADD:
+	{
+		if (strIP.IsEmpty() || nPort <= 0 || nPort > 65535 || theApp.emuledlg->serverwnd == NULL)
+			return false;
+
+		CString strName(sName);
+		strName.Trim();
+		if (strName.IsEmpty())
+			strName = strIP;
+
+		CServer *srv = new CServer((uint16)nPort, strIP);
+		srv->SetListName(strName);
+		if (!sDescription.IsEmpty())
+			srv->SetDescription(sDescription);
+		srv->SetPreference(NormalizeWebServerPreference(nPriority));
+
+		if (!theApp.emuledlg->serverwnd->serverlistctrl.AddServer(srv, true)) {
+			delete srv;
+			return false;
+		}
+
+		theApp.emuledlg->serverwnd->serverlistctrl.RefreshServer(srv);
+		if (bStatic || bAddToStatic) {
+			CServer *server = theApp.serverlist != NULL ? theApp.serverlist->GetServerByAddress(strIP, (uint16)nPort) : NULL;
+			if (server != NULL)
+				theApp.emuledlg->serverwnd->serverlistctrl.StaticServerFileAppend(server);
+		}
+		if (bConnectNow) {
+			if (theApp.emuledlg != NULL && !theApp.emuledlg->CanUseP2PConnectionCommands())
+				theApp.emuledlg->LogP2PConnectionCommandBlocked(false);
+			else {
+				CServer *server = theApp.serverlist != NULL ? theApp.serverlist->GetServerByAddress(strIP, (uint16)nPort) : NULL;
+				if (server != NULL && theApp.serverconnect != NULL)
+					theApp.serverconnect->ConnectToServer(server, false, false, true);
+			}
+		}
+		return true;
+	}
+	case WEB_SERVER_COMMAND_REMOVE:
+		if (strIP.IsEmpty() || nPort <= 0 || theApp.emuledlg->serverwnd == NULL)
+			return false;
+	{
+		CServer *server = theApp.serverlist != NULL ? theApp.serverlist->GetServerByAddress(strIP, (uint16)nPort) : NULL;
+		if (server == NULL)
+			return false;
+		theApp.emuledlg->serverwnd->serverlistctrl.RemoveServer(server);
+		return true;
+	}
+	case WEB_SERVER_COMMAND_ADD_TO_STATIC:
+		if (strIP.IsEmpty() || nPort <= 0 || theApp.emuledlg->serverwnd == NULL)
+			return false;
+	{
+		CServer *server = theApp.serverlist != NULL ? theApp.serverlist->GetServerByAddress(strIP, (uint16)nPort) : NULL;
+		if (server == NULL)
+			return false;
+		theApp.emuledlg->serverwnd->serverlistctrl.StaticServerFileAppend(server);
+		return true;
+	}
+	case WEB_SERVER_COMMAND_REMOVE_FROM_STATIC:
+		if (strIP.IsEmpty() || nPort <= 0 || theApp.emuledlg->serverwnd == NULL)
+			return false;
+	{
+		CServer *server = theApp.serverlist != NULL ? theApp.serverlist->GetServerByAddress(strIP, (uint16)nPort) : NULL;
+		if (server == NULL)
+			return false;
+		theApp.emuledlg->serverwnd->serverlistctrl.StaticServerFileRemove(server);
+		return true;
+	}
+	case WEB_SERVER_COMMAND_SET_PRIORITY:
+	{
+		if (strIP.IsEmpty() || nPort <= 0 || theApp.serverlist == NULL || theApp.emuledlg->serverwnd == NULL)
+			return false;
+		CServer *server = theApp.serverlist->GetServerByAddress(strIP, (uint16)nPort);
+		if (server == NULL)
+			return false;
+		server->SetPreference(NormalizeWebServerPreference(nPriority));
+		theApp.emuledlg->serverwnd->serverlistctrl.RefreshServer(server);
+		return true;
+	}
+	case WEB_SERVER_COMMAND_CONNECT:
+		if (theApp.serverconnect == NULL)
+			return false;
+		if (theApp.emuledlg != NULL && !theApp.emuledlg->CanUseP2PConnectionCommands()) {
+			theApp.emuledlg->LogP2PConnectionCommandBlocked(false);
+			return false;
+		}
+		if (strIP.IsEmpty())
+			theApp.serverconnect->ConnectToAnyServer();
+		else if (nPort > 0) {
+			CServer *server = theApp.serverlist != NULL ? theApp.serverlist->GetServerByAddress(strIP, (uint16)nPort) : NULL;
+			if (server == NULL)
+				return false;
+			theApp.serverconnect->ConnectToServer(server, false, false, true);
+		} else
+			return false;
+		return true;
+	case WEB_SERVER_COMMAND_CONNECT_ANY:
+		if (theApp.serverconnect == NULL)
+			return false;
+		if (theApp.emuledlg != NULL && !theApp.emuledlg->CanUseP2PConnectionCommands()) {
+			theApp.emuledlg->LogP2PConnectionCommandBlocked(false);
+			return false;
+		}
+		theApp.serverconnect->ConnectToAnyServer();
+		return true;
+	case WEB_SERVER_COMMAND_STOP_CONNECTING:
+		if (theApp.serverconnect == NULL)
+			return false;
+		theApp.serverconnect->StopConnectionTry();
+		return true;
+	case WEB_SERVER_COMMAND_DISCONNECT_ED2K:
+		if (theApp.serverconnect != NULL && theApp.serverconnect->IsConnecting())
+			theApp.serverconnect->StopConnectionTry();
+		else if (theApp.serverconnect != NULL)
+			theApp.serverconnect->Disconnect();
+		else
+			return false;
+		return true;
+	case WEB_SERVER_COMMAND_CONNECT_KAD:
+		if (theApp.emuledlg != NULL && !theApp.emuledlg->CanUseP2PConnectionCommands()) {
+			theApp.emuledlg->LogP2PConnectionCommandBlocked(false);
+			return false;
+		}
+		Kademlia::CKademlia::Start();
+		return true;
+	case WEB_SERVER_COMMAND_DISCONNECT_KAD:
+		Kademlia::CKademlia::Stop();
+		return true;
+	case WEB_SERVER_COMMAND_RECHECK_KAD_FIREWALL:
+		Kademlia::CKademlia::RecheckFirewalled();
+		return true;
+		case WEB_SERVER_COMMAND_BOOTSTRAP_KAD:
+		{
+			if (theApp.emuledlg != NULL && !theApp.emuledlg->CanUseP2PConnectionCommands()) {
+				theApp.emuledlg->LogP2PConnectionCommandBlocked(false);
+				return false;
+			}
+			if (strIP.IsEmpty())
+				return false;
+			CString strEndpoint(strIP);
+		uint16 uPort = static_cast<uint16>(nPort > 0 ? nPort : 0);
+		if (uPort == 0) {
+			const int iSeparator = strEndpoint.Find(_T(':'));
+			if (iSeparator < 0)
+				return false;
+			uPort = static_cast<uint16>(_tstoi(CPTR(strEndpoint, iSeparator + 1)));
+			strEndpoint.Truncate(iSeparator);
+		}
+		if (strEndpoint.IsEmpty() || uPort == 0)
+			return false;
+			Kademlia::CKademlia::Bootstrap(strEndpoint, uPort);
+			return true;
+		}
+		case WEB_SERVER_COMMAND_UPDATE_SERVER_MET_FROM_URL:
+			if (strIP.IsEmpty() || theApp.emuledlg->serverwnd == NULL)
+				return false;
+			if (theApp.emuledlg != NULL && !theApp.emuledlg->CanUseP2PConnectionCommands()) {
+				theApp.emuledlg->LogP2PConnectionCommandBlocked(false);
+				return false;
+			}
+			return theApp.emuledlg->serverwnd->UpdateServerMetFromURL(strIP);
+		default:
+			return false;
+		}
+	}
+
+static bool QueueServerCommandForUiThread(WebServerCommand eCommand, const CString &sIP, int nPort, const CString &sName, const CString &sDescription, bool bStatic, int nPriority, bool bAddToStatic, bool bConnectNow)
+{
+	if (theApp.emuledlg == NULL || !::IsWindow(theApp.emuledlg->m_hWnd))
+		return false;
+	if (theApp.IsUiThread())
+		return ExecuteServerCommandForWebThreadImpl(eCommand, sIP, nPort, sName, sDescription, bStatic, nPriority, bAddToStatic, bConnectNow);
+
+	SWebServerCommandRequest *pRequest = new SWebServerCommandRequest();
+	pRequest->m_eCommand = eCommand;
+	pRequest->m_strIP = sIP;
+	pRequest->m_strName = sName;
+	pRequest->m_strServerName = sName;
+	pRequest->m_strDescription = sDescription;
+	pRequest->m_nPort = nPort;
+	pRequest->m_bStatic = bStatic;
+	pRequest->m_bAddToStatic = bAddToStatic;
+	pRequest->m_bConnectNow = bConnectNow;
+	pRequest->m_nPriority = nPriority;
+	pRequest->AddRef();
+	if (!::PostMessage(theApp.emuledlg->m_hWnd, WEB_SERVER_COMMAND, 0, reinterpret_cast<LPARAM>(pRequest))) {
+		pRequest->ReleaseReference();
+		pRequest->ReleaseReference();
+		return false;
+	}
+	pRequest->ReleaseReference();
+	return true;
+}
+
+bool CWebServer::ExecuteServerCommandForWebThread(WebServerCommand eCommand, const CString &sIP, int nPort)
+{
+	return ExecuteServerCommandForWebThread(eCommand, sIP, nPort, CString(), CString(), false, SRV_PR_NORMAL, false, false);
+}
+
+// This overload must stay defined out-of-line because WebServer.cpp queues it by exact symbol name.
+bool CWebServer::ExecuteServerCommandForWebThread(WebServerCommand eCommand, const CString &sIP, int nPort, int nPriority)
+{
+	return ExecuteServerCommandForWebThread(eCommand, sIP, nPort, CString(), CString(), false, nPriority, false, false);
+}
+
+bool CWebServer::ExecuteServerCommandForWebThread(WebServerCommand eCommand, const CString &sIP, int nPort, const CString &sName, const CString &sDescription)
+{
+	return ExecuteServerCommandForWebThread(eCommand, sIP, nPort, sName, sDescription, false, SRV_PR_NORMAL, false, false);
+}
+
+bool CWebServer::ExecuteServerCommandForWebThread(WebServerCommand eCommand, const CString &sIP, int nPort, const CString &sName, const CString &sDescription, bool bStatic)
+{
+	return ExecuteServerCommandForWebThread(eCommand, sIP, nPort, sName, sDescription, bStatic, SRV_PR_NORMAL, false, false);
+}
+
+bool CWebServer::ExecuteServerCommandForWebThread(WebServerCommand eCommand, const CString &sIP, int nPort, const CString &sName, const CString &sDescription, bool bStatic, int nPriority)
+{
+	return ExecuteServerCommandForWebThread(eCommand, sIP, nPort, sName, sDescription, bStatic, nPriority, false, false);
+}
+
+bool CWebServer::ExecuteServerCommandForWebThread(WebServerCommand eCommand, const CString &sIP, int nPort, int nPriority, const CString &sName, bool bAddToStatic, bool bConnectNow)
+{
+	return ExecuteServerCommandForWebThread(eCommand, sIP, nPort, sName, CString(), false, nPriority, bAddToStatic, bConnectNow);
+}
+
+bool CWebServer::ExecuteServerCommandForWebThread(WebServerCommand eCommand, const CString &sIP, int nPort, const CString &sName, const CString &sDescription, bool bStatic, int nPriority, bool bAddToStatic, bool bConnectNow)
+{
+	return QueueServerCommandForUiThread(eCommand, sIP, nPort, sName, sDescription, bStatic, nPriority, bAddToStatic, bConnectNow);
 }
 
 void CWebServer::_ProcessURL(const ThreadData &Data)
@@ -415,7 +1188,7 @@ void CWebServer::_ProcessURL(const ThreadData &Data)
 					pThis->m_Params.Sessions.Add(ses);
 				}
 
-				SendMessage(theApp.emuledlg->m_hWnd, WEB_GUI_INTERACTION, WEBGUIIA_UPDATEMYINFO, 0);
+				::PostMessage(theApp.emuledlg->m_hWnd, WEB_GUI_INTERACTION, WEBGUIIA_UPDATEMYINFO, 0);
 
 				AddLogLine(true, GetResString(_T("WEB_ADMINLOGIN")) + _T(" (%s)"), (LPCTSTR)ip);
 				login = true;
@@ -426,7 +1199,7 @@ void CWebServer::_ProcessURL(const ThreadData &Data)
 				ses.lSession = lSession = (long)(rand() >> 1);
 				pThis->m_Params.Sessions.Add(ses);
 
-				SendMessage(theApp.emuledlg->m_hWnd, WEB_GUI_INTERACTION, WEBGUIIA_UPDATEMYINFO, 0);
+				::PostMessage(theApp.emuledlg->m_hWnd, WEB_GUI_INTERACTION, WEBGUIIA_UPDATEMYINFO, 0);
 
 				AddLogLine(true, GetResString(_T("WEB_GUESTLOGIN")) + _T(" (%s)"), (LPCTSTR)ip);
 				login = true;
@@ -458,14 +1231,14 @@ void CWebServer::_ProcessURL(const ThreadData &Data)
 		if (_IsLoggedIn(Data, lSession)) {
 			bool bAdmin = _IsSessionAdmin(Data, sSession);
 			if (_ParseURL(Data.sURL, _T("w")) == _T("close") && bAdmin && thePrefs.GetWebAdminAllowedHiLevFunc()) {
-				theApp.m_app_state = APP_STATE_SHUTTINGDOWN;
+				theApp.BeginBackendShutdownLifecycle(_T("webserver-close"));
 				_RemoveSession(Data, lSession);
 
 				// send answer...
 				Out += _GetLoginScreen(Data);
 				Data.pSocket->SendContent(HTTPInit, Out);
 
-				SendMessage(theApp.emuledlg->m_hWnd, WM_CLOSE, 0, 0);
+				::PostMessage(theApp.emuledlg->m_hWnd, WM_CLOSE, 0, 0);
 
 				CoUninitialize();
 				return;
@@ -477,7 +1250,7 @@ void CWebServer::_ProcessURL(const ThreadData &Data)
 				Out += _GetLoginScreen(Data);
 				Data.pSocket->SendContent(HTTPInit, Out);
 
-				SendMessage(theApp.emuledlg->m_hWnd, WEB_GUI_INTERACTION, WEBGUIIA_WINFUNC, 1);
+				::PostMessage(theApp.emuledlg->m_hWnd, WEB_GUI_INTERACTION, WEBGUIIA_WINFUNC, 1);
 
 				CoUninitialize();
 				return;
@@ -490,7 +1263,7 @@ void CWebServer::_ProcessURL(const ThreadData &Data)
 				Out += _GetLoginScreen(Data);
 				Data.pSocket->SendContent(HTTPInit, Out);
 
-				SendMessage(theApp.emuledlg->m_hWnd, WEB_GUI_INTERACTION, WEBGUIIA_WINFUNC, 2);
+				::PostMessage(theApp.emuledlg->m_hWnd, WEB_GUI_INTERACTION, WEBGUIIA_WINFUNC, 2);
 
 				CoUninitialize();
 				return;
@@ -506,11 +1279,9 @@ void CWebServer::_ProcessURL(const ThreadData &Data)
 					return;
 				}
 			} else if (_ParseURL(Data.sURL, _T("w")) == _T("getfile") && bAdmin) {
-				uchar FileHash[MDX_DIGEST_SIZE];
-				bool bHash = strmd4(_ParseURL(Data.sURL, _T("filehash")), FileHash);
-				CKnownFile *kf = bHash ? theApp.sharedfiles->GetFileByID(FileHash) : NULL;
-				if (kf) {
-					if (thePrefs.GetMaxWebUploadFileSizeMB() != 0 && kf->GetFileSize() > (uint64)thePrefs.GetMaxWebUploadFileSizeMB() * 1024 * 1024) {
+				WebSharedFileDownloadInfo fileInfo;
+				if (GetWebSharedFileDownloadInfo(_ParseURL(Data.sURL, _T("filehash")), fileInfo) && fileInfo.bFound) {
+					if (thePrefs.GetMaxWebUploadFileSizeMB() != 0 && fileInfo.qwFileSize > (uint64)thePrefs.GetMaxWebUploadFileSizeMB() * 1024 * 1024) {
 						Data.pSocket->SendReply("HTTP/1.1 403 Forbidden\r\n");
 
 						CoUninitialize();
@@ -518,8 +1289,8 @@ void CWebServer::_ProcessURL(const ThreadData &Data)
 					}
 
 					CFile file;
-					if (file.Open(kf->GetFilePath(), CFile::modeRead | CFile::shareDenyWrite | CFile::typeBinary)) {
-						EMFileSize filesize = kf->GetFileSize();
+					if (file.Open(fileInfo.sFilePath, CFile::modeRead | CFile::shareDenyWrite | CFile::typeBinary)) {
+						uint64 qwRemaining = fileInfo.qwFileSize;
 
 #define SENDFILEBUFSIZE 2048
 						char *buffer = (char*)malloc(SENDFILEBUFSIZE);
@@ -529,19 +1300,20 @@ void CWebServer::_ProcessURL(const ThreadData &Data)
 							return;
 						}
 
-						CStringA fname(kf->GetFileName());
+						CStringA fname(fileInfo.sFileName);
 						CStringA szBuf;
 						szBuf.Format("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n"
 							"Content-Description: \"%s\"\r\n"
 							"Content-Disposition: attachment; filename=\"%s\";\r\n"
 							"Content-Transfer-Encoding: binary\r\n"
 							"Content-Length: %I64u\r\n\r\n"
-							, (LPCSTR)fname, (LPCSTR)fname, (uint64)filesize);
+							, (LPCSTR)fname, (LPCSTR)fname, fileInfo.qwFileSize);
 						Data.pSocket->SendData(szBuf, szBuf.GetLength());
 
-						for (UINT r = 1; (uint64)filesize > 0 && r;) {
-							r = file.Read(buffer, SENDFILEBUFSIZE);
-							filesize -= r;
+						for (UINT r = 1; qwRemaining > 0 && r;) {
+							const UINT uReadSize = static_cast<UINT>((qwRemaining < SENDFILEBUFSIZE) ? qwRemaining : SENDFILEBUFSIZE);
+							r = file.Read(buffer, uReadSize);
+							qwRemaining -= r;
 							Data.pSocket->SendData(buffer, r);
 						}
 						file.Close();
@@ -555,7 +1327,9 @@ void CWebServer::_ProcessURL(const ThreadData &Data)
 			}
 
 			Out += _GetHeader(Data, lSession);
-			const CString &sPage(_ParseURL(Data.sURL, _T("w")));
+			CString sPage(_ParseURL(Data.sURL, _T("w")));
+			if (sPage.IsEmpty() && _IsTransferCommandRequest(Data.sURL))
+				sPage = _T("transfer");
 			if (sPage == _T("server"))
 				Out += _GetServerList(Data);
 			else if (sPage == _T("shared"))
@@ -612,11 +1386,38 @@ void CWebServer::_ProcessURL(const ThreadData &Data)
 			Out += justAddLink ? _GetRemoteLinkAddedFailed(Data) : _GetLoginScreen(Data);
 		}
 
+		CStringA strHttpInit(HTTPInit);
+		if (_IsLoggedIn(Data, lSession) && _ParseURL(Data.sURL, _T("w")) == _T("server")) {
+			WebHeaderSnapshot headerSnapshot;
+			GetWebHeaderSnapshot(pThis, headerSnapshot);
+			const CString &sCmd(_ParseURL(Data.sURL, _T("c")));
+			const UINT uRefreshRound = static_cast<UINT>(_tstol(_ParseURL(Data.sURL, _T("wr"))));
+			const CString strRefreshStartTick(_ParseURL(Data.sURL, _T("wrt")));
+			const DWORD dwNow = ::GetTickCount();
+			const DWORD dwRefreshStartTick = strRefreshStartTick.IsEmpty() ? dwNow : static_cast<DWORD>(_tcstoul(strRefreshStartTick, NULL, 10));
+			const bool bServerCommandIssued = sCmd == _T("connect") || sCmd == _T("disconnect");
+			const bool bWithinConnectionTimeout = headerSnapshot.dwConnectionTimeout != 0 && static_cast<DWORD>(dwNow - dwRefreshStartTick) < headerSnapshot.dwConnectionTimeout;
+			const bool bContinueServerRefresh = !headerSnapshot.bServerConnected && headerSnapshot.bServerConnecting && headerSnapshot.bActiveConnectionAttempt && bWithinConnectionTimeout;
+			if (bServerCommandIssued || bContinueServerRefresh) {
+				CString strTarget;
+				strTarget.Format(_T("?ses=%s&w=server"), (LPCTSTR)sSession);
+				const CString &strCat(_ParseURL(Data.sURL, _T("cat")));
+				if (!strCat.IsEmpty())
+					strTarget.AppendFormat(_T("&cat=%s"), (LPCTSTR)strCat);
+				strTarget.AppendFormat(_T("&wr=%u&wrt=%u&dummy=%u"), uRefreshRound + 1U, dwRefreshStartTick, static_cast<UINT>(rand()));
+				const CStringA strTargetA(wc2utf8(strTarget));
+				strHttpInit.AppendFormat("Refresh: 7.5; url=%s\r\n", (LPCSTR)strTargetA);
+			}
+		}
+
+		CStringA strHttpInitGZ(strHttpInit);
+		strHttpInitGZ += "Content-Encoding: gzip\r\n";
+
 		// send answer...
 		if (!isUseGzip)
-			Data.pSocket->SendContent(HTTPInit, Out);
+			Data.pSocket->SendContent(strHttpInit, Out);
 		else
-			Data.pSocket->SendContent(HTTPInitGZ, gzipOut, gzipLen);
+			Data.pSocket->SendContent(strHttpInitGZ, gzipOut, gzipLen);
 
 		delete[] gzipOut;
 
@@ -653,6 +1454,8 @@ CString CWebServer::_ParseURL(const CString &URL, const CString &fieldname)
 	int findPos = URL.Find(_T('?'));
 	if (findPos >= 0) {
 		CString Parameter(URL.Mid(findPos + 1, URL.GetLength() - findPos - 1));
+		Parameter.Replace(_T("&amp;"), _T("&"));
+		Parameter.Replace(_T("&AMP;"), _T("&"));
 
 		int findLength;
 		// search the field name beginning / middle and strip the rest...
@@ -678,7 +1481,7 @@ CString CWebServer::_ParseURL(const CString &URL, const CString &fieldname)
 
 CString CWebServer::_GetHeader(const ThreadData &Data, long lSession)
 {
-	const CWebServer *pThis = reinterpret_cast<CWebServer*>(Data.pThis);
+	CWebServer *pThis = reinterpret_cast<CWebServer*>(Data.pThis);
 	if (pThis == NULL)
 		return CString();
 
@@ -701,7 +1504,7 @@ CString CWebServer::_GetHeader(const ThreadData &Data, long lSession)
 	CString swCommand(_ParseURL(Data.sURL, _T("w")));
 	swCommand.AppendFormat(_T("&amp;cat=%s&amp;dummy=%d"), (LPCTSTR)_ParseURL(Data.sURL, _T("cat")), rand());
 
-	Out.Replace(_T("[admin]"), (bAdmin && thePrefs.GetWebAdminAllowedHiLevFunc()) ? _T("admin") : EMPTY);
+	Out.Replace(_T("[admin]"), _WebSelectString(bAdmin && thePrefs.GetWebAdminAllowedHiLevFunc(), _T("admin"), _T("")));
 	Out.Replace(_T("[Session]"), sSession);
 	Out.Replace(_T("[RefreshVal]"), sRefresh);
 	Out.Replace(_T("[wCommand]"), swCommand);
@@ -727,7 +1530,7 @@ CString CWebServer::_GetHeader(const ThreadData &Data, long lSession)
 	Out.Replace(_T("[Logout]"), _GetPlainResString(_T("WEB_LOGOUT")));
 	Out.Replace(_T("[Search]"), _GetPlainResString(_T("EM_SEARCH")));
 	Out.Replace(_T("[Download]"), _GetPlainResString(_T("SW_DOWNLOAD")));
-	Out.Replace(_T("[Start]"), _GetPlainResString(_T("SW_START")));
+	Out.Replace(_T("[Start]"), _GetPlainResString(_T("START_VERB")));
 	Out.Replace(_T("[Version]"), _GetPlainResString(_T("VERSION")));
 	Out.Replace(_T("[VersionCheck]"), thePrefs.GetVersionCheckURL());
 	Out.Replace(_T("[Kad]"), _GetPlainResString(_T("KADEMLIA")));
@@ -762,6 +1565,9 @@ CString CWebServer::_GetHeader(const ThreadData &Data, long lSession)
 	Out.Replace(_T("[PriorityRelease]"), _GetPlainResString(_T("PRIORELEASE")));
 	Out.Replace(_T("[PriorityAuto]"), _GetPlainResString(_T("PRIOAUTO")));
 
+	WebHeaderSnapshot headerSnapshot;
+	GetWebHeaderSnapshot(pThis, headerSnapshot);
+
 	CString HTTPHelpU(_T('0'));
 	CString HTTPHelpM(_T('0'));
 	CString HTTPHelpV(_T('0'));
@@ -769,30 +1575,29 @@ CString CWebServer::_GetHeader(const ThreadData &Data, long lSession)
 	const CString &sCmd(_ParseURL(Data.sURL, _T("c")));
 	bool disconnectissued = (sCmd == _T("disconnect"));
 	bool connectissued = (sCmd == _T("connect"));
+	const bool bActiveConnectionAttempt = headerSnapshot.bActiveConnectionAttempt;
 
 	CString HTTPConState, HTTPConText, HTTPHelp;
-	if ((theApp.serverconnect->IsConnecting() && !disconnectissued) || connectissued) {
+	if ((bActiveConnectionAttempt && !disconnectissued) || connectissued) {
 		HTTPConState = _T("connecting");
 		HTTPConText = _GetPlainResString(_T("CONNECTING"));
-	} else if (theApp.serverconnect->IsConnected() && !disconnectissued) {
-		HTTPConState = theApp.serverconnect->IsLowID() ? _T("low") : _T("high");
-		CServer *cur_server = theApp.serverlist->GetServerByAddress(
-			theApp.serverconnect->GetCurrentServer()->GetAddress(),
-			theApp.serverconnect->GetCurrentServer()->GetPort());
-
-		if (cur_server) {
-			HTTPConText = cur_server->GetListName();
+	} else if (headerSnapshot.bServerConnected && !disconnectissued) {
+		HTTPConState = headerSnapshot.bServerLowId ? _T("low") : _T("high");
+		HTTPConText = headerSnapshot.sCurrentServerName;
+		if (HTTPConText.IsEmpty())
+			HTTPConText = _GetPlainResString(_T("CONNECTED"));
+		else {
 			if (HTTPConText.GetLength() > SHORT_LENGTH)
 				HTTPConText = HTTPConText.Left(SHORT_LENGTH - 3) + _T("...");
 
 			if (bAdmin)
 				HTTPConText.AppendFormat(_T(" (<a href=\"?ses=%s&amp;w=server&amp;c=disconnect\">%s</a>)"), (LPCTSTR)sSession, (LPCTSTR)_GetPlainResString(_T("IRC_DISCONNECT")));
 
-			HTTPHelpU = CastItoIShort(cur_server->GetUsers());
-			HTTPHelpM = CastItoIShort(cur_server->GetMaxUsers());
-			HTTPHelpF = CastItoIShort(cur_server->GetFiles());
-			if (cur_server->GetMaxUsers() > 0)
-				HTTPHelpV.Format(_T("%.0f"), (100.0 * cur_server->GetUsers()) / cur_server->GetMaxUsers());
+			HTTPHelpU = CastItoIShort(headerSnapshot.nCurrentServerUsers);
+			HTTPHelpM = CastItoIShort(headerSnapshot.nCurrentServerMaxUsers);
+			HTTPHelpF = CastItoIShort(headerSnapshot.nCurrentServerFiles);
+			if (headerSnapshot.nCurrentServerMaxUsers > 0)
+				HTTPHelpV.Format(_T("%.0f"), (100.0 * headerSnapshot.nCurrentServerUsers) / headerSnapshot.nCurrentServerMaxUsers);
 			else
 				HTTPHelpV = _T("0");
 		}
@@ -803,21 +1608,14 @@ CString CWebServer::_GetHeader(const ThreadData &Data, long lSession)
 		if (bAdmin)
 			HTTPConText.AppendFormat(_T(" (<a href=\"?ses=%s&amp;w=server&amp;c=connect\">%s</a>)"), (LPCTSTR)sSession, (LPCTSTR)_GetPlainResString(_T("CONNECTTOANYSERVER")));
 	}
-	uint32 allUsers = 0;
-	uint32 allFiles = 0;
-	for (INT_PTR sc = theApp.serverlist->GetServerCount(); --sc >= 0;) {
-		const CServer *cur_server = theApp.serverlist->GetServerAt(sc);
-		allUsers += cur_server->GetUsers();
-		allFiles += cur_server->GetFiles();
-	}
-	Out.Replace(_T("[AllUsers]"), CastItoIShort(allUsers));
-	Out.Replace(_T("[AllFiles]"), CastItoIShort(allFiles));
+	Out.Replace(_T("[AllUsers]"), CastItoIShort(headerSnapshot.nAllUsers));
+	Out.Replace(_T("[AllFiles]"), CastItoIShort(headerSnapshot.nAllFiles));
 	Out.Replace(_T("[ConState]"), HTTPConState);
 	Out.Replace(_T("[ConText]"), HTTPConText);
 
 	// kad status
-	if (Kademlia::CKademlia::IsConnected()) {
-		if (Kademlia::CKademlia::IsFirewalled()) {
+	if (headerSnapshot.bKadConnected) {
+		if (headerSnapshot.bKadFirewalled) {
 			HTTPConText = GetResString(_T("FIREWALLED"));
 			HTTPConText.AppendFormat(_T(" (<a href=\"?ses=%s&amp;w=kad&amp;c=rcfirewall\">%s</a>"), (LPCTSTR)sSession, (LPCTSTR)GetResString(_T("KAD_RECHECKFW")));
 			HTTPConText.AppendFormat(_T(", <a href=\"?ses=%s&amp;w=kad&amp;c=disconnect\">%s</a>)"), (LPCTSTR)sSession, (LPCTSTR)GetResString(_T("IRC_DISCONNECT")));
@@ -826,7 +1624,7 @@ CString CWebServer::_GetHeader(const ThreadData &Data, long lSession)
 			HTTPConText.AppendFormat(_T(" (<a href=\"?ses=%s&amp;w=kad&amp;c=disconnect\">%s</a>)"), (LPCTSTR)sSession, (LPCTSTR)GetResString(_T("IRC_DISCONNECT")));
 		}
 	} else {
-		if (Kademlia::CKademlia::IsRunning())
+		if (headerSnapshot.bKadRunning)
 			HTTPConText = GetResString(_T("CONNECTING"));
 		else {
 			HTTPConText = GetResString(_T("DISCONNECTED"));
@@ -838,24 +1636,24 @@ CString CWebServer::_GetHeader(const ThreadData &Data, long lSession)
 	TCHAR HTTPHeader[100];
 	//100/1024 equals to 1/10.24
 	if (thePrefs.GetMaxDownload() == UNLIMITED)
-		_stprintf(HTTPHeader, _T("%.0f"), theApp.downloadqueue->GetDatarate() / 10.24 / thePrefs.GetMaxGraphDownloadRate());
+		_stprintf(HTTPHeader, _T("%.0f"), headerSnapshot.dDownloadDatarate / 10.24 / thePrefs.GetMaxGraphDownloadRate());
 	else
-		_stprintf(HTTPHeader, _T("%.0f"), theApp.downloadqueue->GetDatarate() / 10.24 / thePrefs.GetMaxDownload());
+		_stprintf(HTTPHeader, _T("%.0f"), headerSnapshot.dDownloadDatarate / 10.24 / thePrefs.GetMaxDownload());
 	Out.Replace(_T("[DownloadValue]"), HTTPHeader);
 
 	if (thePrefs.GetMaxUpload() == UNLIMITED)
-		_stprintf(HTTPHeader, _T("%.0f"), theApp.uploadqueue->GetDatarate() / 10.24 / thePrefs.GetMaxGraphUploadRate(true));
+		_stprintf(HTTPHeader, _T("%.0f"), headerSnapshot.dUploadDatarate / 10.24 / thePrefs.GetMaxGraphUploadRate(true));
 	else
-		_stprintf(HTTPHeader, _T("%.0f"), theApp.uploadqueue->GetDatarate() / 10.24 / thePrefs.GetMaxUpload());
+		_stprintf(HTTPHeader, _T("%.0f"), headerSnapshot.dUploadDatarate / 10.24 / thePrefs.GetMaxUpload());
 	Out.Replace(_T("[UploadValue]"), HTTPHeader);
 
-	_stprintf(HTTPHeader, _T("%.0f"), (100.0 * theApp.listensocket->GetOpenSockets()) / thePrefs.GetMaxConnections());
+	_stprintf(HTTPHeader, _T("%.0f"), (100.0 * headerSnapshot.nOpenSockets) / thePrefs.GetMaxConnections());
 	Out.Replace(_T("[ConnectionValue]"), HTTPHeader);
-	_stprintf(HTTPHeader, _T("%.1f"), theApp.uploadqueue->GetDatarate() / 1024.0);
+	_stprintf(HTTPHeader, _T("%.1f"), headerSnapshot.dUploadDatarate / 1024.0);
 	Out.Replace(_T("[CurUpload]"), HTTPHeader);
-	_stprintf(HTTPHeader, _T("%.1f"), theApp.downloadqueue->GetDatarate() / 1024.0);
+	_stprintf(HTTPHeader, _T("%.1f"), headerSnapshot.dDownloadDatarate / 1024.0);
 	Out.Replace(_T("[CurDownload]"), HTTPHeader);
-	_stprintf(HTTPHeader, _T("%u.0"), theApp.listensocket->GetOpenSockets());
+	_stprintf(HTTPHeader, _T("%u.0"), headerSnapshot.nOpenSockets);
 	Out.Replace(_T("[CurConnection]"), HTTPHeader);
 
 	uint32 dwMax = thePrefs.GetMaxUpload();
@@ -892,9 +1690,9 @@ CString CWebServer::_GetHeader(const ThreadData &Data, long lSession)
 	Out.Replace(_T("[Down]"), _GetPlainResString(_T("PW_CON_DOWNLBL")));
 
 	if (thePrefs.GetCatCount() > 1)
-		_InsertCatBox(Out, 0, pThis->m_Templates.sCatArrow, false, false, sSession, EMPTY, true);
+		_InsertCatBox(Out, 0, pThis->m_Templates.sCatArrow, false, false, sSession, _T(""), true);
 	else
-		Out.Replace(_T("[CATBOXED2K]"), EMPTY);
+		Out.Replace(_T("[CATBOXED2K]"), _T(""));
 
 	return Out;
 }
@@ -903,6 +1701,587 @@ const CString CWebServer::_GetFooter(const ThreadData &Data)
 {
 	const CWebServer *pThis = reinterpret_cast<CWebServer*>(Data.pThis);
 	return (pThis == NULL) ? CString() : pThis->m_Templates.sFooter;
+}
+
+bool CWebServer::BuildHeaderSnapshotForWebThread(WebHeaderSnapshot &snapshot)
+{
+	snapshot = WebHeaderSnapshot();
+	if (theApp.serverconnect != NULL) {
+		snapshot.bServerConnected = theApp.serverconnect->IsConnected();
+		snapshot.bServerConnecting = theApp.serverconnect->IsConnecting();
+		snapshot.bActiveConnectionAttempt = theApp.serverconnect->HasActiveConnectionAttempts();
+		snapshot.bServerLowId = snapshot.bServerConnected && theApp.serverconnect->IsLowID();
+		snapshot.dwConnectionTimeout = theApp.serverconnect->GetConnectionAttemptTimeoutMs();
+
+		const CServer *pCurrentServer = theApp.serverconnect->GetCurrentServer();
+		if (pCurrentServer != NULL) {
+			const CServer *pServerDetails = pCurrentServer;
+			if (theApp.serverlist != NULL) {
+				CServer *pListedServer = theApp.serverlist->GetServerByAddress(pCurrentServer->GetAddress(), pCurrentServer->GetPort());
+				if (pListedServer != NULL)
+					pServerDetails = pListedServer;
+			}
+			snapshot.sCurrentServerName = pServerDetails->GetListName();
+			snapshot.nCurrentServerUsers = pServerDetails->GetUsers();
+			snapshot.nCurrentServerMaxUsers = pServerDetails->GetMaxUsers();
+			snapshot.nCurrentServerFiles = pServerDetails->GetFiles();
+		}
+	}
+
+	if (theApp.serverlist != NULL) {
+		for (INT_PTR sc = theApp.serverlist->GetServerCount(); --sc >= 0;) {
+			const CServer *cur_server = theApp.serverlist->GetServerAt(sc);
+			if (cur_server == NULL)
+				continue;
+			snapshot.nAllUsers += cur_server->GetUsers();
+			snapshot.nAllFiles += cur_server->GetFiles();
+		}
+	}
+
+	UINT uDisplayedUploadDatarate = 0;
+	UINT uDisplayedDownloadDatarate = 0;
+	theApp.GetDisplayedTransferRates(uDisplayedUploadDatarate, uDisplayedDownloadDatarate);
+	snapshot.dDownloadDatarate = uDisplayedDownloadDatarate;
+	snapshot.dUploadDatarate = uDisplayedUploadDatarate;
+	if (theApp.listensocket != NULL)
+		snapshot.nOpenSockets = theApp.listensocket->GetOpenSockets();
+
+	snapshot.bKadConnected = Kademlia::CKademlia::IsConnected();
+	snapshot.bKadFirewalled = snapshot.bKadConnected && Kademlia::CKademlia::IsFirewalled();
+	snapshot.bKadRunning = Kademlia::CKademlia::IsRunning();
+	return true;
+}
+
+bool CWebServer::BuildSharedFileDownloadInfoForWebThread(const CString &strFileHash, WebSharedFileDownloadInfo &info)
+{
+	info = WebSharedFileDownloadInfo();
+	if (strFileHash.IsEmpty() || theApp.sharedfiles == NULL)
+		return false;
+
+	CSharedFileList::SWebSharedFileSnapshot snapshot;
+	if (!theApp.sharedfiles->CopyWebSharedFileSnapshot(strFileHash, snapshot))
+		return false;
+	info.sFileName = snapshot.strFileName;
+	info.sFilePath = snapshot.strFilePath;
+	info.qwFileSize = snapshot.uFileSize;
+	info.bFound = !info.sFilePath.IsEmpty();
+	return info.bFound;
+}
+
+bool CWebServer::_GetServerListSnapshot(CWebServer *pThis, CArray<ServerEntry> &ServerArray)
+{
+	ServerArray.RemoveAll();
+	if (pThis == NULL)
+		return false;
+	if (theApp.IsUiThread()) {
+		const bool bResult = BuildServerListSnapshotForWebThread(ServerArray);
+		if (bResult)
+			pThis->StoreWebServerListSnapshot(ServerArray);
+		return bResult;
+	}
+
+	const bool bHasCachedSnapshot = pThis->CopyWebServerListSnapshot(ServerArray);
+	SWebServerListSnapshotRequest *pRequest = new SWebServerListSnapshotRequest();
+	pRequest->m_pThis = pThis;
+	QueueWebUiSnapshotRefresh(WEB_GET_SERVER_LIST_SNAPSHOT, 0, pRequest);
+	return bHasCachedSnapshot;
+}
+
+bool CWebServer::_BuildServerListSnapshot(CArray<ServerEntry> &ServerArray)
+{
+	ServerArray.RemoveAll();
+	if (theApp.serverlist == NULL)
+		return false;
+
+	for (INT_PTR sc = theApp.serverlist->GetServerCount(); --sc >= 0;) {
+		CServer *pServer = theApp.serverlist->GetServerAt(sc);
+		if (pServer == NULL)
+			continue;
+		const CServer &cur_serv = *pServer;
+		ServerEntry Entry;
+		Entry.sServerName = _SpecialChars(cur_serv.GetListName());
+		Entry.sServerIP = cur_serv.GetAddress();
+		Entry.nServerPort = cur_serv.GetPort();
+		Entry.sServerDescription = _SpecialChars(cur_serv.GetDescription());
+		Entry.nServerPing = cur_serv.GetPing();
+		Entry.nServerUsers = cur_serv.GetUsers();
+		Entry.nServerMaxUsers = cur_serv.GetMaxUsers();
+		Entry.nServerFiles = cur_serv.GetFiles();
+		Entry.bServerStatic = cur_serv.IsStaticMember();
+		LPCTSTR uid;
+		switch (cur_serv.GetPreference()) {
+		case SRV_PR_HIGH:
+			uid = _T("PRIOHIGH");
+			Entry.nServerPriority = 2;
+			break;
+		case SRV_PR_NORMAL:
+			uid = _T("PRIONORMAL");
+			Entry.nServerPriority = 1;
+			break;
+		case SRV_PR_LOW:
+			uid = _T("PRIOLOW");
+			Entry.nServerPriority = 0;
+			break;
+		default:
+			uid = _T("");
+			Entry.nServerPriority = 0;
+		}
+		if (uid)
+			Entry.sServerPriority = _GetPlainResString(uid);
+		Entry.nServerFailed = cur_serv.GetFailedCount();
+		Entry.nServerSoftLimit = cur_serv.GetSoftFiles();
+		Entry.nServerHardLimit = cur_serv.GetHardFiles();
+		Entry.sServerVersion = cur_serv.GetVersion();
+		if (inet_addr((CStringA)Entry.sServerIP) != INADDR_NONE) {
+			CString &newip(Entry.sServerFullIP);
+			for (int j = 0, iPos = 0; j < 4 && iPos >= 0; ++j) {
+				const CString &temp(Entry.sServerIP.Tokenize(_T("."), iPos));
+				newip.AppendFormat(&_T("000%s")[min(temp.GetLength(), 3)], (LPCTSTR)temp);
+			}
+		} else
+			Entry.sServerFullIP = Entry.sServerIP;
+		Entry.sServerState = cur_serv.GetFailedCount() ? _T("failed") : _T("disconnected");
+
+		if (theApp.serverconnect != NULL && theApp.serverconnect->IsConnecting() && theApp.serverconnect->AwaitingConnectionToServer(pServer))
+			Entry.sServerState = _T("connecting");
+		else if (theApp.serverconnect != NULL && theApp.serverconnect->IsConnected() && theApp.serverconnect->GetCurrentServer() != NULL) {
+			if (theApp.serverconnect->GetCurrentServer()->GetFullIP() == cur_serv.GetFullIP())
+				Entry.sServerState = theApp.serverconnect->IsLowID() ? _T("low") : _T("high");
+		}
+		ServerArray.Add(Entry);
+		if (ServerArray.GetCount() >= WEB_MAX_TABLE_ROWS)
+			break;
+	}
+	return true;
+}
+
+bool CWebServer::BuildServerListSnapshotForWebThread(CArray<ServerEntry> &ServerArray)
+{
+	return _BuildServerListSnapshot(ServerArray);
+}
+
+
+
+static CString GetWebSharedSnapshotFileNameByHash(const uchar *fileHash)
+{
+	if (fileHash == NULL || theApp.sharedfiles == NULL)
+		return CString();
+	CSharedFileList::SWebSharedFileSnapshot snapshot;
+	if (theApp.sharedfiles->CopyWebSharedFileSnapshot(md4str(fileHash), snapshot))
+		return snapshot.strFileName;
+	return CString();
+}
+
+static CString BuildWebSharedFileEd2kLink(const CSharedFileList::SWebSharedFileSnapshot &snapshot)
+{
+	if (theApp.sharedfiles == NULL || snapshot.strFileHash.GetLength() != 32)
+		return CString();
+
+	uchar fileHash[MDX_DIGEST_SIZE];
+	if (!DecodeBase16(snapshot.strFileHash, snapshot.strFileHash.GetLength(), fileHash, _countof(fileHash)))
+		return CString();
+
+	const CKnownFile *pFile = theApp.sharedfiles->GetFileByID(fileHash);
+	if (pFile != NULL)
+		return pFile->GetED2kLink();
+
+	CString strED2kLink;
+	strED2kLink.Format(_T("ed2k://|file|%s|%I64u|%s|/"), (LPCTSTR)EncodeUrlUtf8(snapshot.strFileName), snapshot.uFileSize, (LPCTSTR)snapshot.strFileHash);
+	return strED2kLink;
+}
+
+bool CWebServer::_GetTransferSnapshot(CWebServer *pThis, const ThreadData &Data, int cat, WebTransferSnapshot &snapshot)
+{
+	snapshot.FilesArray.RemoveAll();
+	snapshot.UploadArray.RemoveAll();
+	snapshot.QueueArray.RemoveAll();
+	snapshot.nCountQueue = 0;
+	snapshot.nCountQueueBanned = 0;
+	snapshot.nCountQueueFriend = 0;
+	snapshot.nCountQueueSecure = 0;
+	snapshot.nCountQueueBannedSecure = 0;
+	snapshot.nCountQueueFriendSecure = 0;
+	snapshot.bStale = false;
+	if (pThis == NULL)
+		return false;
+	if (theApp.IsUiThread()) {
+		const bool bResult = pThis->BuildTransferSnapshotForWebThread(pThis, Data, cat, snapshot);
+		if (bResult) {
+			pThis->StoreWebTransferSnapshot(cat, snapshot);
+			pThis->ApplyWebTransferRenamePreviews(snapshot);
+		}
+		return bResult;
+	}
+
+	const bool bTransferCommand = _IsTransferCommandRequest(Data.sURL);
+	const bool bHasCachedSnapshot = pThis->CopyWebTransferSnapshot(cat, snapshot);
+	SWebTransferSnapshotRequest *pRequest = new SWebTransferSnapshotRequest();
+	pRequest->m_pThis = pThis;
+	pRequest->m_pServer = pThis;
+	pRequest->m_Data = Data;
+	pRequest->m_iCategory = cat;
+	if (!bHasCachedSnapshot || bTransferCommand) {
+		const DWORD dwWait = bTransferCommand ? WEB_TRANSFER_COMMAND_SNAPSHOT_SYNC_WAIT_MS : WEB_TRANSFER_SNAPSHOT_SYNC_WAIT_MS;
+		const bool bCompleted = PostWebUiRequestAndWait(WEB_GET_TRANSFER_SNAPSHOT, 0, pRequest, dwWait);
+		if (bCompleted && pRequest->m_bResult && pRequest->m_pSnapshot != NULL) {
+			snapshot = *pRequest->m_pSnapshot;
+			pThis->ApplyWebTransferRenamePreviews(snapshot);
+			pRequest->ReleaseReference();
+			return true;
+		}
+		pRequest->ReleaseReference();
+		return bHasCachedSnapshot;
+	}
+
+	QueueWebUiSnapshotRefresh(WEB_GET_TRANSFER_SNAPSHOT, 0, pRequest);
+	return bHasCachedSnapshot;
+}
+
+bool CWebServer::BuildTransferSnapshotForWebThread(const ThreadData &Data, int cat, WebTransferSnapshot &snapshot)
+{
+	return BuildTransferSnapshotForWebThread(this, Data, cat, snapshot);
+}
+
+bool CWebServer::BuildTransferSnapshotForWebThread(CWebServer *pThis, const ThreadData &Data, int cat, WebTransferSnapshot &snapshot)
+{
+	snapshot.FilesArray.RemoveAll();
+	snapshot.UploadArray.RemoveAll();
+	snapshot.QueueArray.RemoveAll();
+	snapshot.nCountQueue = 0;
+	snapshot.nCountQueueBanned = 0;
+	snapshot.nCountQueueFriend = 0;
+	snapshot.nCountQueueSecure = 0;
+	snapshot.nCountQueueBannedSecure = 0;
+	snapshot.nCountQueueFriendSecure = 0;
+	snapshot.bStale = false;
+	if (pThis == NULL || theApp.downloadqueue == NULL || theApp.uploadqueue == NULL)
+		return false;
+
+	for (POSITION pos = NULL; ;) {
+		CPartFile *pPartFile = theApp.downloadqueue->GetFileNext(pos);
+		if (pPartFile != NULL) {
+			bool bInclude = true;
+			if (cat < 0) {
+				switch (cat) {
+				case -1:
+					bInclude = (pPartFile->GetCategory() == 0);
+					break;
+				case -2:
+					bInclude = pPartFile->IsPartFile();
+					break;
+				case -3:
+					bInclude = !pPartFile->IsPartFile();
+					break;
+				case -4:
+					bInclude = (pPartFile->GetStatus() == PS_READY || pPartFile->GetStatus() == PS_EMPTY) && pPartFile->GetTransferringSrcCount() == 0;
+					break;
+				case -5:
+					bInclude = (pPartFile->GetStatus() == PS_READY || pPartFile->GetStatus() == PS_EMPTY) && pPartFile->GetTransferringSrcCount() > 0;
+					break;
+				case -6:
+					bInclude = (pPartFile->GetStatus() == PS_ERROR);
+					break;
+				case -7:
+					bInclude = (pPartFile->GetStatus() == PS_PAUSED || pPartFile->IsStopped());
+					break;
+				case -8:
+					bInclude = (pPartFile->lastseencomplete != 0);
+					break;
+				case -9:
+					bInclude = pPartFile->IsMovie();
+					break;
+				case -10:
+					bInclude = (ED2KFT_AUDIO == GetED2KFileTypeID(pPartFile->GetFileName()));
+					break;
+				case -11:
+					bInclude = pPartFile->IsArchive();
+					break;
+				case -12:
+					bInclude = (ED2KFT_CDIMAGE == GetED2KFileTypeID(pPartFile->GetFileName()));
+					break;
+				case -13:
+					bInclude = (ED2KFT_DOCUMENT == GetED2KFileTypeID(pPartFile->GetFileName()));
+					break;
+				case -14:
+					bInclude = (ED2KFT_IMAGE == GetED2KFileTypeID(pPartFile->GetFileName()));
+					break;
+				case -15:
+					bInclude = (ED2KFT_PROGRAM == GetED2KFileTypeID(pPartFile->GetFileName()));
+					break;
+				case -16:
+					bInclude = (ED2KFT_EMULECOLLECTION == GetED2KFileTypeID(pPartFile->GetFileName()));
+					break;
+				default:
+					bInclude = false;
+				}
+			} else if (cat > 0)
+				bInclude = (pPartFile->GetCategory() == (UINT)cat);
+
+			if (bInclude) {
+				DownloadFiles dFile;
+				dFile.sFileName = _SpecialChars(pPartFile->GetFileName());
+				dFile.sFileType = _GetWebImageNameForFileType(dFile.sFileName);
+				dFile.sFileNameJS = _SpecialChars(pPartFile->GetFileName());
+				dFile.m_qwFileSize = (uint64)pPartFile->GetFileSize();
+				dFile.m_qwFileTransferred = (uint64)pPartFile->GetCompletedSize();
+				dFile.m_dblCompleted = pPartFile->GetPercentCompleted();
+				dFile.lFileSpeed = pPartFile->GetDatarate();
+				dFile.iComment = (pPartFile->HasComment() || pPartFile->HasRating()) ? (pPartFile->HasBadRating() ? 2 : 1) : 0;
+				dFile.iFileState = pPartFile->getPartfileStatusRank();
+
+				LPCTSTR pFileState;
+				switch (pPartFile->GetStatus()) {
+				case PS_HASHING:
+					pFileState = _T("hashing");
+					break;
+				case PS_WAITINGFORHASH:
+					pFileState = _T("waitinghash");
+					break;
+				case PS_ERROR:
+					pFileState = _T("error");
+					break;
+				case PS_COMPLETING:
+					pFileState = _T("completing");
+					break;
+				case PS_COMPLETE:
+					pFileState = _T("complete");
+					break;
+				case PS_PAUSED:
+					pFileState = pPartFile->IsStopped() ? _T("stopped") : _T("paused");
+					break;
+				default:
+					pFileState = (pPartFile->GetDatarate() > 0) ? _T("downloading") : _T("waiting");
+				}
+				dFile.sFileState = CString(pFileState);
+				dFile.bFileAutoPrio = pPartFile->IsAutoDownPriority();
+				dFile.nFilePrio = pPartFile->GetDownPriority();
+				dFile.iCategory = pPartFile->GetCategory();
+
+				CString strCategory(thePrefs.GetCategoryDisplayTitle(dFile.iCategory));
+				strCategory.Replace(_T("'"), _T("\\'"));
+				dFile.sCategory = strCategory;
+
+				dFile.sFileHash = md4str(pPartFile->GetFileHash());
+				dFile.lSourceCount = pPartFile->GetSourceCount();
+				dFile.lNotCurrentSourceCount = pPartFile->GetNotCurrentSourcesCount();
+				dFile.lTransferringSourceCount = pPartFile->GetTransferringSrcCount();
+				dFile.bIsComplete = !pPartFile->IsPartFile();
+				dFile.bIsPreview = pPartFile->IsReadyForPreview();
+				dFile.bIsGetFLC = pPartFile->GetPreviewPrio();
+				dFile.sDownloadBar = _GetDownloadGraph(Data, pPartFile);
+
+				if (!theApp.GetPublicIP().IsNull() && !theApp.IsFirewalled())
+					dFile.sED2kLink = pPartFile->GetED2kLink(false, false, false, true, theApp.GetPublicIP());
+				else
+					dFile.sED2kLink = pPartFile->GetED2kLink();
+
+				dFile.sFileInfo = _SpecialChars(pPartFile->GetInfoSummary(true), false);
+				snapshot.FilesArray.Add(dFile);
+			}
+		}
+		if (pos == NULL || snapshot.FilesArray.GetCount() >= WEB_MAX_TABLE_ROWS)
+			break;
+	}
+
+	SortParams dprm{ (int)pThis->m_Params.DownloadSort, pThis->m_Params.bDownloadSortReverse };
+	qsort_s(snapshot.FilesArray.GetData(), snapshot.FilesArray.GetCount(), sizeof(DownloadFiles), &_DownloadCmp, &dprm);
+
+	for (POSITION pos = theApp.uploadqueue->GetFirstFromUploadList(); pos != NULL && snapshot.UploadArray.GetCount() < WEB_MAX_TABLE_ROWS;) {
+		UploadUsers dUser;
+		const CUpDownClient &cur_client(*theApp.uploadqueue->GetNextFromUploadList(pos));
+		dUser.sUserHash = md4str(cur_client.GetUserHash());
+		if (cur_client.GetUploadDatarate() > 0) {
+			dUser.sActive = _T("downloading");
+			dUser.sClientState = _T("uploading");
+		} else {
+			dUser.sActive = _T("waiting");
+			dUser.sClientState = _T("connecting");
+		}
+
+		const CString strUploadFileName(GetWebSharedSnapshotFileNameByHash(cur_client.GetUploadFileID()));
+		dUser.sFileInfo = _SpecialChars(_GetClientSummary(cur_client, strUploadFileName), false);
+		dUser.sFileInfo.Replace(_T("\\"), _T("\\\\"));
+		dUser.sFileInfo.Replace(_T("\n"), _T("<br>"));
+		dUser.sFileInfo.Replace(_T("'"), _T("&#8217;"));
+
+		_GetClientversionImage(cur_client, dUser.sClientSoft);
+		if (cur_client.IsBanned())
+			dUser.sClientExtra = _T("banned");
+		else if (cur_client.IsFriend())
+			dUser.sClientExtra = _T("friend");
+		else if (cur_client.Credits()->GetScoreRatio(cur_client.GetIP()) > 1)
+			dUser.sClientExtra = _T("credit");
+		else
+			dUser.sClientExtra = _T("none");
+
+		CString cname(cur_client.GetUserName());
+		if (cname.GetLength() > SHORT_LENGTH_MIN) {
+			cname.Truncate(SHORT_LENGTH_MIN - 3);
+			cname += _T("...");
+		}
+		dUser.sUserName = _SpecialChars(cname);
+
+		dUser.sFileName = strUploadFileName.IsEmpty() ? _GetPlainResString(_T("REQ_UNKNOWNFILE")) : _SpecialChars(strUploadFileName);
+		dUser.nTransferredDown = cur_client.GetTransferredDown();
+		dUser.nTransferredUp = cur_client.GetTransferredUp();
+		UINT uDataRate = cur_client.GetUploadDatarate();
+		dUser.nDataRate = (uDataRate == UNLIMITED) ? 0 : uDataRate;
+		dUser.sClientNameVersion = cur_client.DbgGetFullClientSoftVer();
+		snapshot.UploadArray.Add(dUser);
+	}
+
+	SortParams uprm{ (int)pThis->m_Params.UploadSort, pThis->m_Params.bUploadSortReverse };
+	qsort_s(snapshot.UploadArray.GetData(), snapshot.UploadArray.GetCount(), sizeof(UploadUsers), &_UploadCmp, &uprm);
+
+	for (POSITION pos = theApp.uploadqueue->waitinglist.GetHeadPosition(); pos != NULL && snapshot.QueueArray.GetCount() < WEB_MAX_TABLE_ROWS;) {
+		QueueUsers dUser;
+		CUpDownClient &cur_client(*theApp.uploadqueue->waitinglist.GetNext(pos));
+		int iSecure = static_cast<int>(cur_client.Credits()->GetCurrentIdentState(cur_client.GetIP()) == IS_IDENTIFIED);
+		if (cur_client.IsBanned()) {
+			dUser.sClientExtra = _T("banned");
+			++snapshot.nCountQueueBanned;
+			snapshot.nCountQueueBannedSecure += iSecure;
+		} else if (cur_client.IsFriend()) {
+			dUser.sClientExtra = _T("friend");
+			++snapshot.nCountQueueFriend;
+			snapshot.nCountQueueFriendSecure += iSecure;
+		} else {
+			dUser.sClientExtra = _T("none");
+			++snapshot.nCountQueue;
+			snapshot.nCountQueueSecure += iSecure;
+		}
+
+		CString usn(cur_client.GetUserName());
+		if (usn.GetLength() > SHORT_LENGTH_MIN) {
+			usn.Truncate(SHORT_LENGTH_MIN - 3);
+			usn += _T("...");
+		}
+		dUser.sUserName = _SpecialChars(usn);
+		dUser.sClientNameVersion = cur_client.DbgGetFullClientSoftVer();
+		const CString strUploadFileName(GetWebSharedSnapshotFileNameByHash(cur_client.GetUploadFileID()));
+		dUser.sFileName = strUploadFileName.IsEmpty() ? _GetPlainResString(_T("REQ_UNKNOWNFILE")) : _SpecialChars(strUploadFileName);
+		dUser.sClientState = dUser.sClientExtra;
+		dUser.sClientStateSpecial = _T("connecting");
+		dUser.nScore = cur_client.GetScore(false);
+		_GetClientversionImage(cur_client, dUser.sClientSoft);
+		dUser.sUserHash = md4str(cur_client.GetUserHash());
+
+		switch (pThis->m_Params.QueueSort) {
+		case QU_SORT_CLIENT:
+			dUser.sIndex = dUser.sClientSoft;
+			break;
+		case QU_SORT_USER:
+			dUser.sIndex = dUser.sUserName;
+			break;
+		case QU_SORT_VERSION:
+			dUser.sIndex = dUser.sClientNameVersion;
+			break;
+		case QU_SORT_FILENAME:
+			dUser.sIndex = dUser.sFileName;
+			break;
+		case QU_SORT_SCORE:
+			dUser.sIndex.Format(_T("%09u"), dUser.nScore);
+		}
+		snapshot.QueueArray.Add(dUser);
+	}
+
+	INT_PTR nNextPos = 0;
+	uint32 nNextScore = 0;
+	for (INT_PTR i = snapshot.QueueArray.GetCount(); --i >= 0;)
+		if (snapshot.QueueArray[i].nScore > nNextScore) {
+			nNextPos = i;
+			nNextScore = snapshot.QueueArray[i].nScore;
+		}
+
+	if (snapshot.QueueArray.GetCount() > 0) {
+		snapshot.QueueArray[nNextPos].sClientState = _T("next");
+		snapshot.QueueArray[nNextPos].sClientStateSpecial = snapshot.QueueArray[nNextPos].sClientState;
+	}
+
+	if ((snapshot.nCountQueue > 0 && pThis->m_Params.bShowUploadQueue)
+		|| (snapshot.nCountQueueBanned > 0 && pThis->m_Params.bShowUploadQueueBanned)
+		|| (snapshot.nCountQueueFriend > 0 && pThis->m_Params.bShowUploadQueueFriend))
+	{
+#ifdef _DEBUG
+		const DWORD dwStart = ::GetTickCount();
+#endif
+		snapshot.QueueArray.QuickSort(pThis->m_Params.bQueueSortReverse);
+#ifdef _DEBUG
+		AddDebugLogLine(false, _T("WebServer: Waitingqueue with %u elements sorted in %u ms"), snapshot.QueueArray.GetCount(), ::GetTickCount() - dwStart);
+#endif
+	}
+	return true;
+}
+
+bool CWebServer::_GetSharedFilesSnapshot(CWebServer *pThis, CArray<SharedFiles> &SharedArray)
+{
+	SharedArray.RemoveAll();
+	if (pThis == NULL)
+		return false;
+	if (theApp.IsUiThread()) {
+		const bool bResult = BuildSharedFilesSnapshotForWebThread(SharedArray);
+		if (bResult)
+			pThis->StoreWebSharedFilesSnapshot(SharedArray);
+		return bResult;
+	}
+
+	const bool bHasCachedSnapshot = pThis->CopyWebSharedFilesSnapshot(SharedArray);
+	SWebSharedFilesSnapshotRequest *pRequest = new SWebSharedFilesSnapshotRequest();
+	pRequest->m_pThis = pThis;
+	if (!bHasCachedSnapshot) {
+		const bool bCompleted = PostWebUiRequestAndWait(WEB_GET_SHARED_FILES_SNAPSHOT, 0, pRequest, WEB_SHARED_FILES_SNAPSHOT_SYNC_WAIT_MS);
+		if (bCompleted && pRequest->m_bResult && pRequest->m_pSharedArray != NULL) {
+			SharedArray.RemoveAll();
+			SharedArray.Append(*pRequest->m_pSharedArray);
+			pRequest->ReleaseReference();
+			return true;
+		}
+		pRequest->ReleaseReference();
+		return pThis->CopyWebSharedFilesSnapshot(SharedArray);
+	}
+
+	QueueWebUiSnapshotRefresh(WEB_GET_SHARED_FILES_SNAPSHOT, 0, pRequest);
+	return bHasCachedSnapshot;
+}
+
+bool CWebServer::BuildSharedFilesSnapshotForWebThread(CArray<SharedFiles> &SharedArray)
+{
+	SharedArray.RemoveAll();
+	if (theApp.sharedfiles == NULL)
+		return false;
+
+	std::vector<CSharedFileList::SWebSharedFileSnapshot> webSnapshots;
+	theApp.sharedfiles->CopyWebSharedFileSnapshots(webSnapshots, static_cast<size_t>(WEB_MAX_TABLE_ROWS));
+	SharedArray.SetSize(0, static_cast<INT_PTR>(std::min<size_t>(webSnapshots.size(), static_cast<size_t>(WEB_MAX_TABLE_ROWS))));
+	for (size_t i = 0; i < webSnapshots.size() && SharedArray.GetCount() < WEB_MAX_TABLE_ROWS; ++i) {
+		const CSharedFileList::SWebSharedFileSnapshot &snapshot = webSnapshots[i];
+		if (snapshot.strFileHash.IsEmpty())
+			continue;
+
+		SharedFiles dFile;
+		dFile.bIsPartFile = snapshot.bPartFile;
+		dFile.sFileName = snapshot.strFileName;
+		dFile.sFileState = snapshot.bPartFile ? _T("filedown") : _T("file");
+		dFile.sFileType = _GetWebImageNameForFileType(dFile.sFileName);
+		dFile.m_qwFileSize = snapshot.uFileSize;
+		dFile.sED2kLink = BuildWebSharedFileEd2kLink(snapshot);
+		dFile.nFileTransferred = snapshot.uTransferred;
+		dFile.nFileAllTimeTransferred = snapshot.uAllTimeTransferred;
+		dFile.nFileRequests = snapshot.uRequests;
+		dFile.nFileAllTimeRequests = snapshot.uAllTimeRequests;
+		dFile.nFileAccepts = snapshot.uAccepts;
+		dFile.nFileAllTimeAccepts = snapshot.uAllTimeAccepts;
+		dFile.sFileHash = snapshot.strFileHash;
+		dFile.sFileCompletes = snapshot.strFileCompletes;
+		dFile.dblFileCompletes = snapshot.dblFileCompletes;
+		dFile.sFilePriority = snapshot.strFilePriority;
+		dFile.nFilePriority = snapshot.nFilePriority;
+		dFile.bFileAutoPriority = snapshot.bFileAutoPriority;
+		dFile.bDownloadable = snapshot.bDownloadable;
+		dFile.bReleasePriority = snapshot.bReleasePriority;
+		SharedArray.Add(dFile);
+	}
+	return true;
 }
 
 CString CWebServer::_GetServerList(const ThreadData &Data)
@@ -919,49 +2298,28 @@ CString CWebServer::_GetServerList(const ThreadData &Data)
 	const CString &sIP(_ParseURL(Data.sURL, _T("ip")));
 	int nPort = _tstoi(_ParseURL(Data.sURL, _T("port")));
 	if (bAdmin) {
-		if (sCmd == _T("connect")) {
-			if (sIP.IsEmpty())
-				SendMessage(theApp.emuledlg->m_hWnd, WEB_GUI_INTERACTION, WEBGUIIA_CONNECTTOSERVER, 0);
-			else
-				_ConnectToServer(sIP, nPort);
-		} else if (sCmd == _T("disconnect")) {
-			if (theApp.serverconnect->IsConnecting())
-				SendMessage(theApp.emuledlg->m_hWnd, WEB_GUI_INTERACTION, WEBGUIIA_STOPCONNECTING, 0);
-			else
-				SendMessage(theApp.emuledlg->m_hWnd, WEB_GUI_INTERACTION, WEBGUIIA_DISCONNECT, 1);
-		} else if (sCmd == _T("remove")) {
+		if (sCmd == _T("connect"))
+			ExecuteServerCommandForWebThread(sIP.IsEmpty() ? WEB_SERVER_COMMAND_CONNECT_ANY : WEB_SERVER_COMMAND_CONNECT, sIP, nPort);
+		else if (sCmd == _T("disconnect"))
+			ExecuteServerCommandForWebThread(WEB_SERVER_COMMAND_DISCONNECT_ED2K, CString(), 0);
+		else if (sCmd == _T("remove")) {
 			if (!sIP.IsEmpty())
-				_RemoveServer(sIP, nPort);
+				ExecuteServerCommandForWebThread(WEB_SERVER_COMMAND_REMOVE, sIP, nPort);
 		} else if (sCmd == _T("addtostatic")) {
 			if (!sIP.IsEmpty())
-				_AddToStatic(sIP, nPort);
+				ExecuteServerCommandForWebThread(WEB_SERVER_COMMAND_ADD_TO_STATIC, sIP, nPort);
 		} else if (sCmd == _T("removefromstatic")) {
 			if (!sIP.IsEmpty())
-				_RemoveFromStatic(sIP, nPort);
+				ExecuteServerCommandForWebThread(WEB_SERVER_COMMAND_REMOVE_FROM_STATIC, sIP, nPort);
 		} else if (sCmd == _T("priolow")) {
-			if (!sIP.IsEmpty()) {
-				CServer *server = theApp.serverlist->GetServerByAddress(sIP, (uint16)nPort);
-				if (server) {
-					server->SetPreference(SRV_PR_LOW);
-					SendMessage(theApp.emuledlg->m_hWnd, WEB_GUI_INTERACTION, WEBGUIIA_UPDATESERVER, (LPARAM)server);
-				}
-			}
+			if (!sIP.IsEmpty())
+				ExecuteServerCommandForWebThread(WEB_SERVER_COMMAND_SET_PRIORITY, sIP, nPort, SRV_PR_LOW);
 		} else if (sCmd == _T("prionormal")) {
-			if (!sIP.IsEmpty()) {
-				CServer *server = theApp.serverlist->GetServerByAddress(sIP, (uint16)nPort);
-				if (server) {
-					server->SetPreference(SRV_PR_NORMAL);
-					SendMessage(theApp.emuledlg->m_hWnd, WEB_GUI_INTERACTION, WEBGUIIA_UPDATESERVER, (LPARAM)server);
-				}
-			}
+			if (!sIP.IsEmpty())
+				ExecuteServerCommandForWebThread(WEB_SERVER_COMMAND_SET_PRIORITY, sIP, nPort, SRV_PR_NORMAL);
 		} else if (sCmd == _T("priohigh")) {
-			if (!sIP.IsEmpty()) {
-				CServer *server = theApp.serverlist->GetServerByAddress(sIP, (uint16)nPort);
-				if (server) {
-					server->SetPreference(SRV_PR_HIGH);
-					SendMessage(theApp.emuledlg->m_hWnd, WEB_GUI_INTERACTION, WEBGUIIA_UPDATESERVER, (LPARAM)server);
-				}
-			}
+			if (!sIP.IsEmpty())
+				ExecuteServerCommandForWebThread(WEB_SERVER_COMMAND_SET_PRIORITY, sIP, nPort, SRV_PR_HIGH);
 		}
 	} else if (sCmd == _T("menu")) {
 		int iMenu = _tstol(_ParseURL(Data.sURL, _T("m")));
@@ -1017,147 +2375,148 @@ CString CWebServer::_GetServerList(const ThreadData &Data)
 	if (pThis->m_Params.ServerSort == SERVER_SORT_STATE)
 		Out.Replace(_T("[SortState]"), strTmp);
 	else
-		Out.Replace(_T("[SortState]"), EMPTY);
+		Out.Replace(_T("[SortState]"), _T(""));
 	if (pThis->m_Params.ServerSort == SERVER_SORT_NAME)
 		Out.Replace(_T("[SortName]"), strTmp);
 	else
-		Out.Replace(_T("[SortName]"), EMPTY);
+		Out.Replace(_T("[SortName]"), _T(""));
 	if (pThis->m_Params.ServerSort == SERVER_SORT_IP)
 		Out.Replace(_T("[SortIP]"), strTmp);
 	else
-		Out.Replace(_T("[SortIP]"), EMPTY);
+		Out.Replace(_T("[SortIP]"), _T(""));
 	if (pThis->m_Params.ServerSort == SERVER_SORT_DESCRIPTION)
 		Out.Replace(_T("[SortDescription]"), strTmp);
 	else
-		Out.Replace(_T("[SortDescription]"), EMPTY);
+		Out.Replace(_T("[SortDescription]"), _T(""));
 	if (pThis->m_Params.ServerSort == SERVER_SORT_PING)
 		Out.Replace(_T("[SortPing]"), strTmp);
 	else
-		Out.Replace(_T("[SortPing]"), EMPTY);
+		Out.Replace(_T("[SortPing]"), _T(""));
 	if (pThis->m_Params.ServerSort == SERVER_SORT_USERS)
 		Out.Replace(_T("[SortUsers]"), strTmp);
 	else
-		Out.Replace(_T("[SortUsers]"), EMPTY);
+		Out.Replace(_T("[SortUsers]"), _T(""));
 	if (pThis->m_Params.ServerSort == SERVER_SORT_FILES)
 		Out.Replace(_T("[SortFiles]"), strTmp);
 	else
-		Out.Replace(_T("[SortFiles]"), EMPTY);
+		Out.Replace(_T("[SortFiles]"), _T(""));
 	if (pThis->m_Params.ServerSort == SERVER_SORT_PRIORITY)
 		Out.Replace(_T("[SortPriority]"), strTmp);
 	else
-		Out.Replace(_T("[SortPriority]"), EMPTY);
+		Out.Replace(_T("[SortPriority]"), _T(""));
 	if (pThis->m_Params.ServerSort == SERVER_SORT_FAILED)
 		Out.Replace(_T("[SortFailed]"), strTmp);
 	else
-		Out.Replace(_T("[SortFailed]"), EMPTY);
+		Out.Replace(_T("[SortFailed]"), _T(""));
 	if (pThis->m_Params.ServerSort == SERVER_SORT_LIMIT)
 		Out.Replace(_T("[SortLimit]"), strTmp);
 	else
-		Out.Replace(_T("[SortLimit]"), EMPTY);
+		Out.Replace(_T("[SortLimit]"), _T(""));
 	if (pThis->m_Params.ServerSort == SERVER_SORT_VERSION)
 		Out.Replace(_T("[SortVersion]"), strTmp);
 	else
-		Out.Replace(_T("[SortVersion]"), EMPTY);
+		Out.Replace(_T("[SortVersion]"), _T(""));
 	Out.Replace(_T("[ServerList]"), _GetPlainResString(_T("SV_SERVERLIST")));
 
-	const TCHAR *pcSortIcon = (pThis->m_Params.bServerSortReverse) ? pThis->m_Templates.sUpArrow : pThis->m_Templates.sDownArrow;
+	CString sSortIcon = _WebSelectString(pThis->m_Params.bServerSortReverse, pThis->m_Templates.sUpArrow, pThis->m_Templates.sDownArrow);
+		LPCTSTR pcSortIcon = sSortIcon;
 
 	_GetPlainResString(strTmp, _T("SL_SERVERNAME"));
 	if (WSserverColumnHidden[0]) {
-		Out.Replace(_T("[ServernameI]"), EMPTY);
-		Out.Replace(_T("[ServernameH]"), EMPTY);
+		Out.Replace(_T("[ServernameI]"), _T(""));
+		Out.Replace(_T("[ServernameH]"), _T(""));
 	} else {
-		Out.Replace(_T("[ServernameI]"), (pThis->m_Params.ServerSort == SERVER_SORT_NAME) ? pcSortIcon : EMPTY);
+		Out.Replace(_T("[ServernameI]"), _WebSelectString(pThis->m_Params.ServerSort == SERVER_SORT_NAME, pcSortIcon, _T("")));
 		Out.Replace(_T("[ServernameH]"), strTmp);
 	}
 	Out.Replace(_T("[ServernameM]"), strTmp);
 
 	_GetPlainResString(strTmp, _T("IP"));
 	if (WSserverColumnHidden[1]) {
-		Out.Replace(_T("[AddressI]"), EMPTY);
-		Out.Replace(_T("[AddressH]"), EMPTY);
+		Out.Replace(_T("[AddressI]"), _T(""));
+		Out.Replace(_T("[AddressH]"), _T(""));
 	} else {
-		Out.Replace(_T("[AddressI]"), (pThis->m_Params.ServerSort == SERVER_SORT_IP) ? pcSortIcon : EMPTY);
+		Out.Replace(_T("[AddressI]"), _WebSelectString(pThis->m_Params.ServerSort == SERVER_SORT_IP, pcSortIcon, _T("")));
 		Out.Replace(_T("[AddressH]"), strTmp);
 	}
 	Out.Replace(_T("[AddressM]"), strTmp);
 
 	_GetPlainResString(strTmp, _T("DESCRIPTION"));
 	if (WSserverColumnHidden[2]) {
-		Out.Replace(_T("[DescriptionI]"), EMPTY);
-		Out.Replace(_T("[DescriptionH]"), EMPTY);
+		Out.Replace(_T("[DescriptionI]"), _T(""));
+		Out.Replace(_T("[DescriptionH]"), _T(""));
 	} else {
-		Out.Replace(_T("[DescriptionI]"), (pThis->m_Params.ServerSort == SERVER_SORT_DESCRIPTION) ? pcSortIcon : EMPTY);
+		Out.Replace(_T("[DescriptionI]"), _WebSelectString(pThis->m_Params.ServerSort == SERVER_SORT_DESCRIPTION, pcSortIcon, _T("")));
 		Out.Replace(_T("[DescriptionH]"), strTmp);
 	}
 	Out.Replace(_T("[DescriptionM]"), strTmp);
 
 	_GetPlainResString(strTmp, _T("PING"));
 	if (WSserverColumnHidden[3]) {
-		Out.Replace(_T("[PingI]"), EMPTY);
-		Out.Replace(_T("[PingH]"), EMPTY);
+		Out.Replace(_T("[PingI]"), _T(""));
+		Out.Replace(_T("[PingH]"), _T(""));
 	} else {
-		Out.Replace(_T("[PingI]"), (pThis->m_Params.ServerSort == SERVER_SORT_PING) ? pcSortIcon : EMPTY);
+		Out.Replace(_T("[PingI]"), _WebSelectString(pThis->m_Params.ServerSort == SERVER_SORT_PING, pcSortIcon, _T("")));
 		Out.Replace(_T("[PingH]"), strTmp);
 	}
 	Out.Replace(_T("[PingM]"), strTmp);
 
 	_GetPlainResString(strTmp, _T("UUSERS"));
 	if (WSserverColumnHidden[4]) {
-		Out.Replace(_T("[UsersI]"), EMPTY);
-		Out.Replace(_T("[UsersH]"), EMPTY);
+		Out.Replace(_T("[UsersI]"), _T(""));
+		Out.Replace(_T("[UsersH]"), _T(""));
 	} else {
-		Out.Replace(_T("[UsersI]"), (pThis->m_Params.ServerSort == SERVER_SORT_USERS) ? pcSortIcon : EMPTY);
+		Out.Replace(_T("[UsersI]"), _WebSelectString(pThis->m_Params.ServerSort == SERVER_SORT_USERS, pcSortIcon, _T("")));
 		Out.Replace(_T("[UsersH]"), strTmp);
 	}
 	Out.Replace(_T("[UsersM]"), strTmp);
 
 	_GetPlainResString(strTmp, _T("FILES"));
 	if (WSserverColumnHidden[5]) {
-		Out.Replace(_T("[FilesI]"), EMPTY);
-		Out.Replace(_T("[FilesH]"), EMPTY);
+		Out.Replace(_T("[FilesI]"), _T(""));
+		Out.Replace(_T("[FilesH]"), _T(""));
 	} else {
-		Out.Replace(_T("[FilesI]"), (pThis->m_Params.ServerSort == SERVER_SORT_FILES) ? pcSortIcon : EMPTY);
+		Out.Replace(_T("[FilesI]"), _WebSelectString(pThis->m_Params.ServerSort == SERVER_SORT_FILES, pcSortIcon, _T("")));
 		Out.Replace(_T("[FilesH]"), strTmp);
 	}
 	Out.Replace(_T("[FilesM]"), strTmp);
 
 	_GetPlainResString(strTmp, _T("PRIORITY"));
 	if (WSserverColumnHidden[6]) {
-		Out.Replace(_T("[PriorityI]"), EMPTY);
-		Out.Replace(_T("[PriorityH]"), EMPTY);
+		Out.Replace(_T("[PriorityI]"), _T(""));
+		Out.Replace(_T("[PriorityH]"), _T(""));
 	} else {
-		Out.Replace(_T("[PriorityI]"), (pThis->m_Params.ServerSort == SERVER_SORT_PRIORITY) ? pcSortIcon : EMPTY);
+		Out.Replace(_T("[PriorityI]"), _WebSelectString(pThis->m_Params.ServerSort == SERVER_SORT_PRIORITY, pcSortIcon, _T("")));
 		Out.Replace(_T("[PriorityH]"), strTmp);
 	}
 	Out.Replace(_T("[PriorityM]"), strTmp);
 
 	_GetPlainResString(strTmp, _T("UFAILED"));
 	if (WSserverColumnHidden[7]) {
-		Out.Replace(_T("[FailedI]"), EMPTY);
-		Out.Replace(_T("[FailedH]"), EMPTY);
+		Out.Replace(_T("[FailedI]"), _T(""));
+		Out.Replace(_T("[FailedH]"), _T(""));
 	} else {
-		Out.Replace(_T("[FailedI]"), (pThis->m_Params.ServerSort == SERVER_SORT_FAILED) ? pcSortIcon : EMPTY);
+		Out.Replace(_T("[FailedI]"), _WebSelectString(pThis->m_Params.ServerSort == SERVER_SORT_FAILED, pcSortIcon, _T("")));
 		Out.Replace(_T("[FailedH]"), strTmp);
 	}
 	Out.Replace(_T("[FailedM]"), strTmp);
 
 	_GetPlainResString(strTmp, _T("SERVER_LIMITS"));
 	if (WSserverColumnHidden[8]) {
-		Out.Replace(_T("[LimitI]"), EMPTY);
-		Out.Replace(_T("[LimitH]"), EMPTY);
+		Out.Replace(_T("[LimitI]"), _T(""));
+		Out.Replace(_T("[LimitH]"), _T(""));
 	} else {
-		Out.Replace(_T("[LimitI]"), (pThis->m_Params.ServerSort == SERVER_SORT_LIMIT) ? pcSortIcon : EMPTY);
+		Out.Replace(_T("[LimitI]"), _WebSelectString(pThis->m_Params.ServerSort == SERVER_SORT_LIMIT, pcSortIcon, _T("")));
 		Out.Replace(_T("[LimitH]"), strTmp);
 	}
 	Out.Replace(_T("[LimitM]"), strTmp);
 
 	_GetPlainResString(strTmp, _T("SV_SERVERINFO"));
 	if (WSserverColumnHidden[9]) {
-		Out.Replace(_T("[VersionI]"), EMPTY);
-		Out.Replace(_T("[VersionH]"), EMPTY);
+		Out.Replace(_T("[VersionI]"), _T(""));
+		Out.Replace(_T("[VersionH]"), _T(""));
 	} else {
-		Out.Replace(_T("[VersionI]"), (pThis->m_Params.ServerSort == SERVER_SORT_VERSION) ? pcSortIcon : EMPTY);
+		Out.Replace(_T("[VersionI]"), _WebSelectString(pThis->m_Params.ServerSort == SERVER_SORT_VERSION, pcSortIcon, _T("")));
 		Out.Replace(_T("[VersionH]"), strTmp);
 	}
 	Out.Replace(_T("[VersionM]"), strTmp);
@@ -1165,62 +2524,8 @@ CString CWebServer::_GetServerList(const ThreadData &Data)
 	Out.Replace(_T("[Actions]"), _GetPlainResString(_T("WEB_ACTIONS")));
 
 	CArray<ServerEntry> ServerArray;
-
-	// Populating array
-	for (INT_PTR sc = theApp.serverlist->GetServerCount(); --sc >= 0;) {
-		const CServer &cur_serv = *theApp.serverlist->GetServerAt(sc);
-		ServerEntry Entry;
-		Entry.sServerName = _SpecialChars(cur_serv.GetListName());
-		Entry.sServerIP = cur_serv.GetAddress();
-		Entry.nServerPort = cur_serv.GetPort();
-		Entry.sServerDescription = _SpecialChars(cur_serv.GetDescription());
-		Entry.nServerPing = cur_serv.GetPing();
-		Entry.nServerUsers = cur_serv.GetUsers();
-		Entry.nServerMaxUsers = cur_serv.GetMaxUsers();
-		Entry.nServerFiles = cur_serv.GetFiles();
-		Entry.bServerStatic = cur_serv.IsStaticMember();
-		LPCTSTR uid;
-		switch (cur_serv.GetPreference()) {
-		case SRV_PR_HIGH:
-			uid = _T("PRIOHIGH");
-			Entry.nServerPriority = 2;
-			break;
-		case SRV_PR_NORMAL:
-			uid = _T("PRIONORMAL");
-			Entry.nServerPriority = 1;
-			break;
-		case SRV_PR_LOW:
-			uid = _T("PRIOLOW");
-			Entry.nServerPriority = 0;
-			break;
-		default:
-			uid = EMPTY;
-			Entry.nServerPriority = 0;
-		}
-		if (uid)
-			Entry.sServerPriority = _GetPlainResString(uid);
-		Entry.nServerFailed = cur_serv.GetFailedCount();
-		Entry.nServerSoftLimit = cur_serv.GetSoftFiles();
-		Entry.nServerHardLimit = cur_serv.GetHardFiles();
-		Entry.sServerVersion = cur_serv.GetVersion();
-		if (inet_addr((CStringA)Entry.sServerIP) != INADDR_NONE) {
-			CString &newip(Entry.sServerFullIP);
-			for (int j = 0, iPos = 0; j < 4 && iPos >= 0; ++j) {
-				const CString &temp(Entry.sServerIP.Tokenize(_T("."), iPos));
-				newip.AppendFormat(&_T("000%s")[min(temp.GetLength(), 3)], (LPCTSTR)temp);
-			}
-		} else
-			Entry.sServerFullIP = Entry.sServerIP;
-		Entry.sServerState = cur_serv.GetFailedCount() ? _T("failed") : _T("disconnected");
-
-		if (theApp.serverconnect->IsConnecting())
-			Entry.sServerState = _T("connecting");
-		else if (theApp.serverconnect->IsConnected()) {
-			if (theApp.serverconnect->GetCurrentServer()->GetFullIP() == cur_serv.GetFullIP())
-				Entry.sServerState = theApp.serverconnect->IsLowID() ? _T("low") : _T("high");
-		}
-		ServerArray.Add(Entry);
-	}
+	if (!_GetServerListSnapshot(pThis, ServerArray))
+		ServerArray.RemoveAll();
 
 	SortParams prm{ (int)pThis->m_Params.ServerSort, pThis->m_Params.bServerSortReverse };
 	qsort_s(ServerArray.GetData(), ServerArray.GetCount(), sizeof(ServerEntry), &_ServerCmp, &prm);
@@ -1228,7 +2533,7 @@ CString CWebServer::_GetServerList(const ThreadData &Data)
 	// Displaying
 	CString OutE(pThis->m_Templates.sServerLine); // List Entry Templates
 
-	OutE.Replace(_T("[admin]"), bAdmin ? _T("admin") : EMPTY);
+	OutE.Replace(_T("[admin]"), _WebSelectString(bAdmin, _T("admin"), _T("")));
 	OutE.Replace(_T("[session]"), sSession);
 
 	CString sList, HTTPProcessData, sServerPort, ed2k;
@@ -1240,10 +2545,10 @@ CString CWebServer::_GetServerList(const ThreadData &Data)
 		ed2k.Format(_T("ed2k://|server|%s|%s|/"), (LPCTSTR)cur_srv.sServerIP, (LPCTSTR)sServerPort);
 
 		bool b = (cur_srv.sServerIP == _ParseURL(Data.sURL, _T("ip")) && sServerPort == _ParseURL(Data.sURL, _T("port")));
-		HTTPProcessData.Replace(_T("[LastChangedDataset]"), b ?_T("checked") : _T("checked_no"));
+		HTTPProcessData.Replace(_T("[LastChangedDataset]"), _WebSelectString(b, _T("checked"), _T("checked_no")));
 		b = cur_srv.bServerStatic;
-		HTTPProcessData.Replace(_T("[isstatic]"), b ? _T("staticsrv") : EMPTY);
-		HTTPProcessData.Replace(_T("[ServerType]"), b ? _T("static") : _T("none"));
+		HTTPProcessData.Replace(_T("[isstatic]"), _WebSelectString(b, _T("staticsrv"), _T("")));
+		HTTPProcessData.Replace(_T("[ServerType]"), _WebSelectString(b, _T("static"), _T("none")));
 
 		LPCTSTR pcSrvPriority;
 		switch (cur_srv.nServerPriority) {
@@ -1257,7 +2562,7 @@ CString CWebServer::_GetServerList(const ThreadData &Data)
 			pcSrvPriority = _T("High");
 			break;
 		default:
-			pcSrvPriority = EMPTY;
+			pcSrvPriority = _T("");
 		}
 
 		HTTPProcessData.Replace(_T("[ed2k]"), ed2k);
@@ -1267,7 +2572,7 @@ CString CWebServer::_GetServerList(const ThreadData &Data)
 
 		// DonGato: reduced large server names or descriptions
 		if (WSserverColumnHidden[0])
-			HTTPProcessData.Replace(_T("[Servername]"), EMPTY);
+			HTTPProcessData.Replace(_T("[Servername]"), _T(""));
 		else if (cur_srv.sServerName.GetLength() > (SHORT_LENGTH)) {
 			CString s;
 			s.Format(_T("<acronym title=\"%s\">%s...</acronym>"), (LPCTSTR)cur_srv.sServerName, (LPCTSTR)cur_srv.sServerName.Left(SHORT_LENGTH - 3));
@@ -1276,14 +2581,14 @@ CString CWebServer::_GetServerList(const ThreadData &Data)
 			HTTPProcessData.Replace(_T("[Servername]"), cur_srv.sServerName);
 
 		if (WSserverColumnHidden[1])
-			HTTPProcessData.Replace(_T("[Address]"), EMPTY);
+			HTTPProcessData.Replace(_T("[Address]"), _T(""));
 		else {
 			CString sAddr(cur_srv.sServerIP);
 			sAddr.AppendFormat(_T(":%d"), cur_srv.nServerPort);
 			HTTPProcessData.Replace(_T("[Address]"), sAddr);
 		}
 		if (WSserverColumnHidden[2])
-			HTTPProcessData.Replace(_T("[Description]"), EMPTY);
+			HTTPProcessData.Replace(_T("[Description]"), _T(""));
 		else if (cur_srv.sServerDescription.GetLength() > SHORT_LENGTH) {
 			CString s;
 			s.Format(_T("<acronym title=\"%s\">%s...</acronym>"), (LPCTSTR)cur_srv.sServerDescription, (LPCTSTR)cur_srv.sServerDescription.Left(SHORT_LENGTH - 3));
@@ -1292,7 +2597,7 @@ CString CWebServer::_GetServerList(const ThreadData &Data)
 			HTTPProcessData.Replace(_T("[Description]"), cur_srv.sServerDescription);
 
 		if (WSserverColumnHidden[3])
-			HTTPProcessData.Replace(_T("[Ping]"), EMPTY);
+			HTTPProcessData.Replace(_T("[Ping]"), _T(""));
 		else {
 			CString sPing;
 			sPing.Format(_T("%u"), cur_srv.nServerPing);
@@ -1300,7 +2605,7 @@ CString CWebServer::_GetServerList(const ThreadData &Data)
 		}
 
 		if (WSserverColumnHidden[4])
-			HTTPProcessData.Replace(_T("[Users]"), EMPTY);
+			HTTPProcessData.Replace(_T("[Users]"), _T(""));
 		else {
 			CString sT;
 			if (cur_srv.nServerUsers > 0) {
@@ -1311,29 +2616,29 @@ CString CWebServer::_GetServerList(const ThreadData &Data)
 			HTTPProcessData.Replace(_T("[Users]"), sT);
 		}
 		if (WSserverColumnHidden[5] && (cur_srv.nServerFiles > 0))
-			HTTPProcessData.Replace(_T("[Files]"), EMPTY);
+			HTTPProcessData.Replace(_T("[Files]"), _T(""));
 		else
 			HTTPProcessData.Replace(_T("[Files]"), CastItoIShort(cur_srv.nServerFiles));
 		if (WSserverColumnHidden[6])
-			HTTPProcessData.Replace(_T("[Priority]"), EMPTY);
+			HTTPProcessData.Replace(_T("[Priority]"), _T(""));
 		else
 			HTTPProcessData.Replace(_T("[Priority]"), cur_srv.sServerPriority);
 		if (WSserverColumnHidden[7])
-			HTTPProcessData.Replace(_T("[Failed]"), EMPTY);
+			HTTPProcessData.Replace(_T("[Failed]"), _T(""));
 		else {
 			CString sFailed;
 			sFailed.Format(_T("%d"), cur_srv.nServerFailed);
 			HTTPProcessData.Replace(_T("[Failed]"), sFailed);
 		}
 		if (WSserverColumnHidden[8])
-			HTTPProcessData.Replace(_T("[Limit]"), EMPTY);
+			HTTPProcessData.Replace(_T("[Limit]"), _T(""));
 		else {
 			CString strTemp(CastItoIShort(cur_srv.nServerSoftLimit));
 			strTemp.AppendFormat(_T(" (%s)"), (LPCTSTR)CastItoIShort(cur_srv.nServerHardLimit));
 			HTTPProcessData.Replace(_T("[Limit]"), strTemp);
 		}
 		if (WSserverColumnHidden[9])
-			HTTPProcessData.Replace(_T("[Version]"), EMPTY);
+			HTTPProcessData.Replace(_T("[Version]"), _T(""));
 		else if (cur_srv.sServerVersion.GetLength() > SHORT_LENGTH_MIN) {
 			CString s;
 			s.Format(_T("<acronym title=\"%s\">%s...</acronym>"), (LPCTSTR)cur_srv.sServerVersion, (LPCTSTR)cur_srv.sServerVersion.Left(SHORT_LENGTH_MIN - 3));
@@ -1376,29 +2681,26 @@ CString CWebServer::_GetTransferList(const ThreadData &Data)
 
 	CString Out;
 	if (thePrefs.GetCatCount() > 1)
-		_InsertCatBox(Out, cat, EMPTY, true, true, sSession, CString());
+		_InsertCatBox(Out, cat, _T(""), true, true, sSession, CString());
 	else
-		Out.Replace(_T("[CATBOX]"), EMPTY);
+		Out.Replace(_T("[CATBOX]"), _T(""));
 
 
 	const CString &sClear(_ParseURL(Data.sURL, _T("clearcompleted")));
 	if (bAdmin && !sClear.IsEmpty()) {
 		if (sClear.CompareNoCase(_T("all")) == 0)
-			theApp.emuledlg->SendMessage(WEB_CLEAR_COMPLETED, (WPARAM)0, (LPARAM)cat);
+			theApp.ExecuteWebServerClearCompletedCommand(NULL, cat);
 		else if (!sClear.IsEmpty()) {
 			uchar FileHash[MDX_DIGEST_SIZE];
-			if (strmd4(sClear, FileHash)) {
-				uchar *pFileHash = new uchar[MDX_DIGEST_SIZE];
-				md4cpy(pFileHash, FileHash);
-				theApp.emuledlg->SendMessage(WEB_CLEAR_COMPLETED, (WPARAM)1, reinterpret_cast<LPARAM>(pFileHash));
-			}
+			if (strmd4(sClear, FileHash))
+				theApp.ExecuteWebServerClearCompletedCommand(sClear, -1);
 		}
 	}
 
 	CString HTTPTemp(_ParseURL(Data.sURL, _T("ed2k")));
 
 	if (bAdmin && !HTTPTemp.IsEmpty())
-		theApp.emuledlg->SendMessage(WEB_ADDDOWNLOADS, (WPARAM)(LPCTSTR)HTTPTemp, cat);
+		QueueWebDownloadLinks(HTTPTemp, cat);
 
 	HTTPTemp = _ParseURL(Data.sURL, _T("c"));
 
@@ -1428,7 +2730,7 @@ CString CWebServer::_GetTransferList(const ThreadData &Data)
 			prio = PR_NORMAL;
 		else //if (sPrio == _T("auto"))
 			prio = PR_AUTO; //make auto the default
-		SendMessage(theApp.emuledlg->m_hWnd, WEB_CATPRIO, (WPARAM)cat, (LPARAM)prio);
+		theApp.ExecuteWebServerCategoryPriorityCommand(cat, static_cast<uint8>(prio));
 	}
 
 	if (bAdmin) {
@@ -1439,56 +2741,25 @@ CString CWebServer::_GetTransferList(const ThreadData &Data)
 
 			if (sFile.IsEmpty()) {
 				const CString &sUser(_ParseURL(Data.sURL, _T("userhash")));
-				uchar UserHash[MDX_DIGEST_SIZE];
-
-				if (strmd4(sUser, UserHash)) {
-					CUpDownClient *cur_client = theApp.clientlist->FindClientByUserHash(UserHash);
-					if (cur_client) {
-						if (sOp == _T("addfriend"))
-							SendMessage(theApp.emuledlg->m_hWnd, WEB_ADDREMOVEFRIEND, (WPARAM)cur_client, (LPARAM)1);
-						else if (sOp == _T("removefriend")) {
-							const CFriend *f = theApp.friendlist->SearchFriend(UserHash, CAddress(), 0);
-							if (f)
-								SendMessage(theApp.emuledlg->m_hWnd, WEB_ADDREMOVEFRIEND, (WPARAM)f, (LPARAM)0);
-						}
-					}
-				}
+				if (sOp == _T("addfriend"))
+					ExecuteWebFriendCommand(sUser, true);
+				else if (sOp == _T("removefriend"))
+					ExecuteWebFriendCommand(sUser, false);
 			} else {
 				uchar FileHash[MDX_DIGEST_SIZE];
 				bool bHash = strmd4(sFile, FileHash);
-				CPartFile *found_file = bHash ? theApp.downloadqueue->GetFileByID(FileHash) : NULL;
-				if (found_file) {	// SyruS all actions require a found file (removed double-check inside)
-					if (sOp == _T("stop"))
-						found_file->StopFile(false);
-					else if (sOp == _T("pause"))
-						found_file->PauseFile();
-					else if (sOp == _T("resume"))
-						found_file->ResumeFile();
-					else if (sOp == _T("cancel")) {
-						found_file->DeletePartFile();
-						SendMessage(theApp.emuledlg->m_hWnd, WEB_GUI_INTERACTION, WEBGUIIA_UPD_CATTABS, 0);
-					} else if (sOp == _T("getflc"))
-						found_file->GetPreviewPrio();
-					else if (sOp == _T("rename")) {
-						const CString &sNewName(_ParseURL(Data.sURL, _T("name")));
-						theApp.emuledlg->SendMessage(WEB_FILE_RENAME, (WPARAM)found_file, (LPARAM)(LPCTSTR)sNewName);
-					} else if (sOp == _T("priolow")) {
-						found_file->SetAutoDownPriority(false);
-						found_file->SetDownPriority(PR_LOW);
-					} else if (sOp == _T("prionormal")) {
-						found_file->SetAutoDownPriority(false);
-						found_file->SetDownPriority(PR_NORMAL);
-					} else if (sOp == _T("priohigh")) {
-						found_file->SetAutoDownPriority(false);
-						found_file->SetDownPriority(PR_HIGH);
-					} else if (sOp == _T("prioauto")) {
-						found_file->SetAutoDownPriority(true);
-						found_file->SetDownPriority(PR_HIGH);
-					} else if (sOp == _T("setcat")) {
+				if (bHash) {
+					if (sOp == _T("setcat")) {
 						const CString &newcat(_ParseURL(Data.sURL, _T("filecat")));
 						if (!newcat.IsEmpty())
-							found_file->SetCategory(_tstol(newcat));
-					}
+							theApp.ExecuteWebServerDownloadActionCommand(sFile, sOp, _tstol(newcat));
+					} else if (sOp == _T("rename")) {
+						const CString &sNewName(_ParseURL(Data.sURL, _T("name")));
+						if (!sNewName.IsEmpty() && IsValidEd2kString(sNewName))
+							pThis->RememberWebTransferRenamePreview(sFile, sNewName);
+						theApp.ExecuteWebServerDownloadActionCommand(sFile, sOp, 0, sNewName);
+					} else
+						theApp.ExecuteWebServerDownloadActionCommand(sFile, sOp);
 				}
 			}
 		}
@@ -1573,210 +2844,212 @@ CString CWebServer::_GetTransferList(const ThreadData &Data)
 	Out.Replace(_T("[DownloadFooter]"), pThis->m_Templates.sTransferDownFooter);
 	Out.Replace(_T("[UploadHeader]"), pThis->m_Templates.sTransferUpHeader);
 	Out.Replace(_T("[UploadFooter]"), pThis->m_Templates.sTransferUpFooter);
-	_InsertCatBox(Out, cat, pThis->m_Templates.sCatArrow, true, true, sSession, EMPTY);
+	_InsertCatBox(Out, cat, pThis->m_Templates.sCatArrow, true, true, sSession, _T(""));
 
 	HTTPTemp = (pThis->m_Params.bDownloadSortReverse) ? _T("&amp;sortreverse=false") : _T("&amp;sortreverse=true");
 
 	if (pThis->m_Params.DownloadSort == DOWN_SORT_STATE)
 		Out.Replace(_T("[SortDState]"), HTTPTemp);
 	else
-		Out.Replace(_T("[SortDState]"), EMPTY);
+		Out.Replace(_T("[SortDState]"), _T(""));
 	if (pThis->m_Params.DownloadSort == DOWN_SORT_TYPE)
 		Out.Replace(_T("[SortDType]"), HTTPTemp);
 	else
-		Out.Replace(_T("[SortDType]"), EMPTY);
+		Out.Replace(_T("[SortDType]"), _T(""));
 	if (pThis->m_Params.DownloadSort == DOWN_SORT_NAME)
 		Out.Replace(_T("[SortDName]"), HTTPTemp);
 	else
-		Out.Replace(_T("[SortDName]"), EMPTY);
+		Out.Replace(_T("[SortDName]"), _T(""));
 	if (pThis->m_Params.DownloadSort == DOWN_SORT_SIZE)
 		Out.Replace(_T("[SortDSize]"), HTTPTemp);
 	else
-		Out.Replace(_T("[SortDSize]"), EMPTY);
+		Out.Replace(_T("[SortDSize]"), _T(""));
 	if (pThis->m_Params.DownloadSort == DOWN_SORT_TRANSFERRED)
 		Out.Replace(_T("[SortDTransferred]"), HTTPTemp);
 	else
-		Out.Replace(_T("[SortDTransferred]"), EMPTY);
+		Out.Replace(_T("[SortDTransferred]"), _T(""));
 	if (pThis->m_Params.DownloadSort == DOWN_SORT_SPEED)
 		Out.Replace(_T("[SortDSpeed]"), HTTPTemp);
 	else
-		Out.Replace(_T("[SortDSpeed]"), EMPTY);
+		Out.Replace(_T("[SortDSpeed]"), _T(""));
 	if (pThis->m_Params.DownloadSort == DOWN_SORT_PROGRESS)
 		Out.Replace(_T("[SortDProgress]"), HTTPTemp);
 	else
-		Out.Replace(_T("[SortDProgress]"), EMPTY);
+		Out.Replace(_T("[SortDProgress]"), _T(""));
 	if (pThis->m_Params.DownloadSort == DOWN_SORT_SOURCES)
 		Out.Replace(_T("[SortDSources]"), HTTPTemp);
 	else
-		Out.Replace(_T("[SortDSources]"), EMPTY);
+		Out.Replace(_T("[SortDSources]"), _T(""));
 	if (pThis->m_Params.DownloadSort == DOWN_SORT_PRIORITY)
 		Out.Replace(_T("[SortDPriority]"), HTTPTemp);
 	else
-		Out.Replace(_T("[SortDPriority]"), EMPTY);
+		Out.Replace(_T("[SortDPriority]"), _T(""));
 	if (pThis->m_Params.DownloadSort == DOWN_SORT_CATEGORY)
 		Out.Replace(_T("[SortDCategory]"), HTTPTemp);
 	else
-		Out.Replace(_T("[SortDCategory]"), EMPTY);
+		Out.Replace(_T("[SortDCategory]"), _T(""));
 
 	HTTPTemp = (pThis->m_Params.bUploadSortReverse) ? _T("&amp;sortreverse=false") : _T("&amp;sortreverse=true");
 
 	if (pThis->m_Params.UploadSort == UP_SORT_CLIENT)
 		Out.Replace(_T("[SortUClient]"), HTTPTemp);
 	else
-		Out.Replace(_T("[SortUClient]"), EMPTY);
+		Out.Replace(_T("[SortUClient]"), _T(""));
 	if (pThis->m_Params.UploadSort == UP_SORT_USER)
 		Out.Replace(_T("[SortUUser]"), HTTPTemp);
 	else
-		Out.Replace(_T("[SortUUser]"), EMPTY);
+		Out.Replace(_T("[SortUUser]"), _T(""));
 	if (pThis->m_Params.UploadSort == UP_SORT_VERSION)
 		Out.Replace(_T("[SortUVersion]"), HTTPTemp);
 	else
-		Out.Replace(_T("[SortUVersion]"), EMPTY);
+		Out.Replace(_T("[SortUVersion]"), _T(""));
 	if (pThis->m_Params.UploadSort == UP_SORT_FILENAME)
 		Out.Replace(_T("[SortUFilename]"), HTTPTemp);
 	else
-		Out.Replace(_T("[SortUFilename]"), EMPTY);
+		Out.Replace(_T("[SortUFilename]"), _T(""));
 	if (pThis->m_Params.UploadSort == UP_SORT_TRANSFERRED)
 		Out.Replace(_T("[SortUTransferred]"), HTTPTemp);
 	else
-		Out.Replace(_T("[SortUTransferred]"), EMPTY);
+		Out.Replace(_T("[SortUTransferred]"), _T(""));
 	if (pThis->m_Params.UploadSort == UP_SORT_SPEED)
 		Out.Replace(_T("[SortUSpeed]"), HTTPTemp);
 	else
-		Out.Replace(_T("[SortUSpeed]"), EMPTY);
+		Out.Replace(_T("[SortUSpeed]"), _T(""));
 
-	const TCHAR *pcSortIcon = (pThis->m_Params.bDownloadSortReverse) ? pThis->m_Templates.sUpArrow : pThis->m_Templates.sDownArrow;
+	CString sSortIcon = _WebSelectString(pThis->m_Params.bDownloadSortReverse, pThis->m_Templates.sUpArrow, pThis->m_Templates.sDownArrow);
+		LPCTSTR pcSortIcon = sSortIcon;
 
 	_GetPlainResString(HTTPTemp, _T("DL_FILENAME"));
 	if (WSdownloadColumnHidden[0]) {
-		Out.Replace(_T("[DFilenameI]"), EMPTY);
-		Out.Replace(_T("[DFilename]"), EMPTY);
+		Out.Replace(_T("[DFilenameI]"), _T(""));
+		Out.Replace(_T("[DFilename]"), _T(""));
 	} else {
-		Out.Replace(_T("[DFilenameI]"), (pThis->m_Params.DownloadSort == DOWN_SORT_NAME) ? pcSortIcon : EMPTY);
+		Out.Replace(_T("[DFilenameI]"), _WebSelectString(pThis->m_Params.DownloadSort == DOWN_SORT_NAME, pcSortIcon, _T("")));
 		Out.Replace(_T("[DFilename]"), HTTPTemp);
 	}
 	Out.Replace(_T("[DFilenameM]"), HTTPTemp);
 
 	_GetPlainResString(HTTPTemp, _T("DL_SIZE"));
 	if (WSdownloadColumnHidden[1]) {
-		Out.Replace(_T("[DSizeI]"), EMPTY);
-		Out.Replace(_T("[DSize]"), EMPTY);
+		Out.Replace(_T("[DSizeI]"), _T(""));
+		Out.Replace(_T("[DSize]"), _T(""));
 	} else {
-		Out.Replace(_T("[DSizeI]"), (pThis->m_Params.DownloadSort == DOWN_SORT_SIZE) ? pcSortIcon : EMPTY);
+		Out.Replace(_T("[DSizeI]"), _WebSelectString(pThis->m_Params.DownloadSort == DOWN_SORT_SIZE, pcSortIcon, _T("")));
 		Out.Replace(_T("[DSize]"), HTTPTemp);
 	}
 	Out.Replace(_T("[DSizeM]"), HTTPTemp);
 
 	_GetPlainResString(HTTPTemp, _T("DL_TRANSFCOMPL"));
 	if (WSdownloadColumnHidden[2]) {
-		Out.Replace(_T("[DTransferredI]"), EMPTY);
-		Out.Replace(_T("[DTransferred]"), EMPTY);
+		Out.Replace(_T("[DTransferredI]"), _T(""));
+		Out.Replace(_T("[DTransferred]"), _T(""));
 	} else {
-		Out.Replace(_T("[DTransferredI]"), (pThis->m_Params.DownloadSort == DOWN_SORT_TRANSFERRED) ? pcSortIcon : EMPTY);
+		Out.Replace(_T("[DTransferredI]"), _WebSelectString(pThis->m_Params.DownloadSort == DOWN_SORT_TRANSFERRED, pcSortIcon, _T("")));
 		Out.Replace(_T("[DTransferred]"), HTTPTemp);
 	}
 	Out.Replace(_T("[DTransferredM]"), HTTPTemp);
 
 	_GetPlainResString(HTTPTemp, _T("DL_PROGRESS"));
 	if (WSdownloadColumnHidden[3]) {
-		Out.Replace(_T("[DProgressI]"), EMPTY);
-		Out.Replace(_T("[DProgress]"), EMPTY);
+		Out.Replace(_T("[DProgressI]"), _T(""));
+		Out.Replace(_T("[DProgress]"), _T(""));
 	} else {
-		Out.Replace(_T("[DProgressI]"), (pThis->m_Params.DownloadSort == DOWN_SORT_PROGRESS) ? pcSortIcon : EMPTY);
+		Out.Replace(_T("[DProgressI]"), _WebSelectString(pThis->m_Params.DownloadSort == DOWN_SORT_PROGRESS, pcSortIcon, _T("")));
 		Out.Replace(_T("[DProgress]"), HTTPTemp);
 	}
 	Out.Replace(_T("[DProgressM]"), HTTPTemp);
 
 	_GetPlainResString(HTTPTemp, _T("DL_SPEED"));
 	if (WSdownloadColumnHidden[4]) {
-		Out.Replace(_T("[DSpeedI]"), EMPTY);
-		Out.Replace(_T("[DSpeed]"), EMPTY);
+		Out.Replace(_T("[DSpeedI]"), _T(""));
+		Out.Replace(_T("[DSpeed]"), _T(""));
 	} else {
-		Out.Replace(_T("[DSpeedI]"), (pThis->m_Params.DownloadSort == DOWN_SORT_SPEED) ? pcSortIcon : EMPTY);
+		Out.Replace(_T("[DSpeedI]"), _WebSelectString(pThis->m_Params.DownloadSort == DOWN_SORT_SPEED, pcSortIcon, _T("")));
 		Out.Replace(_T("[DSpeed]"), HTTPTemp);
 	}
 	Out.Replace(_T("[DSpeedM]"), HTTPTemp);
 
 	_GetPlainResString(HTTPTemp, _T("DL_SOURCES"));
 	if (WSdownloadColumnHidden[5]) {
-		Out.Replace(_T("[DSourcesI]"), EMPTY);
-		Out.Replace(_T("[DSources]"), EMPTY);
+		Out.Replace(_T("[DSourcesI]"), _T(""));
+		Out.Replace(_T("[DSources]"), _T(""));
 	} else {
-		Out.Replace(_T("[DSourcesI]"), (pThis->m_Params.DownloadSort == DOWN_SORT_SOURCES) ? pcSortIcon : EMPTY);
+		Out.Replace(_T("[DSourcesI]"), _WebSelectString(pThis->m_Params.DownloadSort == DOWN_SORT_SOURCES, pcSortIcon, _T("")));
 		Out.Replace(_T("[DSources]"), HTTPTemp);
 	}
 	Out.Replace(_T("[DSourcesM]"), HTTPTemp);
 
 	_GetPlainResString(HTTPTemp, _T("PRIORITY"));
 	if (WSdownloadColumnHidden[6]) {
-		Out.Replace(_T("[DPriorityI]"), EMPTY);
-		Out.Replace(_T("[DPriority]"), EMPTY);
+		Out.Replace(_T("[DPriorityI]"), _T(""));
+		Out.Replace(_T("[DPriority]"), _T(""));
 	} else {
-		Out.Replace(_T("[DPriorityI]"), (pThis->m_Params.DownloadSort == DOWN_SORT_PRIORITY) ? pcSortIcon : EMPTY);
+		Out.Replace(_T("[DPriorityI]"), _WebSelectString(pThis->m_Params.DownloadSort == DOWN_SORT_PRIORITY, pcSortIcon, _T("")));
 		Out.Replace(_T("[DPriority]"), HTTPTemp);
 	}
 	Out.Replace(_T("[DPriorityM]"), HTTPTemp);
 
 	_GetPlainResString(HTTPTemp, _T("CAT"));
 	if (WSdownloadColumnHidden[7]) {
-		Out.Replace(_T("[DCategoryI]"), EMPTY);
-		Out.Replace(_T("[DCategory]"), EMPTY);
+		Out.Replace(_T("[DCategoryI]"), _T(""));
+		Out.Replace(_T("[DCategory]"), _T(""));
 	} else {
-		Out.Replace(_T("[DCategoryI]"), (pThis->m_Params.DownloadSort == DOWN_SORT_CATEGORY) ? pcSortIcon : EMPTY);
+		Out.Replace(_T("[DCategoryI]"), _WebSelectString(pThis->m_Params.DownloadSort == DOWN_SORT_CATEGORY, pcSortIcon, _T("")));
 		Out.Replace(_T("[DCategory]"), HTTPTemp);
 	}
 	Out.Replace(_T("[DCategoryM]"), HTTPTemp);
 
 	// add 8th columns here
 
-	pcSortIcon = (pThis->m_Params.bUploadSortReverse) ? pThis->m_Templates.sUpArrow : pThis->m_Templates.sDownArrow;
+	sSortIcon = _WebSelectString(pThis->m_Params.bUploadSortReverse, pThis->m_Templates.sUpArrow, pThis->m_Templates.sDownArrow);
+		pcSortIcon = sSortIcon;
 
 	_GetPlainResString(HTTPTemp, _T("QL_USERNAME"));
 	if (WSuploadColumnHidden[0]) {
-		Out.Replace(_T("[UUserI]"), EMPTY);
-		Out.Replace(_T("[UUser]"), EMPTY);
+		Out.Replace(_T("[UUserI]"), _T(""));
+		Out.Replace(_T("[UUser]"), _T(""));
 	} else {
-		Out.Replace(_T("[UUserI]"), (pThis->m_Params.UploadSort == UP_SORT_USER) ? pcSortIcon : EMPTY);
+		Out.Replace(_T("[UUserI]"), _WebSelectString(pThis->m_Params.UploadSort == UP_SORT_USER, pcSortIcon, _T("")));
 		Out.Replace(_T("[UUser]"), HTTPTemp);
 	}
 	Out.Replace(_T("[UUserM]"), HTTPTemp);
 
 	_GetPlainResString(HTTPTemp, _T("CD_VERSION"));
 	if (WSuploadColumnHidden[1]) {
-		Out.Replace(_T("[UVersionI]"), EMPTY);
-		Out.Replace(_T("[UVersion]"), EMPTY);
+		Out.Replace(_T("[UVersionI]"), _T(""));
+		Out.Replace(_T("[UVersion]"), _T(""));
 	} else {
-		Out.Replace(_T("[UVersionI]"), (pThis->m_Params.UploadSort == UP_SORT_VERSION) ? pcSortIcon : EMPTY);
+		Out.Replace(_T("[UVersionI]"), _WebSelectString(pThis->m_Params.UploadSort == UP_SORT_VERSION, pcSortIcon, _T("")));
 		Out.Replace(_T("[UVersion]"), HTTPTemp);
 	}
 	Out.Replace(_T("[UVersionM]"), HTTPTemp);
 
 	_GetPlainResString(HTTPTemp, _T("DL_FILENAME"));
 	if (WSuploadColumnHidden[2]) {
-		Out.Replace(_T("[UFilenameI]"), EMPTY);
-		Out.Replace(_T("[UFilename]"), EMPTY);
+		Out.Replace(_T("[UFilenameI]"), _T(""));
+		Out.Replace(_T("[UFilename]"), _T(""));
 	} else {
-		Out.Replace(_T("[UFilenameI]"), (pThis->m_Params.UploadSort == UP_SORT_FILENAME) ? pcSortIcon : EMPTY);
+		Out.Replace(_T("[UFilenameI]"), _WebSelectString(pThis->m_Params.UploadSort == UP_SORT_FILENAME, pcSortIcon, _T("")));
 		Out.Replace(_T("[UFilename]"), HTTPTemp);
 	}
 	Out.Replace(_T("[UFilenameM]"), HTTPTemp);
 
 	_GetPlainResString(HTTPTemp, _T("STATS_SRATIO"));
 	if (WSuploadColumnHidden[3]) {
-		Out.Replace(_T("[UTransferredI]"), EMPTY);
-		Out.Replace(_T("[UTransferred]"), EMPTY);
+		Out.Replace(_T("[UTransferredI]"), _T(""));
+		Out.Replace(_T("[UTransferred]"), _T(""));
 	} else {
-		Out.Replace(_T("[UTransferredI]"), (pThis->m_Params.UploadSort == UP_SORT_TRANSFERRED) ? pcSortIcon : EMPTY);
+		Out.Replace(_T("[UTransferredI]"), _WebSelectString(pThis->m_Params.UploadSort == UP_SORT_TRANSFERRED, pcSortIcon, _T("")));
 		Out.Replace(_T("[UTransferred]"), HTTPTemp);
 	}
 	Out.Replace(_T("[UTransferredM]"), HTTPTemp);
 
 	_GetPlainResString(HTTPTemp, _T("DL_SPEED"));
 	if (WSuploadColumnHidden[4]) {
-		Out.Replace(_T("[USpeedI]"), EMPTY);
-		Out.Replace(_T("[USpeed]"), EMPTY);
+		Out.Replace(_T("[USpeedI]"), _T(""));
+		Out.Replace(_T("[USpeed]"), _T(""));
 	} else {
-		Out.Replace(_T("[USpeedI]"), (pThis->m_Params.UploadSort == UP_SORT_SPEED) ? pcSortIcon : EMPTY);
+		Out.Replace(_T("[USpeedI]"), _WebSelectString(pThis->m_Params.UploadSort == UP_SORT_SPEED, pcSortIcon, _T("")));
 		Out.Replace(_T("[USpeed]"), HTTPTemp);
 	}
 	Out.Replace(_T("[USpeedM]"), HTTPTemp);
@@ -1786,214 +3059,14 @@ CString CWebServer::_GetTransferList(const ThreadData &Data)
 	Out.Replace(_T("[Actions]"), _GetPlainResString(_T("WEB_ACTIONS")));
 	Out.Replace(_T("[TotalDown]"), _GetPlainResString(_T("INFLST_USER_TOTALDOWNLOAD")));
 	Out.Replace(_T("[TotalUp]"), _GetPlainResString(_T("INFLST_USER_TOTALUPLOAD")));
-	Out.Replace(_T("[admin]"), bAdmin ? _T("admin") : EMPTY);
-	_InsertCatBox(Out, cat, EMPTY, true, true, sSession, EMPTY);
+	Out.Replace(_T("[admin]"), _WebSelectString(bAdmin, _T("admin"), _T("")));
+	_InsertCatBox(Out, cat, _T(""), true, true, sSession, _T(""));
 
-	CArray<DownloadFiles> FilesArray;
-	CArray<CPartFile*, CPartFile*> partlist;
+	WebTransferSnapshot transferSnapshot;
+	if (!_GetTransferSnapshot(pThis, Data, cat, transferSnapshot))
+		transferSnapshot.bStale = true;
 
-	theApp.emuledlg->transferwnd->GetDownloadList()->GetDisplayedFiles(&partlist);
-
-	// Populating array
-	for (INT_PTR i = 0; i < partlist.GetCount(); ++i) {
-
-		CPartFile *pPartFile = partlist[i];
-
-		if (pPartFile) {
-			if (cat < 0) {
-				switch (cat) {
-				case -1:
-					if (pPartFile->GetCategory() != 0)
-						continue;
-					break;
-				case -2:
-					if (!pPartFile->IsPartFile())
-						continue;
-					break;
-				case -3:
-					if (pPartFile->IsPartFile())
-						continue;
-					break;
-				case -4:
-					if (!((pPartFile->GetStatus() == PS_READY || pPartFile->GetStatus() == PS_EMPTY) && pPartFile->GetTransferringSrcCount() == 0))
-						continue;
-					break;
-				case -5:
-					if (!((pPartFile->GetStatus() == PS_READY || pPartFile->GetStatus() == PS_EMPTY) && pPartFile->GetTransferringSrcCount() > 0))
-						continue;
-					break;
-				case -6:
-					if (pPartFile->GetStatus() != PS_ERROR)
-						continue;
-					break;
-				case -7:
-					if (pPartFile->GetStatus() != PS_PAUSED && !pPartFile->IsStopped())
-						continue;
-					break;
-				case -8:
-					if (pPartFile->lastseencomplete == 0)
-						continue;
-					break;
-				case -9:
-					if (!pPartFile->IsMovie())
-						continue;
-					break;
-				case -10:
-					if (ED2KFT_AUDIO != GetED2KFileTypeID(pPartFile->GetFileName()))
-						continue;
-					break;
-				case -11:
-					if (!pPartFile->IsArchive())
-						continue;
-					break;
-				case -12:
-					if (ED2KFT_CDIMAGE != GetED2KFileTypeID(pPartFile->GetFileName()))
-						continue;
-					break;
-				case -13:
-					if (ED2KFT_DOCUMENT != GetED2KFileTypeID(pPartFile->GetFileName()))
-						continue;
-					break;
-				case -14:
-					if (ED2KFT_IMAGE != GetED2KFileTypeID(pPartFile->GetFileName()))
-						continue;
-					break;
-				case -15:
-					if (ED2KFT_PROGRAM != GetED2KFileTypeID(pPartFile->GetFileName()))
-						continue;
-					break;
-				case -16:
-					if (ED2KFT_EMULECOLLECTION != GetED2KFileTypeID(pPartFile->GetFileName()))
-						continue;
-				//JOHNTODO: Not too sure here. I was going to add Collections but noticed something strange.
-				//Are these supposed to match the list in PartFile around line 5132? Because they do not.
-				}
-			} else if (cat > 0 && pPartFile->GetCategory() != (UINT)cat)
-				continue;
-
-			DownloadFiles dFile;
-			dFile.sFileName = _SpecialChars(pPartFile->GetFileName());
-			dFile.sFileType = _GetWebImageNameForFileType(dFile.sFileName);
-			dFile.sFileNameJS = _SpecialChars(pPartFile->GetFileName());	//for javascript
-			dFile.m_qwFileSize = (uint64)pPartFile->GetFileSize();
-			dFile.m_qwFileTransferred = (uint64)pPartFile->GetCompletedSize();
-			dFile.m_dblCompleted = pPartFile->GetPercentCompleted();
-			dFile.lFileSpeed = pPartFile->GetDatarate();
-
-			if (pPartFile->HasComment() || pPartFile->HasRating())
-				dFile.iComment = pPartFile->HasBadRating() ? 2 : 1;
-			else
-				dFile.iComment = 0;
-
-			dFile.iFileState = pPartFile->getPartfileStatusRank();
-
-			LPCTSTR pFileState;
-			switch (pPartFile->GetStatus()) {
-			case PS_HASHING:
-				pFileState = _T("hashing");
-				break;
-			case PS_WAITINGFORHASH:
-				pFileState = _T("waitinghash");
-				break;
-			case PS_ERROR:
-				pFileState = _T("error");
-				break;
-			case PS_COMPLETING:
-				pFileState = _T("completing");
-				break;
-			case PS_COMPLETE:
-				pFileState = _T("complete");
-				break;
-			case PS_PAUSED:
-				pFileState = pPartFile->IsStopped() ? _T("stopped") : _T("paused");
-				break;
-			default:
-				pFileState = (pPartFile->GetDatarate() > 0) ? _T("downloading") : _T("waiting");
-			}
-			dFile.sFileState = CString(pFileState);
-
-			dFile.bFileAutoPrio = pPartFile->IsAutoDownPriority();
-			dFile.nFilePrio = pPartFile->GetDownPriority();
-			int pCat = pPartFile->GetCategory();
-
-			CString strCategory(thePrefs.GetCategoryDisplayTitle(pCat));
-			strCategory.Replace(_T("'"), _T("\\'"));
-
-			dFile.sCategory = strCategory;
-
-			dFile.sFileHash = md4str(pPartFile->GetFileHash());
-			dFile.lSourceCount = pPartFile->GetSourceCount();
-			dFile.lNotCurrentSourceCount = pPartFile->GetNotCurrentSourcesCount();
-			dFile.lTransferringSourceCount = pPartFile->GetTransferringSrcCount();
-			dFile.bIsComplete = !pPartFile->IsPartFile();
-			dFile.bIsPreview = pPartFile->IsReadyForPreview();
-			dFile.bIsGetFLC = pPartFile->GetPreviewPrio();
-
-			if (!theApp.GetPublicIP().IsNull() && !theApp.IsFirewalled())
-				dFile.sED2kLink = pPartFile->GetED2kLink(false, false, false, true, theApp.GetPublicIP());
-			else
-				dFile.sED2kLink = pPartFile->GetED2kLink();
-
-			dFile.sFileInfo = _SpecialChars(pPartFile->GetInfoSummary(true), false);
-
-			FilesArray.Add(dFile);
-		}
-	}
-
-	SortParams dprm{ (int)pThis->m_Params.DownloadSort, pThis->m_Params.bDownloadSortReverse };
-	qsort_s(FilesArray.GetData(), FilesArray.GetCount(), sizeof(DownloadFiles), &_DownloadCmp, &dprm);
-
-	CArray<UploadUsers> UploadArray;
-
-	for (POSITION pos = theApp.uploadqueue->GetFirstFromUploadList(); pos != NULL;) {
-		UploadUsers dUser;
-		const CUpDownClient &cur_client(*theApp.uploadqueue->GetNextFromUploadList(pos));
-		dUser.sUserHash = md4str(cur_client.GetUserHash());
-		if (cur_client.GetUploadDatarate() > 0) {
-			dUser.sActive = _T("downloading");
-			dUser.sClientState = _T("uploading");
-		} else {
-			dUser.sActive = _T("waiting");
-			dUser.sClientState = _T("connecting");
-		}
-
-		dUser.sFileInfo = _SpecialChars(_GetClientSummary(cur_client), false);
-		dUser.sFileInfo.Replace(_T("\\"), _T("\\\\"));
-		dUser.sFileInfo.Replace(_T("\n"), _T("<br>"));
-		dUser.sFileInfo.Replace(_T("'"), _T("&#8217;"));
-
-		_GetClientversionImage(cur_client, dUser.sClientSoft);
-
-		if (cur_client.IsBanned())
-			dUser.sClientExtra = _T("banned");
-		else if (cur_client.IsFriend())
-			dUser.sClientExtra = _T("friend");
-		else if (cur_client.Credits()->GetScoreRatio(cur_client.GetIP()) > 1)
-			dUser.sClientExtra = _T("credit");
-		else
-			dUser.sClientExtra = _T("none");
-
-		CString cname(cur_client.GetUserName());
-		if (cname.GetLength() > SHORT_LENGTH_MIN) {
-			cname.Truncate(SHORT_LENGTH_MIN - 3);
-			cname += _T("...");
-		}
-		dUser.sUserName = _SpecialChars(cname);
-
-		CKnownFile *file = theApp.sharedfiles->GetFileByID(cur_client.GetUploadFileID());
-		dUser.sFileName = file ? _SpecialChars(file->GetFileName()) : _GetPlainResString(_T("REQ_UNKNOWNFILE"));
-		dUser.nTransferredDown = cur_client.GetTransferredDown();
-		dUser.nTransferredUp = cur_client.GetTransferredUp();
-		UINT uDataRate = cur_client.GetUploadDatarate();
-		dUser.nDataRate = (uDataRate == UNLIMITED) ? 0 : uDataRate;
-		dUser.sClientNameVersion = cur_client.GetClientSoftVer();
-		UploadArray.Add(dUser);
-	}
-
-	SortParams uprm{ (int)pThis->m_Params.UploadSort, pThis->m_Params.bUploadSortReverse };
-	qsort_s(UploadArray.GetData(), UploadArray.GetCount(), sizeof(UploadUsers), &_UploadCmp, &uprm);
-
-	_MakeTransferList(Out, pThis, Data, &FilesArray, &UploadArray, bAdmin);
+	_MakeTransferList(Out, pThis, Data, transferSnapshot, bAdmin);
 
 	Out.Replace(_T("[Session]"), sSession);
 	Out.Replace(_T("[CatSel]"), sCat);
@@ -2001,100 +3074,18 @@ CString CWebServer::_GetTransferList(const ThreadData &Data)
 	return Out;
 }
 
-void CWebServer::_MakeTransferList(CString &Out, CWebServer *pThis, const ThreadData &Data, void *_FilesArray, void *_UploadArray, bool bAdmin)
+void CWebServer::_MakeTransferList(CString &Out, CWebServer *pThis, const ThreadData &Data, const WebTransferSnapshot &snapshot, bool bAdmin)
 {
-	CArray<DownloadFiles> *FilesArray = (CArray<DownloadFiles>*)_FilesArray;
-	CArray<UploadUsers> *UploadArray = (CArray<UploadUsers>*)_UploadArray;
+	const CArray<DownloadFiles> *FilesArray = &snapshot.FilesArray;
+	const CArray<UploadUsers> *UploadArray = &snapshot.UploadArray;
+	const CQArray<QueueUsers, QueueUsers> &QueueArray = snapshot.QueueArray;
 
-	// Displaying
-	int nCountQueue = 0;
-	int nCountQueueBanned = 0;
-	int nCountQueueFriend = 0;
-	int nCountQueueSecure = 0;
-	int nCountQueueBannedSecure = 0;
-	int nCountQueueFriendSecure = 0;
-
-	CQArray<QueueUsers, QueueUsers> QueueArray;
-	for (POSITION pos = theApp.uploadqueue->waitinglist.GetHeadPosition(); pos != NULL;) {
-		QueueUsers dUser;
-		CUpDownClient &cur_client(*theApp.uploadqueue->waitinglist.GetNext(pos));
-		int iSecure = static_cast<int>(cur_client.Credits()->GetCurrentIdentState(cur_client.GetIP()) == IS_IDENTIFIED);
-		if (cur_client.IsBanned()) {
-			dUser.sClientExtra = _T("banned");
-			++nCountQueueBanned;
-			nCountQueueBannedSecure += iSecure;
-		} else if (cur_client.IsFriend()) {
-			dUser.sClientExtra = _T("friend");
-			++nCountQueueFriend;
-			nCountQueueFriendSecure += iSecure;
-		} else {
-			dUser.sClientExtra = _T("none");
-			++nCountQueue;
-			nCountQueueSecure += iSecure;
-		}
-
-		CString usn(cur_client.GetUserName());
-		if (usn.GetLength() > SHORT_LENGTH_MIN) {
-			usn.Truncate(SHORT_LENGTH_MIN - 3);
-			usn += _T("...");
-		}
-		dUser.sUserName = _SpecialChars(usn);
-
-		dUser.sClientNameVersion = cur_client.GetClientSoftVer();
-		CKnownFile *file = theApp.sharedfiles->GetFileByID(cur_client.GetUploadFileID());
-		dUser.sFileName = file ? _SpecialChars(file->GetFileName()) : _GetPlainResString(_T("REQ_UNKNOWNFILE"));
-		dUser.sClientState = dUser.sClientExtra;
-		dUser.sClientStateSpecial = _T("connecting");
-		dUser.nScore = cur_client.GetScore(false);
-
-		_GetClientversionImage(cur_client, dUser.sClientSoft);
-
-		dUser.sUserHash = md4str(cur_client.GetUserHash());
-		//SyruS CQArray-Sorting setting sIndex according to param
-		switch (pThis->m_Params.QueueSort) {
-		case QU_SORT_CLIENT:
-			dUser.sIndex = dUser.sClientSoft;
-			break;
-		case QU_SORT_USER:
-			dUser.sIndex = dUser.sUserName;
-			break;
-		case QU_SORT_VERSION:
-			dUser.sIndex = dUser.sClientNameVersion;
-			break;
-		case QU_SORT_FILENAME:
-			dUser.sIndex = dUser.sFileName;
-			break;
-		case QU_SORT_SCORE:
-			dUser.sIndex.Format(_T("%09u"), dUser.nScore);
-		}
-		QueueArray.Add(dUser);
-	}
-
-	INT_PTR nNextPos = 0;	// position in queue of the user with the highest score -> next upload user
-	uint32 nNextScore = 0;	// highest score -> next upload user
-	for (INT_PTR i = QueueArray.GetCount(); --i >= 0;)
-		if (QueueArray[i].nScore > nNextScore) {
-			nNextPos = i;
-			nNextScore = QueueArray[i].nScore;
-		}
-
-	if (theApp.uploadqueue->waitinglist.GetHeadPosition() != NULL) {
-		QueueArray[nNextPos].sClientState = _T("next");
-		QueueArray[nNextPos].sClientStateSpecial = QueueArray[nNextPos].sClientState;
-	}
-
-	if ((nCountQueue > 0 && pThis->m_Params.bShowUploadQueue)
-		|| (nCountQueueBanned > 0 && pThis->m_Params.bShowUploadQueueBanned)
-		|| (nCountQueueFriend > 0 && pThis->m_Params.bShowUploadQueueFriend))
-	{
-#ifdef _DEBUG
-		const DWORD dwStart = ::GetTickCount();
-#endif
-		QueueArray.QuickSort(pThis->m_Params.bQueueSortReverse);
-#ifdef _DEBUG
-		AddDebugLogLine(false, _T("WebServer: Waitingqueue with %u elements sorted in %u ms"), QueueArray.GetCount(), ::GetTickCount() - dwStart);
-#endif
-	}
+	const int nCountQueue = snapshot.nCountQueue;
+	const int nCountQueueBanned = snapshot.nCountQueueBanned;
+	const int nCountQueueFriend = snapshot.nCountQueueFriend;
+	const int nCountQueueSecure = snapshot.nCountQueueSecure;
+	const int nCountQueueBannedSecure = snapshot.nCountQueueBannedSecure;
+	const int nCountQueueFriendSecure = snapshot.nCountQueueFriendSecure;
 
 	CString HTTPProcessData;
 	CString sDownList, HTTPTemp;
@@ -2123,18 +3114,18 @@ void CWebServer::_MakeTransferList(CString &Out, CWebServer *pThis, const Thread
 			HTTPProcessData.Replace(_T("[HASCOMMENT]"), _T("<!--"));
 			HTTPProcessData.Replace(_T("[HASCOMMENT_END]"), _T("-->"));
 		} else {
-			HTTPProcessData.Replace(_T("[HASCOMMENT]"), EMPTY);
-			HTTPProcessData.Replace(_T("[HASCOMMENT_END]"), EMPTY);
+			HTTPProcessData.Replace(_T("[HASCOMMENT]"), _T(""));
+			HTTPProcessData.Replace(_T("[HASCOMMENT_END]"), _T(""));
 		}
 
 		if (downf.sFileState.CompareNoCase(_T("downloading")) == 0 || downf.sFileState.CompareNoCase(_T("waiting")) == 0) {
 			HTTPProcessData.Replace(_T("[ISACTIVE]"), _T("<!--"));
 			HTTPProcessData.Replace(_T("[ISACTIVE_END]"), _T("-->"));
-			HTTPProcessData.Replace(_T("[!ISACTIVE]"), EMPTY);
-			HTTPProcessData.Replace(_T("[!ISACTIVE_END]"), EMPTY);
+			HTTPProcessData.Replace(_T("[!ISACTIVE]"), _T(""));
+			HTTPProcessData.Replace(_T("[!ISACTIVE_END]"), _T(""));
 		} else {
-			HTTPProcessData.Replace(_T("[ISACTIVE]"), EMPTY);
-			HTTPProcessData.Replace(_T("[ISACTIVE_END]"), EMPTY);
+			HTTPProcessData.Replace(_T("[ISACTIVE]"), _T(""));
+			HTTPProcessData.Replace(_T("[ISACTIVE_END]"), _T(""));
 			HTTPProcessData.Replace(_T("[!ISACTIVE]"), _T("<!--"));
 			HTTPProcessData.Replace(_T("[!ISACTIVE_END]"), _T("-->"));
 		}
@@ -2164,13 +3155,13 @@ void CWebServer::_MakeTransferList(CString &Out, CWebServer *pThis, const Thread
 				pcTmp = _T("High");
 				break;
 			default:
-				pcTmp = EMPTY;
+				pcTmp = _T("");
 			}
 		}
 
-		HTTPProcessData.Replace(_T("[admin]"), bAdmin ? _T("admin") : EMPTY);
+		HTTPProcessData.Replace(_T("[admin]"), _WebSelectString(bAdmin, _T("admin"), _T("")));
 		HTTPProcessData.Replace(_T("[finfo]"), strFinfo);
-		HTTPProcessData.Replace(_T("[fcomments]"), downf.iComment ? _T("yes") : EMPTY);
+		HTTPProcessData.Replace(_T("[fcomments]"), _WebSelectString(downf.iComment != 0, _T("yes"), _T("")));
 		HTTPProcessData.Replace(_T("[ed2k]"), _SpecialChars(ed2k));
 		HTTPProcessData.Replace(_T("[DownState]"), downf.sFileState);
 		HTTPProcessData.Replace(_T("[isgetflc]"), isgetflc);
@@ -2180,7 +3171,7 @@ void CWebServer::_MakeTransferList(CString &Out, CWebServer *pThis, const Thread
 		HTTPProcessData.Replace(_T("[filehash]"), downf.sFileHash);
 		HTTPProcessData.Replace(_T("[down-priority]"), pcTmp);
 		HTTPProcessData.Replace(_T("[FileType]"), downf.sFileType);
-		HTTPProcessData.Replace(_T("[downloadable]"), (bAdmin && (thePrefs.GetMaxWebUploadFileSizeMB() == 0 || downf.m_qwFileSize < ((uint64)thePrefs.GetMaxWebUploadFileSizeMB()) * 1024 * 1024)) ? _T("yes") : _T("no"));
+		HTTPProcessData.Replace(_T("[downloadable]"), _WebSelectString(bAdmin && (thePrefs.GetMaxWebUploadFileSizeMB() == 0 || downf.m_qwFileSize < ((uint64)thePrefs.GetMaxWebUploadFileSizeMB()) * 1024 * 1024), _T("yes"), _T("no")));
 
 		// comment icon
 		switch (downf.iComment) {
@@ -2200,7 +3191,7 @@ void CWebServer::_MakeTransferList(CString &Out, CWebServer *pThis, const Thread
 		HTTPProcessData.Replace(_T("[FileIsGetFLC]"), pcTmp);
 
 		if (WSdownloadColumnHidden[0])
-			HTTPProcessData.Replace(_T("[ShortFileName]"), EMPTY);
+			HTTPProcessData.Replace(_T("[ShortFileName]"), _T(""));
 		else if (downf.sFileName.GetLength() > (SHORT_LENGTH_MAX))
 			HTTPProcessData.Replace(_T("[ShortFileName]"), downf.sFileName.Left(SHORT_LENGTH_MAX - 3) + _T("..."));
 		else
@@ -2209,20 +3200,20 @@ void CWebServer::_MakeTransferList(CString &Out, CWebServer *pThis, const Thread
 		HTTPProcessData.Replace(_T("[FileInfo]"), strFileInfo);
 		fTotalSize += downf.m_qwFileSize;
 
-		HTTPProcessData.Replace(_T("[2]"), WSdownloadColumnHidden[1] ? EMPTY : (LPCTSTR)CastItoXBytes(downf.m_qwFileSize));
+		HTTPProcessData.Replace(_T("[2]"), _WebSelectString(WSdownloadColumnHidden[1] != FALSE, _T(""), CastItoXBytes(downf.m_qwFileSize)));
 
 		if (WSdownloadColumnHidden[2])
-			HTTPProcessData.Replace(_T("[3]"), EMPTY);
+			HTTPProcessData.Replace(_T("[3]"), _T(""));
 		else if (downf.m_qwFileTransferred > 0) {
 			fTotalTransferred += downf.m_qwFileTransferred;
 			HTTPProcessData.Replace(_T("[3]"), CastItoXBytes(downf.m_qwFileTransferred));
 		} else
 			HTTPProcessData.Replace(_T("[3]"), _T("-"));
 
-		HTTPProcessData.Replace(_T("[DownloadBar]"), WSdownloadColumnHidden[3] ? EMPTY : (LPCTSTR)_GetDownloadGraph(Data, downf.sFileHash));
+		HTTPProcessData.Replace(_T("[DownloadBar]"), _WebSelectString(WSdownloadColumnHidden[3] != FALSE, _T(""), downf.sDownloadBar));
 
 		if (WSdownloadColumnHidden[4])
-			pcTmp = EMPTY;
+			pcTmp = _T("");
 		else if (downf.lFileSpeed > 0) {
 			fTotalSpeed += downf.lFileSpeed;
 			HTTPTemp.Format(_T("%8.2f"), downf.lFileSpeed / 1024.0);
@@ -2232,7 +3223,7 @@ void CWebServer::_MakeTransferList(CString &Out, CWebServer *pThis, const Thread
 		HTTPProcessData.Replace(_T("[4]"), pcTmp);
 
 		if (WSdownloadColumnHidden[5])
-			pcTmp = EMPTY;
+			pcTmp = _T("");
 		else if (downf.lSourceCount > 0) {
 			HTTPTemp.Format(_T("%li&nbsp;/&nbsp;%8li&nbsp;(%li)"),
 				downf.lSourceCount - downf.lNotCurrentSourceCount,
@@ -2244,7 +3235,7 @@ void CWebServer::_MakeTransferList(CString &Out, CWebServer *pThis, const Thread
 		HTTPProcessData.Replace(_T("[5]"), pcTmp);
 
 		if (WSdownloadColumnHidden[6] || downf.nFilePrio < 0 || downf.nFilePrio > 2)
-			HTTPProcessData.Replace(_T("[PrioVal]"), EMPTY);
+			HTTPProcessData.Replace(_T("[PrioVal]"), _T(""));
 		else {
 			static const LPCTSTR uprio[2][3] =
 			{
@@ -2254,10 +3245,10 @@ void CWebServer::_MakeTransferList(CString &Out, CWebServer *pThis, const Thread
 			HTTPProcessData.Replace(_T("[PrioVal]"), GetResString(uprio[static_cast<unsigned>(downf.bFileAutoPrio)][downf.nFilePrio]));
 		}
 
-		pcTmp = WSdownloadColumnHidden[7] ? EMPTY : (LPCTSTR)downf.sCategory;
+		pcTmp = WSdownloadColumnHidden[7] ? _T("") : (LPCTSTR)downf.sCategory;
 		HTTPProcessData.Replace(_T("[Category]"), pcTmp);
 
-		_InsertCatBox(HTTPProcessData, 0, EMPTY, false, false, session, downf.sFileHash);
+		_InsertCatBox(HTTPProcessData, downf.iCategory, _T(""), false, false, session, downf.sFileHash, false, downf.iCategory);
 
 		sDownList += HTTPProcessData;
 	}
@@ -2279,7 +3270,7 @@ void CWebServer::_MakeTransferList(CString &Out, CWebServer *pThis, const Thread
 	fTotalSize = fTotalTransferred = fTotalSpeed = 0;
 
 	OutE = pThis->m_Templates.sTransferUpLine;
-	OutE.Replace(_T("[admin]"), bAdmin ? _T("admin") : EMPTY);
+	OutE.Replace(_T("[admin]"), _WebSelectString(bAdmin, _T("admin"), _T("")));
 
 	CString sUpList;
 	for (INT_PTR i = 0; i < UploadArray->GetCount(); ++i) {
@@ -2293,17 +3284,17 @@ void CWebServer::_MakeTransferList(CString &Out, CWebServer *pThis, const Thread
 		HTTPProcessData.Replace(_T("[ClientSoft]"), ulu.sClientSoft);
 		HTTPProcessData.Replace(_T("[ClientExtra]"), ulu.sClientExtra);
 
-		pcTmp = WSuploadColumnHidden[0] ? EMPTY : (LPCTSTR)ulu.sUserName;
+		pcTmp = WSuploadColumnHidden[0] ? _T("") : (LPCTSTR)ulu.sUserName;
 		HTTPProcessData.Replace(_T("[1]"), pcTmp);
 
-		pcTmp = WSuploadColumnHidden[1] ? EMPTY : (LPCTSTR)ulu.sClientNameVersion;
+		pcTmp = WSuploadColumnHidden[1] ? _T("") : (LPCTSTR)ulu.sClientNameVersion;
 		HTTPProcessData.Replace(_T("[ClientSoftV]"), pcTmp);
 
-		pcTmp = WSuploadColumnHidden[2] ? EMPTY : (LPCTSTR)ulu.sFileName;
+		pcTmp = WSuploadColumnHidden[2] ? _T("") : (LPCTSTR)ulu.sFileName;
 		HTTPProcessData.Replace(_T("[2]"), pcTmp);
 
 		if (WSuploadColumnHidden[3])
-			pcTmp = EMPTY;
+			pcTmp = _T("");
 		else {
 			fTotalSize += ulu.nTransferredDown;
 			fTotalTransferred += ulu.nTransferredUp;
@@ -2313,7 +3304,7 @@ void CWebServer::_MakeTransferList(CString &Out, CWebServer *pThis, const Thread
 		HTTPProcessData.Replace(_T("[3]"), pcTmp);
 
 		if (WSuploadColumnHidden[4])
-			pcTmp = EMPTY;
+			pcTmp = _T("");
 		else {
 			fTotalSpeed += ulu.nDataRate;
 			HTTPTemp.Format(_T("%8.2f "), max(ulu.nDataRate / 1024.0, 0.0));
@@ -2334,19 +3325,19 @@ void CWebServer::_MakeTransferList(CString &Out, CWebServer *pThis, const Thread
 		Out.Replace(_T("[UploadQueueList]"), _GetPlainResString(_T("ONQUEUE")));
 
 		OutE = pThis->m_Templates.sTransferUpQueueLine;
-		OutE.Replace(_T("[admin]"), bAdmin ? _T("admin") : EMPTY);
+		OutE.Replace(_T("[admin]"), _WebSelectString(bAdmin, _T("admin"), _T("")));
 
 		CString sQueue;
 		for (INT_PTR i = 0; i < QueueArray.GetCount(); ++i) {
 			if (QueueArray[i].sClientExtra == _T("none")) {
 				HTTPProcessData = OutE;
-				pcTmp = WSqueueColumnHidden[0] ? EMPTY : (LPCTSTR)QueueArray[i].sUserName;
+				pcTmp = WSqueueColumnHidden[0] ? _T("") : (LPCTSTR)QueueArray[i].sUserName;
 				HTTPProcessData.Replace(_T("[UserName]"), pcTmp);
 
-				pcTmp = WSqueueColumnHidden[1] ? EMPTY : (LPCTSTR)QueueArray[i].sClientNameVersion;
+				pcTmp = WSqueueColumnHidden[1] ? _T("") : (LPCTSTR)QueueArray[i].sClientNameVersion;
 				HTTPProcessData.Replace(_T("[ClientSoftV]"), pcTmp);
 
-				pcTmp = WSqueueColumnHidden[2] ? EMPTY : (LPCTSTR)QueueArray[i].sFileName;
+				pcTmp = WSqueueColumnHidden[2] ? _T("") : (LPCTSTR)QueueArray[i].sFileName;
 				HTTPProcessData.Replace(_T("[FileName]"), pcTmp);
 
 				TCHAR HTTPTempC[20];
@@ -2378,13 +3369,13 @@ void CWebServer::_MakeTransferList(CString &Out, CWebServer *pThis, const Thread
 		for (INT_PTR i = 0; i < QueueArray.GetCount(); ++i) {
 			if (QueueArray[i].sClientExtra == _T("banned")) {
 				HTTPProcessData = OutE;
-				pcTmp = WSqueueColumnHidden[0] ? EMPTY : (LPCTSTR)QueueArray[i].sUserName;
+				pcTmp = WSqueueColumnHidden[0] ? _T("") : (LPCTSTR)QueueArray[i].sUserName;
 				HTTPProcessData.Replace(_T("[UserName]"), pcTmp);
 
-				pcTmp = WSqueueColumnHidden[1] ? EMPTY : (LPCTSTR)QueueArray[i].sClientNameVersion;
+				pcTmp = WSqueueColumnHidden[1] ? _T("") : (LPCTSTR)QueueArray[i].sClientNameVersion;
 				HTTPProcessData.Replace(_T("[ClientSoftV]"), pcTmp);
 
-				pcTmp = WSqueueColumnHidden[2] ? EMPTY : (LPCTSTR)QueueArray[i].sFileName;
+				pcTmp = WSqueueColumnHidden[2] ? _T("") : (LPCTSTR)QueueArray[i].sFileName;
 				HTTPProcessData.Replace(_T("[FileName]"), pcTmp);
 
 				TCHAR HTTPTempC[20];
@@ -2417,13 +3408,13 @@ void CWebServer::_MakeTransferList(CString &Out, CWebServer *pThis, const Thread
 		for (INT_PTR i = 0; i < QueueArray.GetCount(); ++i) {
 			if (QueueArray[i].sClientExtra == _T("friend")) {
 				HTTPProcessData = OutE;
-				pcTmp = WSqueueColumnHidden[0] ? EMPTY : (LPCTSTR)QueueArray[i].sUserName;
+				pcTmp = WSqueueColumnHidden[0] ? _T("") : (LPCTSTR)QueueArray[i].sUserName;
 				HTTPProcessData.Replace(_T("[UserName]"), pcTmp);
 
-				pcTmp = WSqueueColumnHidden[1] ? EMPTY : (LPCTSTR)QueueArray[i].sClientNameVersion;
+				pcTmp = WSqueueColumnHidden[1] ? _T("") : (LPCTSTR)QueueArray[i].sClientNameVersion;
 				HTTPProcessData.Replace(_T("[ClientSoftV]"), pcTmp);
 
-				pcTmp = WSqueueColumnHidden[2] ? EMPTY : (LPCTSTR)QueueArray[i].sFileName;
+				pcTmp = WSqueueColumnHidden[2] ? _T("") : (LPCTSTR)QueueArray[i].sFileName;
 				HTTPProcessData.Replace(_T("[FileName]"), pcTmp);
 
 				TCHAR HTTPTempC[20];
@@ -2475,74 +3466,74 @@ void CWebServer::_MakeTransferList(CString &Out, CWebServer *pThis, const Thread
 	if (pThis->m_Params.QueueSort == QU_SORT_CLIENT)
 		Out.Replace(_T("[SortQClient]"), strTmp);
 	else
-		Out.Replace(_T("[SortQClient]"), EMPTY);
+		Out.Replace(_T("[SortQClient]"), _T(""));
 	if (pThis->m_Params.QueueSort == QU_SORT_USER)
 		Out.Replace(_T("[SortQUser]"), strTmp);
 	else
-		Out.Replace(_T("[SortQUser]"), EMPTY);
+		Out.Replace(_T("[SortQUser]"), _T(""));
 	if (pThis->m_Params.QueueSort == QU_SORT_VERSION)
 		Out.Replace(_T("[SortQVersion]"), strTmp);
 	else
-		Out.Replace(_T("[SortQVersion]"), EMPTY);
+		Out.Replace(_T("[SortQVersion]"), _T(""));
 	if (pThis->m_Params.QueueSort == QU_SORT_FILENAME)
 		Out.Replace(_T("[SortQFilename]"), strTmp);
 	else
-		Out.Replace(_T("[SortQFilename]"), EMPTY);
+		Out.Replace(_T("[SortQFilename]"), _T(""));
 	if (pThis->m_Params.QueueSort == QU_SORT_SCORE)
 		Out.Replace(_T("[SortQScore]"), strTmp);
 	else
-		Out.Replace(_T("[SortQScore]"), EMPTY);
+		Out.Replace(_T("[SortQScore]"), _T(""));
 
 	CString pcSortIcon(pThis->m_Params.bQueueSortReverse ? pThis->m_Templates.sUpArrow : pThis->m_Templates.sDownArrow);
 
 	_GetPlainResString(strTmp, _T("QL_USERNAME"));
 	if (WSqueueColumnHidden[0]) {
-		Out.Replace(_T("[UserNameTitleI]"), EMPTY);
-		Out.Replace(_T("[UserNameTitle]"), EMPTY);
+		Out.Replace(_T("[UserNameTitleI]"), _T(""));
+		Out.Replace(_T("[UserNameTitle]"), _T(""));
 	} else {
 		if (pThis->m_Params.QueueSort == QU_SORT_USER)
 			Out.Replace(_T("[UserNameTitleI]"), pcSortIcon);
 		else
-			Out.Replace(_T("[UserNameTitleI]"), EMPTY);
+			Out.Replace(_T("[UserNameTitleI]"), _T(""));
 		Out.Replace(_T("[UserNameTitle]"), strTmp);
 	}
 	Out.Replace(_T("[UserNameTitleM]"), strTmp);
 
 	_GetPlainResString(strTmp, _T("CD_CSOFT"));
 	if (WSqueueColumnHidden[1]) {
-		Out.Replace(_T("[VersionI]"), EMPTY);
-		Out.Replace(_T("[Version]"), EMPTY);
+		Out.Replace(_T("[VersionI]"), _T(""));
+		Out.Replace(_T("[Version]"), _T(""));
 	} else {
 		if (pThis->m_Params.QueueSort == QU_SORT_VERSION)
 			Out.Replace(_T("[VersionI]"), pcSortIcon);
 		else
-			Out.Replace(_T("[VersionI]"), EMPTY);
+			Out.Replace(_T("[VersionI]"), _T(""));
 		Out.Replace(_T("[Version]"), strTmp);
 	}
 	Out.Replace(_T("[VersionM]"), strTmp);
 
 	_GetPlainResString(strTmp, _T("DL_FILENAME"));
 	if (WSqueueColumnHidden[2]) {
-		Out.Replace(_T("[FileNameTitleI]"), EMPTY);
-		Out.Replace(_T("[FileNameTitle]"), EMPTY);
+		Out.Replace(_T("[FileNameTitleI]"), _T(""));
+		Out.Replace(_T("[FileNameTitle]"), _T(""));
 	} else {
 		if (pThis->m_Params.QueueSort == QU_SORT_FILENAME)
 			Out.Replace(_T("[FileNameTitleI]"), pcSortIcon);
 		else
-			Out.Replace(_T("[FileNameTitleI]"), EMPTY);
+			Out.Replace(_T("[FileNameTitleI]"), _T(""));
 		Out.Replace(_T("[FileNameTitle]"), strTmp);
 	}
 	Out.Replace(_T("[FileNameTitleM]"), strTmp);
 
 	_GetPlainResString(strTmp, _T("SCORE"));
 	if (WSqueueColumnHidden[3]) {
-		Out.Replace(_T("[ScoreTitleI]"), EMPTY);
-		Out.Replace(_T("[ScoreTitle]"), EMPTY);
+		Out.Replace(_T("[ScoreTitleI]"), _T(""));
+		Out.Replace(_T("[ScoreTitle]"), _T(""));
 	} else {
 		if (pThis->m_Params.QueueSort == QU_SORT_SCORE)
 			Out.Replace(_T("[ScoreTitleI]"), pcSortIcon);
 		else
-			Out.Replace(_T("[ScoreTitleI]"), EMPTY);
+			Out.Replace(_T("[ScoreTitleI]"), _T(""));
 		Out.Replace(_T("[ScoreTitle]"), strTmp);
 	}
 	Out.Replace(_T("[ScoreTitleM]"), strTmp);
@@ -2607,35 +3598,8 @@ CString CWebServer::_GetSharedFilesList(const ThreadData &Data)
 	if (bAdmin) {
 		CString hash(_ParseURL(Data.sURL, _T("hash")));
 		const CString &sPrio(_ParseURL(Data.sURL, _T("prio")));
-		if (!hash.IsEmpty() && !sPrio.IsEmpty()) {
-			uchar fileid[MDX_DIGEST_SIZE];
-			if (hash.GetLength() == 32 && DecodeBase16(hash, hash.GetLength(), fileid, _countof(fileid))) {
-				CKnownFile *pFile = theApp.sharedfiles->GetFileByID(fileid);
-				if (pFile != NULL) {
-					uint8 uPrio;
-					if (sPrio == _T("verylow"))
-						uPrio = PR_VERYLOW;
-					else if (sPrio == _T("low"))
-						uPrio = PR_LOW;
-					else if (sPrio == _T("normal"))
-						uPrio = PR_NORMAL;
-					else if (sPrio == _T("high"))
-						uPrio = PR_HIGH;
-					else if (sPrio == _T("release"))
-						uPrio = PR_VERYHIGH;
-					else //if (sPrio == _T("auto"))
-						uPrio = PR_AUTO;
-					if (uPrio == PR_AUTO) {
-						pFile->SetAutoUpPriority(true);
-						pFile->UpdateAutoUpPriority();
-					} else {
-						pFile->SetAutoUpPriority(false);
-						pFile->SetUpPriority(uPrio);
-					}
-					SendMessage(theApp.emuledlg->m_hWnd, WEB_GUI_INTERACTION, WEBGUIIA_UPD_SFUPDATE, (LPARAM)pFile);
-				}
-			}
-		}
+		if (!hash.IsEmpty() && !sPrio.IsEmpty())
+			QueueWebSharedFilesPriority(hash, GetWebSharedFilesPriorityAction(sPrio));
 	}
 
 	if (_ParseURL(Data.sURL, _T("c")) == _T("menu")) {
@@ -2645,7 +3609,7 @@ CString CWebServer::_GetSharedFilesList(const ThreadData &Data)
 		_SaveWIConfigArray(WSsharedColumnHidden, _countof(WSsharedColumnHidden), _T("sharedColumnHidden"));
 	}
 	if (_ParseURL(Data.sURL, _T("reload")) == _T("true"))
-		SendMessage(theApp.emuledlg->m_hWnd, WEB_GUI_INTERACTION, WEBGUIIA_SHARED_FILES_RELOAD, 0);
+		QueueWebSharedFilesReload();
 
 	strTmp = (pThis->m_Params.bSharedSortReverse) ? _T("false") : _T("true");
 
@@ -2728,85 +3692,86 @@ CString CWebServer::_GetSharedFilesList(const ThreadData &Data)
 			strResultLog.Delete(0, iStringIndex);
 		Out.Replace(_T("[Message]"), strResultLog);
 	} else
-		Out.Replace(_T("[Message]"), EMPTY);
+		Out.Replace(_T("[Message]"), _T(""));
 
-	const TCHAR *pcSortIcon = (pThis->m_Params.bSharedSortReverse) ? pThis->m_Templates.sUpArrow : pThis->m_Templates.sDownArrow;
+	CString sSortIcon = _WebSelectString(pThis->m_Params.bSharedSortReverse, pThis->m_Templates.sUpArrow, pThis->m_Templates.sDownArrow);
+		LPCTSTR pcSortIcon = sSortIcon;
 
 	_GetPlainResString(strTmp, _T("DL_FILENAME"));
 	if (WSsharedColumnHidden[0]) {
-		Out.Replace(_T("[FilenameI]"), EMPTY);
-		Out.Replace(_T("[Filename]"), EMPTY);
+		Out.Replace(_T("[FilenameI]"), _T(""));
+		Out.Replace(_T("[Filename]"), _T(""));
 	} else {
-		Out.Replace(_T("[FilenameI]"), (pThis->m_Params.SharedSort == SHARED_SORT_NAME) ? pcSortIcon : EMPTY);
+		Out.Replace(_T("[FilenameI]"), _WebSelectString(pThis->m_Params.SharedSort == SHARED_SORT_NAME, pcSortIcon, _T("")));
 		Out.Replace(_T("[Filename]"), strTmp);
 	}
 	Out.Replace(_T("[FilenameM]"), strTmp);
 
 	_GetPlainResString(strTmp, _T("SF_TRANSFERRED"));
 	if (WSsharedColumnHidden[1]) {
-		Out.Replace(_T("[FileTransferredI]"), EMPTY);
-		Out.Replace(_T("[FileTransferred]"), EMPTY);
+		Out.Replace(_T("[FileTransferredI]"), _T(""));
+		Out.Replace(_T("[FileTransferred]"), _T(""));
 	} else {
-		LPCTSTR pcIconTmp = (pThis->m_Params.SharedSort == SHARED_SORT_TRANSFERRED) ? pcSortIcon : EMPTY;
+		CString sIconTmp = _WebSelectString(pThis->m_Params.SharedSort == SHARED_SORT_TRANSFERRED, pcSortIcon, _T(""));
 		if (pThis->m_Params.SharedSort == SHARED_SORT_ALL_TIME_TRANSFERRED)
-			pcIconTmp = (pThis->m_Params.bSharedSortReverse) ? pThis->m_Templates.sUpDoubleArrow : pThis->m_Templates.sDownDoubleArrow;
-		Out.Replace(_T("[FileTransferredI]"), pcIconTmp);
+			sIconTmp = _WebSelectString(pThis->m_Params.bSharedSortReverse, pThis->m_Templates.sUpDoubleArrow, pThis->m_Templates.sDownDoubleArrow);
+		Out.Replace(_T("[FileTransferredI]"), sIconTmp);
 		Out.Replace(_T("[FileTransferred]"), strTmp);
 	}
 	Out.Replace(_T("[FileTransferredM]"), strTmp);
 
 	_GetPlainResString(strTmp, _T("SF_REQUESTS"));
 	if (WSsharedColumnHidden[2]) {
-		Out.Replace(_T("[FileRequestsI]"), EMPTY);
-		Out.Replace(_T("[FileRequests]"), EMPTY);
+		Out.Replace(_T("[FileRequestsI]"), _T(""));
+		Out.Replace(_T("[FileRequests]"), _T(""));
 	} else {
-		LPCTSTR pcIconTmp = (pThis->m_Params.SharedSort == SHARED_SORT_REQUESTS) ? pcSortIcon : EMPTY;
+		CString sIconTmp = _WebSelectString(pThis->m_Params.SharedSort == SHARED_SORT_REQUESTS, pcSortIcon, _T(""));
 		if (pThis->m_Params.SharedSort == SHARED_SORT_ALL_TIME_REQUESTS)
-			pcIconTmp = (pThis->m_Params.bSharedSortReverse) ? pThis->m_Templates.sUpDoubleArrow : pThis->m_Templates.sDownDoubleArrow;
-		Out.Replace(_T("[FileRequestsI]"), pcIconTmp);
+			sIconTmp = _WebSelectString(pThis->m_Params.bSharedSortReverse, pThis->m_Templates.sUpDoubleArrow, pThis->m_Templates.sDownDoubleArrow);
+		Out.Replace(_T("[FileRequestsI]"), sIconTmp);
 		Out.Replace(_T("[FileRequests]"), strTmp);
 	}
 	Out.Replace(_T("[FileRequestsM]"), strTmp);
 
 	_GetPlainResString(strTmp, _T("SF_ACCEPTS"));
 	if (WSsharedColumnHidden[3]) {
-		Out.Replace(_T("[FileAcceptsI]"), EMPTY);
-		Out.Replace(_T("[FileAccepts]"), EMPTY);
+		Out.Replace(_T("[FileAcceptsI]"), _T(""));
+		Out.Replace(_T("[FileAccepts]"), _T(""));
 	} else {
-		LPCTSTR pcIconTmp = (pThis->m_Params.SharedSort == SHARED_SORT_ACCEPTS) ? pcSortIcon : EMPTY;
+		CString sIconTmp = _WebSelectString(pThis->m_Params.SharedSort == SHARED_SORT_ACCEPTS, pcSortIcon, _T(""));
 		if (pThis->m_Params.SharedSort == SHARED_SORT_ALL_TIME_ACCEPTS)
-			pcIconTmp = (pThis->m_Params.bSharedSortReverse) ? pThis->m_Templates.sUpDoubleArrow : pThis->m_Templates.sDownDoubleArrow;
-		Out.Replace(_T("[FileAcceptsI]"), pcIconTmp);
+			sIconTmp = _WebSelectString(pThis->m_Params.bSharedSortReverse, pThis->m_Templates.sUpDoubleArrow, pThis->m_Templates.sDownDoubleArrow);
+		Out.Replace(_T("[FileAcceptsI]"), sIconTmp);
 		Out.Replace(_T("[FileAccepts]"), strTmp);
 	}
 	Out.Replace(_T("[FileAcceptsM]"), strTmp);
 
 	_GetPlainResString(strTmp, _T("DL_SIZE"));
 	if (WSsharedColumnHidden[4]) {
-		Out.Replace(_T("[SizeI]"), EMPTY);
-		Out.Replace(_T("[Size]"), EMPTY);
+		Out.Replace(_T("[SizeI]"), _T(""));
+		Out.Replace(_T("[Size]"), _T(""));
 	} else {
-		Out.Replace(_T("[SizeI]"), (pThis->m_Params.SharedSort == SHARED_SORT_SIZE) ? pcSortIcon : EMPTY);
+		Out.Replace(_T("[SizeI]"), _WebSelectString(pThis->m_Params.SharedSort == SHARED_SORT_SIZE, pcSortIcon, _T("")));
 		Out.Replace(_T("[Size]"), strTmp);
 	}
 	Out.Replace(_T("[SizeM]"), strTmp);
 
 	_GetPlainResString(strTmp, _T("COMPLSOURCES"));
 	if (WSsharedColumnHidden[5]) {
-		Out.Replace(_T("[CompletesI]"), EMPTY);
-		Out.Replace(_T("[Completes]"), EMPTY);
+		Out.Replace(_T("[CompletesI]"), _T(""));
+		Out.Replace(_T("[Completes]"), _T(""));
 	} else {
-		Out.Replace(_T("[CompletesI]"), (pThis->m_Params.SharedSort == SHARED_SORT_COMPLETES) ? pcSortIcon : EMPTY);
+		Out.Replace(_T("[CompletesI]"), _WebSelectString(pThis->m_Params.SharedSort == SHARED_SORT_COMPLETES, pcSortIcon, _T("")));
 		Out.Replace(_T("[Completes]"), strTmp);
 	}
 	Out.Replace(_T("[CompletesM]"), strTmp);
 
 	_GetPlainResString(strTmp, _T("PRIORITY"));
 	if (WSsharedColumnHidden[6]) {
-		Out.Replace(_T("[PriorityI]"), EMPTY);
-		Out.Replace(_T("[Priority]"), EMPTY);
+		Out.Replace(_T("[PriorityI]"), _T(""));
+		Out.Replace(_T("[Priority]"), _T(""));
 	} else {
-		Out.Replace(_T("[PriorityI]"), (pThis->m_Params.SharedSort == SHARED_SORT_PRIORITY) ? pcSortIcon : EMPTY);
+		Out.Replace(_T("[PriorityI]"), _WebSelectString(pThis->m_Params.SharedSort == SHARED_SORT_PRIORITY, pcSortIcon, _T("")));
 		Out.Replace(_T("[Priority]"), strTmp);
 	}
 	Out.Replace(_T("[PriorityM]"), strTmp);
@@ -2819,82 +3784,8 @@ CString CWebServer::_GetSharedFilesList(const ThreadData &Data)
 	CString OutE(pThis->m_Templates.sSharedLine);
 
 	CArray<SharedFiles> SharedArray;
-
-	// Populating array
-	for (POSITION pos = BEFORE_START_POSITION; pos != NULL;) {
-		CKnownFile *pFile = theApp.sharedfiles->GetFileNext(pos);
-		if (pFile != NULL) {
-			bool bPartFile = pFile->IsPartFile();
-
-			SharedFiles dFile;
-			dFile.bIsPartFile = bPartFile;
-			dFile.sFileName = pFile->GetFileName();
-			dFile.sFileState = bPartFile ? _T("filedown") : _T("file");
-			dFile.sFileType = _GetWebImageNameForFileType(dFile.sFileName);
-			dFile.m_qwFileSize = pFile->GetFileSize();
-
-			if (!theApp.GetPublicIP().IsNull() && !theApp.IsFirewalled())
-				dFile.sED2kLink = pFile->GetED2kLink(false, false, false, true, theApp.GetPublicIP());
-			else
-				dFile.sED2kLink = pFile->GetED2kLink();
-
-			dFile.nFileTransferred = pFile->statistic.GetTransferred();
-			dFile.nFileAllTimeTransferred = pFile->statistic.GetAllTimeTransferred();
-			dFile.nFileRequests = pFile->statistic.GetRequests();
-			dFile.nFileAllTimeRequests = pFile->statistic.GetAllTimeRequests();
-			dFile.nFileAccepts = pFile->statistic.GetAccepts();
-			dFile.nFileAllTimeAccepts = pFile->statistic.GetAllTimeAccepts();
-			dFile.sFileHash = md4str(pFile->GetFileHash());
-
-			if (pFile->m_nCompleteSourcesCountLo == 0)
-				dFile.sFileCompletes.Format(_T("< %hu"), pFile->m_nCompleteSourcesCountHi);
-			else if (pFile->m_nCompleteSourcesCountLo == pFile->m_nCompleteSourcesCountHi)
-				dFile.sFileCompletes.Format(_T("%hu"), pFile->m_nCompleteSourcesCountLo);
-			else
-				dFile.sFileCompletes.Format(_T("%hu - %hu"), pFile->m_nCompleteSourcesCountLo, pFile->m_nCompleteSourcesCountHi);
-
-			LPCTSTR uid;
-			if (pFile->IsAutoUpPriority()) {
-				switch (pFile->GetUpPriority()) {
-				case PR_LOW:
-					uid = _T("PRIOAUTOLOW");
-					break;
-				case PR_HIGH:
-					uid = _T("PRIOAUTOHIGH");
-					break;
-				case PR_VERYHIGH:
-					uid = _T("PRIOAUTORELEASE");
-					break;
-				//case PR_NORMAL:
-				default:
-					uid = _T("PRIOAUTONORMAL");
-				}
-			} else {
-				switch (pFile->GetUpPriority()) {
-				case PR_VERYLOW:
-					uid = _T("PRIOVERYLOW");
-					break;
-				case PR_LOW:
-					uid = _T("PRIOLOW");
-					break;
-				case PR_HIGH:
-					uid = _T("PRIOHIGH");
-					break;
-				case PR_VERYHIGH:
-					uid = _T("PRIORELEASE");
-					break;
-				case PR_NORMAL:
-				default:
-					uid = _T("PRIONORMAL");
-				}
-			}
-			dFile.sFilePriority = GetResString(uid);
-
-			dFile.nFilePriority = pFile->GetUpPriority();
-			dFile.bFileAutoPriority = pFile->IsAutoUpPriority();
-			SharedArray.Add(dFile);
-		}
-	} //for
+	if (!_GetSharedFilesSnapshot(pThis, SharedArray))
+		SharedArray.RemoveAll();
 
 	SortParams prm{ (int)pThis->m_Params.SharedSort, pThis->m_Params.bSharedSortReverse };
 	qsort_s(SharedArray.GetData(), SharedArray.GetCount(), sizeof(SharedFiles), &_SharedCmp, &prm);
@@ -2905,7 +3796,7 @@ CString CWebServer::_GetSharedFilesList(const ThreadData &Data)
 		CString HTTPProcessData(OutE);
 
 		bool b = (SharedArray[i].sFileHash == _ParseURL(Data.sURL, _T("hash")));
-		HTTPProcessData.Replace(_T("[LastChangedDataset]"), b ? _T("checked") : _T("checked_no"));
+		HTTPProcessData.Replace(_T("[LastChangedDataset]"), _WebSelectString(b, _T("checked"), _T("checked_no")));
 
 		LPCTSTR sharedpriority;	//priority
 		if (SharedArray[i].bFileAutoPriority)
@@ -2928,7 +3819,7 @@ CString CWebServer::_GetSharedFilesList(const ThreadData &Data)
 				sharedpriority = _T("Release");
 				break;
 			default:
-				sharedpriority = EMPTY;
+				sharedpriority = _T("");
 			}
 
 		CString ed2k(SharedArray[i].sED2kLink);		//ed2klink
@@ -2937,19 +3828,13 @@ CString CWebServer::_GetSharedFilesList(const ThreadData &Data)
 		CString fname(SharedArray[i].sFileName);	//filename
 		fname.Replace(_T("'"), _T("&#8217;"));
 
-		bool downloadable = false;
-		uchar fileid[MDX_DIGEST_SIZE];
-		if (hash.GetLength() == 32 && DecodeBase16(hash, hash.GetLength(), fileid, _countof(fileid))) {
+		bool downloadable = SharedArray[i].bDownloadable;
+		if (!hash.IsEmpty()) {
 			HTTPProcessData.Replace(_T("[hash]"), hash);
-			const CKnownFile *cur_file = theApp.sharedfiles->GetFileByID(fileid);
-			if (cur_file != NULL) {
-				HTTPProcessData.Replace(_T("[FileIsPriority]")
-					, (cur_file->GetUpPriority() == PR_VERYHIGH) ? _T("release") : _T("none"));
-				downloadable = !cur_file->IsPartFile() && (thePrefs.GetMaxWebUploadFileSizeMB() == 0 || SharedArray[i].m_qwFileSize < ((uint64)thePrefs.GetMaxWebUploadFileSizeMB()) * 1024 * 1024);
-			}
+			HTTPProcessData.Replace(_T("[FileIsPriority]"), _WebSelectString(SharedArray[i].bReleasePriority, _T("release"), _T("none")));
 		}
 
-		HTTPProcessData.Replace(_T("[admin]"), bAdmin ? _T("admin") : EMPTY);
+		HTTPProcessData.Replace(_T("[admin]"), _WebSelectString(bAdmin, _T("admin"), _T("")));
 		HTTPProcessData.Replace(_T("[ed2k]"), _SpecialChars(ed2k));
 		HTTPProcessData.Replace(_T("[fname]"), _SpecialChars(fname));
 		HTTPProcessData.Replace(_T("[session]"), sSession);
@@ -2959,21 +3844,21 @@ CString CWebServer::_GetSharedFilesList(const ThreadData &Data)
 		HTTPProcessData.Replace(_T("[FileType]"), SharedArray[i].sFileType);
 		HTTPProcessData.Replace(_T("[FileState]"), SharedArray[i].sFileState);
 
-		HTTPProcessData.Replace(_T("[Downloadable]"), downloadable ? _T("yes") : _T("no"));
+		HTTPProcessData.Replace(_T("[Downloadable]"), _WebSelectString(downloadable, _T("yes"), _T("no")));
 
-		HTTPProcessData.Replace(_T("[IFDOWNLOADABLE]"), downloadable ? EMPTY : _T("<!--"));
-		HTTPProcessData.Replace(_T("[/IFDOWNLOADABLE]"), downloadable ? EMPTY : _T("-->"));
+		HTTPProcessData.Replace(_T("[IFDOWNLOADABLE]"), _WebSelectString(downloadable, _T(""), _T("<!--")));
+		HTTPProcessData.Replace(_T("[/IFDOWNLOADABLE]"), _WebSelectString(downloadable, _T(""), _T("-->")));
 
 		TCHAR HTTPTempC[100];
 		//0
 		if (WSsharedColumnHidden[0])
-			HTTPProcessData.Replace(_T("[ShortFileName]"), EMPTY);
+			HTTPProcessData.Replace(_T("[ShortFileName]"), _T(""));
 		else if (SharedArray[i].sFileName.GetLength() > (SHORT_LENGTH))
 			HTTPProcessData.Replace(_T("[ShortFileName]"), _SpecialChars(SharedArray[i].sFileName.Left(SHORT_LENGTH - 3)) + _T("..."));
 		else
 			HTTPProcessData.Replace(_T("[ShortFileName]"), _SpecialChars(SharedArray[i].sFileName));
 		//1
-		HTTPProcessData.Replace(_T("[FileTransferred]"), WSsharedColumnHidden[1] ? EMPTY : (LPCTSTR)CastItoXBytes(SharedArray[i].nFileTransferred));
+		HTTPProcessData.Replace(_T("[FileTransferred]"), _WebSelectString(WSsharedColumnHidden[1] != FALSE, _T(""), CastItoXBytes(SharedArray[i].nFileTransferred)));
 		if (WSsharedColumnHidden[1])
 			*HTTPTempC = _T('\0');
 		else
@@ -2999,15 +3884,15 @@ CString CWebServer::_GetSharedFilesList(const ThreadData &Data)
 		HTTPProcessData.Replace(_T("[FileAllTimeAccepts]"), HTTPTempC);
 		//4..6
 		if (WSsharedColumnHidden[4])
-			HTTPProcessData.Replace(_T("[FileSize]"), EMPTY);
+			HTTPProcessData.Replace(_T("[FileSize]"), _T(""));
 		else
 			HTTPProcessData.Replace(_T("[FileSize]"), CastItoXBytes(SharedArray[i].m_qwFileSize));
 		if (WSsharedColumnHidden[5])
-			HTTPProcessData.Replace(_T("[Completes]"), EMPTY);
+			HTTPProcessData.Replace(_T("[Completes]"), _T(""));
 		else
 			HTTPProcessData.Replace(_T("[Completes]"), SharedArray[i].sFileCompletes);
 		if (WSsharedColumnHidden[6])
-			HTTPProcessData.Replace(_T("[Priority]"), EMPTY);
+			HTTPProcessData.Replace(_T("[Priority]"), _T(""));
 		else
 			HTTPProcessData.Replace(_T("[Priority]"), SharedArray[i].sFilePriority);
 		HTTPProcessData.Replace(_T("[FileHash]"), SharedArray[i].sFileHash);
@@ -3085,44 +3970,32 @@ CString CWebServer::_GetAddServerBox(const ThreadData &Data)
 			CString strServerName(_ParseURL(Data.sURL, _T("servername")));
 			if (strServerName.Trim().IsEmpty())
 				strServerName = strServerAddress;
-			CServer *srv = new CServer((uint16)_tstoi(strServerPort), strServerAddress);
-			srv->SetListName(strServerName);
-			if (!theApp.emuledlg->serverwnd->serverlistctrl.AddServer(srv, true)) {
-				delete srv;
-				Out.Replace(_T("[Message]"), _GetPlainResString(_T("ERROR")));
-			} else {
-				const CString &sPrio(_ParseURL(Data.sURL, _T("priority")));
-				if (sPrio == _T("low"))
-					srv->SetPreference(PR_LOW);
-				else if (sPrio == _T("normal"))
-					srv->SetPreference(PR_NORMAL);
-				else if (sPrio == _T("high"))
-					srv->SetPreference(PR_HIGH);
 
-				SendMessage(theApp.emuledlg->m_hWnd, WEB_GUI_INTERACTION, WEBGUIIA_UPDATESERVER, (LPARAM)srv);
+			const CString &sPrio(_ParseURL(Data.sURL, _T("priority")));
+			int nPriority = SRV_PR_NORMAL;
+			if (sPrio == _T("low"))
+				nPriority = SRV_PR_LOW;
+			else if (sPrio == _T("high"))
+				nPriority = SRV_PR_HIGH;
 
-				if (_ParseURL(Data.sURL, _T("addtostatic")) == _T("true")) {
-					_AddToStatic(_ParseURL(Data.sURL, _T("serveraddr")), _tstoi(_ParseURL(Data.sURL, _T("serverport"))));
-					resultlog.AppendFormat(_T("<br>%s"), (LPCTSTR)_SpecialChars(theApp.emuledlg->GetLastLogEntry())); //Pick-up last line of the log
-				}
+			const bool bAddToStatic = _ParseURL(Data.sURL, _T("addtostatic")) == _T("true");
+			const bool bConnectNow = _ParseURL(Data.sURL, _T("connectnow")) == _T("true");
+			if (ExecuteServerCommandForWebThread(WEB_SERVER_COMMAND_ADD, strServerAddress, _tstoi(strServerPort), strServerName, CString(), bAddToStatic, nPriority, bAddToStatic, bConnectNow)) {
 				resultlog.TrimRight(_T('\n'));
 				resultlog.Delete(0, resultlog.ReverseFind(_T('\n')));
 				Out.Replace(_T("[Message]"), resultlog);
-				if (_ParseURL(Data.sURL, _T("connectnow")) == _T("true"))
-					_ConnectToServer(_ParseURL(Data.sURL, _T("serveraddr")), _tstoi(_ParseURL(Data.sURL, _T("serverport"))));
-			}
+			} else
+				Out.Replace(_T("[Message]"), _GetPlainResString(_T("ERROR")));
 		} else
 			Out.Replace(_T("[Message]"), _GetPlainResString(_T("ERROR")));
-	} else if (_ParseURL(Data.sURL, _T("updateservermetfromurl")) == _T("true")) {
-		const CString &url(_ParseURL(Data.sURL, _T("servermeturl")));
-		SendMessage(theApp.emuledlg->m_hWnd, WEB_GUI_INTERACTION, WEBGUIIA_UPDATESERVERMETFROMURL, (LPARAM)(LPCTSTR)url);
-
-		resultlog = _SpecialChars(theApp.emuledlg->GetLastLogEntry());
-		resultlog.TrimRight(_T('\n'));
-		resultlog.Delete(0, resultlog.ReverseFind(_T('\n')));
-		Out.Replace(_T("[Message]"), resultlog);
-	} else
-		Out.Replace(_T("[Message]"), EMPTY);
+		} else if (_ParseURL(Data.sURL, _T("updateservermetfromurl")) == _T("true")) {
+			const CString &url(_ParseURL(Data.sURL, _T("servermeturl")));
+			if (ExecuteServerCommandForWebThread(WEB_SERVER_COMMAND_UPDATE_SERVER_MET_FROM_URL, url, 0))
+				Out.Replace(_T("[Message]"), _GetPlainResString(_T("DOWNLOADING_SERVERMET")));
+			else
+				Out.Replace(_T("[Message]"), _GetPlainResString(_T("ERROR")));
+		} else
+			Out.Replace(_T("[Message]"), _T(""));
 
 	Out.Replace(_T("[AddServer]"), _GetPlainResString(_T("SV_NEWSERVER")));
 	Out.Replace(_T("[IP:Port]"), _GetPlainResString(_T("SV_ADDRESS_PORT")));
@@ -3239,19 +4112,19 @@ CString CWebServer::_GetKadDlg(const ThreadData &Data)
 		if (!_ParseURL(Data.sURL, _T("bootstrap")).IsEmpty()) {
 			CString dest(_ParseURL(Data.sURL, _T("ip")));
 			dest.AppendFormat(_T(":%s"), (LPCTSTR)_ParseURL(Data.sURL, _T("port")));
-			SendMessage(theApp.emuledlg->m_hWnd, WEB_GUI_INTERACTION, WEBGUIIA_KAD_BOOTSTRAP, (LPARAM)(LPCTSTR)dest);
+			ExecuteServerCommandForWebThread(WEB_SERVER_COMMAND_BOOTSTRAP_KAD, dest, 0);
 		}
 
 		const CString &sAction(_ParseURL(Data.sURL, _T("c")));
 		if (sAction == _T("connect"))
-			SendMessage(theApp.emuledlg->m_hWnd, WEB_GUI_INTERACTION, WEBGUIIA_KAD_START, 0);
+			ExecuteServerCommandForWebThread(WEB_SERVER_COMMAND_CONNECT_KAD, CString(), 0);
 		else if (sAction == _T("disconnect"))
-			SendMessage(theApp.emuledlg->m_hWnd, WEB_GUI_INTERACTION, WEBGUIIA_KAD_STOP, 0);
+			ExecuteServerCommandForWebThread(WEB_SERVER_COMMAND_DISCONNECT_KAD, CString(), 0);
 		else if (sAction == _T("rcfirewall"))
-			SendMessage(theApp.emuledlg->m_hWnd, WEB_GUI_INTERACTION, WEBGUIIA_KAD_RCFW, 0);
+			ExecuteServerCommandForWebThread(WEB_SERVER_COMMAND_RECHECK_KAD_FIREWALL, CString(), 0);
 	}
 	// check the condition if bootstrap is possible
-	Out.Replace(_T("[BOOTSTRAPLINE]"), Kademlia::CKademlia::IsConnected() ? EMPTY : (LPCTSTR)pThis->m_Templates.sBootstrapLine);
+	Out.Replace(_T("[BOOTSTRAPLINE]"), _WebSelectString(Kademlia::CKademlia::IsConnected(), _T(""), pThis->m_Templates.sBootstrapLine));
 
 	// Infos
 	CString buffer;
@@ -3301,7 +4174,7 @@ CString CWebServer::_GetStats(const ThreadData &Data)
 		return CString();
 
 	// refresh statistics
-	SendMessage(theApp.emuledlg->m_hWnd, WEB_GUI_INTERACTION, WEBGUIIA_SHOWSTATISTICS, 1);
+	::PostMessage(theApp.emuledlg->m_hWnd, WEB_GUI_INTERACTION, WEBGUIIA_SHOWSTATISTICS, 1);
 
 	CString Out(pThis->m_Templates.sStats);
 	// eklmn: new stats
@@ -3333,19 +4206,19 @@ CString CWebServer::_GetPreferences(const ThreadData &Data)
 
 		strTmp = _ParseURL(Data.sURL, _T("maxcapdown"));
 		if (!strTmp.IsEmpty())
-			thePrefs.SetMaxGraphDownloadRate(_tstoi(strTmp));
+			thePrefs.SetMaxGraphDownloadRate(ParseWebSpeedPreferenceValue(strTmp));
 		strTmp = _ParseURL(Data.sURL, _T("maxcapup"));
 		if (!strTmp.IsEmpty())
-			thePrefs.SetMaxGraphUploadRate(_tstoi(strTmp));
+			thePrefs.SetMaxGraphUploadRate(ParseWebSpeedPreferenceValue(strTmp));
 
 		strTmp = _ParseURL(Data.sURL, _T("maxdown"));
 		if (!strTmp.IsEmpty()) {
-			uint32 dwSpeed = _tstoi(strTmp);
+			uint32 dwSpeed = ParseWebSpeedPreferenceValue(strTmp);
 			thePrefs.SetMaxDownload(dwSpeed > 0 ? dwSpeed : UNLIMITED);
 		}
 		strTmp = _ParseURL(Data.sURL, _T("maxup"));
 		if (!strTmp.IsEmpty()) {
-			uint32 dwSpeed = _tstoi(strTmp);
+			uint32 dwSpeed = ParseWebSpeedPreferenceValue(strTmp);
 			thePrefs.SetMaxUpload(dwSpeed > 0 ? dwSpeed : UNLIMITED);
 		}
 
@@ -3358,7 +4231,7 @@ CString CWebServer::_GetPreferences(const ThreadData &Data)
 	}
 
 	// Fill form
-	Out.Replace(_T("[UseGzipVal]"), thePrefs.GetWebUseGzip() ? _T("checked") : EMPTY);
+	Out.Replace(_T("[UseGzipVal]"), _WebSelectString(thePrefs.GetWebUseGzip(), _T("checked"), _T("")));
 
 	CString sRefresh;
 	sRefresh.Format(_T("%d"), thePrefs.GetWebPageRefresh());
@@ -3373,7 +4246,7 @@ CString CWebServer::_GetPreferences(const ThreadData &Data)
 	sRefresh.Format(_T("%u"), thePrefs.GetMaxConperFive());
 	Out.Replace(_T("[MaxConnectionsPer5Val]"), sRefresh);
 
-	Out.Replace(_T("[KBS]"), _GetPlainResString(_T("KBYTESPERSEC")) + _T(':'));
+	Out.Replace(_T("[KBS]"), _GetPlainResString(thePrefs.GetForceSpeedsToKB() ? _T("KBYTESPERSEC") : _T("MBITSSEC")) + _T(':'));
 	Out.Replace(_T("[LimitForm]"), _GetPlainResString(_T("WEB_CONLIMITS")) + _T(':'));
 	Out.Replace(_T("[MaxSources]"), _GetPlainResString(_T("PW_MAXSOURCES")) + _T(':'));
 	Out.Replace(_T("[MaxConnections]"), _GetPlainResString(_T("PW_MAXC")) + _T(':'));
@@ -3406,16 +4279,16 @@ CString CWebServer::_GetPreferences(const ThreadData &Data)
 
 
 	CString sT;
-	sT.Format(_T("%u"), thePrefs.GetMaxDownload() == UNLIMITED ? 0u : thePrefs.GetMaxDownload());
+	sT = FormatWebSpeedPreferenceValue(thePrefs.GetMaxDownload() == UNLIMITED ? 0u : thePrefs.GetMaxDownload());
 	Out.Replace(_T("[MaxDownVal]"), sT);
 
-	sT.Format(_T("%u"), thePrefs.GetMaxUpload() == UNLIMITED ? 0u : thePrefs.GetMaxUpload());
+	sT = FormatWebSpeedPreferenceValue(thePrefs.GetMaxUpload() == UNLIMITED ? 0u : thePrefs.GetMaxUpload());
 	Out.Replace(_T("[MaxUpVal]"), sT);
 
-	sT.Format(_T("%u"), thePrefs.GetMaxGraphDownloadRate());
+	sT = FormatWebSpeedPreferenceValue(thePrefs.GetMaxGraphDownloadRate());
 	Out.Replace(_T("[MaxCapDownVal]"), sT);
 
-	sT.Format(_T("%u"), thePrefs.GetMaxGraphUploadRate(true));
+	sT = FormatWebSpeedPreferenceValue(thePrefs.GetMaxGraphUploadRate(true));
 	Out.Replace(_T("[MaxCapUpVal]"), sT);
 
 	return Out;
@@ -3529,7 +4402,7 @@ bool CWebServer::_RemoveSession(const ThreadData &Data, long lSession)
 		if (pThis->m_Params.Sessions[i].lSession == lSession) {
 			pThis->m_Params.Sessions.RemoveAt(i);
 			AddLogLine(true, (LPCTSTR)GetResString(_T("WEB_SESSIONEND")), (LPCTSTR)ipstr(pThis->m_uCurIP));
-			SendMessage(theApp.emuledlg->m_hWnd, WEB_GUI_INTERACTION, WEBGUIIA_UPDATEMYINFO, 0);
+			::PostMessage(theApp.emuledlg->m_hWnd, WEB_GUI_INTERACTION, WEBGUIIA_UPDATEMYINFO, 0);
 			return true;
 		}
 
@@ -3587,14 +4460,10 @@ void CWebServer::_GetPlainResString(CString &rstrOut, LPCTSTR nID, bool noquote)
 }
 
 // Ornis: creating the progressbar. colored if resources are given/available
-CString CWebServer::_GetDownloadGraph(const ThreadData &Data, const CString &filehash)
+CString CWebServer::_GetDownloadGraph(const ThreadData &Data, const CPartFile *pPartFile)
 {
 	const CWebServer *pThis = reinterpret_cast<CWebServer*>(Data.pThis);
 	if (pThis == NULL)
-		return CString();
-
-	uchar fileid[MDX_DIGEST_SIZE];
-	if (filehash.GetLength() != MDX_DIGEST_SIZE * 2 || !DecodeBase16(filehash, MDX_DIGEST_SIZE * 2, fileid, _countof(fileid)))
 		return CString();
 
 	//	Color style (paused files)
@@ -3612,35 +4481,48 @@ CString CWebServer::_GetDownloadGraph(const ThreadData &Data, const CString &fil
 		_T("blue5.gif"), _T("blue6.gif"), _T("greenpercent.gif"), _T("transparent.gif")
 	};
 
-	const CPartFile *pPartFile = theApp.downloadqueue->GetFileByID(fileid);
 	const LPCTSTR *barcolours = (pPartFile && (pPartFile->GetStatus() == PS_PAUSED)) ? styles_paused : styles_active;
 
+	const uint16 uBarWidth = pThis->m_Templates.iProgressbarWidth;
+
 	CString Out;
-	if (pPartFile == NULL || !pPartFile->IsPartFile()) {
-		Out.Format(pThis->m_Templates.sProgressbarImgsPercent, barcolours[10], pThis->m_Templates.iProgressbarWidth);
+	if (pPartFile == NULL || !pPartFile->IsPartFile() || uBarWidth == 0) {
+		Out.Format(pThis->m_Templates.sProgressbarImgsPercent, barcolours[10], uBarWidth);
 		Out += _T("<br>");
-		Out.AppendFormat(pThis->m_Templates.sProgressbarImgs, barcolours[0], pThis->m_Templates.iProgressbarWidth);
+		Out.AppendFormat(pThis->m_Templates.sProgressbarImgs, barcolours[0], uBarWidth);
 	} else {
-		const CStringA &s_ChunkBar(pPartFile->GetProgressString(pThis->m_Templates.iProgressbarWidth));
+		const CStringA s_ChunkBar(pPartFile->GetProgressString(uBarWidth));
 		// and now make a graph out of the array - need to be in a progressive way
 
-		int compl = static_cast<int>((pThis->m_Templates.iProgressbarWidth / 100.0) * pPartFile->GetPercentCompleted());
-		Out.Format(pThis->m_Templates.sProgressbarImgsPercent, barcolours[compl > 0 ? 10 : 11], (compl > 0 ? compl : 5));
+		int iCompletedWidth = static_cast<int>((uBarWidth / 100.0) * pPartFile->GetPercentCompleted());
+		if (iCompletedWidth < 0)
+			iCompletedWidth = 0;
+		else if (iCompletedWidth > uBarWidth)
+			iCompletedWidth = uBarWidth;
+		const int iMinimumProgressWidth = (uBarWidth < 5) ? uBarWidth : 5;
+		Out.Format(pThis->m_Templates.sProgressbarImgsPercent, barcolours[iCompletedWidth > 0 ? 10 : 11], (iCompletedWidth > 0 ? iCompletedWidth : iMinimumProgressWidth));
 		Out += _T("<br>");
 
 		BYTE lastcolor = 1;
 		uint16 lastindex = 0;
-		const uint16 uBarWidth = pThis->m_Templates.iProgressbarWidth;
+		const int iChunkBarLength = s_ChunkBar.GetLength();
 		for (uint16 i = 0; i < uBarWidth; ++i) {
-			if (lastcolor != (BYTE)(s_ChunkBar[i] - '0')) {
+			BYTE color = 1;
+			if (i < iChunkBarLength) {
+				const char c = s_ChunkBar[i];
+				if (c >= '0' && c <= '9')
+					color = static_cast<BYTE>(c - '0');
+			}
+
+			if (lastcolor != color) {
 				if (i > lastindex && lastcolor < _countof(styles_active))
 					Out.AppendFormat(pThis->m_Templates.sProgressbarImgs, barcolours[lastcolor], i - lastindex);
-				lastcolor = (BYTE)(s_ChunkBar[i] - '0');
-				ASSERT(lastcolor <= 9);
+				lastcolor = color;
 				lastindex = i;
 			}
 		}
-		Out.AppendFormat(pThis->m_Templates.sProgressbarImgs, barcolours[lastcolor], uBarWidth - lastindex);
+		if (uBarWidth > lastindex && lastcolor < _countof(styles_active))
+			Out.AppendFormat(pThis->m_Templates.sProgressbarImgs, barcolours[lastcolor], uBarWidth - lastindex);
 	}
 	return Out;
 }
@@ -3660,16 +4542,6 @@ CString CWebServer::_GetSearch(const ThreadData &Data)
 	bool bSessionAdmin = _IsSessionAdmin(Data, sSession);
 	CString Out(pThis->m_Templates.sSearch);
 
-	if (!_ParseURL(Data.sURL, _T("downloads")).IsEmpty() && bSessionAdmin) {
-		const CString &downloads(_ParseURLArray(Data.sURL, _T("downloads")));
-
-		for (int iPos = 0; iPos >= 0;) {
-			const CString &resToken(downloads.Tokenize(_T("|"), iPos));
-			if (resToken.GetLength() == 32)
-				SendMessage(theApp.emuledlg->m_hWnd, WEB_ADDDOWNLOADS, (LPARAM)(LPCTSTR)resToken, cat);
-		}
-	}
-
 	if (_ParseURL(Data.sURL, _T("c")) == _T("menu")) {
 		int iMenu = _tstoi(_ParseURL(Data.sURL, _T("m")));
 		bool bValue = _tstoi(_ParseURL(Data.sURL, _T("v"))) != 0;
@@ -3680,67 +4552,46 @@ CString CWebServer::_GetSearch(const ThreadData &Data)
 
 	if (!_ParseURL(Data.sURL, _T("tosearch")).IsEmpty() && bSessionAdmin) {
 
-		// perform search
-		SendMessage(theApp.emuledlg->m_hWnd, WEB_GUI_INTERACTION, WEBGUIIA_DELETEALLSEARCHES, 0);
-
 		// get method
 		const CString &method((_ParseURL(Data.sURL, _T("method"))));
 
-		SSearchParams *pParams = new SSearchParams;
-		pParams->strExpression = _ParseURL(Data.sURL, _T("tosearch"));
-		pParams->strFileType = _ParseURL(Data.sURL, _T("type"));
+		SSearchParams params;
+		params.strExpression = _ParseURL(Data.sURL, _T("tosearch"));
+		params.strFileType = _ParseURL(Data.sURL, _T("type"));
 		// for safety: this string is sent to servers and/or kad nodes, validate it!
-		if (!pParams->strFileType.IsEmpty()
-			&& pParams->strFileType != _T(ED2KFTSTR_ARCHIVE)
-			&& pParams->strFileType != _T(ED2KFTSTR_AUDIO)
-			&& pParams->strFileType != _T(ED2KFTSTR_CDIMAGE)
-			&& pParams->strFileType != _T(ED2KFTSTR_DOCUMENT)
-			&& pParams->strFileType != _T(ED2KFTSTR_IMAGE)
-			&& pParams->strFileType != _T(ED2KFTSTR_PROGRAM)
-			&& pParams->strFileType != _T(ED2KFTSTR_VIDEO)
-			&& pParams->strFileType != _T(ED2KFTSTR_EMULECOLLECTION))
+		if (!params.strFileType.IsEmpty()
+			&& params.strFileType != _T(ED2KFTSTR_ARCHIVE)
+			&& params.strFileType != _T(ED2KFTSTR_AUDIO)
+			&& params.strFileType != _T(ED2KFTSTR_CDIMAGE)
+			&& params.strFileType != _T(ED2KFTSTR_DOCUMENT)
+			&& params.strFileType != _T(ED2KFTSTR_IMAGE)
+			&& params.strFileType != _T(ED2KFTSTR_PROGRAM)
+			&& params.strFileType != _T(ED2KFTSTR_VIDEO)
+			&& params.strFileType != _T(ED2KFTSTR_EMULECOLLECTION))
 		{
 			ASSERT(0);
-			pParams->strFileType.Empty();
+			params.strFileType.Empty();
 		}
-		pParams->ullMinSize = _tstoi64(_ParseURL(Data.sURL, _T("min"))) * 1048576ui64;
-		pParams->ullMaxSize = _tstoi64(_ParseURL(Data.sURL, _T("max"))) * 1048576ui64;
-		if (pParams->ullMaxSize < pParams->ullMinSize)
-			pParams->ullMaxSize = 0;
+		params.ullMinSize = _tstoi64(_ParseURL(Data.sURL, _T("min"))) * 1048576ui64;
+		params.ullMaxSize = _tstoi64(_ParseURL(Data.sURL, _T("max"))) * 1048576ui64;
+		if (params.ullMaxSize < params.ullMinSize)
+			params.ullMaxSize = 0;
 
 		const CString &s(_ParseURL(Data.sURL, _T("avail")));
-		pParams->uAvailability = s.IsEmpty() ? 0 : _tstoi(s);
-		if (pParams->uAvailability > 1000000)
-			pParams->uAvailability = 1000000;
+		params.uAvailability = s.IsEmpty() ? 0 : _tstoi(s);
+		if (params.uAvailability > 1000000)
+			params.uAvailability = 1000000;
 
-		pParams->strExtension = _ParseURL(Data.sURL, _T("ext"));
+		params.strExtension = _ParseURL(Data.sURL, _T("ext"));
 		if (method == _T("kademlia"))
-			pParams->eType = SearchTypeKademlia;
+			params.eType = SearchTypeKademlia;
 		else if (method == _T("global"))
-			pParams->eType = SearchTypeEd2kGlobal;
+			params.eType = SearchTypeEd2kGlobal;
 		else
-			pParams->eType = SearchTypeEd2kServer;
+			params.eType = SearchTypeEd2kServer;
 
-
-		CString strResponse(_GetPlainResString(_T("SW_SEARCHINGINFO")));
-		try {
-			if (pParams->eType != SearchTypeKademlia) {
-				if (!theApp.emuledlg->searchwnd->DoNewEd2kSearch(pParams)) {
-					delete pParams;
-					pParams = NULL;
-					strResponse = _GetPlainResString(_T("ERR_NOTCONNECTED"));
-				} else
-					::Sleep(SEC2MS(2));	// wait for some results to come in (thanks thread)
-			} else if (!theApp.emuledlg->searchwnd->DoNewKadSearch(pParams)) {
-				delete pParams;
-				pParams = NULL;
-				strResponse = _GetPlainResString(_T("ERR_NOTCONNECTEDKAD"));
-			}
-		} catch (...) {
-			strResponse = _GetPlainResString(_T("ERROR"));
-			ASSERT(0);
-			delete pParams;
-		}
+		CString strResponse;
+		QueueWebSearchStartCommand(params, strResponse);
 		Out.Replace(_T("[Message]"), strResponse);
 
 	} else {
@@ -3758,35 +4609,25 @@ CString CWebServer::_GetSearch(const ThreadData &Data)
 	CString result(pThis->m_Templates.sSearchHeader);
 
 	CQArray<SearchFileStruct, SearchFileStruct> SearchFileArray;
-	theApp.searchlist->GetWebList(&SearchFileArray, pThis->m_iSearchSortby);
+	GetWebSearchList(pThis, SearchFileArray, pThis->m_iSearchSortby);
 
 	SearchFileArray.QuickSort(pThis->m_bSearchAsc);
 
-	for (INT_PTR i = 0; i < SearchFileArray.GetCount(); ++i) {
-		uchar aFileHash[MDX_DIGEST_SIZE];
+	if (!_ParseURL(Data.sURL, _T("downloads")).IsEmpty() && bSessionAdmin) {
+		const CString &downloads(_ParseURLArray(Data.sURL, _T("downloads")));
+		CString downloadLinks;
+		GetWebSearchDownloadLinks(pThis, downloads, downloadLinks);
+		if (!downloadLinks.IsEmpty())
+			QueueWebDownloadLinks(downloadLinks, cat);
+	}
+
+	const INT_PTR iSearchRenderCount = min(SearchFileArray.GetCount(), WEB_MAX_TABLE_ROWS);
+	for (INT_PTR i = 0; i < iSearchRenderCount; ++i) {
 		SearchFileStruct structFile = SearchFileArray[i];
-		DecodeBase16(structFile.m_strFileHash, 32, aFileHash, _countof(aFileHash));
-
-		LPCTSTR strOverlayImage = _T("none");
-		uchar nRed, nGreen, nBlue;
-		nRed = nGreen = nBlue = 255;
-		if (theApp.downloadqueue->GetFileByID(aFileHash) != NULL) {
-			nBlue = 128;
-			nGreen = 128;
-		} else {
-			CKnownFile *sameFile = theApp.sharedfiles->GetFileByID(aFileHash);
-			if (sameFile == NULL)
-				sameFile = theApp.knownfiles->FindKnownFileByID(aFileHash);
-
-			if (sameFile == NULL) {
-			} else {
-				nBlue = 128;
-				nRed = 128;
-			}
-		}
+		LPCTSTR strOverlayImage = structFile.m_strOverlayImage.IsEmpty() ? _T("none") : (LPCTSTR)structFile.m_strOverlayImage;
 
 		CString strFmt;
-		strFmt.Format(_T("<font color=\"#%02x%02x%02x\">%%s</font>"), nRed, nGreen, nBlue);
+		strFmt.Format(_T("<font color=\"%s\">%%s</font>"), structFile.m_strTextColor.IsEmpty() ? _T("#ffffff") : (LPCTSTR)structFile.m_strTextColor);
 
 		LPCTSTR strSourcesImage;
 		if (structFile.m_uSourceCount < 5)
@@ -3833,11 +4674,11 @@ CString CWebServer::_GetSearch(const ThreadData &Data)
 	}
 
 	if (thePrefs.GetCatCount() > 1)
-		_InsertCatBox(Out, 0, pThis->m_Templates.sCatArrow, false, false, sSession, EMPTY);
+		_InsertCatBox(Out, 0, pThis->m_Templates.sCatArrow, false, false, sSession, _T(""));
 	else
-		Out.Replace(_T("[CATBOX]"), EMPTY);
+		Out.Replace(_T("[CATBOX]"), _T(""));
 
-	Out.Replace(_T("[SEARCHINFOMSG]"), EMPTY);
+	Out.Replace(_T("[SEARCHINFOMSG]"), _T(""));
 	Out.Replace(_T("[RESULTLIST]"), result);
 	Out.Replace(_T("[Result]"), GetResString(_T("SW_RESULT")));
 	Out.Replace(_T("[Session]"), sSession);
@@ -3854,7 +4695,7 @@ CString CWebServer::_GetSearch(const ThreadData &Data)
 	Out.Replace(_T("[eMuleCollection]"), _GetPlainResString(_T("SEARCH_EMULECOLLECTION")));
 	Out.Replace(_T("[Search]"), _GetPlainResString(_T("EM_SEARCH")));
 	Out.Replace(_T("[Size]"), _GetPlainResString(_T("DL_SIZE")));
-	Out.Replace(_T("[Start]"), _GetPlainResString(_T("SW_START")));
+	Out.Replace(_T("[Start]"), _GetPlainResString(_T("START_VERB")));
 
 	Out.Replace(_T("[USESSERVER]"), _GetPlainResString(_T("SERVER")));
 	Out.Replace(_T("[USEKADEMLIA]"), _GetPlainResString(_T("KADEMLIA")));
@@ -3869,37 +4710,38 @@ CString CWebServer::_GetSearch(const ThreadData &Data)
 	Out.Replace(_T("[Apply]"), _GetPlainResString(_T("PW_APPLY")));
 	Out.Replace(_T("[CatSel]"), sCat);
 	Out.Replace(_T("[Ed2klink]"), _GetPlainResString(_T("SW_LINK")));
-	const TCHAR *pcSortIcon = (pThis->m_bSearchAsc) ? pThis->m_Templates.sUpArrow : pThis->m_Templates.sDownArrow;
+	CString sSortIcon = _WebSelectString(pThis->m_bSearchAsc, pThis->m_Templates.sUpArrow, pThis->m_Templates.sDownArrow);
+		LPCTSTR pcSortIcon = sSortIcon;
 
 	CString strTmp;
 	_GetPlainResString(strTmp, _T("DL_FILENAME"));
-	Out.Replace(_T("[FilenameI]"), (WSsearchColumnHidden[0] || pThis->m_iSearchSortby != 0) ? EMPTY : pcSortIcon);
-	Out.Replace(_T("[FilenameH]"), WSsearchColumnHidden[0] ? EMPTY : (LPCTSTR)strTmp);
+	Out.Replace(_T("[FilenameI]"), _WebSelectString(WSsearchColumnHidden[0] || pThis->m_iSearchSortby != 0, _T(""), pcSortIcon));
+	Out.Replace(_T("[FilenameH]"), _WebSelectString(WSsearchColumnHidden[0] != FALSE, _T(""), strTmp));
 	Out.Replace(_T("[FilenameM]"), strTmp);
 
 	_GetPlainResString(strTmp, _T("DL_SIZE"));
-	Out.Replace(_T("[FilesizeI]"), (WSsearchColumnHidden[1] || pThis->m_iSearchSortby != 1) ? EMPTY : pcSortIcon);
-	Out.Replace(_T("[FilesizeH]"), WSsearchColumnHidden[1] ? EMPTY : (LPCTSTR)strTmp);
+	Out.Replace(_T("[FilesizeI]"), _WebSelectString(WSsearchColumnHidden[1] || pThis->m_iSearchSortby != 1, _T(""), pcSortIcon));
+	Out.Replace(_T("[FilesizeH]"), _WebSelectString(WSsearchColumnHidden[1] != FALSE, _T(""), strTmp));
 	Out.Replace(_T("[FilesizeM]"), strTmp);
 
 	_GetPlainResString(strTmp, _T("FILEHASH"));
-	Out.Replace(_T("[FilehashI]"), (WSsearchColumnHidden[2] || pThis->m_iSearchSortby != 2) ? EMPTY : pcSortIcon);
-	Out.Replace(_T("[FilehashH]"), WSsearchColumnHidden[2] ? EMPTY : (LPCTSTR)strTmp);
+	Out.Replace(_T("[FilehashI]"), _WebSelectString(WSsearchColumnHidden[2] || pThis->m_iSearchSortby != 2, _T(""), pcSortIcon));
+	Out.Replace(_T("[FilehashH]"), _WebSelectString(WSsearchColumnHidden[2] != FALSE, _T(""), strTmp));
 	Out.Replace(_T("[FilehashM]"), strTmp);
 
 	_GetPlainResString(strTmp, _T("DL_SOURCES"));
-	Out.Replace(_T("[SourcesI]"), (WSsearchColumnHidden[3] || pThis->m_iSearchSortby != 3) ? EMPTY : pcSortIcon);
-	Out.Replace(_T("[SourcesH]"), WSsearchColumnHidden[3] ? EMPTY : (LPCTSTR)strTmp);
+	Out.Replace(_T("[SourcesI]"), _WebSelectString(WSsearchColumnHidden[3] || pThis->m_iSearchSortby != 3, _T(""), pcSortIcon));
+	Out.Replace(_T("[SourcesH]"), _WebSelectString(WSsearchColumnHidden[3] != FALSE, _T(""), strTmp));
 	Out.Replace(_T("[SourcesM]"), strTmp);
 
 	Out.Replace(_T("[Download]"), _GetPlainResString(_T("DOWNLOAD")));
 
-	Out.Replace(_T("[SORTASCVALUE0]"), (pThis->m_iSearchSortby == 0 && pThis->m_bSearchAsc) ? _T("0") : _T("1"));
-	Out.Replace(_T("[SORTASCVALUE1]"), (pThis->m_iSearchSortby == 1 && pThis->m_bSearchAsc) ? _T("0") : _T("1"));
-	Out.Replace(_T("[SORTASCVALUE2]"), (pThis->m_iSearchSortby == 2 && pThis->m_bSearchAsc) ? _T("0") : _T("1"));
-	Out.Replace(_T("[SORTASCVALUE3]"), (pThis->m_iSearchSortby == 3 && pThis->m_bSearchAsc) ? _T("0") : _T("1"));
-	Out.Replace(_T("[SORTASCVALUE4]"), (pThis->m_iSearchSortby == 4 && pThis->m_bSearchAsc) ? _T("0") : _T("1"));
-	Out.Replace(_T("[SORTASCVALUE5]"), (pThis->m_iSearchSortby == 5 && pThis->m_bSearchAsc) ? _T("0") : _T("1"));
+	Out.Replace(_T("[SORTASCVALUE0]"), _WebSelectString(pThis->m_iSearchSortby == 0 && pThis->m_bSearchAsc, _T("0"), _T("1")));
+	Out.Replace(_T("[SORTASCVALUE1]"), _WebSelectString(pThis->m_iSearchSortby == 1 && pThis->m_bSearchAsc, _T("0"), _T("1")));
+	Out.Replace(_T("[SORTASCVALUE2]"), _WebSelectString(pThis->m_iSearchSortby == 2 && pThis->m_bSearchAsc, _T("0"), _T("1")));
+	Out.Replace(_T("[SORTASCVALUE3]"), _WebSelectString(pThis->m_iSearchSortby == 3 && pThis->m_bSearchAsc, _T("0"), _T("1")));
+	Out.Replace(_T("[SORTASCVALUE4]"), _WebSelectString(pThis->m_iSearchSortby == 4 && pThis->m_bSearchAsc, _T("0"), _T("1")));
+	Out.Replace(_T("[SORTASCVALUE5]"), _WebSelectString(pThis->m_iSearchSortby == 5 && pThis->m_bSearchAsc, _T("0"), _T("1")));
 
 	return Out;
 }
@@ -3916,29 +4758,29 @@ INT_PTR CWebServer::UpdateSessionCount()
 		}
 
 		if (oldvalue != m_Params.Sessions.GetCount())
-			SendMessage(theApp.emuledlg->m_hWnd, WEB_GUI_INTERACTION, WEBGUIIA_UPDATEMYINFO, 0);
+			::PostMessage(theApp.emuledlg->m_hWnd, WEB_GUI_INTERACTION, WEBGUIIA_UPDATEMYINFO, 0);
 	}
 	return m_Params.Sessions.GetCount();
 }
 
-void CWebServer::_InsertCatBox(CString &Out, int preselect, LPCTSTR boxlabel, bool jump, bool extraCats, const CString &sSession, const CString &sFileHash, bool ed2kbox)
+void CWebServer::_InsertCatBox(CString &Out, int preselect, LPCTSTR boxlabel, bool jump, bool extraCats, const CString &sSession, const CString &sFileHash, bool ed2kbox, int iFileCategory)
 {
 	CString tempBuf;
 	tempBuf.Format(_T("<form action=\"\">%s<select name=\"cat\" size=\"1\"%s>")
 		, boxlabel
-		, jump ? _T(" onchange=\"GotoCat(this.form.cat.options[this.form.cat.selectedIndex].value)\"") : EMPTY);
+		, jump ? _T(" onchange=\"GotoCat(this.form.cat.options[this.form.cat.selectedIndex].value)\"") : _T(""));
 
 	for (INT_PTR i = 0; i < thePrefs.GetCatCount(); ++i) {
 		CString strCategory(thePrefs.GetCategoryDisplayTitle(i));
 		strCategory.Replace(_T("'"), _T("\\'"));
-		tempBuf.AppendFormat(_T("<option%s value=\"%i\">%s</option>\n"), (i == preselect) ? _T(" selected") : EMPTY, (int)i, (LPCTSTR)strCategory);
+		tempBuf.AppendFormat(_T("<option%s value=\"%i\">%s</option>\n"), (i == preselect) ? _T(" selected") : _T(""), (int)i, (LPCTSTR)strCategory);
 	}
 	if (extraCats) {
 		if (thePrefs.GetCatCount() > 1)
 			tempBuf += _T("<option>-------------------</option>\n");
 
 		for (int i = 1; i < 16; ++i)
-			tempBuf.AppendFormat(_T("<option%s value=\"%i\">%s</option>\n"), (-i == preselect) ? _T(" selected") : EMPTY, -i, (LPCTSTR)_GetSubCatLabel(-i));
+			tempBuf.AppendFormat(_T("<option%s value=\"%i\">%s</option>\n"), (-i == preselect) ? _T(" selected") : _T(""), -i, (LPCTSTR)_GetSubCatLabel(-i));
 	}
 	tempBuf += _T("</select></form>");
 	Out.Replace(ed2kbox ? _T("[CATBOXED2K]") : _T("[CATBOX]"), tempBuf);
@@ -3977,15 +4819,8 @@ void CWebServer::_InsertCatBox(CString &Out, int preselect, LPCTSTR boxlabel, bo
 	tempBuff4.Replace(_T("'"), _T("\\'"));
 	Out.Replace(_T("[Category]"), tempBuff4);
 
-	if (!sFileHash.IsEmpty()) {
-		uchar FileHash[MDX_DIGEST_SIZE];
-		if (strmd4(sFileHash, FileHash)) {
-			CPartFile *found_file = theApp.downloadqueue->GetFileByID(FileHash);
-			//	Get the user category index of 'found_file' into 'preselect'.
-			if (found_file)
-				preselect = found_file->GetCategory();
-		}
-	}
+	if (!sFileHash.IsEmpty() && iFileCategory >= 0)
+		preselect = iFileCategory;
 	tempBuff.Empty();
 	//	For each user category index...
 	for (INT_PTR i = 0; i < thePrefs.GetCatCount(); ++i) {
@@ -4023,7 +4858,7 @@ CString CWebServer::_GetRemoteLinkAddedOk(const ThreadData &Data)
 
 	int cat = _tstoi(_ParseURL(Data.sURL, _T("cat")));
 	const CString &HTTPTemp(_ParseURL(Data.sURL, _T("c")));
-	theApp.emuledlg->SendMessage(WEB_ADDDOWNLOADS, (WPARAM)(LPCTSTR)HTTPTemp, cat);
+	QueueWebDownloadLinks(HTTPTemp, cat);
 
 	CString Out;
 	Out.Format(_T("<status result=\"OK\"><description>%s</description>"), (LPCTSTR)GetResString(_T("WEB_REMOTE_LINK_ADDED")));
@@ -4166,20 +5001,18 @@ CString CWebServer::_GetWebImageNameForFileType(const CString &filename)
 	return CString(p);
 }
 
-CString CWebServer::_GetClientSummary(const CUpDownClient &client)
+CString CWebServer::_GetClientSummary(const CUpDownClient &client, const CString &strUploadFileName)
 {
 	CString buffer(GetResString(_T("CD_UNAME")));
 	// name
 	buffer.AppendFormat(_T(" %s\n"), client.GetUserName());
 	// client version
-	buffer.AppendFormat(_T("%s: %s\n"), (LPCTSTR)GetResString(_T("CD_CSOFT")), (LPCTSTR)client.GetClientSoftVer());
+	buffer.AppendFormat(_T("%s: %s\n"), (LPCTSTR)GetResString(_T("CD_CSOFT")), (LPCTSTR)client.DbgGetFullClientSoftVer());
 
 	// uploading file
 	buffer.AppendFormat(_T("%s "), (LPCTSTR)GetResString(_T("CD_UPLOADREQ")));
-	const CKnownFile *file = theApp.sharedfiles->GetFileByID(client.GetUploadFileID());
-	ASSERT(file);
-	if (file)
-		buffer += file->GetFileName();
+	if (!strUploadFileName.IsEmpty())
+		buffer += strUploadFileName;
 
 	// transferring time
 	buffer.AppendFormat(_T("\n\n%s: %s\n"), (LPCTSTR)GetResString(_T("UPLOADTIME")), (LPCTSTR)CastSecondsToHM(client.GetUpStartTimeDelay() / SEC2MS(1)));
@@ -4226,13 +5059,39 @@ void CWebServer::_GetClientversionImage(const CUpDownClient &client, TCHAR pSoft
 
 CString CWebServer::_GetCommentlist(const ThreadData &Data)
 {
+	CWebServer *pThis = reinterpret_cast<CWebServer*>(Data.pThis);
+	if (pThis == NULL)
+		return CString();
+
+	const CString strFileHash(_ParseURL(Data.sURL, _T("filehash")));
+	if (theApp.IsUiThread()) {
+		CString strCommentList(BuildCommentListForWebThread(Data));
+		pThis->StoreWebCommentList(strFileHash, strCommentList);
+		return strCommentList;
+	}
+
+	CString strCachedCommentList;
+	const bool bHasCachedCommentList = pThis->CopyWebCommentList(strFileHash, strCachedCommentList);
+	SWebCommentListRequest *pRequest = new SWebCommentListRequest();
+	pRequest->m_pThis = pThis;
+	pRequest->m_Data = Data;
+	pRequest->m_strFileHash = strFileHash;
+	QueueWebUiSnapshotRefresh(WEB_GET_COMMENT_LIST, 0, pRequest);
+	return bHasCachedCommentList ? strCachedCommentList : CString();
+}
+
+CString CWebServer::BuildCommentListForWebThread(const ThreadData &Data)
+{
 	uchar FileHash[MDX_DIGEST_SIZE];
 	bool bHash = strmd4(_ParseURL(Data.sURL, _T("filehash")), FileHash);
-	const CPartFile *pPartFile = bHash ? theApp.downloadqueue->GetFileByID(FileHash) : NULL;
+	const CPartFile *pPartFile = (bHash && theApp.downloadqueue != NULL) ? theApp.downloadqueue->GetFileByID(FileHash) : NULL;
 	if (!pPartFile)
 		return CString();
 
 	const CWebServer *pThis = reinterpret_cast<CWebServer*>(Data.pThis);
+	if (pThis == NULL)
+		return CString();
+
 	CString Out(pThis->m_Templates.sCommentList);
 
 	CString comments(GetResString(_T("COMMENT")));
@@ -4255,7 +5114,7 @@ CString CWebServer::_GetCommentlist(const ThreadData &Data)
 	for (POSITION pos = list.GetHeadPosition(); pos != NULL;) {
 		const Kademlia::CEntry *entry = list.GetNext(pos);
 		commentlines.AppendFormat(pThis->m_Templates.sCommentListLine
-			, EMPTY
+			, _T("")
 			, (LPCTSTR)_SpecialChars(entry->GetCommonFileName())
 			, (LPCTSTR)_SpecialChars(entry->GetStrTagValue(Kademlia::CKadTagNameString(TAG_DESCRIPTION)))
 			, (LPCTSTR)_SpecialChars(GetRateString((UINT)entry->GetIntTagValue(Kademlia::CKadTagNameString(TAG_FILERATING)))));
@@ -4263,7 +5122,7 @@ CString CWebServer::_GetCommentlist(const ThreadData &Data)
 
 	Out.Replace(_T("[COMMENTLINES]"), commentlines);
 
-	Out.Replace(_T("[COMMENTS]"), EMPTY);
+	Out.Replace(_T("[COMMENTS]"), _T(""));
 	Out.Replace(_T("[USERNAME]"), GetResString(_T("QL_USERNAME")));
 	Out.Replace(_T("[FILENAME]"), GetResString(_T("DL_FILENAME")));
 	Out.Replace(_T("[COMMENT]"), GetResString(_T("COMMENT")));

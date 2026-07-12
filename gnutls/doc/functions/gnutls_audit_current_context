@@ -1,0 +1,14 @@
+
+
+
+
+@deftypefun {long} {gnutls_audit_current_context} ( @var{void})
+
+Return the current crypto-auditing context from the thread-local
+context stack. This is useful for the applications that define
+their own probe points for application level protocols.
+
+@strong{Returns:} an opaque context
+
+@strong{Since:} 3.8.11
+@end deftypefun

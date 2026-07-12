@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 enum EDebugLogPriority : int
 {
@@ -46,6 +46,8 @@ void AddDebugLogLine(bool bAddToStatusBar, LPCTSTR pszLine, ...);
 void AddDebugLogLine(EDebugLogPriority Priority, LPCTSTR pszLine, ...);
 void AddDebugLogLine(EDebugLogPriority Priority, bool bAddToStatusBar, LPCTSTR pszLine, ...);
 
+bool IsNatTraversalDebugLog(LPCTSTR pszLine);
+bool IsUiResponsivenessDebugLog(LPCTSTR pszLine);
 void AddLogTextV(UINT uFlags, EDebugLogPriority dlpPriority, LPCTSTR pszLine, va_list argptr);
 
 void AddProtectionLogLine(bool bAddToStatusBar, LPCTSTR pszLine, ...);

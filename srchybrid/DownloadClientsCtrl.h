@@ -18,8 +18,10 @@
 #pragma once
 #include "MuleListCtrl.h"
 #include "ListCtrlItemWalk.h"
+#include "UploadQueue.h"
 #include <map>
 #include <set>
+#include <utility>
 
 class CUpDownClient;
 
@@ -66,18 +68,30 @@ public:
 	virtual CObject* GetNextSelectableItem() override;
 	virtual CObject* GetPrevSelectableItem() override;
 
-	typedef std::map<DownloadClientItemID, CUpDownClient*> ListItemsMapType;
+	typedef std::set<DownloadClientItemID> ListItemsMapType;
 	ListItemsMapType m_ListItemsMap;
 	void	AddClientInternal(CUpDownClient* client);
 	void	RemoveClientInternal(CUpDownClient* client);
 protected:
 	CImageList	*m_pImageList;
+	CCriticalSection m_uiClientUpdateLock;
+	std::set<DownloadClientItemID> m_PendingAddRuntimeIDs;
+	std::map<DownloadClientItemID, DownloadClientItemID> m_PendingRemoveRuntimeIDs;
+	std::set<DownloadClientItemID> m_PendingRefreshRuntimeIDs;
 	std::set<DownloadClientItemID> m_PendingRemovalRuntimeIDs;
+	volatile LONG m_lUiAddClientPending;
+	volatile LONG m_lUiRemoveClientPending;
+	volatile LONG m_lClientRowUpdatePending;
+	volatile LONG m_lUiRemoveStaleClientPending;
 
 	static CUpDownClient* AcquireRuntimeClient(DownloadClientItemID uRuntimeID);
 	bool	ResolveArchivedClientForActiveClient(CUpDownClient* client, ClientReference& clientRef) const;
 	bool	TryReplaceArchivedClient(CUpDownClient* client);
 	void	QueueTrackedClientRemoval(DownloadClientItemID uRuntimeID);
+	void	QueueUiAddClient(DownloadClientItemID uRuntimeID);
+	void	QueueUiRemoveClient(DownloadClientItemID uRuntimeID, DownloadClientItemID uArchivedRuntimeID);
+	void	QueueClientRowUpdate(DownloadClientItemID uRuntimeID);
+	void	QueueUiRemoveStaleClient(DownloadClientItemID uRuntimeID);
 	void	RefreshClientByRuntimeID(DownloadClientItemID uRuntimeID);
 	bool	ResolveTrackedClient(DownloadClientItemID uRuntimeID, ClientReference& clientRef);
 	bool	GetClientFromItem(int iItem, ClientReference& clientRef, DownloadClientItemID* puRuntimeID = NULL);
@@ -87,14 +101,16 @@ protected:
 	void	RemoveTrackedClientByRuntimeID(DownloadClientItemID uRuntimeID, bool bUpdateCount = true);
 	int		PurgeVisibleRows(DownloadClientItemID uRuntimeID, int iKeepItem = -1);
 	int		FindItemIndexByRuntimeID(DownloadClientItemID uRuntimeID) const;
+	int		FindSortedInsertIndex(DownloadClientItemID uRuntimeID);
 	void SetAllIcons();
 	CString GetItemDisplayText(CUpDownClient *client, int iSubItem) const;
 	static int CALLBACK SortProc(const LPARAM lParam1, const LPARAM lParam2, const LPARAM lParamSort);
 
 	virtual BOOL OnCommand(WPARAM wParam, LPARAM);
 	virtual void DrawItem(LPDRAWITEMSTRUCT lpDrawItemStruct);
-	
-	// Override to maintain sort order after updates
+
+	// Client row updates use the throttled list sort path.
+	virtual bool ShouldMaintainSortOrderOnUpdate() const override { return GetSortItem() != -1; }
 	virtual void MaintainSortOrderAfterUpdate() override;
 
 	DECLARE_MESSAGE_MAP()
@@ -104,15 +120,16 @@ protected:
 	afx_msg void OnNmDblClk(LPNMHDR, LRESULT *pResult);
 	afx_msg void OnSysColorChange();
 	afx_msg void OnKeyDown(UINT nChar, UINT nRepCnt, UINT nFlags);
+	afx_msg void OnDestroy();
 	afx_msg LRESULT OnUiAddClient(WPARAM wParam, LPARAM lParam);
 	afx_msg LRESULT OnUiRemoveClient(WPARAM wParam, LPARAM lParam);
-	afx_msg LRESULT OnUiRefreshClient(WPARAM wParam, LPARAM lParam);
+	afx_msg LRESULT OnClientRowUpdate(WPARAM wParam, LPARAM lParam);
 	afx_msg LRESULT OnUiRemoveStaleClient(WPARAM wParam, LPARAM lParam);
 
 	enum {
 		WM_DOWNLOADCLIENTSCTRL_ADD_CLIENT = WM_APP + 4050,
 		WM_DOWNLOADCLIENTSCTRL_REMOVE_CLIENT = WM_APP + 4051,
-		WM_DOWNLOADCLIENTSCTRL_REFRESH_CLIENT = WM_APP + 4052,
+		WM_DOWNLOADCLIENTSCTRL_UPDATE_CLIENT_ROW = WM_APP + 4052,
 		WM_DOWNLOADCLIENTSCTRL_REMOVE_STALE_CLIENT = WM_APP + 4053
 	};
 };

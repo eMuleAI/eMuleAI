@@ -18,7 +18,8 @@
 #include "stdafx.h"
 #include "emule.h"
 #include "ClientCredits.h"
-#include "OtherFunctions.h"
+#include "otherfunctions.h"
+#include "PartFileWriteThread.h"
 #include "Preferences.h"
 #include "SafeFile.h"
 #include "Opcodes.h"
@@ -41,6 +42,11 @@ static char THIS_FILE[] = __FILE__;
 
 #define CLIENTS_MET_FILENAME	_T("clients.met")
 #define CLIENTS_MET_FILENAME_TMP _T("clients.met.tmp")
+
+namespace
+{
+	const size_t kLargeMetFileBufferSize = 256 * 1024;
+}
 
 CClientCredits::CClientCredits(const CreditStruct &in_credits)
 	: m_Credits(in_credits)
@@ -416,23 +422,25 @@ float CClientCredits::GetScoreRatio(const CAddress& dwForIP)
 	}
 		break;
 	case CS_TK4: {
-		CUpDownClient* client = theApp.clientlist->FindClientByIP(dwForIP);
+		CUpDownClient* client = theApp.clientlist != NULL ? theApp.clientlist->FindClientByIP(dwForIP) : NULL;
 
 		result = 10.0F;
 		//if SUI failed then credit starts at 10 as for everyone else but will not go up
 		if ((currentIDstate == IS_IDFAILED || currentIDstate == IS_IDBADGUY || currentIDstate == IS_IDNEEDED) && theApp.clientcredits->CryptoAvailable()) {
-			float dOwnloadedSessionTotal = (float)client->GetTransferredDown();
-			float uPloadedSessionTotal = (float)client->GetTransferredUp();
-			float allowance = dOwnloadedSessionTotal / 4.0F;
-			if (uPloadedSessionTotal > (float)(dOwnloadedSessionTotal + allowance + 1048576.0F)) {
-				CKnownFile* file = theApp.sharedfiles->GetFileByID(client->GetUploadFileID());
-				if (file != NULL) { //Are they requesting a file? NULL can be produced when client details calls getscoreratio() without this line eMule will crash.
-					if (file->IsPartFile()) { //It's a file we are trying to obtain so we want to give to givers so we may get the file quicker.
-						float MbSqd = sqrt((float)(uPloadedSessionTotal - (dOwnloadedSessionTotal + allowance)) / 1048576.0F);
-						if (MbSqd > 9.0F) result = 9.0F / MbSqd;  //above 81mb values 1 - 0 9/(9 - x)
-						else result = 10.0F - MbSqd; //for the first 81Mb (10 -(0-9))
-					}
+			if (client != NULL) {
+				float dOwnloadedSessionTotal = (float)client->GetTransferredDown();
+				float uPloadedSessionTotal = (float)client->GetTransferredUp();
+				float allowance = dOwnloadedSessionTotal / 4.0F;
+				if (uPloadedSessionTotal > (float)(dOwnloadedSessionTotal + allowance + 1048576.0F)) {
+					CKnownFile* file = theApp.sharedfiles->GetFileByID(client->GetUploadFileID());
+					if (file != NULL) { //Are they requesting a file? NULL can be produced when client details calls getscoreratio() without this line eMule will crash.
+						if (file->IsPartFile()) { //It's a file we are trying to obtain so we want to give to givers so we may get the file quicker.
+							float MbSqd = sqrt((float)(uPloadedSessionTotal - (dOwnloadedSessionTotal + allowance)) / 1048576.0F);
+							if (MbSqd > 9.0F) result = 9.0F / MbSqd;  //above 81mb values 1 - 0 9/(9 - x)
+							else result = 10.0F - MbSqd; //for the first 81Mb (10 -(0-9))
+						}
 
+					}
 				}
 			}
 			bBadGuy = true;
@@ -445,7 +453,7 @@ float CClientCredits::GetScoreRatio(const CAddress& dwForIP)
 		But if someone has give us 100Mb and take 130Mb they should not be penalized as someone who has give 0Mb and taken 30Mb?
 		So if you've given 100Mb and taken 130Mb you will only be penalized for 5Mb*/
 		float allowance = dOwnloadedTotal / 4.0F; //reward uploaders with 1 Mb allowance for every 4Mb uploaded over what they have uploaded.
-		if (uPloadedTotal > (float)(dOwnloadedTotal + allowance + 1048576.0F)) //If they have taken above (1Mb + 'allowance')
+		if (client != NULL && uPloadedTotal > (float)(dOwnloadedTotal + allowance + 1048576.0F)) //If they have taken above (1Mb + 'allowance')
 		{/*They may owe us, is it on a file we want or a completed file we are sharing. If it's a completed file progrssively lowering someone score
 		who cannot pay us back could make it very difficult for them to complete the file esp. if it's rare and we hold one of the few complete copies, better for everyone if
 		we share completed files based on time waited + any credit thay have for giving us stuff.
@@ -472,7 +480,7 @@ float CClientCredits::GetScoreRatio(const CAddress& dwForIP)
 			break;
 		}
 
-		CUpDownClient* client = theApp.clientlist->FindClientByIP(dwForIP);
+		CUpDownClient* client = theApp.clientlist != NULL ? theApp.clientlist->FindClientByIP(dwForIP) : NULL;
 
 		#define PENALTY_UPSIZE 8388608 //8 MB
 		// Cache value
@@ -480,7 +488,7 @@ float CClientCredits::GetScoreRatio(const CAddress& dwForIP)
 
 		float m_bonusfaktor = 0.0F;
 		// Check if this client has any credit (sent >1.65MB)
-		const float difference2 = (float)client->GetTransferredUp() - client->GetTransferredDown();
+		const float difference2 = client != NULL ? (float)client->GetTransferredUp() - (float)client->GetTransferredDown() : 0.0F;
 		if (downloadTotal < 1650000)
 		{
 			if (difference2 > (2 * PENALTY_UPSIZE))
@@ -648,21 +656,24 @@ float CClientCredits::GetScoreRatio(const CAddress& dwForIP)
 		m_bCheckScoreRatio = true;
 
 	// FIXED: Anti Upload Protection when the other client have not yet uploaded to us [evcz]
-	if (thePrefs.IsAntiUploadProtection() && thePrefs.TransferFullChunks() && (GetDownloadedTotal() < thePrefs.GetAntiUploadProtectionLimit() * 1024))
+	if (thePrefs.IsAntiUploadProtection() && thePrefs.TransferFullChunks() && (GetDownloadedTotal() < thePrefs.GetAntiUploadProtectionLimit() * 1024)) {
 		//fixed to handle proper default values depending on the CS... not everytime 1.0... ;)
 		//code from StulleMule
 		switch (thePrefs.GetCreditSystem()) {
 		case CS_LOVELACE: {
 			if ((float)result > 0.985f)
 				return m_fLastScoreRatio = 0.985f;
+			break;
 		}
 		case CS_PAWCIO: {
-			if ((float)result > (float)3.0f)
+			if ((float)result > 3.0f)
 				return m_fLastScoreRatio = 3.0f;
+			break;
 		}
 		case CS_TK4: {
-			if ((float)result > (float)10.0f)
+			if ((float)result > 10.0f)
 				return m_fLastScoreRatio = 3.0f;
+			break;
 		}
 		case CS_RATIO:
 		case CS_EASTSHARE:
@@ -676,8 +687,10 @@ float CClientCredits::GetScoreRatio(const CAddress& dwForIP)
 		default: {
 			if ((float)result > 1.0f)
 				return m_fLastScoreRatio = 1.0f;
+			break;
 		}
 		}
+	}
 
 	return m_fLastScoreRatio = (float)result;
 }
@@ -719,6 +732,7 @@ const float CClientCredits::GetMyScoreRatio(const CAddress& dwForIP) const
 }
 
 CClientCreditsList::CClientCreditsList()
+	: m_lClientCreditsSaveGeneration()
 {
 	m_nLastSaved = ::GetTickCount();
 	LoadList();
@@ -746,7 +760,7 @@ void CClientCreditsList::LoadList()
 	CSafeBufferedFile file;
 	if (!CFileOpen(file, strFileName, iOpenFlags, GetResString(_T("ERR_LOADCREDITFILE"))))
 		return;
-	::setvbuf(file.m_pStream, NULL, _IOFBF, 16384);
+	::setvbuf(file.m_pStream, NULL, _IOFBF, kLargeMetFileBufferSize);
 
 	try {
 		uint8 version = file.ReadUInt8();
@@ -784,7 +798,7 @@ void CClientCreditsList::LoadList()
 			// reopen file
 			if (!CFileOpen(file, strFileName, iOpenFlags, GetResString(_T("ERR_LOADCREDITFILE"))))
 				return;
-			::setvbuf(file.m_pStream, NULL, _IOFBF, 16384);
+			::setvbuf(file.m_pStream, NULL, _IOFBF, kLargeMetFileBufferSize);
 			file.Seek(1, CFile::begin); //set file pointer behind file version byte
 		}
 
@@ -819,6 +833,18 @@ void CClientCreditsList::LoadList()
 	}
 }
 
+static void CopyMemFileToClientCreditAsyncDiskData(CSafeMemFile& source, AsyncDiskWriteData& target)
+{
+	const ULONGLONG uLength = source.GetLength();
+	if (uLength != 0)
+		target.data.assign(source.GetBuffer(), source.GetBuffer() + static_cast<size_t>(uLength));
+}
+
+static bool QueueOrWriteClientCreditAsyncDiskData(AsyncDiskWriteData* pData)
+{
+	return CPartFileWriteThread::QueueOrWriteDiskSnapshot(pData);
+}
+
 void CClientCreditsList::SaveList()
 {
 	if (thePrefs.GetLogFileSaving())
@@ -826,36 +852,40 @@ void CClientCreditsList::SaveList()
 	m_nLastSaved = ::GetTickCount();
 
 	const CString& sConfDir(thePrefs.GetMuleDirectory(EMULE_CONFIGDIR));
-	CFile file;// no buffering needed here since we swap out the entire array
-	if (!CFileOpen(file
-		, sConfDir + CLIENTS_MET_FILENAME_TMP
-		, CFile::modeWrite | CFile::modeCreate | CFile::typeBinary | CFile::shareDenyWrite
-		, GetResString(_T("ERR_FAILED_CREDITSAVE"))))
-	{
-		return;
-	}
-
-	byte *pBuffer = new byte[m_mapClients.GetCount() * sizeof(CreditStruct)]; //not CreditStruct[] because of alignment
-	uint32 count = 0;
-	for (const CClientCreditsMap::CPair *pair = m_mapClients.PGetFirstAssoc(); pair != NULL; pair = m_mapClients.PGetNextAssoc(pair)) {
-		const CClientCredits *cur_credit = pair->value;
-		if (cur_credit->GetUploadedTotal() || cur_credit->GetDownloadedTotal())
-			*reinterpret_cast<CreditStruct*>(&pBuffer[sizeof(CreditStruct) * count++]) = cur_credit->m_Credits;
-	}
+	const LONG lGeneration = NextClientCreditsSaveGeneration();
 
 	try {
+		CSafeMemFile creditData;
 		uint8 version = CREDITFILE_VERSION;
-		file.Write(&version, 1);
-		file.Write(&count, 4);
-		file.Write(pBuffer, (UINT)(count * sizeof(CreditStruct)));
-		file.Close();
-		MoveFileEx(sConfDir + CLIENTS_MET_FILENAME_TMP, sConfDir + CLIENTS_MET_FILENAME, MOVEFILE_REPLACE_EXISTING);
+		uint32 count = 0;
+		creditData.Write(&version, 1);
+		creditData.Write(&count, 4);
+
+		for (const CClientCreditsMap::CPair *pair = m_mapClients.PGetFirstAssoc(); pair != NULL; pair = m_mapClients.PGetNextAssoc(pair)) {
+			const CClientCredits *cur_credit = pair->value;
+			if (cur_credit->GetUploadedTotal() || cur_credit->GetDownloadedTotal()) {
+				creditData.Write(&cur_credit->m_Credits, static_cast<UINT>(sizeof(CreditStruct)));
+				++count;
+			}
+		}
+
+		creditData.Seek(1, CFile::begin);
+		creditData.Write(&count, 4);
+
+		AsyncDiskWriteData* pData = new AsyncDiskWriteData;
+		pData->lGeneration = lGeneration;
+		pData->plGeneration = &m_lClientCreditsSaveGeneration;
+		pData->strTempPath = sConfDir + CLIENTS_MET_FILENAME_TMP;
+		pData->strFinalPath = sConfDir + CLIENTS_MET_FILENAME;
+		pData->strLogName = CLIENTS_MET_FILENAME;
+		CopyMemFileToClientCreditAsyncDiskData(creditData, *pData);
+		QueueOrWriteClientCreditAsyncDiskData(pData);
 	} catch (CFileException *ex) {
 		LogError(LOG_STATUSBAR, _T("%s%s"), (LPCTSTR)GetResString(_T("ERR_FAILED_CREDITSAVE")), (LPCTSTR)EscPercent(CExceptionStrDash(*ex)));
 		ex->Delete();
+	} catch (...) {
+		LogError(LOG_STATUSBAR, _T("%s"), (LPCTSTR)GetResString(_T("ERR_FAILED_CREDITSAVE")));
 	}
-
-	delete[] pBuffer;
 }
 
 CClientCredits* CClientCreditsList::GetCredit(const uchar *key, bool bSetLastSeen)

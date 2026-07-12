@@ -16,7 +16,7 @@
 //along with this program; if not, write to the Free Software
 //Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 #pragma once
-#include "eMuleAI/GeoLite2.h"
+#include "eMuleAI/IPGeolocation.h"
 
 class CTag;
 class CFileDataIO;
@@ -168,7 +168,7 @@ public:
 
 	const CString GetGeolocationData() const;
 	const int GetCountryFlagIndex() const;
-	void	ResetGeoLite2();
+	void	ResetIPGeolocation();
 
 private:
 	void	init();

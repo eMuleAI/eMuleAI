@@ -17,7 +17,6 @@
 //Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 #include "stdafx.h"
 #include <io.h>
-#include <share.h>
 #include <memory>
 #include "emule.h"
 #include "ServerList.h"
@@ -34,9 +33,9 @@
 #include "ServerConnect.h"
 #include "Packets.h"
 #include "emuledlg.h"
-#include "HttpDownloadDlg.h"
 #include "ServerWnd.h"
 #include "Log.h"
+#include "PartFileWriteThread.h"
 
 #ifdef _DEBUG
 #define new DEBUG_NEW
@@ -54,6 +53,8 @@ CServerList::CServerList()
 	, delservercount()
 	, m_nLastSaved(::GetTickCount())
 	, version()
+	, m_lServerMetSaveGeneration()
+	, m_lStaticServersSaveGeneration()
 {
 }
 
@@ -73,31 +74,10 @@ void CServerList::AutoUpdate()
 
 	const CString &confdir(thePrefs.GetMuleDirectory(EMULE_CONFIGDIR));
 	const CString &servermetdownload(confdir + _T("server_met.download"));
-	const CString &servermetbackup(confdir + _T("server_met.old"));
-	const CString &servermet(confdir + SERVER_MET_FILENAME);
 
-	(void)_tremove(servermetbackup);
 	(void)_tremove(servermetdownload);
-	(void)_trename(servermet, servermetbackup);
-
-	bool bDownloaded = false;
-	for (POSITION Pos = thePrefs.addresses_list.GetHeadPosition(); Pos != NULL;) {
-		CHttpDownloadDlg dlgDownload;
-		dlgDownload.m_strTitle = GetResString(_T("HTTP_CAPTION"));
-		dlgDownload.m_sURLToDownload = thePrefs.addresses_list.GetNext(Pos);
-		dlgDownload.m_sFileToDownloadInto = servermetdownload;
-		if (dlgDownload.DoModal() == IDOK) {
-			bDownloaded = true;
-			break;
-		}
-		LogError(LOG_STATUSBAR, GetResString(_T("ERR_FAILEDDOWNLOADMET")), (LPCTSTR)dlgDownload.m_sURLToDownload);
-	}
-
-	if (bDownloaded)
-		(void)_trename(servermet, servermetdownload);
-	else
-		(void)_tremove(servermet);
-	(void)_trename(servermetbackup, servermet);
+	if (theApp.emuledlg != NULL && theApp.emuledlg->serverwnd != NULL && ::IsWindow(theApp.emuledlg->serverwnd->GetSafeHwnd()) && ::IsWindow(theApp.emuledlg->serverwnd->serverlistctrl.GetSafeHwnd()))
+		theApp.emuledlg->serverwnd->UpdateServerMetFromURLs(thePrefs.addresses_list);
 }
 
 bool CServerList::Init()
@@ -589,6 +569,18 @@ CServer* CServerList::GetServerByIPUDP(uint32 nIP, uint16 nUDPPort, bool bObfusc
 	return NULL;
 }
 
+static void CopyMemFileToServerAsyncDiskData(CSafeMemFile& source, AsyncDiskWriteData& target)
+{
+	const ULONGLONG uLength = source.GetLength();
+	if (uLength != 0)
+		target.data.assign(source.GetBuffer(), source.GetBuffer() + static_cast<size_t>(uLength));
+}
+
+static bool QueueOrWriteServerAsyncDiskData(AsyncDiskWriteData* pData)
+{
+	return CPartFileWriteThread::QueueOrWriteDiskSnapshot(pData);
+}
+
 bool CServerList::SaveServermetToFile()
 {
 	if (thePrefs.GetLogFileSaving())
@@ -597,17 +589,10 @@ bool CServerList::SaveServermetToFile()
 	const CString &sConfDir(thePrefs.GetMuleDirectory(EMULE_CONFIGDIR));
 	const CString &curservermet(sConfDir + SERVER_MET_FILENAME);
 	const CString &newservermet(curservermet + _T(".new"));
-
-	CSafeBufferedFile file;
-	if (!CFileOpen(file, newservermet
-		, CFile::modeWrite | CFile::modeCreate | CFile::typeBinary | CFile::shareDenyWrite
-		, GetResString(_T("ERR_SAVESERVERMET"))))
-	{
-		return false;
-	}
-	::setvbuf(file.m_pStream, NULL, _IOFBF, 16384);
+	const LONG lGeneration = NextServerMetSaveGeneration();
 
 	try {
+		CSafeMemFile file;
 		file.WriteUInt8(0xE0);
 
 		INT_PTR fservercount = list.GetCount();
@@ -742,18 +727,25 @@ bool CServerList::SaveServermetToFile()
 			file.Seek(uTagCountFilePos, CFile::begin);
 			file.WriteUInt32(uTagCount);
 			file.SeekToEnd();
-
 		}
-		CommitAndClose(file);
 
-		MoveFileEx(curservermet, sConfDir + _T("server_met.old"), MOVEFILE_REPLACE_EXISTING);
-		MoveFileEx(newservermet, curservermet, MOVEFILE_REPLACE_EXISTING);
+		AsyncDiskWriteData* pData = new AsyncDiskWriteData;
+		pData->lGeneration = lGeneration;
+		pData->plGeneration = &m_lServerMetSaveGeneration;
+		pData->strTempPath = newservermet;
+		pData->strFinalPath = curservermet;
+		pData->strBackupPath = sConfDir + _T("server_met.old");
+		pData->strLogName = SERVER_MET_FILENAME;
+		CopyMemFileToServerAsyncDiskData(file, *pData);
+		return QueueOrWriteServerAsyncDiskData(pData);
 	} catch (CFileException *ex) {
 		LogError(LOG_STATUSBAR, _T("%s%s"), (LPCTSTR)GetResString(_T("ERR_SAVESERVERMET2")), (LPCTSTR)EscPercent(CExceptionStrDash(*ex)));
 		ex->Delete();
 		return false;
+	} catch (...) {
+		LogError(LOG_STATUSBAR, _T("%s"), (LPCTSTR)GetResString(_T("ERR_SAVESERVERMET2")));
+		return false;
 	}
-	return true;
 }
 
 void CServerList::AddServersFromTextFile(const CString &strFilename) const
@@ -836,29 +828,46 @@ void CServerList::AddServersFromTextFile(const CString &strFilename) const
 
 bool CServerList::SaveStaticServers()
 {
-	FILE *fpStaticServers = _tfsopen(thePrefs.GetMuleDirectory(EMULE_CONFIGDIR) + _T("staticservers.dat"), _T("wb"), _SH_DENYWR);
-	if (fpStaticServers == NULL) {
-		LogError(LOG_STATUSBAR, GetResString(_T("ERROR_SSF")));
-		return false;
-	}
+	const CString strFinalPath = thePrefs.GetMuleDirectory(EMULE_CONFIGDIR) + _T("staticservers.dat");
+	const CString strTempPath = strFinalPath + _T(".tmp");
+	const LONG lGeneration = NextStaticServersSaveGeneration();
 
-	bool bResult = false;
-	// write Unicode byte order mark 0xFEFF
-	if (fputwc(u'\xFEFF', fpStaticServers) != _TEOF) {
-		bResult = true;
+	try {
+		CSafeMemFile file;
+		const WORD wBom = 0xFEFF;
+		file.Write(&wBom, sizeof(wBom));
+
 		for (POSITION pos = list.GetHeadPosition(); pos != NULL;) {
 			const CServer *pServer = list.GetNext(pos);
 			if (pServer->IsStaticMember()) {
-				if (_ftprintf(fpStaticServers, _T("%s:%u,%u,%s\r\n"), pServer->GetAddress(), pServer->GetPort(), pServer->GetPreference(), (LPCTSTR)pServer->GetListName()) == EOF) {
-					bResult = false;
-					break;
-				}
+				CString strLine;
+				strLine.Format(_T("%s:%u,%u,%s\r\n"), pServer->GetAddress(), pServer->GetPort(), pServer->GetPreference(), (LPCTSTR)pServer->GetListName());
+				file.Write((LPCTSTR)strLine, strLine.GetLength() * sizeof(TCHAR));
 			}
 		}
-	}
 
-	fclose(fpStaticServers);
-	return bResult;
+		AsyncDiskWriteData* pData = new AsyncDiskWriteData;
+		pData->lGeneration = lGeneration;
+		pData->plGeneration = &m_lStaticServersSaveGeneration;
+		pData->strTempPath = strTempPath;
+		pData->strFinalPath = strFinalPath;
+		pData->strLogName = _T("staticservers.dat");
+		pData->strPayloadName = _T("static-servers");
+		pData->eConflictPolicy = AsyncDiskWriteConflictLastSnapshotWins;
+		CopyMemFileToServerAsyncDiskData(file, *pData);
+		if (!QueueOrWriteServerAsyncDiskData(pData)) {
+			LogError(LOG_STATUSBAR, GetResString(_T("ERROR_SSF")));
+			return false;
+		}
+		return true;
+	} catch (CFileException *ex) {
+		LogError(LOG_STATUSBAR, _T("%s - %s"), (LPCTSTR)GetResString(_T("ERROR_SSF")), (LPCTSTR)EscPercent(CExceptionStrDash(*ex)));
+		ex->Delete();
+		return false;
+	} catch (...) {
+		LogError(LOG_STATUSBAR, GetResString(_T("ERROR_SSF")));
+		return false;
+	}
 }
 
 void CServerList::Process()
@@ -936,12 +945,12 @@ void CServerList::CheckForExpiredUDPKeys()
 	DebugLog(_T("Possible IP Change - Checking for expired Server UDP-Keys: %u UDP Keys total, %u UDP Keys expired, %u immediate UDP Pings forced, %u delayed UDP Pings forced")
 		, cKeysTotal, cKeysExpired, cKeysExpired - cPingDelayed, cPingDelayed);
 }
-void CServerList::ResetGeoLite2() {
+void CServerList::ResetIPGeolocation() {
 
 	CServer* cur_server;
 
 	for (POSITION pos = list.GetHeadPosition(); pos != NULL; list.GetNext(pos)) {
 		cur_server = list.GetAt(pos);
-		cur_server->ResetGeoLite2();
+		cur_server->ResetIPGeolocation();
 	}
 }

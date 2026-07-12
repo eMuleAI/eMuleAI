@@ -36,6 +36,59 @@
 #define new DEBUG_NEW
 #endif
 
+namespace
+{
+	bool IsUploaderPunishmentPreventionCategory(uint8 uBadClientCategory)
+	{
+		switch (uBadClientCategory) {
+		case PR_NONSUIMLDONKEY:
+		case PR_NONSUIEDONKEY:
+		case PR_NONSUIEDONKEYHYBRID:
+		case PR_NONSUISHAREAZA:
+		case PR_NONSUILPHANT:
+		case PR_NONSUIAMULE:
+		case PR_NONSUIEMULE:
+			return true;
+		}
+		return false;
+	}
+
+	bool HasAIModVersionPrefixDelimiter(const CString& strValue, int iPrefixLength)
+	{
+		if (strValue.GetLength() == iPrefixLength)
+			return true;
+		const TCHAR ch = strValue.GetAt(iPrefixLength);
+		return _istspace(ch) || ch == _T('v') || ch == _T('V') || _istdigit(ch);
+	}
+
+	bool IsAIModVersionTag(CString strModVersion)
+	{
+		strModVersion.Trim();
+		if (strModVersion.IsEmpty())
+			return false;
+
+		const CString strFullPrefix(_T("eMule AI"));
+		if (strModVersion.GetLength() >= strFullPrefix.GetLength()
+			&& strModVersion.Left(strFullPrefix.GetLength()).CompareNoCase(strFullPrefix) == 0
+			&& HasAIModVersionPrefixDelimiter(strModVersion, strFullPrefix.GetLength()))
+			return true;
+
+		const CString strModPrefix(MOD_NAME);
+		return strModVersion.GetLength() >= strModPrefix.GetLength()
+			&& strModVersion.Left(strModPrefix.GetLength()).CompareNoCase(strModPrefix) == 0
+			&& HasAIModVersionPrefixDelimiter(strModVersion, strModPrefix.GetLength());
+	}
+
+	bool HasReadableModVersionText(const CString& strModVersion)
+	{
+		for (int i = 0; i < strModVersion.GetLength(); ++i) {
+			if (_istalnum(strModVersion.GetAt(i)))
+				return true;
+		}
+		return false;
+	}
+}
+
 CShield::CShield()
 {
 	LoadShieldFile();
@@ -278,6 +331,7 @@ void CShield::FillCategoryPunishmentMap()
 	m_CategoryPunishmentMap[PR_HASHTHIEF] = thePrefs.GetHashThiefPunishment();
 	m_CategoryPunishmentMap[PR_BADCOMMUNITY] = thePrefs.GetCommunityPunishment();
 	m_CategoryPunishmentMap[PR_UPLOADFAKER] = thePrefs.GetUploadFakerPunishment();
+	m_CategoryPunishmentMap[PR_UPLOADREQUESTABUSE] = thePrefs.GetUploadRequestAbusePunishment();
 	m_CategoryPunishmentMap[PR_AGGRESSIVE] = thePrefs.GetAgressivePunishment();
 	m_CategoryPunishmentMap[PR_FILEFAKER] = thePrefs.GetFileFakerPunishment();
 	m_CategoryPunishmentMap[PR_EMPTYUSERNAME] = thePrefs.GetEmptyUserNameEmulePunishment();
@@ -319,6 +373,8 @@ void CShield::SetPunishment(CUpDownClient* client, const CString& strReason, con
 		uNewBadClientCategoryTemp = PR_NOTBADCLIENT; // If manual punishment is set to no punishment, then update the category to not bad client. This is used to check if the client is already bad or not.
 
 	if (uNewBadClientCategoryTemp == PR_NOTBADCLIENT) { // Cancel punishment
+		client->m_bUploaderPunishmentPrevented = false;
+		client->m_bFriendPunishmentPrevented = false;
 		if (client->m_uPunishment == P_IPUSERHASHBAN || client->m_uPunishment == P_USERHASHBAN)
 			client->UnBan();
 		else { // Force rechecks if user reenable function
@@ -357,17 +413,24 @@ void CShield::SetPunishment(CUpDownClient* client, const CString& strReason, con
 		return;
 	}
 
-	if (UploaderPunishmentPreventionActive(client)) {
+	if (IsUploaderPunishmentPreventionCategory(uNewBadClientCategoryTemp) && UploaderPunishmentPreventionActive(client)) {
 		client->m_uPunishment = P_NOPUNISHMENT;
-		client->m_strPunishmentMessage.Format(_T("<Uploader Punishment Prevention> - Client %s"), client->DbgGetClientInfo());
+		client->m_bUploaderPunishmentPrevented = true;
+		client->m_bFriendPunishmentPrevented = false;
+		client->m_strPunishmentMessage.Format(_T("<Uploader Punishment Prevention - %u> [%s] - Client %s"), uNewBadClientCategoryTemp, strReason.IsEmpty() ? GetResString(_T("PUNISHMENT_REASON_NONE")) : strReason, client->DbgGetClientInfo());
 		client->ProcessBanMessage();
 		return;
 	} else if (thePrefs.IsDontPunishFriends() && client->IsFriend()) {
 		client->m_uPunishment = P_NOPUNISHMENT;
-		client->m_strPunishmentMessage.Format(_T("<Friend Punishment Prevention> - Client %s"), client->DbgGetClientInfo());
+		client->m_bUploaderPunishmentPrevented = false;
+		client->m_bFriendPunishmentPrevented = true;
+		client->m_strPunishmentMessage.Format(_T("<Friend Punishment Prevention> [%s] - Client %s"), strReason.IsEmpty() ? GetResString(_T("PUNISHMENT_REASON_NONE")) : strReason, client->DbgGetClientInfo());
 		client->ProcessBanMessage();
 		return;
 	}
+
+	client->m_bUploaderPunishmentPrevented = false;
+	client->m_bFriendPunishmentPrevented = false;
 
 	if (uNewPunishmentTemp > P_USERHASHBAN && client->m_uPunishment <= P_USERHASHBAN && uNewBadClientCategoryTemp == PR_MANUAL) // If this is manual repunishment of an already banned client and new punishment is a score reducing or upload ban
 		client->UnBan();
@@ -419,7 +482,15 @@ void CShield::SetPunishment(CUpDownClient* client, const CString& strReason, con
 
 void CShield::CheckClient(CUpDownClient* client)
 {
-	if (client->m_bUploaderPunishmentPreventionActive || (thePrefs.IsDontPunishFriends() && client->IsFriend())) // => Don't ban friends - sFrQlXeRt
+	const bool bHasAIModVersionTag = IsAIModVersionTag(client->GetClientModVer());
+	if (bHasAIModVersionTag
+		&& (client->m_uBadClientCategory == PR_BADMODSOFT || client->m_uBadClientCategory == PR_BADMODUSERHASHHARD)
+		&& client->m_strPunishmentReason == GetResString(_T("PUNISHMENT_REASON_BAD_MOD_NAME"))) {
+		client->m_bForceRecheckShield = true;
+		SetPunishment(client, EMPTY, PR_NOTBADCLIENT);
+	}
+
+	if (thePrefs.IsDontPunishFriends() && client->IsFriend()) // => Don't ban friends - sFrQlXeRt
 		return;
 
 	if (thePrefs.IsDetectAntiP2PBots() && IsBadUserHash(client->m_achUserHash)) //IsHarderPunishment isn't necessary necessary here since the cost is low
@@ -458,10 +529,11 @@ void CShield::CheckClient(CUpDownClient* client)
 		SetPunishment(client, str, PR_FAKEMULEVERSION);
 	}
 
-	const float m_fModVersionNumber = client->GetModVersionNumber(client->GetClientModVer());
-	if (thePrefs.IsDetectModThief() && IsHarderPunishment(client->m_uPunishment, PR_MODTHIEF)) {
-		if ((m_fModVersionNumber == static_cast<float>(MOD_MAIN_VER) + MOD_MIN_VER / 10.0f && client->GetClientSoftVer() != MAKE_CLIENT_VERSION(CemuleApp::m_nVersionMjr, CemuleApp::m_nVersionMin, CemuleApp::m_nVersionUpd)) ||
-		(m_fModVersionNumber >= 1.4f && CString(client->GetUserName()).Right(client->GetClientModVer().GetLength() + 1) != client->GetClientModVer() + _T("\xBB")))
+	const float fClientModVersionNumber = client->GetModVersionNumber(client->GetClientModVer());
+	const float fLocalAIModVersionNumber = client->GetModVersionNumber(MOD_VERSION);
+	if (!bHasAIModVersionTag && thePrefs.IsDetectModThief() && IsHarderPunishment(client->m_uPunishment, PR_MODTHIEF)) {
+		if ((fLocalAIModVersionNumber > 0.0f && fClientModVersionNumber == fLocalAIModVersionNumber && client->GetClientSoftVer() != MAKE_CLIENT_VERSION(CemuleApp::m_nVersionMjr, CemuleApp::m_nVersionMin, CemuleApp::m_nVersionUpd)) ||
+		(fClientModVersionNumber >= 1.4f && CString(client->GetUserName()).Right(client->GetClientModVer().GetLength() + 1) != client->GetClientModVer() + _T("\xBB")))
 			SetPunishment(client, GetResString(_T("PUNISHMENT_REASON_MOD_THIEF")), PR_MODTHIEF);
 		else {
 			static const CString testModName[] = { _T("Xtreme"), _T("ScarAngel"), _T("Mephisto"), _T("MorphXT"), _T("EastShare"), _T("StulleMule"), /* _T("Magic Angel"), */ _T("DreaMule"), _T("X-Mod"), _T("RaJiL") };
@@ -505,12 +577,13 @@ void CShield::CheckLeecher(CUpDownClient* client)
 	CString m_strUserHash = client->HasValidHash() ? md4str(client->GetUserHash()) : EMPTY;
 	CString m_strModVersion = client->GetClientModVer();
 	CString m_strClientVersion = client->GetClientSoftVer();
+	const bool bHasReadableModVersion = HasReadableModVersionText(m_strModVersion);
 
 	if (m_strUserName.IsEmpty() && m_strUserHash.IsEmpty() && m_strModVersion.IsEmpty() && m_strClientVersion.IsEmpty())
 		return;
 
 	///////////////////////////////////////// Hard Leecher User Mod Check Starts ////////////////////////////////////////
-	if (thePrefs.IsDetectModNames() && !m_strModVersion.IsEmpty() && !m_strClientVersion.IsEmpty() && IsHarderPunishment(client->m_uPunishment, PR_BADMODUSERHASHHARD)) {
+	if (thePrefs.IsDetectModNames() && bHasReadableModVersion && !m_strClientVersion.IsEmpty() && IsHarderPunishment(client->m_uPunishment, PR_BADMODUSERHASHHARD)) {
 		CString strModVersion;
 		CString strClientVersion;
 		for (POSITION pos = HardLeecherModNamesList.GetHeadPosition(); pos != NULL;) {
@@ -544,7 +617,6 @@ void CShield::CheckLeecher(CUpDownClient* client)
 		//Hard coded checks-1
 		if ((m_strClientVersion.CompareNoCase(_T("eMule")) == 0) || //the client did not send client version
 			(strModVersionLower.Find(_T("morph")) != -1 && (strModVersionLower.Find(_T("max")) != -1 || strModVersionLower.Find(_T("+")) != -1 || strModVersionLower.Find(_T("×")) != -1)) || // Originally "Morph" and "Max", lowercased for the comparison.
-			(!m_strModVersion.IsEmpty() && CString(m_strModVersion).Trim().IsEmpty()) || //pruma, korean leecher, modversion is a space
 			(m_strModVersion.Find(_T(" 091113")) != -1 && m_strModVersion.Find(_T("VeryCD")) == -1) || //compatible client in china, but no src //tetris
 			(m_strModVersion.GetLength() > 0 && (strClientVersionLower.Find(_T("edonkey")) != -1 || m_strModVersion[0] == _T('['))) || //1. donkey user with mod name, 2. mod name begins with [ this is a known leecher
 			(strModVersionLower.Find(_T("Xtreme")) != -1 && strClientVersionLower.Find(_T("]")) == -1))  //bad Xtreme mod
@@ -558,9 +630,6 @@ void CShield::CheckLeecher(CUpDownClient* client)
 			(m_strModVersion.Find(_T("aMule CVS")) == 0))
 			; //do nothing
 		else {
-			if (m_strClientVersion.Find(_T("eMule v")) != -1 && m_strModVersion.GetLength() <= 4) //most of them are fincan
-				SetPunishment(client, GetResString(_T("PUNISHMENT_REASON_BAD_MOD_NAME")), PR_BADMODUSERHASHHARD);
-
 			int iNumberFound = -1;
 			_TINT ch = 0;
 			bool bBad = false;
@@ -576,7 +645,9 @@ void CShield::CheckLeecher(CUpDownClient* client)
 
 				if (ch == L'-' /* || ch == L'+' */) { //connector characters, connect two string or two numbers
 					bNotEnd = true; //these chars should not be the end of mod name
-					if (iNumberFound != -1)
+					if (i + 1 < m_strModVersion.GetLength() && _istalpha(m_strModVersion.GetAt(i + 1)))
+						iNumberFound = -1; //allow common pre-release suffixes like v1.5-Beta6
+					else if (iNumberFound != -1)
 						iNumberFound++; //exclude some mod name like v#.#-a1
 					continue;
 				}
@@ -639,7 +710,7 @@ void CShield::CheckLeecher(CUpDownClient* client)
 	//////////////////////////////////////// Hard Leecher User Hash Check Ends ///////////////////////////////////////
 
 	//////////////////////////////////////// Soft Leecher User Mod Check Starts //////////////////////////////////////
-	if (thePrefs.IsDetectModNames() && !m_strModVersion.IsEmpty() && !m_strClientVersion.IsEmpty() && IsHarderPunishment(client->m_uPunishment, PR_BADMODSOFT)) {
+	if (thePrefs.IsDetectModNames() && bHasReadableModVersion && !m_strClientVersion.IsEmpty() && IsHarderPunishment(client->m_uPunishment, PR_BADMODSOFT)) {
 		CString strModVersion;
 		CString strClientVersion;
 		for (POSITION pos = SoftLeecherModNamesList.GetHeadPosition(); pos != NULL;) {
@@ -731,10 +802,10 @@ void CShield::CheckLeecher(CUpDownClient* client)
 						}
 					}
 
-					if (bFoundRandomPadding && !m_strModVersion.IsEmpty() && (m_strUserName.Find(_T("http://emule-project.net [")) == 0) && (find == 25))
+					if (bFoundRandomPadding && bHasReadableModVersion && (m_strUserName.Find(_T("http://emule-project.net [")) == 0) && (find == 25))
 						SetPunishment(client, GetResString(_T("PUNISHMENT_REASON_TLH_COMMUNITY")), PR_BADUSERSOFT); //username like "http://emule-project.net [random]"
 
-					if (thePrefs.IsDetectGhostMod() && bFoundRandomPadding && m_strModVersion.IsEmpty() && (find == m_strUserName.Find(_T('['))))
+					if (thePrefs.IsDetectGhostMod() && bFoundRandomPadding && !bHasReadableModVersion && (find == m_strUserName.Find(_T('['))))
 						SetPunishment(client, GetResString(_T("PUNISHMENT_REASON_GHOST_MOD")), PR_GHOSTMOD); // Username has a random padding [random], it should be a mod function, but there is no mod name
 
 					if (bFoundRandomPadding && (m_strUserName.Find(_T("Silver Surfer User")) == 0) && (m_strModVersion.Find(_T("Silver")) == -1))
@@ -912,47 +983,51 @@ void CShield::CheckTCPErrorFlooder(CUpDownClient* client) {
 
 bool CShield::UploaderPunishmentPreventionActive(CUpDownClient* client)
 {
-	// Don't activate Uploader Punishment Prevention if it is disabled or client has credit/no uploads to us or client has corrupt/banned user hash.
-	if (thePrefs.GetUploaderPunishmentPrevention() && client->credits != NULL && client->credits->GetDownloadedTotal() != NULL && !IsCorruptOrBadUserHash(client->GetUserHash())) {
-		switch (thePrefs.GetUploaderPunishmentPreventionCase()) {
-		case CS_1:
-		{
-			client->m_bUploaderPunishmentPreventionActive = client->credits->GetDownloadedTotal() >= (int)thePrefs.GetUploaderPunishmentPreventionLimit() * 1024 << 20;
-			return client->m_bUploaderPunishmentPreventionActive;
-		}
-		break;
-		case CS_2:
-		{
-			if (client->credits->GetUploadedTotal() != NULL && client->credits->GetUploadedTotal() < client->credits->GetDownloadedTotal()) {
-				client->m_bUploaderPunishmentPreventionActive = client->credits->GetDownloadedTotal() - client->credits->GetUploadedTotal() >= (int)thePrefs.GetUploaderPunishmentPreventionLimit() * 1024 << 20;
-				return client->m_bUploaderPunishmentPreventionActive;
-			} else {
-				client->m_bUploaderPunishmentPreventionActive = false;
-				return client->m_bUploaderPunishmentPreventionActive;
-			}
-		}
-		break;
-		case CS_3:
-		{
-			if (client->credits->GetUploadedTotal() != NULL && client->credits->GetUploadedTotal() < client->credits->GetDownloadedTotal()) {
-				if (client->GetAntiUploaderCaseThree()) {
-					client->m_bUploaderPunishmentPreventionActive = true;
-					return client->m_bUploaderPunishmentPreventionActive;
-				} else if (client->credits->GetDownloadedTotal() - client->credits->GetUploadedTotal() >= (int)thePrefs.GetUploaderPunishmentPreventionLimit() * 1024 << 20) {
-					client->m_bAntiUploaderCaseThree = true;
-					client->m_bUploaderPunishmentPreventionActive = true;
-					return client->m_bUploaderPunishmentPreventionActive;
-				} else {
-					client->m_bUploaderPunishmentPreventionActive = false;
-					return client->m_bUploaderPunishmentPreventionActive;
-				}
-			}
-		}
-		break;
-		}
-	}
+	if (client == NULL)
+		return false;
 
 	client->m_bUploaderPunishmentPreventionActive = false;
+
+	// This protection is only an eligibility check for the non-SUI uploader safeguard.
+	if (!thePrefs.GetUploaderPunishmentPrevention() || client->credits == NULL || IsCorruptOrBadUserHash(client->GetUserHash())) {
+		if (!client->IsBadClient())
+			client->m_bUploaderPunishmentPrevented = false;
+		return false;
+	}
+
+	const uint64 uDownloadedTotal = client->credits->GetDownloadedTotal();
+	if (uDownloadedTotal == 0) {
+		if (!client->IsBadClient())
+			client->m_bUploaderPunishmentPrevented = false;
+		return false;
+	}
+
+	const uint64 uLimitBytes = static_cast<uint64>(thePrefs.GetUploaderPunishmentPreventionLimit()) * static_cast<uint64>(1024);
+	const uint64 uUploadedTotal = client->credits->GetUploadedTotal();
+	switch (thePrefs.GetUploaderPunishmentPreventionCase()) {
+	case CS_1:
+		client->m_bUploaderPunishmentPreventionActive = uDownloadedTotal >= uLimitBytes;
+		break;
+	case CS_2:
+		client->m_bUploaderPunishmentPreventionActive = uDownloadedTotal > uUploadedTotal && uDownloadedTotal - uUploadedTotal >= uLimitBytes;
+		break;
+	case CS_3:
+		if (uDownloadedTotal > uUploadedTotal) {
+			if (client->GetAntiUploaderCaseThree())
+				client->m_bUploaderPunishmentPreventionActive = true;
+			else if (uDownloadedTotal - uUploadedTotal >= uLimitBytes) {
+				client->m_bAntiUploaderCaseThree = true;
+				client->m_bUploaderPunishmentPreventionActive = true;
+			}
+		}
+		break;
+	default:
+		break;
+	}
+
+	if (!client->m_bUploaderPunishmentPreventionActive && !client->IsBadClient())
+		client->m_bUploaderPunishmentPrevented = false;
+
 	return client->m_bUploaderPunishmentPreventionActive;
 }
 

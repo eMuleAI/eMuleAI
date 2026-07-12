@@ -33,8 +33,7 @@ void C3DPreviewControl::SetSliderPos(int iPos)
 	if (iPos <= 5 && iPos >= -5)
 		m_iSliderPos = iPos;
 	if (GetSafeHwnd()) {
-		Invalidate();
-		UpdateWindow();
+		Invalidate(FALSE);
 	}
 }
 

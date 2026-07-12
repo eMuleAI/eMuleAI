@@ -18,6 +18,7 @@
 #include "stdafx.h"
 #include "RARFile.h"
 #include "Log.h"
+#include "OtherFunctions.h"
 
 #ifdef _DEBUG
 #define new DEBUG_NEW
@@ -67,7 +68,7 @@ bool CRARFile::InitUnRarLib()
 	}
 
 	if (m_hLibUnRar == NULL)
-		LogWarning(LOG_STATUSBAR, _T("Failed to initialize ") UNRAR_DLL_NAME _T(". %s"), sUnrar_download);
+		LogWarning(LOG_STATUSBAR, GetResString(_T("MODULE_INITIALIZE_FAILED")), UNRAR_DLL_NAME, (LPCTSTR)sUnrar_download);
 	return m_hLibUnRar != NULL;
 }
 

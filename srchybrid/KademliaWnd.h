@@ -12,6 +12,7 @@ class CDropDownButton;
 namespace Kademlia
 {
 	class CLookupHistory;
+	class CSearch;
 }
 
 class CKademliaWnd : public CResizableDialog
@@ -38,6 +39,9 @@ public:
 	void ContactRem(const Kademlia::CContact *contact);
 	void ContactRef(const Kademlia::CContact *contact);
 	void UpdateNodesDatFromURL(const CString &strURL);
+	void SearchAdd(const Kademlia::CSearch *search);
+	void SearchRem(const Kademlia::CSearch *search);
+	void SearchRef(const Kademlia::CSearch *search);
 	void UpdateSearchGraph(Kademlia::CLookupHistory *pLookupHistory);
 	void SetSearchGraph(Kademlia::CLookupHistory *pLookupHistory, bool bMakeVisible);
 	void ShowLookupGraph(bool bShow);
@@ -49,7 +53,7 @@ public:
 	void Localize();
 	void UpdateControlsState();
 	BOOL SaveAllSettings();
-	void ResetGeoLite2();
+	void ResetIPGeolocation();
 	void ResetHistory();
 private:
 	bool						m_btnsetsize;

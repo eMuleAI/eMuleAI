@@ -1,0 +1,190 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" ToolsVersion="14.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|ARM64">
+      <Configuration>Debug</Configuration>
+      <Platform>ARM64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Debug|Win32">
+      <Configuration>Debug</Configuration>
+      <Platform>Win32</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|ARM64">
+      <Configuration>Release</Configuration>
+      <Platform>ARM64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|Win32">
+      <Configuration>Release</Configuration>
+      <Platform>Win32</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <Keyword>Win32Proj</Keyword>
+    <ProjectGuid>{E40B7D02-5495-4CB8-8E7A-4AA7BC78C930}</ProjectGuid>
+    <ProjectName>gnutls</ProjectName>
+    <RootNamespace>gnutls</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Label="Configuration">
+    <ConfigurationType>StaticLibrary</ConfigurationType>
+    <CharacterSet>Unicode</CharacterSet>
+    <PlatformToolset>v145</PlatformToolset>
+    <SpectreMitigation>false</SpectreMitigation>
+    <UseOfMfc>Static</UseOfMfc>
+  </PropertyGroup>
+  <PropertyGroup Label="Configuration" Condition="'$(Configuration)'=='Debug'">
+    <UseDebugLibraries>true</UseDebugLibraries>
+  </PropertyGroup>
+  <PropertyGroup Label="Configuration" Condition="'$(Configuration)'=='Release'">
+    <UseDebugLibraries>false</UseDebugLibraries>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ImportGroup Label="ExtensionSettings" />
+  <ImportGroup Label="PropertySheets">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <PropertyGroup Label="UserMacros">
+    <EmuleAiRootDir>$(MSBuildProjectDirectory)\..\</EmuleAiRootDir>
+    <EmuleAiBuildDir>$(EmuleAiRootDir)_Build\</EmuleAiBuildDir>
+  </PropertyGroup>
+  <Import Project="..\eMuleAI.props" Condition="exists('..\eMuleAI.props')" />
+  <PropertyGroup>
+    <OutDir>$(EmuleAiBuildDir)$(ProjectName)\$(Configuration)\$(Platform)\</OutDir>
+    <IntDir>$(EmuleAiBuildDir)$(ProjectName)\$(Configuration)\$(Platform)\Intermediate\</IntDir>
+  </PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <WarningLevel>Level3</WarningLevel>
+      <PreprocessorDefinitions>HAVE_CONFIG_H;GNUTLS_BUILDING_LIB=1;GNUTLS_INTERNAL_BUILD;GNUTLS_STATIC;ASN1_STATIC;MINI_GMP_LIMB_TYPE=long;CRAU_MAYBE_UNUSED=;_CRT_SECURE_NO_WARNINGS;_CRT_NONSTDC_NO_WARNINGS;WIN32_LEAN_AND_MEAN;NOMINMAX;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>$(EmuleAiBuildDir)gnutls\Generated;lib;lib\includes;lib\auth;lib\ext;lib\x509;lib\nettle;lib\nettle\int;lib\minitasn1;lib\unistring;gl;$(EmuleAiBuildDir)nettle\Generated;..\nettle;..;$(EmuleAiBuildDir)gmp\Generated;..\gmp\mini-gmp;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <CompileAs>CompileAsC</CompileAs>
+      <ExceptionHandling>false</ExceptionHandling>
+      <LanguageStandard_C>stdc17</LanguageStandard_C>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <AdditionalOptions>/FS %(AdditionalOptions)</AdditionalOptions>
+      <ForcedIncludeFiles>compat.h;%(ForcedIncludeFiles)</ForcedIncludeFiles>
+      <DisableSpecificWarnings>4005;4018;4068;4101;4116;4133;4146;4244;4267;4293;4307;4308;4311;4312;4701;4702;5286;%(DisableSpecificWarnings)</DisableSpecificWarnings>
+    </ClCompile>
+    <Lib>
+      <OutputFile>$(OutDir)gnutls.lib</OutputFile>
+    </Lib>
+    <PreBuildEvent>
+      <Command>python "$(MSBuildProjectDirectory)\prepare_generated.py" -ProjectDir "$(MSBuildProjectDirectory)" -GeneratedDir "$(EmuleAiBuildDir)gnutls\Generated"</Command>
+    </PreBuildEvent>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="$(EmuleAiBuildDir)gnutls\Generated\compat.c">
+      <ObjectFileName>$(IntDir)generated_%(Filename).obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="lib\*.c" Exclude="lib\fipshmac.c;lib\pkcs11.c;lib\pkcs11_int.c;lib\pkcs11_privkey.c;lib\pkcs11_secret.c;lib\pkcs11_write.c;lib\pkcs11x.c;lib\vko.c">
+      <ObjectFileName>$(IntDir)lib_%(Filename).obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="lib\auth\*.c" Exclude="lib\auth\vko_gost.c">
+      <ObjectFileName>$(IntDir)auth_%(Filename).obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="lib\algorithms\*.c">
+      <ObjectFileName>$(IntDir)algorithms_%(Filename).obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="lib\accelerated\accelerated.c">
+      <ObjectFileName>$(IntDir)accelerated_%(Filename).obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="lib\accelerated\afalg.c">
+      <ObjectFileName>$(IntDir)accelerated_%(Filename).obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="lib\accelerated\cryptodev.c">
+      <ObjectFileName>$(IntDir)accelerated_%(Filename).obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="lib\ext\*.c">
+      <ObjectFileName>$(IntDir)ext_%(Filename).obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="lib\x509\*.c">
+      <ObjectFileName>$(IntDir)x509_%(Filename).obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="lib\tls13\*.c">
+      <ObjectFileName>$(IntDir)tls13_%(Filename).obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="lib\extras\hex.c">
+      <ObjectFileName>$(IntDir)extras_%(Filename).obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="lib\inih\ini.c">
+      <ObjectFileName>$(IntDir)inih_%(Filename).obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="lib\system\certs.c">
+      <ObjectFileName>$(IntDir)system_%(Filename).obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="lib\system\fastopen.c">
+      <ObjectFileName>$(IntDir)system_%(Filename).obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="lib\system\keys-dummy.c">
+      <ObjectFileName>$(IntDir)system_%(Filename).obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="lib\system\ktls.c">
+      <ObjectFileName>$(IntDir)system_%(Filename).obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="lib\system\sockets.c">
+      <ObjectFileName>$(IntDir)system_%(Filename).obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="lib\system\threads.c">
+      <ObjectFileName>$(IntDir)system_%(Filename).obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="lib\nettle\*.c" Exclude="lib\nettle\gost_keywrap.c;lib\nettle\rnd-fips.c;lib\nettle\rnd-fuzzer.c;lib\nettle\sysrng-getentropy.c;lib\nettle\sysrng-linux.c;lib\nettle\sysrng-netbsd.c;lib\nettle\sysrng-windows.c">
+      <ObjectFileName>$(IntDir)nettle_%(Filename).obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="lib\nettle\int\*.c" Exclude="lib\nettle\int\drbg-aes.c;lib\nettle\int\drbg-aes-self-test.c">
+      <ObjectFileName>$(IntDir)nettle_int_%(Filename).obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="lib\minitasn1\*.c">
+      <ObjectFileName>$(IntDir)minitasn1_%(Filename).obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="lib\unistring\unistr\*.c">
+      <ObjectFileName>$(IntDir)unistr_%(Filename).obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="lib\unistring\uninorm\*.c">
+      <ObjectFileName>$(IntDir)uninorm_%(Filename).obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="lib\unistring\unictype\*.c">
+      <ObjectFileName>$(IntDir)unictype_%(Filename).obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="gl\c-ctype.c">
+      <ObjectFileName>$(IntDir)gl_%(Filename).obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="gl\c-strcasecmp.c">
+      <ObjectFileName>$(IntDir)gl_%(Filename).obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="gl\c-strncasecmp.c">
+      <ObjectFileName>$(IntDir)gl_%(Filename).obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="gl\gl_array_list.c">
+      <ObjectFileName>$(IntDir)gl_%(Filename).obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="gl\gl_linkedhash_list.c">
+      <ObjectFileName>$(IntDir)gl_%(Filename).obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="gl\gl_list.c">
+      <ObjectFileName>$(IntDir)gl_%(Filename).obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="gl\gl_rbtree_list.c">
+      <ObjectFileName>$(IntDir)gl_%(Filename).obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="gl\hashcode-mem.c">
+      <ObjectFileName>$(IntDir)gl_%(Filename).obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="gl\memset_explicit.c">
+      <ObjectFileName>$(IntDir)gl_%(Filename).obj</ObjectFileName>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="prepare_generated.py" />
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <ImportGroup Label="ExtensionTargets" />
+</Project>

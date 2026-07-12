@@ -1,0 +1,1 @@
+@item @var{int} @ref{gnutls_hpke_seal} (gnutls_hpke_context_t @var{ctx}, const gnutls_datum_t * @var{aad}, const gnutls_datum_t * @var{plaintext}, gnutls_datum_t * @var{ciphertext})

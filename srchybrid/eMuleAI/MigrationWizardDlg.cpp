@@ -1,19 +1,5 @@
 //This file is part of eMule AI
 //Copyright (C)2026 eMule AI
-//
-//This program is free software; you can redistribute it and/or
-//modify it under the terms of the GNU General Public License
-//as published by the Free Software Foundation; either
-//version 2 of the License, or (at your option) any later version.
-//
-//This program is distributed in the hope that it will be useful,
-//but WITHOUT ANY WARRANTY; without even the implied warranty of
-//MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-//GNU General Public License for more details.
-//
-//You should have received a copy of the GNU General Public License
-//along with this program; if not, write to the Free Software
-//Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 
 #include "stdafx.h"
 #include "emule.h"
@@ -51,7 +37,7 @@ namespace
 		kDialogSideIconSizePx = 96
 	};
 
-	static const LPCTSTR kMigrationDetailsErrorProp = _T("BB_MigrationDetailsError");
+	static const LPCTSTR kMigrationDetailsErrorProp = _T("MigrationDetailsError");
 
 	struct MigrationFileDef
 	{
@@ -76,7 +62,7 @@ namespace
 		{ _T("clients.met"), false },
 		{ _T("cryptkey.dat"), false },
 		{ _T("emfriends.met"), false },
-		{ _T("GeoLite2-City.mmdb"), false },
+		{ _T("dbip-city-lite.mmdb"), false },
 		{ _T("ipfilter.dat"), false },
 		{ _T("ipfilter_static.dat"), false },
 		{ _T("ipfilter_white.dat"), false },
@@ -93,6 +79,7 @@ namespace
 		{ _T("server.met"), false },
 		{ _T("shareddir.dat"), false },
 		{ _T("sharedfiles.dat"), false },
+		{ _T("sharedcache.dat"), false },
 		{ _T("sharedsubdir.ini"), false },
 		{ _T("src_index.dat"), false },
 		{ _T("staticservers.dat"), false },

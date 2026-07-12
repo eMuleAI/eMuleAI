@@ -1,4 +1,4 @@
-﻿//This file is part of eMule AI
+//This file is part of eMule AI
 //Copyright (C)2002-2026 Merkur ( strEmail.Format("%s@%s", "devteam", "emule-project.net") / https://www.emule-project.net )
 //Copyright (C)2026 eMule AI
 //
@@ -29,6 +29,7 @@
 #include "ClientCredits.h"
 #include "PartFile.h"
 #include "FriendList.h"
+#include "Friend.h"
 #include "ChatWnd.h"
 #include "Kademlia/Kademlia/Kademlia.h"
 #include "SharedFileList.h"
@@ -48,6 +49,7 @@ extern UINT g_uMainThreadId;
 
 namespace
 {
+
 	CObject* ClientDetailTokenFromRuntimeIDValue(const CDownloadClientsCtrl::DownloadClientItemID uRuntimeID)
 	{
 		if (uRuntimeID == 0)
@@ -66,14 +68,19 @@ BEGIN_MESSAGE_MAP(CDownloadClientsCtrl, CMuleListCtrl)
 	ON_WM_CONTEXTMENU()
 	ON_WM_SYSCOLORCHANGE()
 	ON_WM_KEYDOWN()
+	ON_WM_DESTROY()
 	ON_MESSAGE(WM_DOWNLOADCLIENTSCTRL_ADD_CLIENT, OnUiAddClient)
 	ON_MESSAGE(WM_DOWNLOADCLIENTSCTRL_REMOVE_CLIENT, OnUiRemoveClient)
-	ON_MESSAGE(WM_DOWNLOADCLIENTSCTRL_REFRESH_CLIENT, OnUiRefreshClient)
+	ON_MESSAGE(WM_DOWNLOADCLIENTSCTRL_UPDATE_CLIENT_ROW, OnClientRowUpdate)
 	ON_MESSAGE(WM_DOWNLOADCLIENTSCTRL_REMOVE_STALE_CLIENT, OnUiRemoveStaleClient)
 END_MESSAGE_MAP()
 
 CDownloadClientsCtrl::CDownloadClientsCtrl()
 	: CListCtrlItemWalk(this)
+	, m_lUiAddClientPending(0)
+	, m_lUiRemoveClientPending(0)
+	, m_lClientRowUpdatePending(0)
+	, m_lUiRemoveStaleClientPending(0)
 {
 	SetGeneralPurposeFind(true);
 	SetSkinKey(_T("DownloadingLv"));
@@ -81,7 +88,33 @@ CDownloadClientsCtrl::CDownloadClientsCtrl()
 
 CDownloadClientsCtrl::~CDownloadClientsCtrl()
 {
+	CSingleLock lock(&m_uiClientUpdateLock, TRUE);
+	m_PendingAddRuntimeIDs.clear();
+	m_PendingRemoveRuntimeIDs.clear();
+	m_PendingRefreshRuntimeIDs.clear();
+	m_PendingRemovalRuntimeIDs.clear();
+	lock.Unlock();
 	m_ListItemsMap.clear();
+}
+
+void CDownloadClientsCtrl::OnDestroy()
+{
+	MSG msg = {};
+	while (::PeekMessage(&msg, m_hWnd, WM_DOWNLOADCLIENTSCTRL_ADD_CLIENT, WM_DOWNLOADCLIENTSCTRL_REMOVE_STALE_CLIENT, PM_REMOVE)) {
+	}
+	{
+		CSingleLock lock(&m_uiClientUpdateLock, TRUE);
+		m_PendingAddRuntimeIDs.clear();
+		m_PendingRemoveRuntimeIDs.clear();
+		m_PendingRefreshRuntimeIDs.clear();
+		m_PendingRemovalRuntimeIDs.clear();
+		InterlockedExchange(&m_lUiAddClientPending, 0);
+		InterlockedExchange(&m_lUiRemoveClientPending, 0);
+		InterlockedExchange(&m_lClientRowUpdatePending, 0);
+		InterlockedExchange(&m_lUiRemoveStaleClientPending, 0);
+	}
+
+	CMuleListCtrl::OnDestroy();
 }
 
 CDownloadClientsCtrl::ClientReference::ClientReference()
@@ -295,23 +328,73 @@ bool CDownloadClientsCtrl::TryReplaceArchivedClient(CUpDownClient* client)
 
 void CDownloadClientsCtrl::QueueTrackedClientRemoval(DownloadClientItemID uRuntimeID)
 {
+	QueueUiRemoveStaleClient(uRuntimeID);
+}
+
+void CDownloadClientsCtrl::QueueUiAddClient(DownloadClientItemID uRuntimeID)
+{
 	if (uRuntimeID == 0 || !::IsWindow(m_hWnd) || theApp.IsClosing())
 		return;
 
-	if (m_PendingRemovalRuntimeIDs.insert(uRuntimeID).second) {
-		if (!PostMessage(WM_DOWNLOADCLIENTSCTRL_REMOVE_STALE_CLIENT, 0, (LPARAM)uRuntimeID))
-			m_PendingRemovalRuntimeIDs.erase(uRuntimeID);
+	bool bPostMessage = false;
+	{
+		CSingleLock lock(&m_uiClientUpdateLock, TRUE);
+		m_PendingAddRuntimeIDs.insert(uRuntimeID);
+		bPostMessage = InterlockedCompareExchange(&m_lUiAddClientPending, 1, 0) == 0;
 	}
+	if (bPostMessage && !PostMessage(WM_DOWNLOADCLIENTSCTRL_ADD_CLIENT, 0, 0))
+		InterlockedExchange(&m_lUiAddClientPending, 0);
+}
+
+void CDownloadClientsCtrl::QueueUiRemoveClient(DownloadClientItemID uRuntimeID, DownloadClientItemID uArchivedRuntimeID)
+{
+	if (uRuntimeID == 0 || !::IsWindow(m_hWnd) || theApp.IsClosing())
+		return;
+
+	bool bPostMessage = false;
+	{
+		CSingleLock lock(&m_uiClientUpdateLock, TRUE);
+		m_PendingRemoveRuntimeIDs[uRuntimeID] = uArchivedRuntimeID;
+		bPostMessage = InterlockedCompareExchange(&m_lUiRemoveClientPending, 1, 0) == 0;
+	}
+	if (bPostMessage && !PostMessage(WM_DOWNLOADCLIENTSCTRL_REMOVE_CLIENT, 0, 0))
+		InterlockedExchange(&m_lUiRemoveClientPending, 0);
+}
+
+void CDownloadClientsCtrl::QueueClientRowUpdate(DownloadClientItemID uRuntimeID)
+{
+	if (uRuntimeID == 0 || !::IsWindow(m_hWnd) || theApp.IsClosing())
+		return;
+
+	bool bPostMessage = false;
+	{
+		CSingleLock lock(&m_uiClientUpdateLock, TRUE);
+		m_PendingRefreshRuntimeIDs.insert(uRuntimeID);
+		bPostMessage = InterlockedCompareExchange(&m_lClientRowUpdatePending, 1, 0) == 0;
+	}
+	if (bPostMessage && !PostMessage(WM_DOWNLOADCLIENTSCTRL_UPDATE_CLIENT_ROW, 0, 0))
+		InterlockedExchange(&m_lClientRowUpdatePending, 0);
+}
+
+void CDownloadClientsCtrl::QueueUiRemoveStaleClient(DownloadClientItemID uRuntimeID)
+{
+	if (uRuntimeID == 0 || !::IsWindow(m_hWnd) || theApp.IsClosing())
+		return;
+
+	bool bPostMessage = false;
+	{
+		CSingleLock lock(&m_uiClientUpdateLock, TRUE);
+		m_PendingRemovalRuntimeIDs.insert(uRuntimeID);
+		bPostMessage = InterlockedCompareExchange(&m_lUiRemoveStaleClientPending, 1, 0) == 0;
+	}
+	if (bPostMessage && !PostMessage(WM_DOWNLOADCLIENTSCTRL_REMOVE_STALE_CLIENT, 0, 0))
+		InterlockedExchange(&m_lUiRemoveStaleClientPending, 0);
 }
 
 bool CDownloadClientsCtrl::ResolveTrackedClient(DownloadClientItemID uRuntimeID, ClientReference& clientRef)
 {
 	clientRef.Attach(AcquireRuntimeClient(uRuntimeID));
-	CUpDownClient* pClient = clientRef.Get();
-	auto it = m_ListItemsMap.find(uRuntimeID);
-	if (it != m_ListItemsMap.end())
-		it->second = pClient;
-	return pClient != NULL;
+	return clientRef.Get() != NULL;
 }
 
 bool CDownloadClientsCtrl::IsDisplayableClient(const CUpDownClient* client) const
@@ -352,6 +435,20 @@ int CDownloadClientsCtrl::FindItemIndexByRuntimeID(DownloadClientItemID uRuntime
 	find.flags = LVFI_PARAM;
 	find.lParam = (LPARAM)uRuntimeID;
 	return const_cast<CDownloadClientsCtrl*>(this)->FindItem(&find);
+}
+
+int CDownloadClientsCtrl::FindSortedInsertIndex(DownloadClientItemID uRuntimeID)
+{
+	const int iItemCount = GetItemCount();
+	if (GetSortItem() == -1 || iItemCount <= 0)
+		return iItemCount;
+
+	const LPARAM lParamSort = MAKELONG(GetSortItem(), !GetSortAscending());
+	for (int iItem = 0; iItem < iItemCount; ++iItem) {
+		if (SortProc((LPARAM)uRuntimeID, (LPARAM)GetItemData(iItem), lParamSort) < 0)
+			return iItem;
+	}
+	return iItemCount;
 }
 
 int CDownloadClientsCtrl::PurgeVisibleRows(DownloadClientItemID uRuntimeID, int iKeepItem)
@@ -402,23 +499,27 @@ bool CDownloadClientsCtrl::ReplaceTrackedClient(DownloadClientItemID uOldRuntime
 	bool bCountChanged = false;
 	int iKeepNewItem = -1;
 
-	if (bHadTrackedOldRuntimeID && uOldRuntimeID != uNewRuntimeID)
+	if (bHadTrackedOldRuntimeID && uOldRuntimeID != uNewRuntimeID) {
 		m_ListItemsMap.erase(itOld);
-	m_ListItemsMap[uNewRuntimeID] = pNewClient;
+	}
+	m_ListItemsMap.insert(uNewRuntimeID);
 
 	if (::IsWindow(m_hWnd)) {
 		const bool bFilteredOut = IsFilteredOut(pNewClient);
 		int iOldItem = FindItemIndexByRuntimeID(uOldRuntimeID);
 		int iNewItem = FindItemIndexByRuntimeID(uNewRuntimeID);
+		bool bSortAfterVisibleChange = false;
 
 		if (iNewItem == -1 && iOldItem >= 0 && !bFilteredOut) {
 			SetItemData(iOldItem, (DWORD_PTR)uNewRuntimeID);
 			iNewItem = iOldItem;
+			bSortAfterVisibleChange = true;
 			Update(iOldItem);
 		} else if (iNewItem == -1 && !bFilteredOut) {
-			InsertItem(LVIF_TEXT | LVIF_PARAM, GetItemCount(), LPSTR_TEXTCALLBACK, 0, 0, 0, (LPARAM)uNewRuntimeID);
-			bCountChanged = true;
-			iNewItem = FindItemIndexByRuntimeID(uNewRuntimeID);
+			if (InsertItem(LVIF_TEXT | LVIF_PARAM, FindSortedInsertIndex(uNewRuntimeID), LPSTR_TEXTCALLBACK, 0, 0, 0, (LPARAM)uNewRuntimeID) >= 0) {
+				bCountChanged = true;
+				iNewItem = FindItemIndexByRuntimeID(uNewRuntimeID);
+			}
 		}
 
 		if (iOldItem >= 0 && iOldItem != iNewItem) {
@@ -439,6 +540,15 @@ bool CDownloadClientsCtrl::ReplaceTrackedClient(DownloadClientItemID uOldRuntime
 		const int iRemovedNew = PurgeVisibleRows(uNewRuntimeID, iKeepNewItem);
 		if (iRemovedOld > 0 || iRemovedNew > 0)
 			bCountChanged = true;
+		if (bSortAfterVisibleChange) {
+			iKeepNewItem = FindItemIndexByRuntimeID(uNewRuntimeID);
+			if (iKeepNewItem >= 0) {
+				MaintainSortOrderAfterUpdate();
+				iKeepNewItem = FindItemIndexByRuntimeID(uNewRuntimeID);
+				if (iKeepNewItem >= 0 && IsItemIndexVisible(iKeepNewItem))
+					RequestRowRedrawAsync(iKeepNewItem, iKeepNewItem);
+			}
+		}
 	}
 
 	if (bCountChanged)
@@ -452,17 +562,22 @@ void CDownloadClientsCtrl::DrawItem(LPDRAWITEMSTRUCT lpDrawItemStruct)
 		return;
 
 	CRect rcItem(lpDrawItemStruct->rcItem);
-	CMemoryDC dc(CDC::FromHandle(lpDrawItemStruct->hDC), rcItem);
+	CRect rcClientFullRow;
+	GetClientRect(&rcClientFullRow);
+	CRect rcPaint(rcClientFullRow.left, rcItem.top, rcClientFullRow.right, rcItem.bottom);
+	CMemoryDC dc(CDC::FromHandle(lpDrawItemStruct->hDC), rcPaint);
 	BOOL bCtrlFocused;
 	InitItemMemDC(dc, lpDrawItemStruct, bCtrlFocused);
 
 	// Set selected item background color
 	if ((lpDrawItemStruct->itemState & ODS_SELECTED) != 0)
-		dc.FillSolidRect(rcItem, GetCustomSysColor(COLOR_HIGHLIGHT));
+		dc.FillSolidRect(rcPaint, GetCustomSysColor(COLOR_HIGHLIGHT));
 
 	RECT rcClient;
 	GetClientRect(&rcClient);
 	const DownloadClientItemID uRuntimeID = (DownloadClientItemID)lpDrawItemStruct->itemData;
+	if (m_ListItemsMap.find(uRuntimeID) == m_ListItemsMap.end())
+		return;
 	ClientReference clientRef;
 	if (!ResolveTrackedClient(uRuntimeID, clientRef)) {
 		QueueTrackedClientRemoval(uRuntimeID);
@@ -488,21 +603,23 @@ void CDownloadClientsCtrl::DrawItem(LPDRAWITEMSTRUCT lpDrawItemStruct)
 		rcItem.left = itemLeft;
 		rcItem.right = itemLeft + iColumnWidth;
 		if (rcItem.left < rcItem.right && HaveIntersection(rcClient, rcItem)) {
-			const CString &sItem(GetItemDisplayText(client, iColumn));
+			const CString sItem(GetItemDisplayText(client, iColumn));
 			switch (iColumn) {
 			case 0: //user name
 			{
-					int iImage;
-					UINT uOverlayImage;
+					int iImage = 0;
+					UINT uOverlayImage = 0;
 					client->GetDisplayImage(iImage, uOverlayImage);
 
 					rcItem.left += sm_iIconOffset;
 					const POINT point = { rcItem.left, rcItem.top + iIconY };
 					SafeImageListDraw(m_pImageList, dc, iImage, point, ILD_NORMAL | INDEXTOOVERLAYMASK(uOverlayImage));
-				    if (theApp.geolite2->ShowCountryFlag() && IsColumnHidden(10)) {
-					    rcItem.left += 20;
+				    if (theApp.ipgeolocation->ShowCountryFlag() && IsColumnHidden(10)) {
+				    	rcItem.left += 20;
 						POINT point2 = { rcItem.left,rcItem.top + 1 };
-						theApp.geolite2->GetFlagImageList()->DrawIndirect(&theApp.geolite2->GetFlagImageDrawParams(dc, client->GetCountryFlagIndex(), point2));
+						IMAGELISTDRAWPARAMS flagDrawParams = theApp.ipgeolocation->GetFlagImageDrawParams(dc, client->GetCountryFlagIndex(), point2);
+
+						theApp.ipgeolocation->GetFlagImageList()->DrawIndirect(&flagDrawParams);
 						rcItem.left += sm_iSubItemInset;
 					}
 					rcItem.left += 17;
@@ -528,9 +645,10 @@ void CDownloadClientsCtrl::DrawItem(LPDRAWITEMSTRUCT lpDrawItemStruct)
 				break;
 			case 10:
 			{
-				if (theApp.geolite2->ShowCountryFlag()) {
+				if (theApp.ipgeolocation->ShowCountryFlag()) {
 					POINT point2 = { rcItem.left,rcItem.top + 1 };
-					theApp.geolite2->GetFlagImageList()->DrawIndirect(&theApp.geolite2->GetFlagImageDrawParams(dc, client->GetCountryFlagIndex(), point2));
+					IMAGELISTDRAWPARAMS flagDrawParams = theApp.ipgeolocation->GetFlagImageDrawParams(dc, client->GetCountryFlagIndex(), point2);
+					theApp.ipgeolocation->GetFlagImageList()->DrawIndirect(&flagDrawParams);
 					rcItem.left += 22;
 				}
 				rcItem.left += sm_iIconOffset;
@@ -544,12 +662,13 @@ void CDownloadClientsCtrl::DrawItem(LPDRAWITEMSTRUCT lpDrawItemStruct)
 
 	DrawFocusRect(dc, &lpDrawItemStruct->rcItem, lpDrawItemStruct->itemState & ODS_FOCUS, bCtrlFocused, lpDrawItemStruct->itemState & ODS_SELECTED);
 
-	QueueItemUpdated((LPARAM)uRuntimeID);
 }
 
 CString CDownloadClientsCtrl::GetItemDisplayText( CUpDownClient* client, int iSubItem) const
 {
 	CString sText;
+	if (client == NULL)
+		return sText;
 	switch (iSubItem) {
 	case 0:
 		if (client->GetUserName() != NULL)
@@ -674,29 +793,18 @@ CString CDownloadClientsCtrl::GetItemDisplayText( CUpDownClient* client, int iSu
 void CDownloadClientsCtrl::OnLvnGetDispInfo(LPNMHDR pNMHDR, LRESULT *pResult)
 {
 	if (!theApp.IsClosing()) {
-		// Although we have an owner drawn listview control we store the text for the primary item in the
-		// listview, to be capable of quick searching those items via the keyboard. Because our listview
-		// items may change their contents, we do this via a text callback function. The listview control
-		// will send us the LVN_DISPINFO notification if it needs to know the contents of the primary item.
-		//
-		// But, the listview control sends this notification all the time, even if we do not search for an item.
-		// At least this notification is only sent for the visible items and not for all items in the list.
-		// Though, because this function is invoked *very* often, do *NOT* put any time consuming code in here.
-		//
-		// Vista: That callback is used to get the strings for the label tips for the sub(!)-items.
-		//
 		const LVITEMW &rItem = reinterpret_cast<NMLVDISPINFO*>(pNMHDR)->item;
 		if ((rItem.mask & LVIF_TEXT) && rItem.pszText && rItem.cchTextMax > 0) {
-			ClientReference clientRef;
 			DownloadClientItemID uRuntimeID = 0;
-			if (rItem.iItem >= 0) {
+			if (rItem.iItem >= 0)
 				uRuntimeID = (DownloadClientItemID)GetItemData(rItem.iItem);
+			ClientReference clientRef;
+			if (uRuntimeID != 0)
 				ResolveTrackedClient(uRuntimeID, clientRef);
-			}
 			CUpDownClient* pClient = clientRef.Get();
-			if (pClient != NULL && IsDisplayableClient(pClient))
+			if (pClient != NULL && IsDisplayableClient(pClient)) {
 				_tcsncpy_s(rItem.pszText, rItem.cchTextMax, GetItemDisplayText(pClient, rItem.iSubItem), _TRUNCATE);
-			else {
+			} else {
 				if (uRuntimeID != 0)
 					QueueTrackedClientRemoval(uRuntimeID);
 				rItem.pszText[0] = _T('\0');
@@ -868,6 +976,7 @@ void CDownloadClientsCtrl::OnContextMenu(CWnd*, CPoint point)
 	GetSelectedClient(selectedClientRef);
 	const CUpDownClient *client = selectedClientRef.Get();
 	const bool is_ed2k = client && client->IsEd2kClient();
+	const CFriend *pFriend = client != NULL ? client->GetFriend() : NULL;
 
 	CMenuXP ClientMenu;
 	ClientMenu.CreatePopupMenu();
@@ -875,6 +984,8 @@ void CDownloadClientsCtrl::OnContextMenu(CWnd*, CPoint point)
 	ClientMenu.AppendMenu(MF_STRING | (client ? MF_ENABLED : MF_GRAYED), MP_DETAIL, GetResString(_T("SHOWDETAILS")), _T("CLIENTDETAILS"));
 	ClientMenu.SetDefaultItem(MP_DETAIL);
 	ClientMenu.AppendMenu(MF_STRING | ((is_ed2k && !client->IsFriend()) ? MF_ENABLED : MF_GRAYED), MP_ADDFRIEND, GetResString(_T("ADDFRIEND")), _T("ADDFRIEND"));
+	ClientMenu.AppendMenu(MF_STRING | (pFriend != NULL ? MF_ENABLED : MF_GRAYED), MP_FRIENDSLOT, GetResString(_T("FRIENDSLOT")), _T("FRIENDSLOT"));
+	ClientMenu.CheckMenuItem(MP_FRIENDSLOT, (pFriend != NULL && pFriend->GetFriendSlot()) ? MF_CHECKED : MF_UNCHECKED);
 	ClientMenu.AppendMenu(MF_STRING | (is_ed2k ? MF_ENABLED : MF_GRAYED), MP_MESSAGE, GetResString(_T("SEND_MSG")), _T("SENDMESSAGE"));
 	ClientMenu.AppendMenu(MF_STRING | ((is_ed2k && client->GetViewSharedFilesSupport()) ? MF_ENABLED : MF_GRAYED), MP_SHOWLIST, GetResString(_T("VIEWFILES")), _T("VIEWFILES"));
 	ClientMenu.AppendMenu(MF_STRING | (client ? MF_ENABLED : MF_GRAYED), MP_EDIT_NOTE, GetResString(_T("EDIT_CLIENT_NOTE")), _T("RENAME"));
@@ -944,6 +1055,16 @@ BOOL CDownloadClientsCtrl::OnCommand(WPARAM wParam, LPARAM)
 			if (theApp.friendlist->AddFriend(client))
 				Update(iSel);
 			break;
+		case MP_FRIENDSLOT:
+			{
+				CFriend *pFriend = client->GetFriend();
+				if (pFriend != NULL) {
+					pFriend->SetFriendSlot(!pFriend->GetFriendSlot());
+					theApp.friendlist->SaveList();
+					Update(iSel);
+				}
+			}
+			break;
 			case MP_DETAIL:
 			case MPG_ALTENTER:
 			case IDA_ENTER:
@@ -954,6 +1075,10 @@ BOOL CDownloadClientsCtrl::OnCommand(WPARAM wParam, LPARAM)
 				}
 				break;
 		case MP_BOOT:
+			if (theApp.emuledlg != NULL && !theApp.emuledlg->CanUseP2PConnectionCommands()) {
+				theApp.emuledlg->LogP2PConnectionCommandBlocked(true);
+				break;
+			}
 			if (client->GetKadPort() && client->GetKadVersion() >= KADEMLIA_VERSION2_47a)
 				Kademlia::CKademlia::Bootstrap(client->GetIPv4().ToUInt32(true), client->GetKadPort());
 			break;
@@ -1036,9 +1161,7 @@ void CDownloadClientsCtrl::AddClient(CUpDownClient* client)
 		return;
 
 	if (GetCurrentThreadId() != g_uMainThreadId) {
-		const DownloadClientItemID uRuntimeID = (DownloadClientItemID)client->GetRuntimeID();
-		if (::IsWindow(m_hWnd) && uRuntimeID != 0)
-			PostMessage(WM_DOWNLOADCLIENTSCTRL_ADD_CLIENT, (WPARAM)uRuntimeID, 0);
+		QueueUiAddClient((DownloadClientItemID)client->GetRuntimeID());
 		return;
 	}
 
@@ -1062,7 +1185,6 @@ void CDownloadClientsCtrl::AddClientInternal(CUpDownClient* client)
 
 	auto itTracked = m_ListItemsMap.find(uRuntimeID);
 	if (itTracked != m_ListItemsMap.end()) {
-		itTracked->second = client;
 		if (!::IsWindow(m_hWnd))
 			return;
 
@@ -1073,24 +1195,39 @@ void CDownloadClientsCtrl::AddClientInternal(CUpDownClient* client)
 		return;
 	}
 
-	m_ListItemsMap.emplace(uRuntimeID, client);
+	m_ListItemsMap.insert(uRuntimeID);
 
 	if (!::IsWindow(m_hWnd))
 		return;
 
 	if (!IsFilteredOut(client)) {
 		PurgeVisibleRows(uRuntimeID);
-		InsertItem(LVIF_TEXT | LVIF_PARAM, GetItemCount(), LPSTR_TEXTCALLBACK, 0, 0, 0, (LPARAM)uRuntimeID);
-		theApp.emuledlg->transferwnd->m_pwndTransfer->UpdateListCount();
+		const int iItem = InsertItem(LVIF_TEXT | LVIF_PARAM, FindSortedInsertIndex(uRuntimeID), LPSTR_TEXTCALLBACK, 0, 0, 0, (LPARAM)uRuntimeID);
+		if (iItem >= 0) {
+			if (IsItemIndexVisible(iItem))
+				RequestRowRedrawAsync(iItem, iItem);
+			theApp.emuledlg->transferwnd->m_pwndTransfer->UpdateListCount();
+		}
 	}
 }
 
-LRESULT CDownloadClientsCtrl::OnUiAddClient(WPARAM wParam, LPARAM lParam)
+LRESULT CDownloadClientsCtrl::OnUiAddClient(WPARAM wParam, LPARAM /*lParam*/)
 {
-	UNREFERENCED_PARAMETER(lParam);
-	ClientReference clientRef;
-	if (ResolveTrackedClient((DownloadClientItemID)wParam, clientRef))
-		AddClientInternal(clientRef.Get());
+	std::vector<DownloadClientItemID> aRuntimeIDs;
+	{
+		CSingleLock lock(&m_uiClientUpdateLock, TRUE);
+		const DownloadClientItemID uRuntimeID = (DownloadClientItemID)wParam;
+		if (uRuntimeID != 0)
+			m_PendingAddRuntimeIDs.insert(uRuntimeID);
+		aRuntimeIDs.assign(m_PendingAddRuntimeIDs.begin(), m_PendingAddRuntimeIDs.end());
+		m_PendingAddRuntimeIDs.clear();
+		InterlockedExchange(&m_lUiAddClientPending, 0);
+	}
+	for (size_t i = 0; i < aRuntimeIDs.size(); ++i) {
+		ClientReference clientRef;
+		if (ResolveTrackedClient(aRuntimeIDs[i], clientRef))
+			AddClientInternal(clientRef.Get());
+	}
 	return 0;
 }
 
@@ -1100,9 +1237,7 @@ void CDownloadClientsCtrl::RemoveClient(CUpDownClient* client)
 		return;
 
 	if (GetCurrentThreadId() != g_uMainThreadId) {
-		const DownloadClientItemID uRuntimeID = (DownloadClientItemID)client->GetRuntimeID();
-		if (::IsWindow(m_hWnd) && uRuntimeID != 0)
-			PostMessage(WM_DOWNLOADCLIENTSCTRL_REMOVE_CLIENT, (WPARAM)uRuntimeID, (LPARAM)client->GetArchivedClientRuntimeID());
+		QueueUiRemoveClient((DownloadClientItemID)client->GetRuntimeID(), (DownloadClientItemID)client->GetArchivedClientRuntimeID());
 		return;
 	}
 
@@ -1125,14 +1260,24 @@ void CDownloadClientsCtrl::RemoveClientInternal(CUpDownClient* client)
 
 LRESULT CDownloadClientsCtrl::OnUiRemoveClient(WPARAM wParam, LPARAM lParam)
 {
-	const DownloadClientItemID uRuntimeID = (DownloadClientItemID)wParam;
-	const DownloadClientItemID uArchivedRuntimeID = (DownloadClientItemID)lParam;
-	if (uRuntimeID == 0)
-		return 0;
-
-	RemoveTrackedClientByRuntimeID(uRuntimeID);
-	if (uArchivedRuntimeID != 0 && uArchivedRuntimeID != uRuntimeID)
-		RemoveTrackedClientByRuntimeID(uArchivedRuntimeID);
+	std::vector<std::pair<DownloadClientItemID, DownloadClientItemID> > aRuntimeIDs;
+	{
+		CSingleLock lock(&m_uiClientUpdateLock, TRUE);
+		const DownloadClientItemID uRuntimeID = (DownloadClientItemID)wParam;
+		if (uRuntimeID != 0)
+			m_PendingRemoveRuntimeIDs[uRuntimeID] = (DownloadClientItemID)lParam;
+		for (std::map<DownloadClientItemID, DownloadClientItemID>::const_iterator it = m_PendingRemoveRuntimeIDs.begin(); it != m_PendingRemoveRuntimeIDs.end(); ++it)
+			aRuntimeIDs.push_back(*it);
+		m_PendingRemoveRuntimeIDs.clear();
+		InterlockedExchange(&m_lUiRemoveClientPending, 0);
+	}
+	for (size_t i = 0; i < aRuntimeIDs.size(); ++i) {
+		const DownloadClientItemID uRuntimeID = aRuntimeIDs[i].first;
+		const DownloadClientItemID uArchivedRuntimeID = aRuntimeIDs[i].second;
+		RemoveTrackedClientByRuntimeID(uRuntimeID);
+		if (uArchivedRuntimeID != 0 && uArchivedRuntimeID != uRuntimeID)
+			RemoveTrackedClientByRuntimeID(uArchivedRuntimeID);
+	}
 	return 0;
 }
 
@@ -1164,8 +1309,16 @@ void CDownloadClientsCtrl::RefreshClientByRuntimeID(DownloadClientItemID uRuntim
 	if (theApp.emuledlg->activewnd != theApp.emuledlg->transferwnd || !theApp.emuledlg->transferwnd->GetDownloadClientsList()->IsWindowVisible())
 		return;
 
-	if (m_ListItemsMap.find(uRuntimeID) != m_ListItemsMap.end())
-		QueueItemUpdate((LPARAM)uRuntimeID);
+	if (m_ListItemsMap.find(uRuntimeID) != m_ListItemsMap.end()) {
+		int iItem = FindItemIndexByRuntimeID(uRuntimeID);
+		if (iItem < 0)
+			return;
+
+		MaintainSortOrderAfterThrottledUpdate();
+		iItem = FindItemIndexByRuntimeID(uRuntimeID);
+		if (IsItemIndexVisible(iItem))
+			RequestRowRedrawAsync(iItem, iItem);
+	}
 }
 
 void CDownloadClientsCtrl::RefreshClient(CUpDownClient* client)
@@ -1178,8 +1331,7 @@ void CDownloadClientsCtrl::RefreshClient(CUpDownClient* client)
 		return;
 
 	if (GetCurrentThreadId() != g_uMainThreadId) {
-		if (::IsWindow(m_hWnd))
-			PostMessage(WM_DOWNLOADCLIENTSCTRL_REFRESH_CLIENT, 0, (LPARAM)uRuntimeID);
+		QueueClientRowUpdate(uRuntimeID);
 		return;
 	}
 
@@ -1190,20 +1342,21 @@ void CDownloadClientsCtrl::UpdateView()
 {
 	std::vector<DownloadClientItemID> aStaleRuntimeIDs;
 	for (auto it = m_ListItemsMap.begin(); it != m_ListItemsMap.end(); ++it) {
+		const DownloadClientItemID uRuntimeID = *it;
 		ClientReference clientRef;
-		if (!ResolveTrackedClient(it->first, clientRef)) {
-			aStaleRuntimeIDs.push_back(it->first);
+		if (!ResolveTrackedClient(uRuntimeID, clientRef)) {
+			aStaleRuntimeIDs.push_back(uRuntimeID);
 			continue;
 		}
 
 		CUpDownClient* pClient = clientRef.Get();
 		if (!IsDisplayableClient(pClient)) {
-			aStaleRuntimeIDs.push_back(it->first);
+			aStaleRuntimeIDs.push_back(uRuntimeID);
 			continue;
 		}
 
 		const DownloadClientItemID uArchivedRuntimeID = (DownloadClientItemID)pClient->GetArchivedClientRuntimeID();
-		if (uArchivedRuntimeID != 0 && uArchivedRuntimeID != it->first)
+		if (uArchivedRuntimeID != 0 && uArchivedRuntimeID != uRuntimeID)
 			aStaleRuntimeIDs.push_back(uArchivedRuntimeID);
 
 		if (!IsFilteredOut(pClient))
@@ -1218,17 +1371,37 @@ void CDownloadClientsCtrl::UpdateView()
 	theApp.emuledlg->transferwnd->m_pwndTransfer->UpdateListCount();
 }
 
-LRESULT CDownloadClientsCtrl::OnUiRefreshClient(WPARAM wParam, LPARAM lParam)
+LRESULT CDownloadClientsCtrl::OnClientRowUpdate(WPARAM wParam, LPARAM lParam)
 {
-	UNREFERENCED_PARAMETER(wParam);
-	RefreshClientByRuntimeID((DownloadClientItemID)lParam);
+	std::vector<DownloadClientItemID> aRuntimeIDs;
+	{
+		CSingleLock lock(&m_uiClientUpdateLock, TRUE);
+		const DownloadClientItemID uRuntimeID = (DownloadClientItemID)(lParam != 0 ? lParam : wParam);
+		if (uRuntimeID != 0)
+			m_PendingRefreshRuntimeIDs.insert(uRuntimeID);
+		aRuntimeIDs.assign(m_PendingRefreshRuntimeIDs.begin(), m_PendingRefreshRuntimeIDs.end());
+		m_PendingRefreshRuntimeIDs.clear();
+		InterlockedExchange(&m_lClientRowUpdatePending, 0);
+	}
+	for (size_t i = 0; i < aRuntimeIDs.size(); ++i)
+		RefreshClientByRuntimeID(aRuntimeIDs[i]);
 	return 0;
 }
 
 LRESULT CDownloadClientsCtrl::OnUiRemoveStaleClient(WPARAM wParam, LPARAM lParam)
 {
-	UNREFERENCED_PARAMETER(wParam);
-	RemoveTrackedClientByRuntimeID((DownloadClientItemID)lParam);
+	std::vector<DownloadClientItemID> aRuntimeIDs;
+	{
+		CSingleLock lock(&m_uiClientUpdateLock, TRUE);
+		const DownloadClientItemID uRuntimeID = (DownloadClientItemID)(lParam != 0 ? lParam : wParam);
+		if (uRuntimeID != 0)
+			m_PendingRemovalRuntimeIDs.insert(uRuntimeID);
+		aRuntimeIDs.assign(m_PendingRemovalRuntimeIDs.begin(), m_PendingRemovalRuntimeIDs.end());
+		m_PendingRemovalRuntimeIDs.clear();
+		InterlockedExchange(&m_lUiRemoveStaleClientPending, 0);
+	}
+	for (size_t i = 0; i < aRuntimeIDs.size(); ++i)
+		RemoveTrackedClientByRuntimeID(aRuntimeIDs[i]);
 	return 0;
 }
 
@@ -1269,8 +1442,12 @@ void CDownloadClientsCtrl::ShowClient(CUpDownClient* client)
 	const int iRemoved = PurgeVisibleRows(uRuntimeID, iFound);
 	bool bCountChanged = iRemoved > 0;
 	if (iFound == -1 && !IsFilteredOut(pClient)) {
-		InsertItem(LVIF_PARAM | LVIF_TEXT, GetItemCount(), LPSTR_TEXTCALLBACK, 0, 0, 0, (LPARAM)uRuntimeID);
-		bCountChanged = true;
+		const int iItem = InsertItem(LVIF_PARAM | LVIF_TEXT, FindSortedInsertIndex(uRuntimeID), LPSTR_TEXTCALLBACK, 0, 0, 0, (LPARAM)uRuntimeID);
+		if (iItem >= 0) {
+			if (IsItemIndexVisible(iItem))
+				RequestRowRedrawAsync(iItem, iItem);
+			bCountChanged = true;
+		}
 	}
 
 	if (bCountChanged)
@@ -1357,6 +1534,11 @@ void CDownloadClientsCtrl::OnKeyDown(UINT nChar, UINT nRepCnt, UINT nFlags)
 
 void CDownloadClientsCtrl::MaintainSortOrderAfterUpdate()
 {
-	if (GetSortItem() != -1) // Re-sort the list to maintain sort order after updates
-		SortItems(SortProc, MAKELONG(GetSortItem(), !GetSortAscending()));
+	if (!::IsWindow(m_hWnd) || GetSortItem() == -1)
+		return;
+
+	SetRedraw(false);
+	SortItems(SortProc, MAKELONG(GetSortItem(), !GetSortAscending()));
+	SetRedraw(true);
+	Invalidate(FALSE);
 }

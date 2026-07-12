@@ -36,6 +36,7 @@ public:
 		, requested()
 		, alltimeaccepted()
 		, accepted()
+		, m_tLastRequest(0)
 	{
 	}
 
@@ -43,6 +44,8 @@ public:
 	void	AddRequest();
 	void	AddAccepted();
 	void	AddTransferred(uint64 bytes);
+	time_t	GetLastRequestTime() const		{ return m_tLastRequest; }
+	void	SetLastRequestTime(time_t tVal);
 	void	AddBlockTransferred(uint64 start, uint64 end, uint64 count);
 	void	ResetSpreadBar();
 	void	DrawSpreadBar(CDC* dc, LPCRECT rect, bool bFlat) const;
@@ -70,4 +73,5 @@ private:
 	uint32 requested;
 	uint32 alltimeaccepted;
 	uint32 accepted;
+	time_t m_tLastRequest;
 };

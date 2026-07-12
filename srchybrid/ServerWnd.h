@@ -25,6 +25,7 @@
 
 class CHTRichEditCtrl;
 class CCustomAutoComplete;
+struct SServerMetDownloadJob;
 
 class CServerWnd : public CResizableDialog
 {
@@ -48,6 +49,9 @@ public:
 	virtual	~CServerWnd();
 	void Localize();
 	bool UpdateServerMetFromURL(const CString &strURL);
+	bool UpdateServerMetFromURLs(const CStringList& urls);
+	bool RefreshServerMetDownloadOverlay();
+	void FinishServerMetDownloadOverlayDelay();
 	void ToggleDebugWindow();
 	void UpdateMyInfo();
 	void UpdateLogTabSelection();
@@ -73,6 +77,12 @@ private:
 	void	UpdateSplitterRange();
 	void	InitSplitter();
 	void	ReattachAnchors();
+	bool	IsServerMetDownloadActive() const;
+	void	CancelServerMetDownload();
+	void	ResetServerMetDownloadOverlayState();
+	void	StartServerMetDownloadOverlayDelay();
+	bool	StartNextQueuedServerMetDownload();
+	void	UpdateServerMetDownloadOverlay(uint64 uBytesRead, uint64 uTotalBytes, bool bHasTotalBytes, const CString& strURL);
 
 	CIconStatic m_ctrlNewServerFrm;
 	CIconStatic m_ctrlUpdateServerFrm;
@@ -85,6 +95,14 @@ private:
 	CHARFORMAT2 m_cfDef;
 	CHARFORMAT2 m_cfBold;
 	CCustomAutoComplete *m_pacServerMetURL;
+	SServerMetDownloadJob* m_pServerMetDownloadJob;
+	CStringList m_serverMetDownloadQueue;
+	uint64 m_uServerMetDownloadToken;
+	uint64 m_uServerMetDownloadBytesRead;
+	uint64 m_uServerMetDownloadTotalBytes;
+	bool m_bServerMetDownloadHasTotalBytes;
+	bool m_bServerMetDownloadOverlayDelayActive;
+	CString m_strServerMetDownloadURL;
 	bool	debug;
 
 protected:
@@ -103,10 +121,13 @@ protected:
 	afx_msg void OnTcnSelchangeTab3(LPNMHDR, LRESULT *pResult);
 	afx_msg void OnEnLinkServerBox(LPNMHDR pNMHDR, LRESULT *pResult);
 	afx_msg void OnSysColorChange();
+	afx_msg void OnDestroy();
 	afx_msg void OnDDClicked();
 	afx_msg void OnSvrTextChange();
 	afx_msg BOOL OnHelpInfo(HELPINFO*);
 	afx_msg void OnStnDblclickServlstIco();
 	afx_msg void OnSplitterMoved(LPNMHDR pNMHDR, LRESULT*);
 	afx_msg HBRUSH OnCtlColor(CDC* pDC, CWnd* pWnd, UINT nCtlColor);
+	afx_msg LRESULT OnServerMetDownloadProgress(WPARAM wParam, LPARAM lParam);
+	afx_msg LRESULT OnServerMetDownloadFinished(WPARAM wParam, LPARAM lParam);
 };

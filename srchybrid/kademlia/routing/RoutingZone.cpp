@@ -52,10 +52,12 @@ their client on the eMule forum.
 #include <math.h>
 #include "emule.h"
 #include "emuledlg.h"
-#include "ipfilter.h"
 #include "KadContactListCtrl.h"
 #include "kademliawnd.h"
+#include "ipfilter.h"
 #include "Log.h"
+#include "PartFileWriteThread.h"
+#include "SafeFile.h"
 #include "Opcodes.h"
 #include "kademlia/kademlia/Defines.h"
 #include "kademlia/kademlia/Kademlia.h"
@@ -82,6 +84,7 @@ using namespace Kademlia;
 CString CRoutingZone::m_sFilename;
 CUInt128 CRoutingZone::uMe(0ul);
 static const DWORD ROUTING_GRACE_PERIOD_MS = 30 * 1000; // 30 seconds
+static volatile LONG s_lKadNodesSaveGeneration = 0;
 
 CRoutingZone::CRoutingZone()
 {
@@ -334,8 +337,8 @@ void CRoutingZone::ReadBootstrapNodesDat(CFileDataIO &file)
 		theApp.emuledlg->kademliawnd->SetBootstrapListMode();
 		for (POSITION pos = CKademlia::s_liBootstrapList.GetHeadPosition(); pos != NULL;) {
 			CContact *pContact = CKademlia::s_liBootstrapList.GetNext(pos);
-			pContact->SetGuiRefs(true);
-			theApp.emuledlg->kademliawnd->ContactAdd(pContact);
+			if (theApp.emuledlg->kademliawnd->ContactAdd(pContact))
+				pContact->SetGuiRefs(true);
 		}
 		theApp.emuledlg->kademliawnd->StartUpdateContacts();
 
@@ -358,20 +361,13 @@ void CRoutingZone::WriteFile()
 		return;
 	}
 
-	CString m_sTempFilename = m_sFilename + _T(".tmp");
-	CSafeBufferedFile file;
-	if (!file.Open(m_sTempFilename, CFile::modeWrite | CFile::modeCreate | CFile::typeBinary | CFile::shareDenyWrite, NULL)) {
-		DebugLogError(_T("Unable to store Kad file: %s"), (LPCTSTR)m_sTempFilename);
-		return;
-	}
-
 	// Write the saved contact list.
 	try {
-		::setvbuf(file.m_pStream, NULL, _IOFBF, 32768);
-
 		// The bootstrap method gets a very nice sample of contacts to save.
 		ContactArray listContacts;
 		GetBootstrapContacts(listContacts, 200);
+
+		CSafeMemFile file(32768);
 		// Start file with 0 to prevent older clients from reading it.
 		file.WriteUInt32(0);
 		// Now tag it with a version which happens to be 2 (1 till 0.48a).
@@ -387,12 +383,26 @@ void CRoutingZone::WriteFile()
 			contact.GetUDPKey().StoreToFile(file);
 			file.WriteUInt8(static_cast<uint8>(contact.IsIpVerified()));
 		}
-		file.Close();
-		MoveFileEx(m_sTempFilename, m_sFilename, MOVEFILE_REPLACE_EXISTING);
-		AddDebugLogLine(false, _T("Wrote %ld contact%s to file."), listContacts.size(), ((listContacts.size() == 1) ? EMPTY : _T("s")));
+
+		AsyncDiskWriteData* pData = new AsyncDiskWriteData;
+		pData->lGeneration = InterlockedIncrement(&s_lKadNodesSaveGeneration);
+		pData->plGeneration = &s_lKadNodesSaveGeneration;
+		pData->strTempPath = m_sFilename + _T(".tmp");
+		pData->strFinalPath = m_sFilename;
+		pData->strLogName = _T("nodes.dat");
+		pData->strPayloadName = _T("kad-nodes");
+		pData->eConflictPolicy = AsyncDiskWriteConflictLastSnapshotWins;
+		const ULONGLONG uLength = file.GetLength();
+		if (uLength != 0)
+			pData->data.assign(file.GetBuffer(), file.GetBuffer() + static_cast<size_t>(uLength));
+		if (CPartFileWriteThread::QueueOrWriteDiskSnapshot(pData))
+			AddDebugLogLine(false, _T("Queued %u contact%s to file."), static_cast<UINT>(listContacts.size()), ((listContacts.size() == 1) ? (LPCTSTR)EMPTY : (LPCTSTR)_T("s")));
 	} catch (CFileException *ex) {
 		ex->Delete();
 		AddDebugLogLine(false, _T("CFileException in CRoutingZone::writeFile"));
+	} catch (CException *ex) {
+		ex->Delete();
+		AddDebugLogLine(false, _T("CException in CRoutingZone::writeFile"));
 	}
 }
 
@@ -400,44 +410,53 @@ void CRoutingZone::DbgWriteBootstrapFile()
 {
 #ifdef _BOOTSTRAPNODESDAT
 	DebugLogWarning(_T("Writing special bootstrap nodes.dat - not intended for normal use"));
-		CSafeBufferedFile file;
-	if (!file.Open(m_sFilename, CFile::modeWrite | CFile::modeCreate | CFile::typeBinary | CFile::shareDenyWrite, NULL)) {
-		DebugLogError(_T("Unable to store bootstrap file: %s"), (LPCTSTR)EscPercent(m_sFilename));
-		return;
-	}
 	// Write the saved contact list.
 	try {
-			::setvbuf(file.m_pStream, NULL, _IOFBF, 32768);
-
-			ContactMap mapContacts;
+		ContactMap mapContacts;
 		// filter out Kad1 nodes and null IDs
-			for (ContactMap::const_iterator itContactMap = mapContacts.begin(); itContactMap != mapContacts.end();) {
-				ContactMap::const_iterator itCurContactMap = itContactMap++;
-				const CContact *pContact = itCurContactMap->second;
+		for (ContactMap::const_iterator itContactMap = mapContacts.begin(); itContactMap != mapContacts.end();) {
+			ContactMap::const_iterator itCurContactMap = itContactMap++;
+			const CContact *pContact = itCurContactMap->second;
 			if (pContact->GetClientID() == 0 || pContact->GetVersion() < KADEMLIA_VERSION2_47a)
-					mapContacts.erase(itCurContactMap);
-			}
+				mapContacts.erase(itCurContactMap);
+		}
 		// The bootstrap method gets a very nice sample of contacts to save.
 		CUInt128 uRandom(CUInt128(0ul), 0);
 		CUInt128 uDistance = uRandom;
 		uDistance.Xor(uMe);
 		GetClosestTo(2, uRandom, uDistance, 1200, mapContacts, false, false);
-			// Start file with 0 to prevent older clients from reading it.
-			file.WriteUInt32(0);
-			// Now tag it with a version which happens to be 2 (1 till 0.48a).
-			file.WriteUInt32(3);
-			file.WriteUInt32(1); // if we would use version >=3, this would mean that this is not a normal nodes.dat
-			file.WriteUInt32((uint32)mapContacts.size());
-			for (ContactMap::const_iterator itContactMap = mapContacts.begin(); itContactMap != mapContacts.end(); ++itContactMap) {
+
+		CSafeMemFile file(32768);
+		// Start file with 0 to prevent older clients from reading it.
+		file.WriteUInt32(0);
+		// Now tag it with a version which happens to be 2 (1 till 0.48a).
+		file.WriteUInt32(3);
+		file.WriteUInt32(1); // if we would use version >=3, this would mean that this is not a normal nodes.dat
+		file.WriteUInt32((uint32)mapContacts.size());
+		for (ContactMap::const_iterator itContactMap = mapContacts.begin(); itContactMap != mapContacts.end(); ++itContactMap) {
 			const CContact &contact = *itContactMap->second;
 			file.WriteUInt128(contact.GetClientID());
 			file.WriteUInt32(contact.GetIPAddress());
 			file.WriteUInt16(contact.GetUDPPort());
 			file.WriteUInt16(contact.GetTCPPort());
 			file.WriteUInt8(contact.GetVersion());
-			}
-			file.Close();
+		}
+
+		AsyncDiskWriteData data;
+		data.lGeneration = InterlockedIncrement(&s_lKadNodesSaveGeneration);
+		data.plGeneration = &s_lKadNodesSaveGeneration;
+		data.strTempPath = m_sFilename + _T(".tmp");
+		data.strFinalPath = m_sFilename;
+		data.strLogName = _T("nodes.dat");
+		data.strPayloadName = _T("kad-bootstrap-nodes");
+		data.eConflictPolicy = AsyncDiskWriteConflictLastSnapshotWins;
+		const ULONGLONG uLength = file.GetLength();
+		if (uLength != 0)
+			data.data.assign(file.GetBuffer(), file.GetBuffer() + static_cast<size_t>(uLength));
+		if (CPartFileWriteThread::WriteDiskSnapshotNow(data))
 			AddDebugLogLine(false, _T("Wrote %ld contact to bootstrap file."), mapContacts.size());
+		else
+			DebugLogError(_T("Unable to store bootstrap file: %s"), (LPCTSTR)EscPercent(m_sFilename));
 	} catch (CFileException *ex) {
 		ex->Delete();
 		AddDebugLogLine(false, _T("CFileException in CRoutingZone::writeFile"));

@@ -657,8 +657,6 @@ bool CListCtrlX::FindItem(const CListCtrlX &lv, int iItem, DWORD_PTR)
 
 void CListCtrlX::DoFind(int iStartItem, int iDirection /*1 = down, -1 = up*/, BOOL bShowError)
 {
-	CWaitCursor curHourglass;
-
 	if (iStartItem < 0) {
 		MessageBeep(MB_OK);
 		return;

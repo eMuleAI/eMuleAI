@@ -41,14 +41,14 @@ namespace
 	CStatistics* g_pStatistics = NULL;
 }
 
-CStatistics& BB_GetStatistics()
+CStatistics& GetStatisticsStorage()
 {
 	if (g_pStatistics == NULL)
 		g_pStatistics = new CStatistics;
 	return *g_pStatistics;
 }
 
-void BB_FreeStatistics() noexcept
+void FreeStatisticsStorage() noexcept
 {
 	delete g_pStatistics;
 	g_pStatistics = NULL;

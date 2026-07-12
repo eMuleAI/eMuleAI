@@ -1,4 +1,5 @@
-#pragma once
+﻿#pragma once
+#include "emule.h"
 #include "MuleListCtrl.h"
 #include "ToolTipCtrlX.h"
 
@@ -46,6 +47,10 @@ protected:
 	void SetAllIcons();
 	void UpdateBoldFont();
 	CString GetItemDisplayText(const CServer *server, int iSubItem) const;
+	void RequestServerListRowRedraw(const CServer *server, int iItem);
+	void QueueServerRowRedrawForRange(int iFirst, int iLast);
+	bool TryGetServerListText(const CServer *server, int iSubItem, CString &strText) const;
+	bool TryGetServerListSortKey(const CServer *server, int iSubItem, CString &strSortKey) const;
 	static int CALLBACK SortProc(const LPARAM lParam1, const LPARAM lParam2, const LPARAM lParamSort);
 
 	virtual BOOL OnCommand(WPARAM wParam, LPARAM);

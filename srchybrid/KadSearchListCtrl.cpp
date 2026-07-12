@@ -25,7 +25,8 @@
 #include "emuledlg.h"
 #include "DownloadQueue.h"
 #include "PartFile.h"
-#include "kademlia/kademlia/search.h"
+#include "Preferences.h"
+#include "Log.h"
 #include "kademlia/utils/LookupHistory.h"
 
 #ifdef _DEBUG
@@ -33,7 +34,6 @@
 #undef THIS_FILE
 static char THIS_FILE[] = __FILE__;
 #endif
-
 
 // CKadSearchListCtrl
 
@@ -45,6 +45,7 @@ BEGIN_MESSAGE_MAP(CKadSearchListCtrl, CMuleListCtrl)
 END_MESSAGE_MAP()
 
 CKadSearchListCtrl::CKadSearchListCtrl()
+	: m_liveSearches()
 {
 	SetGeneralPurposeFind(true);
 	SetSkinKey(_T("KadActionsLv"));
@@ -56,14 +57,14 @@ void CKadSearchListCtrl::Init()
 	SetExtendedStyle(LVS_EX_FULLROWSELECT | LVS_EX_INFOTIP);
 
 	// Alignment rule: left for text, dates, and status labels; right for sizes, rates, counts, durations, and percentages.
-	InsertColumn(colNum,			EMPTY,	LVCFMT_RIGHT,	60);						//NUMBER
-	InsertColumn(colKey,			EMPTY,	LVCFMT_LEFT,	DFLT_HASH_COL_WIDTH);		//KEY
-	InsertColumn(colType,			EMPTY,	LVCFMT_LEFT,	100);						//TYPE
-	InsertColumn(colName,			EMPTY,	LVCFMT_LEFT,	DFLT_FILENAME_COL_WIDTH);	//SW_NAME
-	InsertColumn(colStop,			EMPTY,	LVCFMT_LEFT,	100);						//STATUS
-	InsertColumn(colLoad,			EMPTY,	LVCFMT_RIGHT,	100);						//THELOAD
-	InsertColumn(colPacketsSent,	EMPTY,	LVCFMT_RIGHT,	100);						//(PACKSENT
-	InsertColumn(colResponses,		EMPTY,	LVCFMT_RIGHT,	100);						//RESPONSES
+	InsertColumn(colNum, EMPTY, LVCFMT_RIGHT, 60);                         //NUMBER
+	InsertColumn(colKey, EMPTY, LVCFMT_LEFT, DFLT_HASH_COL_WIDTH);         //KEY
+	InsertColumn(colType, EMPTY, LVCFMT_LEFT, 100);                        //TYPE
+	InsertColumn(colName, EMPTY, LVCFMT_LEFT, DFLT_FILENAME_COL_WIDTH);    //SW_NAME
+	InsertColumn(colStop, EMPTY, LVCFMT_LEFT, 100);                        //STATUS
+	InsertColumn(colLoad, EMPTY, LVCFMT_RIGHT, 100);                       //THELOAD
+	InsertColumn(colPacketsSent, EMPTY, LVCFMT_RIGHT, 100);                //(PACKSENT
+	InsertColumn(colResponses, EMPTY, LVCFMT_RIGHT, 100);                  //RESPONSES
 
 	SetAllIcons();
 	Localize();
@@ -110,20 +111,27 @@ void CKadSearchListCtrl::Localize()
 
 	LocaliseHeaderCtrl(uids, _countof(uids));
 
-	for (int i = GetItemCount(); --i >= 0;)
-		SearchRef(reinterpret_cast<Kademlia::CSearch*>(GetItemData(i)));
+	for (int i = GetItemCount(); --i >= 0;) {
+		Kademlia::CSearch *pSearch = reinterpret_cast<Kademlia::CSearch*>(GetItemData(i));
+		if (IsSearchPointerTracked(pSearch))
+			SearchRef(pSearch);
+	}
 
 	UpdateKadSearchCount();
 }
 
 void CKadSearchListCtrl::UpdateSearch(int iItem, const Kademlia::CSearch *search)
 {
+	ASSERT(search != NULL);
+	if (search == NULL)
+		return;
+
 	CString id;
 	id.Format(_T("%u"), search->GetSearchID());
 	SetItemText(iItem, colNum, id);
 
 	int nImage;
-	uint32 uType = search->GetSearchType();
+	const uint32 uType = search->GetSearchType();
 	switch (uType) {
 	case Kademlia::CSearch::FILE:
 		nImage = 0;
@@ -158,12 +166,7 @@ void CKadSearchListCtrl::UpdateSearch(int iItem, const Kademlia::CSearch *search
 	SetItemText(iItem, colType, id);
 #endif
 	SetItemText(iItem, colName, (CString)search->GetGUIName());
-
-	if (search->GetTarget() != NULL) {
-		search->GetTarget().ToHexString(id);
-		SetItemText(iItem, colKey, id);
-	}
-
+	SetItemText(iItem, colKey, search->GetTarget().ToHexString());
 	SetItemText(iItem, colStop, GetResString(search->Stoping() ? _T("KADSTATUS_STOPPING") : _T("KADSTATUS_ACTIVE")));
 
 	id.Format(_T("%u (%u|%u)"), search->GetNodeLoad(), search->GetNodeLoadResponse(), search->GetNodeLoadTotal());
@@ -174,13 +177,79 @@ void CKadSearchListCtrl::UpdateSearch(int iItem, const Kademlia::CSearch *search
 
 	id.Format(_T("%u|%u"), search->GetKadPacketSent(), search->GetRequestAnswer());
 	SetItemText(iItem, colPacketsSent, id);
+
+	RequestSearchRowRedraw(iItem);
+}
+
+void CKadSearchListCtrl::RequestSearchRowRedraw(int iItem)
+{
+	if (iItem >= 0)
+		RequestRowRedrawAsync(iItem, iItem);
+}
+
+bool CKadSearchListCtrl::IsSearchPointerTracked(const Kademlia::CSearch *pSearch) const
+{
+	return pSearch != NULL && m_liveSearches.find(pSearch) != m_liveSearches.end();
+}
+
+bool CKadSearchListCtrl::TryGetSearchSortKey(const Kademlia::CSearch *pSearch, int iSubItem, CString& strSortKey) const
+{
+	if (!IsSearchPointerTracked(pSearch)) {
+		strSortKey.Empty();
+		return false;
+	}
+	CString strSortText;
+	switch (iSubItem) {
+	case colNum:
+		strSortText.Format(_T("%010u"), pSearch->GetSearchID());
+		strSortKey = MakeListSortKey(strSortText);
+		break;
+	case colType:
+		strSortText.Format(_T("%010u"), pSearch->GetSearchType());
+		strSortKey = MakeListSortKey(strSortText);
+		break;
+	case colStop:
+		strSortText.Format(_T("%u"), pSearch->Stoping() ? 1 : 0);
+		strSortKey = MakeListSortKey(strSortText);
+		break;
+	case colLoad:
+		strSortText.Format(_T("%010u"), pSearch->GetNodeLoad());
+		strSortKey = MakeListSortKey(strSortText);
+		break;
+	case colPacketsSent:
+		strSortText.Format(_T("%010u"), pSearch->GetKadPacketSent());
+		strSortKey = MakeListSortKey(strSortText);
+		break;
+	case colResponses:
+		strSortText.Format(_T("%010u"), pSearch->GetAnswers());
+		strSortKey = MakeListSortKey(strSortText);
+		break;
+	default:
+		strSortKey = MakeListSortKey(iSubItem == colKey ? pSearch->GetTarget().ToHexString() : (CString)pSearch->GetGUIName());
+		break;
+	}
+	return true;
 }
 
 void CKadSearchListCtrl::SearchAdd(const Kademlia::CSearch *search)
 {
 	try {
 		ASSERT(search != NULL);
-		int iItem = InsertItem(LVIF_TEXT | LVIF_PARAM, GetItemCount(), EMPTY, 0, 0, 0, (LPARAM)search);
+		if (search == NULL)
+			return;
+
+		m_liveSearches.insert(search);
+
+		LVFINDINFO find;
+		find.flags = LVFI_PARAM;
+		find.lParam = reinterpret_cast<LPARAM>(search);
+		int iItem = FindItem(&find);
+		if (iItem >= 0) {
+			UpdateSearch(iItem, search);
+			return;
+		}
+
+		iItem = InsertItem(LVIF_TEXT | LVIF_PARAM, GetItemCount(), EMPTY, 0, 0, 0, reinterpret_cast<LPARAM>(search));
 		if (iItem >= 0) {
 			UpdateSearch(iItem, search);
 			UpdateKadSearchCount();
@@ -194,14 +263,20 @@ void CKadSearchListCtrl::SearchRem(const Kademlia::CSearch *search)
 {
 	try {
 		ASSERT(search != NULL);
+		if (search == NULL)
+			return;
+
+		m_liveSearches.erase(search);
+
 		LVFINDINFO find;
 		find.flags = LVFI_PARAM;
-		find.lParam = (LPARAM)search;
+		find.lParam = reinterpret_cast<LPARAM>(search);
 		int iItem = FindItem(&find);
-		if (iItem >= 0) {
+		while (iItem >= 0) {
 			DeleteItem(iItem);
-			UpdateKadSearchCount();
+			iItem = FindItem(&find);
 		}
+		UpdateKadSearchCount();
 	} catch (...) {
 		ASSERT(0);
 	}
@@ -211,9 +286,12 @@ void CKadSearchListCtrl::SearchRef(const Kademlia::CSearch *search)
 {
 	try {
 		ASSERT(search != NULL);
+		if (!IsSearchPointerTracked(search))
+			return;
+
 		LVFINDINFO find;
 		find.flags = LVFI_PARAM;
-		find.lParam = (LPARAM)search;
+		find.lParam = reinterpret_cast<LPARAM>(search);
 		int iItem = FindItem(&find);
 		if (iItem >= 0)
 			UpdateSearch(iItem, search);
@@ -251,43 +329,17 @@ int CALLBACK CKadSearchListCtrl::SortProc(const LPARAM lParam1, const LPARAM lPa
 	if (item1 == NULL || item2 == NULL)
 		return 0;
 
-	int iResult;
-	switch (LOWORD(lParamSort)) {
-	case colNum:
-		iResult = CompareUnsigned(item1->GetSearchID(), item2->GetSearchID());
-		break;
-	case colKey:
-		if (item1->GetTarget() == NULL && item2->GetTarget() == NULL)
-			iResult = 0;
-		else if (item1->GetTarget() != NULL && item2->GetTarget() == NULL)
-			iResult = -1;
-		else if (item1->GetTarget() == NULL && item2->GetTarget() != NULL)
-			iResult = 1;
-		else
-			iResult = item1->GetTarget().CompareTo(item2->GetTarget());
-		break;
-	case colType:
-		iResult = item1->GetSearchType() - item2->GetSearchType();
-		break;
-	case colName:
-		iResult = CompareLocaleStringNoCaseW(item1->GetGUIName(), item2->GetGUIName());
-		break;
-	case colStop:
-		iResult = (int)item1->Stoping() - (int)item2->Stoping();
-		break;
-	case colLoad:
-		iResult = CompareUnsigned(item1->GetNodeLoad(), item2->GetNodeLoad());
-		break;
-	case colPacketsSent:
-		iResult = CompareUnsigned(item1->GetKadPacketSent(), item2->GetKadPacketSent());
-		break;
-	case colResponses:
-		iResult = CompareUnsigned(item1->GetAnswers(), item2->GetAnswers());
-		break;
-	default:
-		return 0;
+	CKadSearchListCtrl* pSearchListCtrl = theApp.emuledlg != NULL && theApp.emuledlg->kademliawnd != NULL ? theApp.emuledlg->kademliawnd->searchList : NULL;
+	CString strSortKey1;
+	CString strSortKey2;
+	if (pSearchListCtrl != NULL && pSearchListCtrl->TryGetSearchSortKey(item1, LOWORD(lParamSort), strSortKey1) && pSearchListCtrl->TryGetSearchSortKey(item2, LOWORD(lParamSort), strSortKey2)) {
+		int iSortResult = CMuleListCtrl::CompareListSortKeys(strSortKey1, strSortKey2);
+		iSortResult = CMuleListCtrl::ApplyListSortDirection(iSortResult, HIWORD(lParamSort) != 0);
+		if (iSortResult != 0)
+			return iSortResult;
 	}
-	return HIWORD(lParamSort) ? -iResult : iResult;
+
+	return 0;
 }
 
 Kademlia::CLookupHistory* CKadSearchListCtrl::FetchAndSelectActiveSearch(bool bMark)
@@ -296,8 +348,11 @@ Kademlia::CLookupHistory* CKadSearchListCtrl::FetchAndSelectActiveSearch(bool bM
 	int iItem = -1;
 
 	for (int i = GetItemCount(); --i >= 0;) {
-		const Kademlia::CSearch *pSearch = (Kademlia::CSearch*)GetItemData(i);
-		if (pSearch != NULL && !pSearch->GetLookupHistory()->IsSearchStopped() && !pSearch->GetLookupHistory()->IsSearchDeleted()) {
+		Kademlia::CSearch *pSearch = reinterpret_cast<Kademlia::CSearch*>(GetItemData(i));
+		if (!IsSearchPointerTracked(pSearch))
+			continue;
+		Kademlia::CLookupHistory *pLookupHistory = pSearch->GetLookupHistory();
+		if (pSearch != NULL && pLookupHistory != NULL && !pLookupHistory->IsSearchStopped() && !pLookupHistory->IsSearchDeleted()) {
 			// prefer interesting search rather than node searches
 			switch (pSearch->GetSearchType()) {
 			case Kademlia::CSearch::FILE:
@@ -324,12 +379,21 @@ Kademlia::CLookupHistory* CKadSearchListCtrl::FetchAndSelectActiveSearch(bool bM
 	if (iIntrestingItem >= 0) {
 		if (bMark)
 			SetItemState(iIntrestingItem, LVIS_SELECTED, LVIS_SELECTED);
-		return ((Kademlia::CSearch*)GetItemData(iIntrestingItem))->GetLookupHistory();
+		return GetLookupHistoryForItem(iIntrestingItem);
 	}
 	if (iItem >= 0) {
 		if (bMark)
 			SetItemState(iItem, LVIS_SELECTED, LVIS_SELECTED);
-		return ((Kademlia::CSearch*)GetItemData(iItem))->GetLookupHistory();
+		return GetLookupHistoryForItem(iItem);
 	}
 	return NULL;
+}
+
+Kademlia::CLookupHistory* CKadSearchListCtrl::GetLookupHistoryForItem(int iItem) const
+{
+	if (iItem < 0 || iItem >= GetItemCount())
+		return NULL;
+
+	Kademlia::CSearch *pSearch = reinterpret_cast<Kademlia::CSearch*>(const_cast<CKadSearchListCtrl*>(this)->GetItemData(iItem));
+	return IsSearchPointerTracked(pSearch) ? pSearch->GetLookupHistory() : NULL;
 }

@@ -17,6 +17,7 @@
 //Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 #include "stdafx.h"
 #include "GDIThread.h"
+#include "OtherFunctions.h"
 
 #ifdef _DEBUG
 #define new DEBUG_NEW
@@ -63,6 +64,7 @@ CGDIThread::CGDIThread(CWnd *pWnd, HDC hDC)
 
 BOOL CGDIThread::InitInstance()
 {
+	DbgSetThreadName("GDIThread");
 	// thread setup
 	m_dc.Attach(m_hDC);
 

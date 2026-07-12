@@ -111,7 +111,7 @@ void CPerfLog::WriteSamples(UINT nCurDn, UINT nCurUp, UINT nCurDnOH, UINT nCurUp
 
 		FILE *fp = _tfsopen(m_strFilePath, (m_eMode == OneSample) ? _T("wt") : _T("at"), _SH_DENYWR);
 		if (fp == NULL) {
-			LogError(LOG_DEFAULT, _T("Failed to open performance log file \"%s\" - %s"), (LPCTSTR)m_strFilePath, _tcserror(errno));
+				LogError(LOG_DEFAULT, GetResString(_T("PERFORMANCE_LOG_OPEN_FAILED")), (LPCTSTR)m_strFilePath, _tcserror(errno));
 			return;
 		}
 		::setvbuf(fp, NULL, _IOFBF, 16384); // ensure that all lines are written to file with one call
@@ -127,14 +127,14 @@ void CPerfLog::WriteSamples(UINT nCurDn, UINT nCurUp, UINT nCurDnOH, UINT nCurUp
 			fprintf(fp, "%u\n%u\n\n\n", nCurDn, nCurUp);
 			fclose(fp);
 		} else
-			LogError(LOG_DEFAULT, _T("Failed to open performance log file \"%s\" - %s"), (LPCTSTR)m_strMRTGDataFilePath, _tcserror(errno));
+				LogError(LOG_DEFAULT, GetResString(_T("PERFORMANCE_LOG_OPEN_FAILED")), (LPCTSTR)m_strMRTGDataFilePath, _tcserror(errno));
 
 		fp = _tfsopen(m_strMRTGOverheadFilePath, (m_eMode == OneSample) ? _T("wt") : _T("at"), _SH_DENYWR);
 		if (fp != NULL) {
 			fprintf(fp, "%u\n%u\n\n\n", nCurDnOH, nCurUpOH);
 			fclose(fp);
 		} else
-			LogError(LOG_DEFAULT, _T("Failed to open performance log file \"%s\" - %s"), (LPCTSTR)m_strMRTGOverheadFilePath, _tcserror(errno));
+				LogError(LOG_DEFAULT, GetResString(_T("PERFORMANCE_LOG_OPEN_FAILED")), (LPCTSTR)m_strMRTGOverheadFilePath, _tcserror(errno));
 	}
 }
 

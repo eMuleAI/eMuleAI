@@ -61,3 +61,5 @@
 #*.PDF   diff=astextplain
 #*.rtf   diff=astextplain
 #*.RTF   diff=astextplain
+
+/LibraryPatches/MbedTLS_threading_alt_add.patch text eol=lf whitespace=-blank-at-eol

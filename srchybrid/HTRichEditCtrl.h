@@ -1,6 +1,7 @@
 #pragma once
 
 #include "eMuleAI/MenuXP.h"
+#include <vector>
 
 class CHTRichEditCtrl : public CRichEditCtrl
 {
@@ -49,8 +50,15 @@ public:
 	static void ForcePurgeSmileysForShutdown(); // Ensure global caches are freed at shutdown.
 
 protected:
+	struct STypedLogEntry
+	{
+		CString strText;
+		UINT uMsgType;
+	};
+
 	CHARFORMAT2 m_cfDefault;
 	CStringArray m_astrBuff;
+	std::vector<STypedLogEntry> m_typedLogHistory;
 	CString m_strSkinKey;
 	CString m_strTitle;
 	HCURSOR m_hArrowCursor;
@@ -59,12 +67,16 @@ protected:
 	COLORREF m_crForeground;
 	COLORREF m_crDfltForeground;
 	int m_iLimitText;
+	int m_iTypedLogHistoryChars;
 	bool m_bAutoScroll;
 	bool m_bEnableSmileys;
 	bool m_bEnErrSpace;
 	bool m_bForceArrowCursor;
 	bool m_bNoPaint;
 	bool m_bRestoreFormat;
+	bool m_bAddingTypedLogLine;
+	bool m_bTypedLogHistoryComplete;
+	bool m_bReplayingTypedLogHistory;
 	bool m_bDfltForeground;
 	bool m_bDfltBackground;
 	static int sm_iSmileyClients;
@@ -76,6 +88,9 @@ protected:
 	void CopySelectedItems();
 	void SafeAddLine(int nPos, LPCTSTR pszLine, int iLen, long &lStartChar, long &lEndChar, bool bLink, COLORREF cr, COLORREF bk, DWORD mask);
 	void FlushBuffer();
+	void RecordTypedLogEntry(LPCTSTR pszMsg, int iLen, UINT eMsgType);
+	void TrimTypedLogHistory();
+	void RepaintTypedLogHistory();
 	void AddString(int nPos, LPCTSTR pszString, bool bLink, COLORREF cr, COLORREF bk, DWORD mask);
 	bool InsertSmiley(LPCTSTR pszSmileyID, COLORREF bk);
 	HBITMAP GetSmileyBitmap(LPCTSTR pszSmileyID, COLORREF bk);

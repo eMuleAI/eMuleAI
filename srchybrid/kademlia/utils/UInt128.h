@@ -46,7 +46,7 @@ namespace Kademlia
 		CUInt128(uint64 hword, uint64 lword) throw() : m_uData01(hword), m_uData23(lword) {}
 	public:
 		CUInt128(bool bFill) throw() : m_uData01(bFill ? ~(0ULL) : 0ULL), m_uData23(bFill ? ~(0ULL) : 0ULL) {}
-		CUInt128(ULONG uValue) throw() : m_uData01(0ULL), m_uData2(0UL), m_uData3(uValue) {}
+		CUInt128(ULONG uValue) throw() : m_uData01(0ULL), m_uData23(static_cast<ULONGLONG>(uValue) << 32) {}
 #if (defined(_M_IX86) || defined(_M_AMD64) || defined(_M_ARM64)) && (_MSC_FULL_VER > 13009037)
 		CUInt128(const byte* pbyValueBE) :
 			m_uData0(_byteswap_ulong((reinterpret_cast<const ULONG*>(pbyValueBE))[0])),

@@ -36,6 +36,7 @@
 #include "Log.h"
 #include "ClientList.h"
 #include "UpDownClient.h"
+#include "Preferences.h"
 
 #ifdef _DEBUG
 #define new DEBUG_NEW
@@ -77,6 +78,13 @@ void CServerConnect::TryAnotherConnectionRequest()
 
 void CServerConnect::ConnectToAnyServer(INT_PTR startAt, bool prioSort, bool isAuto, bool bNoCrypt)
 {
+	if (theApp.IsNetworkActivityBlockedByBind())
+		return;
+	if (theApp.emuledlg != NULL && !theApp.emuledlg->CanUseP2PConnectionCommands()) {
+		theApp.emuledlg->LogP2PConnectionCommandBlocked(false);
+		return;
+	}
+
 	StopConnectionTry();
 	Disconnect();
 	connecting = true;
@@ -121,6 +129,13 @@ void CServerConnect::ConnectToAnyServer(INT_PTR startAt, bool prioSort, bool isA
 
 void CServerConnect::ConnectToServer(CServer *server, bool multiconnect, bool bNoCrypt, bool bManual)
 {
+	if (theApp.IsNetworkActivityBlockedByBind())
+		return;
+	if (theApp.emuledlg != NULL && !theApp.emuledlg->CanUseP2PConnectionCommands()) {
+		theApp.emuledlg->LogP2PConnectionCommandBlocked(false);
+		return;
+	}
+
 	if (!bManual && IsConnecting() && AwaitingConnectionToServer(server))
 		return;
 	if (IsConnected())
@@ -495,6 +510,84 @@ bool CServerConnect::Disconnect()
 	return false;
 }
 
+static uint16 GetEffectiveServerUDPBindPort(uint16 nServerUDPPort)
+{
+	return nServerUDPPort == _UI16_MAX ? 0 : nServerUDPPort;
+}
+
+static bool BuildServerUDPEndpoint(LPCTSTR pszBindAddr, uint16 nServerUDPPort, sockaddr_in& endpoint)
+{
+	memset(&endpoint, 0, sizeof(endpoint));
+	endpoint.sin_family = AF_INET;
+	endpoint.sin_port = htons(GetEffectiveServerUDPBindPort(nServerUDPPort));
+	if (pszBindAddr == NULL || *pszBindAddr == _T('\0')) {
+		endpoint.sin_addr.s_addr = INADDR_ANY;
+		return true;
+	}
+
+	CStringA strBindAddrA(pszBindAddr);
+	sockaddr_in sa4 = {};
+	int sa4len = sizeof(sa4);
+	LPSTR pszAddress = const_cast<LPSTR>((LPCSTR)strBindAddrA);
+	if (WSAStringToAddressA(pszAddress, AF_INET, NULL, reinterpret_cast<sockaddr*>(&sa4), &sa4len) != 0)
+		return false;
+
+	endpoint.sin_addr = sa4.sin_addr;
+	return true;
+}
+
+static bool CanCreateServerUDPSocketForCurrentBind(bool& rbBindResolved)
+{
+	rbBindResolved = true;
+	if (thePrefs.GetServerUDPPort() == 0)
+		return false;
+
+	if (thePrefs.HasExplicitBindSelection()) {
+		thePrefs.RefreshBindResolution();
+		if (thePrefs.GetActiveBindResolveResult() != NBR_Resolved) {
+			rbBindResolved = false;
+			return false;
+		}
+		if (thePrefs.GetBindAddrW() == NULL)
+			return false; // Server UDP is IPv4-only. Do not fall back to INADDR_ANY for explicit IPv6 binds.
+	}
+
+	return true;
+}
+
+static bool GetCurrentServerUDPEndpoint(CUDPSocket* pSocket, sockaddr_in& endpoint)
+{
+	if (pSocket == NULL)
+		return false;
+
+	sockaddr_storage ss = {};
+	int sslen = sizeof(ss);
+	if (!pSocket->GetSockName(reinterpret_cast<sockaddr*>(&ss), &sslen) || ss.ss_family != AF_INET)
+		return false;
+
+	endpoint = *reinterpret_cast<sockaddr_in*>(&ss);
+	return true;
+}
+
+static bool IsAnyServerUDPEndpointAddress(const sockaddr_in& endpoint)
+{
+	return endpoint.sin_addr.s_addr == INADDR_ANY;
+}
+
+static bool IsSameServerUDPEndpoint(const sockaddr_in& left, const sockaddr_in& right)
+{
+	return left.sin_port == right.sin_port && left.sin_addr.s_addr == right.sin_addr.s_addr;
+}
+
+static bool CanProbeServerUDPEndpoint(const sockaddr_in& currentEndpoint, const sockaddr_in& targetEndpoint)
+{
+	if (targetEndpoint.sin_port == 0 || currentEndpoint.sin_port != targetEndpoint.sin_port)
+		return true;
+	if (IsSameServerUDPEndpoint(currentEndpoint, targetEndpoint))
+		return true;
+	return !IsAnyServerUDPEndpointAddress(currentEndpoint) && !IsAnyServerUDPEndpointAddress(targetEndpoint);
+}
+
 CServerConnect::CServerConnect()
 	: m_clientid()
 	, m_curuser()
@@ -507,7 +600,8 @@ CServerConnect::CServerConnect()
 	, connected()
 	, m_bTryObfuscated()
 {
-	if (thePrefs.GetServerUDPPort() != 0) {
+	bool bServerUDPBindResolved = true;
+	if (CanCreateServerUDPSocketForCurrentBind(bServerUDPBindResolved)) {
 		udpsocket = new CUDPSocket(); // initialize socket for udp packets
 		if (!udpsocket->Create()) {
 			delete udpsocket;
@@ -530,6 +624,103 @@ CServerConnect::~CServerConnect()
 		udpsocket->Close();
 		delete udpsocket;
 	}
+}
+
+CServerConnect::EServerUDPRebindResult CServerConnect::RebindServerUDPSocket()
+{
+	const uint16 nServerUDPPort = thePrefs.GetServerUDPPort();
+	bool bServerUDPBindResolved = true;
+	if (!CanCreateServerUDPSocketForCurrentBind(bServerUDPBindResolved)) {
+		if (!bServerUDPBindResolved)
+			return ServerUDPRebindFailedKeptOldSocket;
+		if (udpsocket != NULL) {
+			udpsocket->Close();
+			delete udpsocket;
+			udpsocket = NULL;
+		}
+		InitLocalIP();
+		return ServerUDPRebindSucceeded;
+	}
+
+	sockaddr_in targetEndpoint = {};
+	if (!BuildServerUDPEndpoint(thePrefs.GetBindAddrW(), nServerUDPPort, targetEndpoint))
+		return ServerUDPRebindFailedKeptOldSocket;
+
+	if (udpsocket != NULL) {
+		sockaddr_in currentEndpoint = {};
+		if (!GetCurrentServerUDPEndpoint(udpsocket, currentEndpoint))
+			return ServerUDPRebindRequiresRestart;
+		if (IsSameServerUDPEndpoint(currentEndpoint, targetEndpoint))
+			return ServerUDPRebindNoChange;
+		if (!CanProbeServerUDPEndpoint(currentEndpoint, targetEndpoint))
+			return ServerUDPRebindRequiresRestart;
+	}
+
+	CUDPSocket* pNewSocket = new CUDPSocket();
+	if (!pNewSocket->Create(nServerUDPPort, thePrefs.GetBindAddrW())) {
+		delete pNewSocket;
+		return ServerUDPRebindFailedKeptOldSocket;
+	}
+
+	if (udpsocket != NULL) {
+		udpsocket->Close();
+		delete udpsocket;
+	}
+	udpsocket = pNewSocket;
+	InitLocalIP();
+	return ServerUDPRebindSucceeded;
+}
+
+CServerConnect::EServerUDPRebindResult CServerConnect::RebindServerUDPSocketIfRandomPortConflicts(uint16 nClientUDPPort)
+{
+	if (nClientUDPPort == 0 || thePrefs.GetServerUDPPort() != _UI16_MAX || udpsocket == NULL)
+		return ServerUDPRebindNoChange;
+
+	sockaddr_in currentEndpoint = {};
+	if (!GetCurrentServerUDPEndpoint(udpsocket, currentEndpoint))
+		return ServerUDPRebindRequiresRestart;
+	if (ntohs(currentEndpoint.sin_port) != nClientUDPPort)
+		return ServerUDPRebindNoChange;
+
+	DebugLogWarning(_T("Server UDP random socket is using requested client UDP port %u; rebinding server UDP socket"), nClientUDPPort);
+	return RebindServerUDPSocket();
+}
+
+
+bool CServerConnect::RecreateServerUDPSocket()
+{
+	if (udpsocket != NULL) {
+		udpsocket->Close();
+		delete udpsocket;
+		udpsocket = NULL;
+	}
+
+	bool bServerUDPBindResolved = true;
+	if (!CanCreateServerUDPSocketForCurrentBind(bServerUDPBindResolved)) {
+		InitLocalIP();
+		return bServerUDPBindResolved;
+	}
+
+	udpsocket = new CUDPSocket();
+	if (!udpsocket->Create()) {
+		delete udpsocket;
+		udpsocket = NULL;
+		InitLocalIP();
+		return false;
+	}
+
+	InitLocalIP();
+	return true;
+}
+
+void CServerConnect::CloseServerUDPSocketForIpGuardBlock()
+{
+	if (udpsocket != NULL) {
+		udpsocket->Close();
+		delete udpsocket;
+		udpsocket = NULL;
+	}
+	InitLocalIP();
 }
 
 CServer* CServerConnect::GetCurrentServer()
@@ -642,8 +833,23 @@ bool CServerConnect::IsConnectedObfuscated() const
 	return connectedsocket != NULL && connectedsocket->IsObfusicating();
 }
 
+bool CServerConnect::HasActiveConnectionAttempts() const
+{
+	return !connectionattempts.IsEmpty();
+}
+
+DWORD CServerConnect::GetConnectionAttemptTimeoutMs() const
+{
+	DWORD dwServerConnectTimeout = CONSERVTIMEOUT;
+	if (thePrefs.GetProxySettings().bUseProxy)
+		dwServerConnectTimeout = max(dwServerConnectTimeout, CONNECTION_TIMEOUT);
+	return dwServerConnectTimeout;
+}
+
 bool CServerConnect::AwaitingConnectionToServer(CServer* currentServer)
 {
+	if (currentServer == NULL)
+		return false;
 	for (const CServerSocketMap::CPair* pair = connectionattempts.PGetFirstAssoc(); pair != NULL; pair = connectionattempts.PGetNextAssoc(pair))
 		if (pair->value && pair->value->cur_server && pair->value->cur_server->GetIP() == currentServer->GetIP() && pair->value->cur_server->GetPort() == currentServer->GetPort())
 			return true;

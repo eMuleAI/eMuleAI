@@ -128,7 +128,14 @@ void CTrayDialog::TraySetToolTip(LPCTSTR lpszToolTip)
 
 bool CTrayDialog::TrayShow()
 {
+	if (m_bTrayIconVisible) {
+		if (Shell_NotifyIcon(NIM_MODIFY, &m_nidIconData))
+			return true;
+		m_bTrayIconVisible = false;
+	}
 	m_bTrayIconVisible = Shell_NotifyIcon(NIM_ADD, &m_nidIconData) != 0;
+	if (!m_bTrayIconVisible)
+		m_bTrayIconVisible = Shell_NotifyIcon(NIM_MODIFY, &m_nidIconData) != 0;
 	return m_bTrayIconVisible;
 }
 
@@ -165,6 +172,19 @@ BOOL CTrayDialog::TrayUpdate()
 	return bSuccess;
 }
 
+bool CTrayDialog::TrayShowBalloon(LPCTSTR pszTitle, LPCTSTR pszText, DWORD dwInfoFlags)
+{
+	if (!m_bTrayIconVisible)
+		return false;
+
+	NOTIFYICONDATA nidBalloon = m_nidIconData;
+	nidBalloon.uFlags |= NIF_INFO;
+	_tcsncpy_s(nidBalloon.szInfoTitle, _countof(nidBalloon.szInfoTitle), pszTitle != NULL ? pszTitle : _T(""), _TRUNCATE);
+	_tcsncpy_s(nidBalloon.szInfo, _countof(nidBalloon.szInfo), pszText != NULL ? pszText : _T(""), _TRUNCATE);
+	nidBalloon.dwInfoFlags = dwInfoFlags;
+	return Shell_NotifyIcon(NIM_MODIFY, &nidBalloon) != 0;
+}
+
 BOOL CTrayDialog::TraySetMenu(UINT nResourceID)
 {
 	BOOL bSuccess = m_mnuTrayMenu.LoadMenu(nResourceID);
@@ -192,6 +212,9 @@ LRESULT CTrayDialog::OnTrayNotify(WPARAM wParam, LPARAM lParam)
 
 	POINT pt;
 	switch (lParam) {
+	case NIN_BALLOONUSERCLICK:
+		OnTrayBalloonUserClick();
+		break;
 	case WM_MOUSEMOVE:
 		OnTrayMouseMove();
 		break;
@@ -272,7 +295,7 @@ void CTrayDialog::TraySetMinimizeToTray(bool *pbMinimizeToTray)
 void CTrayDialog::TrayMinimizeToTrayChange()
 {
 	if (m_pbMinimizeToTray)
-		if (*m_pbMinimizeToTray || thePrefs.IsRunningAeroGlassTheme()) //there is no easy way to draw in caption
+		if (*m_pbMinimizeToTray || thePrefs.IsDwmCompositionEnabled()) //there is no easy way to draw in caption
 			MinTrayBtnHide();
 		else
 			MinTrayBtnShow();
@@ -302,6 +325,11 @@ void CTrayDialog::OnTrayRButtonDblClk()
 
 void CTrayDialog::OnTrayMouseMove()
 {
+}
+
+void CTrayDialog::OnTrayBalloonUserClick()
+{
+	RestoreWindow();
 }
 
 LRESULT CTrayDialog::OnTaskBarCreated(WPARAM, LPARAM)

@@ -36,7 +36,7 @@ protected:
 
 	void UpdateSyntaxColoring();
 	static DWORD CALLBACK StreamInCallback(DWORD_PTR dwCookie, LPBYTE pbBuff, LONG cb, LONG *pcb);
-	void CRichEditCtrlX::PreSubclassWindow();
+	virtual void PreSubclassWindow();
 	virtual BOOL OnCommand(WPARAM wParam, LPARAM);
 
 	DECLARE_MESSAGE_MAP()

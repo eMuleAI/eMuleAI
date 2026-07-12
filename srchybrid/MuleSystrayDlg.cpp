@@ -2,6 +2,8 @@
 //
 
 #include "stdafx.h"
+#include <locale.h>
+#include <math.h>
 #include "MuleSystrayDlg.h"
 #include "emule.h"
 #include "preferences.h"
@@ -15,6 +17,72 @@
 #undef THIS_FILE
 static char THIS_FILE[] = __FILE__;
 #endif
+
+namespace
+{
+	double KBytesPerSecToMbitPerSec(uint32 nKBytesPerSec)
+	{
+		return (double)nKBytesPerSec * 8192.0 / 1000000.0;
+	}
+
+	bool TryParseDisplayDouble(CString strValue, double& rfValue)
+	{
+		strValue.Trim();
+		if (strValue.IsEmpty())
+			return false;
+		strValue.Replace(_T(','), _T('.'));
+		LPCTSTR pszText = strValue;
+		LPTSTR pszEnd = NULL;
+		_locale_t locale = _create_locale(LC_NUMERIC, "C");
+		const double fValue = locale != NULL ? _tcstod_l(pszText, &pszEnd, locale) : _tcstod(pszText, &pszEnd);
+		if (locale != NULL)
+			_free_locale(locale);
+		if (pszEnd == pszText || !_finite(fValue))
+			return false;
+		CString strTail(pszEnd);
+		strTail.Trim();
+		if (!strTail.IsEmpty())
+			return false;
+		rfValue = fValue;
+		return true;
+	}
+
+	uint32 NumericDisplayToKBytesPerSec(double fValue)
+	{
+		if (fValue <= 0.0)
+			return 0;
+		if (!thePrefs.GetForceSpeedsToKB())
+			fValue = fValue * 1000000.0 / 8192.0;
+		if (fValue >= (double)UNLIMITED)
+			return UNLIMITED - 1;
+		return (uint32)(fValue + 0.5);
+	}
+
+	CString FormatTraySpeedValue(uint32 nKBytesPerSec)
+	{
+		CString strValue;
+		if (thePrefs.GetForceSpeedsToKB())
+			strValue.Format(_T("%u"), nKBytesPerSec);
+		else {
+			const double fMbitPerSec = KBytesPerSecToMbitPerSec(nKBytesPerSec);
+			const double fRounded = floor(fMbitPerSec + 0.5);
+			if (fabs(fMbitPerSec - fRounded) < 0.05)
+				strValue.Format(_T("%.0f"), fMbitPerSec);
+			else
+				strValue.Format(_T("%.1f"), fMbitPerSec);
+		}
+		return strValue;
+	}
+
+	bool TryParseTraySpeedValue(const CString& rstrValue, uint32& rnKBytesPerSec)
+	{
+		double fValue = 0.0;
+		if (!TryParseDisplayDouble(rstrValue, fValue))
+			return false;
+		rnKBytesPerSec = NumericDisplayToKBytesPerSec(fValue);
+		return true;
+	}
+}
 
 
 //Cax2 - new class without context menu
@@ -39,6 +107,7 @@ CMuleSystrayDlg::CMuleSystrayDlg(CWnd *pParent, CPoint pt, int iMaxUp, int iMaxD
 	, m_hUpArrow()
 	, m_hDownArrow()
 	, m_nExitCode()
+	, m_bUpdatingControls(false)
 {
 	if (iCurDown == UNLIMITED)
 		iCurDown = 0;
@@ -68,8 +137,6 @@ void CMuleSystrayDlg::DoDataExchange(CDataExchange *pDX)
 	DDX_Control(pDX, IDC_DOWNSLD, m_ctrlDownSpeedSld);
 	DDX_Control(pDX, IDC_DOWNTXT, m_DownSpeedInput);
 	DDX_Control(pDX, IDC_UPTXT, m_UpSpeedInput);
-	DDX_Text(pDX, IDC_DOWNTXT, m_nDownSpeedTxt);
-	DDX_Text(pDX, IDC_UPTXT, m_nUpSpeedTxt);
 	//}}AFX_DATA_MAP
 }
 
@@ -266,8 +333,9 @@ BOOL CMuleSystrayDlg::OnInitDialog()
 
 	SetDlgItemText(IDC_DOWNLBL, GetResString(_T("PW_CON_DOWNLBL")));
 	SetDlgItemText(IDC_UPLBL, GetResString(_T("PW_CON_UPLBL")));
-	SetDlgItemText(IDC_DOWNKB, GetResString(_T("KBYTESPERSEC")));
-	SetDlgItemText(IDC_UPKB, GetResString(_T("KBYTESPERSEC")));
+	const CString strSpeedUnit(GetResString(thePrefs.GetForceSpeedsToKB() ? _T("KBYTESPERSEC") : _T("MBITSSEC")));
+	SetDlgItemText(IDC_DOWNKB, strSpeedUnit);
+	SetDlgItemText(IDC_UPKB, strSpeedUnit);
 
 	m_ctrlDownSpeedSld.SetRange(0, m_iMaxDown);
 	m_ctrlDownSpeedSld.SetPos(m_nDownSpeedTxt);
@@ -277,6 +345,7 @@ BOOL CMuleSystrayDlg::OnInitDialog()
 
 	m_DownSpeedInput.EnableWindow(m_nDownSpeedTxt > 0);
 	m_UpSpeedInput.EnableWindow(m_nUpSpeedTxt > 0);
+	UpdateSpeedTextControls();
 
 	CFont Font;
 	Font.CreateFont(-16, 0, 900, 0, 700, 0, 0, 0, 0, 3, 2, 1, 34, _T("Tahoma"));
@@ -309,34 +378,75 @@ BOOL CMuleSystrayDlg::OnInitDialog()
 				  // EXCEPTION: OCX Property Pages should return FALSE
 }
 
+void CMuleSystrayDlg::SetSpeedText(UINT nID, uint32 nKBytesPerSec)
+{
+	const bool bOldUpdatingControls = m_bUpdatingControls;
+	m_bUpdatingControls = true;
+	SetDlgItemText(nID, FormatTraySpeedValue(nKBytesPerSec));
+	m_bUpdatingControls = bOldUpdatingControls;
+}
+
+bool CMuleSystrayDlg::TryGetSpeedText(UINT nID, uint32& rnKBytesPerSec) const
+{
+	CString strValue;
+	GetDlgItemText(nID, strValue);
+	return TryParseTraySpeedValue(strValue, rnKBytesPerSec);
+}
+
+void CMuleSystrayDlg::UpdateSpeedTextControls()
+{
+	SetSpeedText(IDC_DOWNTXT, m_nDownSpeedTxt);
+	SetSpeedText(IDC_UPTXT, m_nUpSpeedTxt);
+}
+
+bool CMuleSystrayDlg::UpdateSpeedFromText(UINT nID, bool bCommitText)
+{
+	uint32 nKBytesPerSec = 0;
+	if (!TryGetSpeedText(nID, nKBytesPerSec)) {
+		if (bCommitText)
+			SetSpeedText(nID, nID == IDC_DOWNTXT ? m_nDownSpeedTxt : m_nUpSpeedTxt);
+		return false;
+	}
+
+	const uint32 nEnteredKBytesPerSec = nKBytesPerSec;
+	const uint32 nMaxKBytesPerSec = nID == IDC_DOWNTXT ? (m_iMaxDown > 0 ? (uint32)m_iMaxDown : 0) : (m_iMaxUp > 0 ? (uint32)m_iMaxUp : 0);
+	if (nMaxKBytesPerSec > 0 && nKBytesPerSec > nMaxKBytesPerSec)
+		nKBytesPerSec = nMaxKBytesPerSec;
+
+	if (nID == IDC_DOWNTXT) {
+		m_nDownSpeedTxt = nKBytesPerSec;
+		m_ctrlDownSpeedSld.SetPos(m_nDownSpeedTxt);
+		thePrefs.SetMaxDownload(m_nDownSpeedTxt ? m_nDownSpeedTxt : UNLIMITED);
+	} else {
+		m_nUpSpeedTxt = nKBytesPerSec;
+		m_ctrlUpSpeedSld.SetPos(m_nUpSpeedTxt);
+		thePrefs.SetMaxUpload(m_nUpSpeedTxt ? m_nUpSpeedTxt : UNLIMITED);
+	}
+
+	if (bCommitText || nKBytesPerSec != nEnteredKBytesPerSec)
+		SetSpeedText(nID, nID == IDC_DOWNTXT ? m_nDownSpeedTxt : m_nUpSpeedTxt);
+
+	return true;
+}
+
+void CMuleSystrayDlg::CommitSpeedTextControls()
+{
+	UpdateSpeedFromText(IDC_DOWNTXT, true);
+	UpdateSpeedFromText(IDC_UPTXT, true);
+}
+
 void CMuleSystrayDlg::OnChangeDowntxt()
 {
-	UpdateData();
-
-	if (CPPgConnection::CheckDown(m_nUpSpeedTxt, m_nDownSpeedTxt)) {
-		if (CPPgConnection::CheckUp(m_nUpSpeedTxt, m_nDownSpeedTxt))
-			m_ctrlDownSpeedSld.SetPos(m_nDownSpeedTxt);
-		m_ctrlUpSpeedSld.SetPos(m_nUpSpeedTxt);
-	}
-	m_DownSpeedInput.EnableWindow(m_nDownSpeedTxt > 0);
-	thePrefs.SetMaxDownload(m_nDownSpeedTxt ? m_nDownSpeedTxt : UNLIMITED);
-
-	UpdateData(FALSE);
+	if (m_bUpdatingControls)
+		return;
+	UpdateSpeedFromText(IDC_DOWNTXT, false);
 }
 
 void CMuleSystrayDlg::OnChangeUptxt()
 {
-	UpdateData();
-
-	if (CPPgConnection::CheckUp(m_nUpSpeedTxt, m_nDownSpeedTxt)) {
-		if (CPPgConnection::CheckDown(m_nUpSpeedTxt, m_nDownSpeedTxt))
-			m_ctrlUpSpeedSld.SetPos(m_nUpSpeedTxt);
-		m_ctrlDownSpeedSld.SetPos(m_nDownSpeedTxt);
-	}
-	m_UpSpeedInput.EnableWindow(m_nUpSpeedTxt > 0);
-	thePrefs.SetMaxUpload(m_nUpSpeedTxt ? m_nUpSpeedTxt : UNLIMITED);
-
-	UpdateData(FALSE);
+	if (m_bUpdatingControls)
+		return;
+	UpdateSpeedFromText(IDC_UPTXT, false);
 }
 
 void CMuleSystrayDlg::OnHScroll(UINT nSBCode, UINT nPos, CScrollBar *pScrollBar)
@@ -350,7 +460,7 @@ void CMuleSystrayDlg::OnHScroll(UINT nSBCode, UINT nPos, CScrollBar *pScrollBar)
 				m_ctrlUpSpeedSld.SetPos(m_nUpSpeedTxt);
 			m_ctrlDownSpeedSld.SetPos(m_nDownSpeedTxt);
 		}
-		UpdateData(FALSE);
+		UpdateSpeedTextControls();
 		thePrefs.SetMaxDownload((m_nDownSpeedTxt == 0) ? UNLIMITED : m_nDownSpeedTxt);
 	} else { /*if (hWnd == m_ctrlDownSpeedSld.m_hWnd) { */
 		if (CPPgConnection::CheckDown(m_nUpSpeedTxt, m_nDownSpeedTxt)) {
@@ -358,7 +468,7 @@ void CMuleSystrayDlg::OnHScroll(UINT nSBCode, UINT nPos, CScrollBar *pScrollBar)
 				m_ctrlDownSpeedSld.SetPos(m_nDownSpeedTxt);
 			m_ctrlUpSpeedSld.SetPos(m_nUpSpeedTxt);
 		}
-		UpdateData(FALSE);
+		UpdateSpeedTextControls();
 		thePrefs.SetMaxUpload((m_nUpSpeedTxt == 0) ? UNLIMITED : m_nUpSpeedTxt);
 	}
 
@@ -424,8 +534,20 @@ void CMuleSystrayDlg::OnCaptureChanged(CWnd *pWnd)
 	CDialog::OnCaptureChanged(pWnd);
 }
 
+void CMuleSystrayDlg::OnOK()
+{
+	CommitSpeedTextControls();
+	::ReleaseCapture();
+	EndDialog(m_nExitCode);
+	m_bClosingDown = true;
+}
+
 BOOL CMuleSystrayDlg::OnCommand(WPARAM wParam, LPARAM lParam)
 {
+	if (LOWORD(wParam) == IDOK) {
+		OnOK();
+		return TRUE;
+	}
 	if (HIWORD(wParam) == BN_CLICKED) {
 		::ReleaseCapture();
 		m_nExitCode = LOWORD(wParam);

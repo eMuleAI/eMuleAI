@@ -60,6 +60,7 @@ namespace
 IMPLEMENT_DYNAMIC(CButtonsTabCtrl, CTabCtrl)
 
 BEGIN_MESSAGE_MAP(CButtonsTabCtrl, CTabCtrl)
+	ON_WM_SIZE()
 END_MESSAGE_MAP()
 
 void CButtonsTabCtrl::DrawItem(LPDRAWITEMSTRUCT lpDIS)
@@ -155,4 +156,21 @@ void CButtonsTabCtrl::PreSubclassWindow()
 
 	// Reserve extra width so the selected bold caption does not get clipped.
 	SetPadding(s_szButtonTabPadding);
+	RefreshDarkScrollButtons();
+}
+
+void CButtonsTabCtrl::RefreshDarkScrollButtons()
+{
+	for (HWND hChild = ::GetWindow(m_hWnd, GW_CHILD); hChild != NULL; hChild = ::GetWindow(hChild, GW_HWNDNEXT)) {
+		TCHAR szClassName[64] = {};
+		::GetClassName(hChild, szClassName, _countof(szClassName));
+		if (_tcscmp(szClassName, UPDOWN_CLASS) == 0)
+			ApplyThemeToWindow(hChild, true, false);
+	}
+}
+
+void CButtonsTabCtrl::OnSize(UINT nType, int cx, int cy)
+{
+	CTabCtrl::OnSize(nType, cx, cy);
+	RefreshDarkScrollButtons();
 }

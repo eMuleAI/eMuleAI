@@ -44,12 +44,35 @@ Their respective licenses are included in this directory.
    License: Apache License 2.0 OR GNU General Public License v2.0 or later
    File: license-mbedtls.txt
 
-9. libmaxminddb
-   License: Apache License 2.0
-   File: license-libmaxminddb.txt
+9. DB-IP City Lite Database
+   License: Creative Commons Attribution 4.0 International License
+   File: license-CC-BY-4.0.txt
+   Source: https://db-ip.com/db/download/ip-to-city-lite
+   Attribution: Contains DB-IP City Lite data from DB-IP.com
 
-10. ResizableLib
+10. libmaxminddb
+    License: Apache License 2.0
+    File: license-libmaxminddb.txt
+
+11. ResizableLib
     License: Artistic License 2.0
     File: license-ResizableLib.txt
     Copyright (C) 2000-2024 by Paolo Messina
-
+
+12. GMP
+    License: GNU General Public License v2.0 or later
+    File: license-gmp.txt
+
+13. GnuTLS
+    License: GNU Lesser General Public License v2.1 or later
+    File: license-gnutls.txt
+
+14. Nettle
+    License: GNU General Public License v2.0 or later
+    File: license-nettle.txt
+
+15. ngtcp2
+    License: MIT License
+    File: license-ngtcp2.txt
+
+

@@ -62,7 +62,6 @@ void CPPgDirectories::DoDataExchange(CDataExchange *pDX)
 
 BOOL CPPgDirectories::OnInitDialog()
 {
-	CWaitCursor curWait; // initialization of that dialog may take a while
 	CPropertyPage::OnInitDialog();
 	InitWindowStyles(this);
 
@@ -208,9 +207,9 @@ BOOL CPPgDirectories::OnApply()
 		for (INT_PTR i = 0; i < temptempfolders.GetCount(); ++i) {
 			CString toadd(temptempfolders[i]);
 			MakeFoldername(toadd);
-			if (!::PathFileExists(toadd))
-				::CreateDirectory(toadd, NULL);
-			if (::PathFileExists(toadd))
+			if (!DirectoryExistsLongPath(toadd))
+				::CreateDirectory(PrepareDirectoryPathForWin32LongPath(toadd), NULL);
+			if (DirectoryExistsLongPath(toadd))
 				thePrefs.tempdir.Add(toadd);
 		}
 	}
@@ -267,7 +266,7 @@ BOOL CPPgDirectories::OnApply()
 	// Notify Shared Files window: shared roots changed -> force tree rebuild + rescan
 	CemuleDlg* pDlg = theApp.emuledlg;
 	if (pDlg && pDlg->sharedfileswnd && ::IsWindow(pDlg->sharedfileswnd->m_hWnd))
-		::PostMessage(pDlg->sharedfileswnd->m_hWnd, UM_AUTO_RELOAD_SHARED_FILES, 1, 0);
+		pDlg->sharedfileswnd->PostAutoReloadSharedFilesAsync(1);
 
 	SetModified(0);
 	return CPropertyPage::OnApply();

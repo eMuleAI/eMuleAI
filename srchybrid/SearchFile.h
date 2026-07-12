@@ -72,6 +72,9 @@ public:
 	bool	IsConsideredSpam(bool bIncludeBlacklisted = true) const;
 	bool	GetAutomaticBlacklisted() const					{ return m_bAutomaticBlacklisted; }
 	void	SetAutomaticBlacklisted(bool bAutomaticBlacklisted) { m_bAutomaticBlacklisted = bAutomaticBlacklisted; }
+	bool	HasAutomaticBlacklistEvaluation() const			{ return m_bAutomaticBlacklistEvaluated; }
+	void	SetAutomaticBlacklistEvaluation(bool bEvaluated, bool bAutomaticBlacklisted) { m_bAutomaticBlacklistEvaluated = bEvaluated; m_bAutomaticBlacklisted = bAutomaticBlacklisted; }
+	void	ClearAutomaticBlacklistEvaluation()				{ m_bAutomaticBlacklistEvaluated = false; }
 	bool	GetManualBlacklisted() const					{ return m_bManualBlacklisted; }
 	void	SetManualBlacklisted(bool bManualBlacklisted)	{ m_bManualBlacklisted = bManualBlacklisted; }
 
@@ -192,6 +195,7 @@ private:
 	CString	m_strNameWithoutKeywords;
 	uint32	m_nSpamRating;
 	bool m_bAutomaticBlacklisted;
+	bool m_bAutomaticBlacklistEvaluated;
 	bool m_bManualBlacklisted;
 
 	// GUI helpers

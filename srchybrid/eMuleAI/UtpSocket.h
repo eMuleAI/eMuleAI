@@ -53,20 +53,29 @@ class CUtpSocket : public CAsyncSocketExLayer
 	virtual int Receive(void* lpBuf, int nBufLen, int nFlags = 0);
 	virtual int Send(const void* lpBuf, int nBufLen, int nFlags = 0);
 	virtual BOOL ShutDown(int nHow = sends);
-	virtual bool IsUtpLayer() { return true; }
+	virtual bool IsUtpLayer() const override { return true; }
 	void Setup(utp_socket* Socket, bool bAcceptedSocket = false);
 	void Destroy();
 	AsyncSocketExState GetState() const { return GetLayerState(); }
+	bool HasTransportFailed() const { return m_bTransportFailed; }
 	//Attributes
 	BOOL GetSockOpt(int nOptionName, void* lpOptionValue, int* lpOptionLen);
 	BOOL SetSockOpt(int nOptionName, const void* lpOptionValue, int nOptionLen);
 
   protected:
-	friend static uint64 on_utp_state_change(utp_callback_arguments* a);
-	friend static uint64 on_utp_read(utp_callback_arguments* a);
-	friend static uint64 on_utp_sendto(utp_callback_arguments* a);
-	friend static uint64 on_utp_error(utp_callback_arguments* a);
-	friend static uint64 on_utp_get_read_buffer_size (utp_callback_arguments* a);
+	static uint64 on_utp_state_change(utp_callback_arguments* a);
+	static uint64 on_utp_read(utp_callback_arguments* a);
+	static uint64 on_utp_sendto(utp_callback_arguments* a);
+	static uint64 on_utp_error(utp_callback_arguments* a);
+	static uint64 on_utp_get_read_buffer_size (utp_callback_arguments* a);
+
+	bool IsDuplexTransferLikely() const;
+	size_t GetMaxWriteBufferCapacity() const;
+	bool GrowWriteBufferTo(size_t uNewCapacity, LPCTSTR pszReason);
+	bool ShrinkWriteBufferTo(size_t uNewCapacity, LPCTSTR pszReason);
+	void TrimWriteBufferForDuplexIfPossible(LPCTSTR pszReason);
+	size_t GetNextWriteBufferCapacity() const;
+	void OnWriteBufferBlocked();
 
 	struct UTPSocket*	m_Socket;
 	utp_context*		m_Context;
@@ -76,10 +85,14 @@ class CUtpSocket : public CAsyncSocketExLayer
 	mutable CCriticalSection m_csReadBuffer;
 	mutable CCriticalSection m_csWriteBuffer;
 	bool				m_bConnectNotified;
+	bool				m_bTransportFailed;
 	CUpDownClient*		m_pOwnerClient;
 	uint8				m_uZeroWriteBurst;
 	bool				m_bAppSendBlocked;
+	bool				m_bUtpWriteBlocked;
+	bool				m_bUtpWritableHint;
+	DWORD				m_dwNextUtpWriteAttemptTick;
 	DWORD				m_dwLastSendTime;		// Tick count of last successful Send()
-	size_t				m_nCurrentWriteBufferSize;	// Current allocated size of write buffer
+	uint32				m_uWriteBufferBlockCountAtCapacity;
 	bool				m_bBufferGrown;			// Flag to track if buffer has been grown
 };

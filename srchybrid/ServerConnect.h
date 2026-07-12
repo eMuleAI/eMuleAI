@@ -51,6 +51,17 @@ public:
 	void	ConnectToAnyServer(INT_PTR startAt, bool prioSort = false, bool isAuto = true, bool bNoCrypt = false);
 	void	ConnectToServer(CServer *server, bool multiconnect = false, bool bNoCrypt = false, bool bManual = false);
 	void	StopConnectionTry();
+	enum EServerUDPRebindResult
+	{
+		ServerUDPRebindNoChange,
+		ServerUDPRebindSucceeded,
+		ServerUDPRebindFailedKeptOldSocket,
+		ServerUDPRebindRequiresRestart
+	};
+	EServerUDPRebindResult RebindServerUDPSocket();
+	EServerUDPRebindResult RebindServerUDPSocketIfRandomPortConflicts(uint16 nClientUDPPort);
+	bool RecreateServerUDPSocket();
+	void CloseServerUDPSocketForIpGuardBlock();
 	static  VOID CALLBACK RetryConnectTimer(HWND hWnd, UINT nMsg, UINT_PTR nId, DWORD dwTime) noexcept;
 
 	void	CheckForTimeout();
@@ -75,6 +86,8 @@ public:
 
 	bool	AwaitingTestFromIP(uint32 dwIP) const;
 	bool	IsConnectedObfuscated() const;
+	bool	HasActiveConnectionAttempts() const;
+	DWORD	GetConnectionAttemptTimeoutMs() const;
 	bool	AwaitingConnectionToServer(CServer* currentServer);
 
 	uint32	m_clientid;

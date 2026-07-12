@@ -573,7 +573,7 @@ const bool CIPFilter::IsFiltered(const CAddress& IP) /*const*/
 
 const CString CIPFilter::GetLastHit() const
 {
-	return CString(m_pLastHit ? m_pLastHit->desc : "Not available");
+	return m_pLastHit ? CString(m_pLastHit->desc) : CString("Not available");
 }
 
 const CIPFilterArray& CIPFilter::GetIPFilter() const

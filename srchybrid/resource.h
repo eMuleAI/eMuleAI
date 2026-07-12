@@ -113,10 +113,7 @@
 #define IDC_DEBUG_OPTS                  2067
 #define IDC_TRAFFIC_TEXT                2069
 #define IDC_CLOSECHAT                   2071
-#define IDD_GEOLITE_DOWNLOAD            1690
 #define IDD_MIGRATION_WIZARD            1691
-#define IDC_GEOLITECITY_TEXT            3046
-#define IDC_GEOLITECITY_DOWNLOAD        3047
 #define IDC_MIGRATION_MESSAGE           3048
 #define IDC_MIGRATION_SOURCE_DIR        3049
 #define IDC_MIGRATION_SOURCE_DIR_LABEL  3050
@@ -711,7 +708,7 @@
 #define IDC_CATS                        2841
 #define IDC_STATICFI                    2842
 #define IDC_RESET                       2843
-#define IDC_OPENPORTS                   2844
+#define IDC_OPEN_PORTS_WINDOWS_FIREWALL 3076
 #define IDC_SMILEY                      2844
 #define IDC_TCP                         2845
 #define IDC_UDP                         2846
@@ -788,6 +785,7 @@
 #define IDC_COLLECTIONVIEWLISTICON      2931
 #define IDC_COLLECTIONNAMEEDIT          2932
 #define IDC_VIEWCOLLECTIONDL            2933
+#define IDC_VIEWCOLLECTIONDLSEL         3061
 #define IDC_COLLECTIONVIEWSHAREBUTTON   2935
 #define IDC_COLLECTIONVIEWAUTHORLABEL   2935
 #define IDC_COLLECTIONVIEWAUTHOR        2936
@@ -1146,6 +1144,13 @@
 #define IDD_DARKMODE_MSGBOX             40255
 #define IDC_DARKMODE_ICON               40256
 #define IDC_DARKMODE_TEXT               40257
+#define IDD_BULK_OPERATION_EXIT         40260
+#define IDC_BULKOP_EXIT_BODY            40261
+#define IDC_BULKOP_EXIT_PROGRESS_TEXT   40262
+#define IDC_BULKOP_EXIT_PROGRESS        40263
+#define IDC_BULKOP_EXIT_RETURN          40264
+#define IDC_BULKOP_EXIT_CANCEL_EXIT     40265
+#define IDC_BULKOP_EXIT_WAIT_EXIT       40266
 #define IDR_MOD_BANNER                  40258
 #define IDR_MOD_BANNER_LIGHT            40259
 #define IDC_CLIENT_IP                   49874
@@ -1196,6 +1201,7 @@
 #define IDD_PPG_MOD                     51344
 #define IDC_SHARE_ICO                   51345
 #define IDD_PPG_BLACKLIST_PANEL         51347
+#define IDD_PPG_NETWORK_INTERFACE       51352
 #define IDC_BLACKLIST_DEFINITIONS_TEXTBOX 51348
 #define IDC_BLACKLIST_PANEL_HELP_TEXTBOX 51349
 #define IDC_NETWORK_INFO_AUTOREFRESH    51350
@@ -1203,14 +1209,40 @@
 #define IDC_PERIODDAYS_LABEL            3058
 #define IDC_AUTOUPDATE_IPFILTER         3059
 #define IDC_IPFILTERPERIOD              3060
+#define IDC_IPGEOLOCATION_UPDATE_NOW     3062
+#define IDC_BIND_INTERFACE_LABEL         3064
+#define IDC_BIND_INTERFACE               3065
+#define IDC_BIND_ADDRESS_LABEL           3066
+#define IDC_BIND_ADDRESS                 3067
+#define IDC_IP_GUARD_RANGES              3068
+#define IDC_IP_GUARD_ENABLED            3069
+#define IDC_IP_GUARD_RANGES_LABEL        3070
+#define IDC_BIND_STATUS                  3071
+#define IDC_RANDOMIZE_PORTS_ON_STARTUP   3072
+#define IDC_TBN_DISPLAYMODE             3073
+#define IDC_TBN_DISPLAYMODE_LABEL       3074
+#define IDC_NETWORK_INTERFACE_FRM        3075
+#define IDC_STATIC_CLIENT_PORT           3077
+#define IDC_CLIENT_PORT                  3078
+#define IDC_RANDOM_PORT_RANGE_FRM        3079
+#define IDC_RANDOM_PORT_RANGE_START_LABEL 3080
+#define IDC_RANDOM_PORT_RANGE_START      3081
+#define IDC_RANDOM_PORT_RANGE_END_LABEL  3082
+#define IDC_RANDOM_PORT_RANGE_END        3083
+#define IDC_FORCE_SPEEDS_TO_KB          3084
+#define IDC_VPN_GUARD_FRM              3085
+#define IDC_VPN_GUARD_ENABLED          3086
+#define IDC_VPN_GUARD_COUNTRY_LABEL    3087
+#define IDC_VPN_GUARD_COUNTRY          3088
+#define IDC_VPN_GUARD_BLOCK_UNKNOWN    3089
 
 // Next default values for new objects
 // 
 #ifdef APSTUDIO_INVOKED
 #ifndef APSTUDIO_READONLY_SYMBOLS
-#define _APS_NEXT_RESOURCE_VALUE        1694
+#define _APS_NEXT_RESOURCE_VALUE        1695
 #define _APS_NEXT_COMMAND_VALUE         32773
-#define _APS_NEXT_CONTROL_VALUE         3061
+#define _APS_NEXT_CONTROL_VALUE         3090
 #define _APS_NEXT_SYMED_VALUE           1610
 #endif
 #endif

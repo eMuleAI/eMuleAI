@@ -85,6 +85,13 @@ protected:
 	int		m_iFileFakerPunishment;
 	bool	m_bDetectUploadFaker;
 	int		m_iUploadFakerPunishment;
+	bool	m_bDetectUploadRequestAbuse;
+	bool	m_bDetectUploadRequestAbuseNoRequestSlots;
+	bool	m_bDetectUploadRequestAbuseQueueDrops;
+	bool	m_bUploadRequestAbuseCounterGuard;
+	bool	m_bUploadRequestAbuseHashRotationTracking;
+	bool	m_bUploadRequestAbusePostHelloDisconnect;
+	int		m_iUploadRequestAbusePunishment;
 
 	bool	m_bDetectAgressive;
 	int		m_iAgressiveTime;
@@ -193,6 +200,13 @@ protected:
 	HTREEITEM	m_htiFileFakerPunishment;
 	HTREEITEM	m_htiDetectUploadFaker;
 	HTREEITEM	m_htiUploadFakerPunishment;
+	HTREEITEM	m_htiDetectUploadRequestAbuse;
+	HTREEITEM	m_htiDetectUploadRequestAbuseNoRequestSlots;
+	HTREEITEM	m_htiDetectUploadRequestAbuseQueueDrops;
+	HTREEITEM	m_htiUploadRequestAbuseCounterGuard;
+	HTREEITEM	m_htiUploadRequestAbuseHashRotationTracking;
+	HTREEITEM	m_htiUploadRequestAbusePostHelloDisconnect;
+	HTREEITEM	m_htiUploadRequestAbusePunishment;
 
 	HTREEITEM	m_htiDetectAgressive;
 	HTREEITEM	m_htiAgressiveTime;
@@ -225,7 +239,9 @@ protected:
 	afx_msg LRESULT DrawTreeItemHelp(WPARAM wParam, LPARAM lParam);
 	afx_msg void OnHelp();
 	afx_msg BOOL OnHelpInfo(HELPINFO* pHelpInfo);
+	afx_msg void OnSize(UINT nType, int cx, int cy);
 	afx_msg HBRUSH OnCtlColor(CDC* pDC, CWnd* pWnd, UINT nCtlColor);
+	void UpdateLayout();
 
 	virtual BOOL OnCommand(WPARAM wParam, LPARAM lParam);
 	virtual void DoDataExchange(CDataExchange* pDX);    // DDX/DDV support

@@ -34,6 +34,7 @@ public:
 	void SetDisplayMode(DisplayMode eDisplayMode) { m_eDisplayMode = eDisplayMode; }
 	bool IsSpecialThanksMode() const { return m_eDisplayMode == DisplayModeSpecialThanks; }
 	void AdvanceAnimationFrame();
+	void RepositionToParent(const CRect* pParentRect = NULL);
 
 protected:
 	DisplayMode m_eDisplayMode;

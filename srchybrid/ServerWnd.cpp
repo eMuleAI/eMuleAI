@@ -1,4 +1,4 @@
-//This file is part of eMule AI
+﻿//This file is part of eMule AI
 //Copyright (C)2002-2026 Merkur ( strEmail.Format("%s@%s", "devteam", "emule-project.net") / https://www.emule-project.net )
 //Copyright (C)2026 eMule AI
 //
@@ -16,9 +16,9 @@
 //along with this program; if not, write to the Free Software
 //Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 #include "stdafx.h"
+#include <afxinet.h>
 #include "emule.h"
 #include "ServerWnd.h"
-#include "HttpDownloadDlg.h"
 #include "HTRichEditCtrl.h"
 #include "ED2KLink.h"
 #include "kademlia/kademlia/kademlia.h"
@@ -34,6 +34,8 @@
 #include "HelpIDs.h"
 #include "NetworkInfoDlg.h"
 #include "Log.h"
+#include "OtherFunctions.h"
+#include "PPgSecurity.h"
 #include "UserMsgs.h"
 #include "opcodes.h"
 #include "eMuleAI/DarkMode.h"
@@ -50,6 +52,330 @@ static char THIS_FILE[] = __FILE__;
 #define	SERVERMET_STRINGS_PROFILE	_T("AC_ServerMetURLs.dat")
 #define SZ_DEBUG_LOG_TITLE			_T("Verbose")
 
+struct SServerMetDownloadJob
+{
+	SServerMetDownloadJob()
+		: lRefCount(1)
+		, lCancel()
+		, hNotifyWnd()
+		, uToken()
+	{
+	}
+
+	LONG lRefCount;
+	volatile LONG lCancel;
+	HWND hNotifyWnd;
+	uint64 uToken;
+	CString strURL;
+	CString strTempFile;
+};
+
+namespace
+{
+	const UINT WM_SERVERMET_DOWNLOAD_PROGRESS = WM_APP + 210;
+	const UINT WM_SERVERMET_DOWNLOAD_FINISHED = WM_APP + 211;
+	const DWORD SERVERMET_DOWNLOAD_PROGRESS_INTERVAL = 250;
+
+	struct SServerMetDownloadProgress
+	{
+		SServerMetDownloadProgress()
+			: uToken()
+			, uBytesRead()
+			, uTotalBytes()
+			, bHasTotalBytes(false)
+		{
+		}
+
+		uint64 uToken;
+		uint64 uBytesRead;
+		uint64 uTotalBytes;
+		bool bHasTotalBytes;
+		CString strURL;
+	};
+
+	struct SServerMetDownloadResult
+	{
+		SServerMetDownloadResult()
+			: uToken()
+			, uBytesRead()
+			, uTotalBytes()
+			, bHasTotalBytes(false)
+			, bSucceeded(false)
+			, bCanceled(false)
+		{
+		}
+
+		uint64 uToken;
+		uint64 uBytesRead;
+		uint64 uTotalBytes;
+		bool bHasTotalBytes;
+		bool bSucceeded;
+		bool bCanceled;
+		CString strURL;
+		CString strTempFile;
+		CString strError;
+	};
+
+	void AddServerMetDownloadJobRef(SServerMetDownloadJob* pJob)
+	{
+		if (pJob == NULL)
+			return;
+		InterlockedIncrement(&pJob->lRefCount);
+	}
+
+	void ReleaseServerMetDownloadJob(SServerMetDownloadJob* pJob)
+	{
+		if (pJob != NULL && InterlockedDecrement(&pJob->lRefCount) == 0)
+			delete pJob;
+	}
+
+	bool IsServerMetDownloadCanceled(SServerMetDownloadJob* pJob)
+	{
+		return pJob == NULL || InterlockedCompareExchange(&pJob->lCancel, 0, 0) != 0;
+	}
+
+	void SetServerMetDownloadError(SServerMetDownloadResult& result, LPCTSTR pszContext, DWORD dwError)
+	{
+		CString strLastError;
+		if (dwError >= INTERNET_ERROR_BASE && dwError <= INTERNET_ERROR_LAST)
+			GetModuleErrorString(dwError, strLastError, _T("wininet"));
+		else
+			GetSystemErrorString(dwError, strLastError);
+
+		if (strLastError.IsEmpty())
+			result.strError = pszContext;
+		else
+			result.strError.Format(_T("%s: %s"), pszContext, (LPCTSTR)strLastError);
+	}
+
+	bool PostServerMetDownloadPayload(SServerMetDownloadJob* pJob, UINT uMessage, LPARAM lParam)
+	{
+		HWND hWnd = pJob != NULL ? pJob->hNotifyWnd : NULL;
+		return hWnd != NULL && ::IsWindow(hWnd) && ::PostMessage(hWnd, uMessage, 0, lParam);
+	}
+
+	void PostServerMetDownloadProgress(SServerMetDownloadJob* pJob, uint64 uBytesRead, uint64 uTotalBytes, bool bHasTotalBytes, DWORD& dwLastProgressTick, bool bForce)
+	{
+		const DWORD dwNow = ::GetTickCount();
+		if (!bForce && dwLastProgressTick != 0 && dwNow - dwLastProgressTick < SERVERMET_DOWNLOAD_PROGRESS_INTERVAL)
+			return;
+
+		SServerMetDownloadProgress* pProgress = new SServerMetDownloadProgress;
+		pProgress->uToken = pJob->uToken;
+		pProgress->uBytesRead = uBytesRead;
+		pProgress->uTotalBytes = uTotalBytes;
+		pProgress->bHasTotalBytes = bHasTotalBytes;
+		pProgress->strURL = pJob->strURL;
+
+		if (PostServerMetDownloadPayload(pJob, WM_SERVERMET_DOWNLOAD_PROGRESS, reinterpret_cast<LPARAM>(pProgress)))
+			dwLastProgressTick = dwNow;
+		else
+			delete pProgress;
+	}
+
+	bool DownloadServerMetToFile(SServerMetDownloadJob* pJob, SServerMetDownloadResult& result)
+	{
+		result.uToken = pJob->uToken;
+		result.strURL = pJob->strURL;
+		result.strTempFile = pJob->strTempFile;
+		if (theApp.IsNetworkActivityBlockedByBind()) {
+			result.strError = theApp.GetNetworkActivityBlockMessage();
+			return false;
+		}
+
+		DWORD dwServiceType = 0;
+		CString strServer;
+		CString strObject;
+		INTERNET_PORT nPort = 0;
+		if (!AfxParseURL(pJob->strURL, dwServiceType, strServer, strObject, nPort)) {
+			result.strError = _T("Invalid URL");
+			return false;
+		}
+		if (dwServiceType != AFX_INET_SERVICE_HTTP && dwServiceType != AFX_INET_SERVICE_HTTPS) {
+			result.strError = _T("Unsupported URL service");
+			return false;
+		}
+		if (strObject.IsEmpty())
+			strObject = _T("/");
+
+		CFile file;
+		bool bFileOpen = false;
+		HINTERNET hInternetSession = NULL;
+		HINTERNET hHttpConnection = NULL;
+		HINTERNET hHttpFile = NULL;
+		bool bSuccess = false;
+		bool bDeleteTempFile = true;
+		DWORD dwLastProgressTick = 0;
+		DWORD dwTimeout = SEC2MS(30);
+		DWORD dwRequestFlags = INTERNET_FLAG_RELOAD | INTERNET_FLAG_DONT_CACHE | INTERNET_FLAG_KEEP_CONNECTION;
+		static LPCTSTR ppszAcceptTypes[2] = {_T("*/*"), NULL};
+		TCHAR szStatusCode[32] = {};
+		TCHAR szContentEncoding[32] = {};
+		TCHAR szContentLength[64] = {};
+		DWORD dwInfoSize = 0;
+		DWORD dwEncodingSize = 0;
+		long nStatusCode = 0;
+		char szReadBuf[16 * 1024];
+
+		if (!file.Open(PreparePathForWin32LongPath(pJob->strTempFile), CFile::modeCreate | CFile::modeWrite | CFile::shareDenyWrite)) {
+			SetServerMetDownloadError(result, _T("Failed to open download target"), ::GetLastError());
+			goto cleanup;
+		}
+		bFileOpen = true;
+
+		hInternetSession = ::InternetOpen(AfxGetAppName(), INTERNET_OPEN_TYPE_PRECONFIG, NULL, NULL, 0);
+		if (hInternetSession == NULL) {
+			SetServerMetDownloadError(result, _T("InternetOpen failed"), ::GetLastError());
+			goto cleanup;
+		}
+
+		(void)::InternetSetOption(hInternetSession, INTERNET_OPTION_CONNECT_TIMEOUT, &dwTimeout, sizeof dwTimeout);
+		(void)::InternetSetOption(hInternetSession, INTERNET_OPTION_SEND_TIMEOUT, &dwTimeout, sizeof dwTimeout);
+		(void)::InternetSetOption(hInternetSession, INTERNET_OPTION_RECEIVE_TIMEOUT, &dwTimeout, sizeof dwTimeout);
+
+		if (IsServerMetDownloadCanceled(pJob)) {
+			result.bCanceled = true;
+			goto cleanup;
+		}
+
+		if (dwServiceType == AFX_INET_SERVICE_HTTPS) {
+			dwRequestFlags |= INTERNET_FLAG_SECURE;
+			dwServiceType = INTERNET_SERVICE_HTTP;
+		}
+
+		hHttpConnection = ::InternetConnect(hInternetSession, strServer, nPort, NULL, NULL, dwServiceType, 0, 0);
+		if (hHttpConnection == NULL) {
+			SetServerMetDownloadError(result, _T("InternetConnect failed"), ::GetLastError());
+			goto cleanup;
+		}
+
+		if (IsServerMetDownloadCanceled(pJob)) {
+			result.bCanceled = true;
+			goto cleanup;
+		}
+
+		hHttpFile = ::HttpOpenRequest(hHttpConnection, NULL, strObject, NULL, NULL, ppszAcceptTypes, dwRequestFlags, 0);
+		if (hHttpFile == NULL) {
+			SetServerMetDownloadError(result, _T("HttpOpenRequest failed"), ::GetLastError());
+			goto cleanup;
+		}
+
+		(void)::HttpAddRequestHeaders(hHttpFile, _T("Accept-Encoding: identity, *;q=0\r\n"), _UI32_MAX, HTTP_ADDREQ_FLAG_ADD);
+		(void)::HttpAddRequestHeaders(hHttpFile, _T("User-Agent: Mozilla/4.0 (compatible; MSIE 7.0; Windows NT 6.0; SLCC1)\r\n"), _UI32_MAX, HTTP_ADDREQ_FLAG_ADD);
+
+		PostServerMetDownloadProgress(pJob, 0, 0, false, dwLastProgressTick, true);
+
+		if (!::HttpSendRequest(hHttpFile, NULL, 0, NULL, 0)) {
+			SetServerMetDownloadError(result, _T("HttpSendRequest failed"), ::GetLastError());
+			goto cleanup;
+		}
+
+		dwInfoSize = _countof(szStatusCode);
+		if (!::HttpQueryInfo(hHttpFile, HTTP_QUERY_STATUS_CODE, szStatusCode, &dwInfoSize, NULL)) {
+			SetServerMetDownloadError(result, _T("HTTP status query failed"), ::GetLastError());
+			goto cleanup;
+		}
+		nStatusCode = _ttol(szStatusCode);
+		if (nStatusCode != HTTP_STATUS_OK) {
+			result.strError.Format(_T("Invalid HTTP response: HTTP %ld"), nStatusCode);
+			goto cleanup;
+		}
+
+		dwEncodingSize = _countof(szContentEncoding);
+		if (::HttpQueryInfo(hHttpFile, HTTP_QUERY_CONTENT_ENCODING, szContentEncoding, &dwEncodingSize, NULL)
+			&& (!_tcsicmp(szContentEncoding, _T("gzip")) || !_tcsicmp(szContentEncoding, _T("x-gzip")))) {
+			result.strError = _T("Unsupported compressed HTTP response");
+			goto cleanup;
+		}
+
+		dwInfoSize = _countof(szContentLength);
+		if (::HttpQueryInfo(hHttpFile, HTTP_QUERY_CONTENT_LENGTH, szContentLength, &dwInfoSize, NULL)) {
+			result.uTotalBytes = _tcstoui64(szContentLength, NULL, 10);
+			result.bHasTotalBytes = result.uTotalBytes > 0;
+		}
+
+		for (;;) {
+			if (IsServerMetDownloadCanceled(pJob)) {
+				result.bCanceled = true;
+				break;
+			}
+
+			DWORD dwBytesRead = 0;
+			if (!::InternetReadFile(hHttpFile, szReadBuf, sizeof szReadBuf, &dwBytesRead)) {
+				SetServerMetDownloadError(result, _T("InternetReadFile failed"), ::GetLastError());
+				break;
+			}
+			if (dwBytesRead == 0) {
+				bSuccess = true;
+				break;
+			}
+
+			try {
+				file.Write(szReadBuf, dwBytesRead);
+			} catch (CFileException* ex) {
+				SetServerMetDownloadError(result, _T("Failed to write download target"), ex->m_lOsError);
+				ex->Delete();
+				break;
+			}
+
+			result.uBytesRead += dwBytesRead;
+			PostServerMetDownloadProgress(pJob, result.uBytesRead, result.uTotalBytes, result.bHasTotalBytes, dwLastProgressTick, false);
+		}
+
+		if (bSuccess) {
+			try {
+				file.Close();
+				bFileOpen = false;
+			} catch (CFileException* ex) {
+				SetServerMetDownloadError(result, _T("Failed to close download target"), ex->m_lOsError);
+				ex->Delete();
+				bSuccess = false;
+			}
+		}
+
+		if (bSuccess) {
+			if (!result.bHasTotalBytes) {
+				result.uTotalBytes = result.uBytesRead;
+				result.bHasTotalBytes = result.uTotalBytes > 0;
+			}
+			PostServerMetDownloadProgress(pJob, result.uBytesRead, result.uTotalBytes, result.bHasTotalBytes, dwLastProgressTick, true);
+			bDeleteTempFile = false;
+		}
+
+cleanup:
+		if (hHttpFile != NULL)
+			::InternetCloseHandle(hHttpFile);
+		if (hHttpConnection != NULL)
+			::InternetCloseHandle(hHttpConnection);
+		if (hInternetSession != NULL)
+			::InternetCloseHandle(hInternetSession);
+		if (bFileOpen) {
+			try {
+				file.Close();
+			} catch (CFileException* ex) {
+				ex->Delete();
+			}
+		}
+		if (bDeleteTempFile)
+			(void)::DeleteFile(PreparePathForWin32LongPath(pJob->strTempFile));
+
+		result.bSucceeded = bSuccess && !result.bCanceled;
+		return result.bSucceeded;
+	}
+
+	UINT AFX_CDECL ServerMetDownloadThreadProc(LPVOID pParam)
+	{
+		DbgSetThreadName("ServerMetDownload");
+		SServerMetDownloadJob* pJob = reinterpret_cast<SServerMetDownloadJob*>(pParam);
+		SServerMetDownloadResult* pResult = new SServerMetDownloadResult;
+		(void)DownloadServerMetToFile(pJob, *pResult);
+		if (!PostServerMetDownloadPayload(pJob, WM_SERVERMET_DOWNLOAD_FINISHED, reinterpret_cast<LPARAM>(pResult)))
+			delete pResult;
+		ReleaseServerMetDownloadJob(pJob);
+		return 0;
+	}
+}
+
 // CServerWnd dialog
 
 IMPLEMENT_DYNAMIC(CServerWnd, CDialog)
@@ -62,6 +388,7 @@ BEGIN_MESSAGE_MAP(CServerWnd, CResizableDialog)
 	ON_NOTIFY(EN_LINK, IDC_SERVMSG, OnEnLinkServerBox)
 	ON_BN_CLICKED(IDC_ED2KCONNECT, OnBnConnect)
 	ON_WM_SYSCOLORCHANGE()
+	ON_WM_DESTROY()
 	ON_WM_CTLCOLOR()
 	ON_BN_CLICKED(IDC_DD, OnDDClicked)
 	ON_WM_HELPINFO()
@@ -70,6 +397,8 @@ BEGIN_MESSAGE_MAP(CServerWnd, CResizableDialog)
 	ON_EN_CHANGE(IDC_SERVERMETURL, OnSvrTextChange)
 	ON_STN_DBLCLK(IDC_SERVLST_ICO, OnStnDblclickServlstIco)
 	ON_NOTIFY(UM_SPN_SIZED, IDC_SPLITTER_SERVER, OnSplitterMoved)
+	ON_MESSAGE(WM_SERVERMET_DOWNLOAD_PROGRESS, OnServerMetDownloadProgress)
+	ON_MESSAGE(WM_SERVERMET_DOWNLOAD_FINISHED, OnServerMetDownloadFinished)
 END_MESSAGE_MAP()
 
 CServerWnd::CServerWnd(CWnd *pParent /*=NULL*/)
@@ -78,6 +407,14 @@ CServerWnd::CServerWnd(CWnd *pParent /*=NULL*/)
 	, m_cfDef()
 	, m_cfBold()
 	, m_pacServerMetURL()
+	, m_pServerMetDownloadJob()
+	, m_serverMetDownloadQueue()
+	, m_uServerMetDownloadToken()
+	, m_uServerMetDownloadBytesRead()
+	, m_uServerMetDownloadTotalBytes()
+	, m_bServerMetDownloadHasTotalBytes(false)
+	, m_bServerMetDownloadOverlayDelayActive(false)
+	, m_strServerMetDownloadURL()
 	, debug()
 {
 	servermsgbox = new CHTRichEditCtrl;
@@ -91,6 +428,7 @@ CServerWnd::CServerWnd(CWnd *pParent /*=NULL*/)
 
 CServerWnd::~CServerWnd()
 {
+	CancelServerMetDownload();
 	if (icon_srvlist)
 		VERIFY(::DestroyIcon(icon_srvlist));
 	if (m_pacServerMetURL) {
@@ -334,8 +672,200 @@ void CServerWnd::DoDataExchange(CDataExchange *pDX)
 	DDX_Control(pDX, IDC_MYINFOLIST, m_MyInfo);
 }
 
+bool CServerWnd::IsServerMetDownloadActive() const
+{
+	return m_pServerMetDownloadJob != NULL;
+}
+
+void CServerWnd::ResetServerMetDownloadOverlayState()
+{
+	m_uServerMetDownloadBytesRead = 0;
+	m_uServerMetDownloadTotalBytes = 0;
+	m_bServerMetDownloadHasTotalBytes = false;
+	m_bServerMetDownloadOverlayDelayActive = false;
+	m_strServerMetDownloadURL.Empty();
+}
+
+void CServerWnd::StartServerMetDownloadOverlayDelay()
+{
+	m_bServerMetDownloadOverlayDelayActive = true;
+	if (theApp.emuledlg != NULL)
+		theApp.emuledlg->StartDownloadOverlayCompletionDelay();
+}
+
+void CServerWnd::FinishServerMetDownloadOverlayDelay()
+{
+	if (!m_bServerMetDownloadOverlayDelayActive)
+		return;
+
+	ResetServerMetDownloadOverlayState();
+	if (!IsServerMetDownloadActive() && ::IsWindow(serverlistctrl.GetSafeHwnd()))
+		serverlistctrl.HideOperationOverlay();
+}
+
+void CServerWnd::CancelServerMetDownload()
+{
+	SServerMetDownloadJob* pJob = m_pServerMetDownloadJob;
+	if (pJob == NULL) {
+		FinishServerMetDownloadOverlayDelay();
+		return;
+	}
+
+	m_pServerMetDownloadJob = NULL;
+	pJob->hNotifyWnd = NULL;
+	InterlockedExchange(&pJob->lCancel, 1);
+	ReleaseServerMetDownloadJob(pJob);
+	m_serverMetDownloadQueue.RemoveAll();
+	ResetServerMetDownloadOverlayState();
+	if (::IsWindow(serverlistctrl.GetSafeHwnd()))
+		serverlistctrl.HideOperationOverlay();
+}
+
+bool CServerWnd::RefreshServerMetDownloadOverlay()
+{
+	if (!IsServerMetDownloadActive() && !m_bServerMetDownloadOverlayDelayActive) {
+		if (::IsWindow(serverlistctrl.GetSafeHwnd()))
+			serverlistctrl.HideOperationOverlay();
+		return false;
+	}
+
+	UpdateServerMetDownloadOverlay(m_uServerMetDownloadBytesRead, m_uServerMetDownloadTotalBytes, m_bServerMetDownloadHasTotalBytes, m_strServerMetDownloadURL);
+	return true;
+}
+
+bool CServerWnd::StartNextQueuedServerMetDownload()
+{
+	while (!m_serverMetDownloadQueue.IsEmpty()) {
+		const CString strURL = m_serverMetDownloadQueue.RemoveHead();
+		if (UpdateServerMetFromURL(strURL))
+			return true;
+	}
+	return false;
+}
+
+bool CServerWnd::UpdateServerMetFromURLs(const CStringList& urls)
+{
+	if (IsServerMetDownloadActive())
+		return true;
+
+	m_serverMetDownloadQueue.RemoveAll();
+	for (POSITION pos = urls.GetHeadPosition(); pos != NULL;)
+		m_serverMetDownloadQueue.AddTail(urls.GetNext(pos));
+
+	return StartNextQueuedServerMetDownload();
+}
+
+void CServerWnd::UpdateServerMetDownloadOverlay(uint64 uBytesRead, uint64 uTotalBytes, bool bHasTotalBytes, const CString& strURL)
+{
+	m_uServerMetDownloadBytesRead = uBytesRead;
+	m_uServerMetDownloadTotalBytes = uTotalBytes;
+	m_bServerMetDownloadHasTotalBytes = bHasTotalBytes;
+	m_strServerMetDownloadURL = strURL;
+	if (!::IsWindow(serverlistctrl.GetSafeHwnd()))
+		return;
+
+	CString strDetail;
+	UINT uDone = 0;
+	UINT uTotal = 0;
+	if (bHasTotalBytes && uTotalBytes > 0) {
+		const uint64 uClampedBytesRead = uBytesRead < uTotalBytes ? uBytesRead : uTotalBytes;
+		uint64 uPercent64 = (uClampedBytesRead * 100) / uTotalBytes;
+		if (uPercent64 > 100)
+			uPercent64 = 100;
+		const UINT uPercent = static_cast<UINT>(uPercent64);
+		CString strBytesRead = CastItoXBytes(uBytesRead);
+		CString strTotalBytes = CastItoXBytes(uTotalBytes);
+		strDetail.Format(GetResString(_T("SERVERMET_DOWNLOAD_PROGRESS")), uPercent, (LPCTSTR)strBytesRead, (LPCTSTR)strTotalBytes, (LPCTSTR)strURL);
+		uDone = uPercent;
+		uTotal = 100;
+	} else {
+		CString strBytesRead = CastItoXBytes(uBytesRead);
+		strDetail.Format(GetResString(_T("SERVERMET_DOWNLOAD_PROGRESS_UNKNOWN")), (LPCTSTR)strBytesRead, (LPCTSTR)strURL);
+	}
+
+	CString strTitle = GetResString(_T("DOWNLOADING_SERVERMET"));
+	CString strIPFilterTitle;
+	CString strIPFilterDetail;
+	UINT uIPFilterDone = 0;
+	UINT uIPFilterTotal = 0;
+	if (CPPgSecurity::GetIPFilterDownloadOverlayInfo(strIPFilterTitle, strIPFilterDetail, uIPFilterDone, uIPFilterTotal)) {
+		const UINT uCombinedDone = min(uDone, uTotal) + min(uIPFilterDone, uIPFilterTotal);
+		const UINT uCombinedTotal = uTotal + uIPFilterTotal;
+		strTitle = GetResString(_T("BULKOP_MULTI_OPERATIONS_TITLE"));
+		strDetail.Format(GetResString(_T("BULKOP_MULTI_OPERATIONS_DETAIL")), 2, uCombinedDone, uCombinedTotal);
+		uDone = uCombinedDone;
+		uTotal = uCombinedTotal;
+	}
+
+	if (serverlistctrl.IsOperationOverlayVisible())
+		serverlistctrl.UpdateOperationOverlay(strTitle, strDetail, uDone, uTotal, false);
+	else
+		serverlistctrl.ShowOperationOverlay(strTitle, strDetail, uDone, uTotal, false, CString());
+}
+
+LRESULT CServerWnd::OnServerMetDownloadProgress(WPARAM, LPARAM lParam)
+{
+	SServerMetDownloadProgress* pProgress = reinterpret_cast<SServerMetDownloadProgress*>(lParam);
+	if (pProgress != NULL) {
+		if (m_pServerMetDownloadJob != NULL && pProgress->uToken == m_uServerMetDownloadToken)
+			UpdateServerMetDownloadOverlay(pProgress->uBytesRead, pProgress->uTotalBytes, pProgress->bHasTotalBytes, pProgress->strURL);
+		delete pProgress;
+	}
+	return 0;
+}
+
+LRESULT CServerWnd::OnServerMetDownloadFinished(WPARAM, LPARAM lParam)
+{
+	SServerMetDownloadResult* pResult = reinterpret_cast<SServerMetDownloadResult*>(lParam);
+	if (pResult == NULL)
+		return 0;
+
+	if (m_pServerMetDownloadJob != NULL && pResult->uToken == m_uServerMetDownloadToken) {
+		SServerMetDownloadJob* pJob = m_pServerMetDownloadJob;
+		m_pServerMetDownloadJob = NULL;
+		pJob->hNotifyWnd = NULL;
+
+		if (pResult->bSucceeded) {
+			m_serverMetDownloadQueue.RemoveAll();
+			UpdateServerMetDownloadOverlay(pResult->uBytesRead, pResult->uTotalBytes, pResult->bHasTotalBytes, pResult->strURL);
+			serverlistctrl.Hide();
+			serverlistctrl.AddServerMetToList(pResult->strTempFile);
+			serverlistctrl.Visible();
+			(void)::DeleteFile(PreparePathForWin32LongPath(pResult->strTempFile));
+		} else if (!pResult->bCanceled) {
+			if (!pResult->strError.IsEmpty())
+				AddDebugLogLine(DLP_LOW, false, _T("server.met download failed: %s"), (LPCTSTR)EscPercent(pResult->strError));
+			LogError(LOG_STATUSBAR, GetResString(_T("ERR_FAILEDDOWNLOADMET")), (LPCTSTR)pResult->strURL);
+		}
+
+		if (pResult->bSucceeded)
+			StartServerMetDownloadOverlayDelay();
+		else {
+			ResetServerMetDownloadOverlayState();
+			serverlistctrl.HideOperationOverlay();
+		}
+		ReleaseServerMetDownloadJob(pJob);
+		OnSvrTextChange();
+		if (!pResult->bSucceeded && !pResult->bCanceled && StartNextQueuedServerMetDownload()) {
+			delete pResult;
+			return 0;
+		}
+	} else if (!pResult->strTempFile.IsEmpty())
+		(void)::DeleteFile(PreparePathForWin32LongPath(pResult->strTempFile));
+
+	delete pResult;
+	return 0;
+}
+
 bool CServerWnd::UpdateServerMetFromURL(const CString &strURL)
 {
+	if (IsServerMetDownloadActive())
+		return true;
+	if (theApp.emuledlg != NULL && !theApp.emuledlg->CanUseP2PConnectionCommands()) {
+		theApp.emuledlg->LogP2PConnectionCommandBlocked(false);
+		return false;
+	}
+
 	if (strURL.IsEmpty() || strURL.Find(_T("://")) < 0) {
 		// not a valid URL
 		LogError(LOG_STATUSBAR, GetResString(_T("INVALIDURL")));
@@ -350,22 +880,41 @@ bool CServerWnd::UpdateServerMetFromURL(const CString &strURL)
 	strTempFilename.AppendFormat(_T("temp-%u-server.met"), ::GetTickCount());
 
 	// try to download server.met
-	Log(GetResString(_T("DOWNLOADING_SERVERMET_FROM")), (LPCTSTR)EscPercent(strURL));
-	CHttpDownloadDlg dlgDownload;
-	dlgDownload.m_strTitle = GetResString(_T("DOWNLOADING_SERVERMET"));
-	dlgDownload.m_sURLToDownload = strURL;
-	dlgDownload.m_sFileToDownloadInto = strTempFilename;
-	if (dlgDownload.DoModal() != IDOK) {
+	AddLogLine(true, GetResString(_T("DOWNLOADING_SERVERMET_FROM")), (LPCTSTR)EscPercent(strURL));
+	if (theApp.emuledlg != NULL)
+		theApp.emuledlg->FlushQueuedUiLogLines();
+
+	SServerMetDownloadJob* pJob = new SServerMetDownloadJob;
+	pJob->hNotifyWnd = GetSafeHwnd();
+	pJob->uToken = ++m_uServerMetDownloadToken;
+	pJob->strURL = strURL;
+	pJob->strTempFile = strTempFilename;
+	m_pServerMetDownloadJob = pJob;
+	m_bServerMetDownloadOverlayDelayActive = false;
+	AddServerMetDownloadJobRef(pJob);
+
+	UpdateServerMetDownloadOverlay(0, 0, false, strURL);
+	OnSvrTextChange();
+
+	CWinThread* pThread = AfxBeginThread(ServerMetDownloadThreadProc, pJob, THREAD_PRIORITY_NORMAL);
+	if (pThread == NULL) {
+		m_pServerMetDownloadJob = NULL;
+		ReleaseServerMetDownloadJob(pJob);
+		ReleaseServerMetDownloadJob(pJob);
+		ResetServerMetDownloadOverlayState();
+		serverlistctrl.HideOperationOverlay();
+		OnSvrTextChange();
 		LogError(LOG_STATUSBAR, GetResString(_T("ERR_FAILEDDOWNLOADMET")), (LPCTSTR)strURL);
 		return false;
 	}
 
-	// add content of server.met to serverlist
-	serverlistctrl.Hide();
-	serverlistctrl.AddServerMetToList(strTempFilename);
-	serverlistctrl.Visible();
-	(void)_tremove(strTempFilename);
 	return true;
+}
+
+void CServerWnd::OnDestroy()
+{
+	CancelServerMetDownload();
+	CResizableDialog::OnDestroy();
 }
 
 void CServerWnd::OnSysColorChange()
@@ -555,16 +1104,22 @@ bool CServerWnd::AddServer(uint16 nPort, const CString &strAddress, const CStrin
 
 void CServerWnd::OnBnClickedUpdateServerMetFromUrl()
 {
+	if (IsServerMetDownloadActive())
+		return;
+	if (theApp.emuledlg != NULL && !theApp.emuledlg->CanUseP2PConnectionCommands()) {
+		theApp.emuledlg->LogP2PConnectionCommandBlocked(true);
+		return;
+	}
+
 	CString strURL;
 	GetDlgItemText(IDC_SERVERMETURL, strURL);
+	m_serverMetDownloadQueue.RemoveAll();
 
 	if (strURL.Trim().IsEmpty()) {
 		if (thePrefs.addresses_list.IsEmpty())
 			AddLogLine(true, GetResString(_T("SRV_NOURLAV")));
 		else
-			for (POSITION pos = thePrefs.addresses_list.GetHeadPosition(); pos != NULL;)
-				if (UpdateServerMetFromURL(thePrefs.addresses_list.GetNext(pos)))
-					break;
+			UpdateServerMetFromURLs(thePrefs.addresses_list);
 	} else
 		UpdateServerMetFromURL(strURL);
 }
@@ -785,6 +1340,10 @@ void CServerWnd::OnBnConnect()
 	else if (theApp.serverconnect->IsConnecting())
 		theApp.serverconnect->StopConnectionTry();
 	else {
+		if (theApp.emuledlg != NULL && !theApp.emuledlg->CanUseP2PConnectionCommands()) {
+			theApp.emuledlg->LogP2PConnectionCommandBlocked(true);
+			return;
+		}
 		if (theApp.serverlist != NULL && theApp.serverlist->GetServerCount() == 0) {
 			CDarkMode::MessageBox(GetResString(_T("EMULE_AI_SERVERMET_REQUIRED_CONNECT")), MB_OK | MB_ICONINFORMATION);
 			return;
@@ -824,7 +1383,7 @@ BOOL CServerWnd::OnHelpInfo(HELPINFO*)
 void CServerWnd::OnSvrTextChange()
 {
 	GetDlgItem(IDC_ADDSERVER)->EnableWindow(GetDlgItem(IDC_IPADDRESSPORT)->GetWindowTextLength());
-	GetDlgItem(IDC_UPDATESERVERMETFROMURL)->EnableWindow(GetDlgItem(IDC_SERVERMETURL)->GetWindowTextLength() > 0);
+	GetDlgItem(IDC_UPDATESERVERMETFROMURL)->EnableWindow(!IsServerMetDownloadActive() && GetDlgItem(IDC_SERVERMETURL)->GetWindowTextLength() > 0);
 }
 
 void CServerWnd::OnStnDblclickServlstIco()

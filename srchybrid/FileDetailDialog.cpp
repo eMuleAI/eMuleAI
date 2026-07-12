@@ -1,4 +1,4 @@
-﻿//This file is part of eMule AI
+//This file is part of eMule AI
 //Copyright (C)2002-2026 Merkur ( strEmail.Format("%s@%s", "devteam", "emule-project.net") / https://www.emule-project.net )
 //Copyright (C)2026 eMule AI
 //
@@ -95,6 +95,8 @@ void UpdateFileDetailsPages(CListViewPropertySheet *pSheet
 		bool bUpdateWindow = (iPage >= 0);
 		if (bUpdateWindow) {
 			pSheet->SetRedraw(FALSE);
+			if (::IsWindow(pToHide->GetSafeHwnd()))
+				pToHide->ShowWindow(SW_HIDE);
 			pSheet->RemovePage(pToHide);
 		}
 
@@ -110,15 +112,20 @@ void UpdateFileDetailsPages(CListViewPropertySheet *pSheet
 				pSheet->SetRedraw(FALSE);
 				bUpdateWindow = true;
 			}
+			if (iPage < 0)
+				iPage = pSheet->GetPageCount();
 			pSheet->InsertPage(iPage, pToShow);
-			if (pActivePage == pToHide)
-				pSheet->SetActivePage(iPage);
+		}
+
+		if (pActivePage == pToHide) {
+			const int iPageToShow = pSheet->GetPageIndex(pToShow);
+			if (iPageToShow >= 0)
+				pSheet->SetActivePage(iPageToShow);
 		}
 
 		if (bUpdateWindow) {
 			pSheet->SetRedraw(TRUE);
-			pSheet->Invalidate();
-			pSheet->UpdateWindow();
+			pSheet->RedrawWindow(NULL, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
 		}
 	}
 	if (pFileLink && pFileLink->m_hWnd)
@@ -158,15 +165,21 @@ void CFileDetailDialog::Localize()
 CFileDetailDialog::CFileDetailDialog(const CSimpleArray<CPartFile*> *paFiles, UINT uInvokePage, CListCtrlItemWalk *pListCtrl)
 	: CListViewWalkerPropertySheet(pListCtrl)
 	, m_uInvokePage(uInvokePage)
+	, m_strSnapshotTitleFileName()
 {
-	for (int i = 0; i < paFiles->GetSize(); ++i)
-		m_aItems.Add((*paFiles)[i]);
+	for (int i = 0; i < paFiles->GetSize(); ++i) {
+		CPartFile* pFile = (*paFiles)[i];
+		if (pFile != NULL && m_strSnapshotTitleFileName.IsEmpty())
+			m_strSnapshotTitleFileName = pFile->GetFileName();
+		m_aItems.Add(pFile);
+	}
 	m_psh.dwFlags &= ~PSH_HASHELP;
 
 	m_wndInfo.m_psp.dwFlags &= ~PSP_HASHELP;
 	m_wndInfo.m_psp.dwFlags |= PSP_USEICONID;
 	m_wndInfo.m_psp.pszIcon = _T("FILEINFO");
 	m_wndInfo.SetFiles(&m_aItems);
+	m_wndInfo.SetSnapshotFileName(m_strSnapshotTitleFileName);
 	AddPage(&m_wndInfo);
 
 	if (m_aItems.GetSize() == 1) {
@@ -174,6 +187,7 @@ CFileDetailDialog::CFileDetailDialog(const CSimpleArray<CPartFile*> *paFiles, UI
 		m_wndName.m_psp.dwFlags |= PSP_USEICONID;
 		m_wndName.m_psp.pszIcon = _T("FILERENAME");
 		m_wndName.SetFiles(&m_aItems);
+		m_wndName.SetSnapshotFileName(m_strSnapshotTitleFileName);
 		AddPage(&m_wndName);
 	}
 
@@ -263,7 +277,13 @@ LRESULT CFileDetailDialog::OnDataChanged(WPARAM, LPARAM)
 void CFileDetailDialog::UpdateTitle()
 {
 	CString sTitle(GetResString(_T("DETAILS")));
-	if (m_aItems.GetSize() == 1)
-		sTitle.AppendFormat(_T(": %s"), (LPCTSTR)(static_cast<CAbstractFile*>(m_aItems[0])->GetFileName()));
+	if (m_aItems.GetSize() == 1) {
+		CString strFileName(m_strSnapshotTitleFileName);
+		const CKnownFile* pKnownCandidate = static_cast<const CKnownFile*>(m_aItems[0]);
+		if (theApp.downloadqueue != NULL && theApp.downloadqueue->IsPartFile(pKnownCandidate))
+			strFileName = static_cast<CAbstractFile*>(m_aItems[0])->GetFileName();
+		if (!strFileName.IsEmpty())
+			sTitle.AppendFormat(_T(": %s"), (LPCTSTR)strFileName);
+	}
 	SetWindowText(sTitle);
 }

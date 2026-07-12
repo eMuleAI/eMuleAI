@@ -22,6 +22,7 @@
 #include <vector>
 #include "eMuleAI/Address.h"
 #include "eMuleAI/UtpSocket.h"
+#include "eMuleAI/QuicNatSocket.h"
 
 class Packet;
 class CUpDownClient;
@@ -52,13 +53,29 @@ public:
 	byte*	GetHashForEncryption(const CAddress& IP, uint16 nPort);
 	bool	IsObfusicating(const CAddress& IP, uint16 nPort) { return GetHashForEncryption(IP, nPort) != NULL; }
 	void	SendUtpPacket(const byte* data, size_t len, const struct sockaddr* to, socklen_t tolen);
+	void	SendQuicNatPacket(const byte* data, size_t len, const struct sockaddr* to, socklen_t tolen);
+	void	SendQuicNatKeyFrame(const struct sockaddr* to, socklen_t tolen);
+	void	SendNatTraversalCaps(CUpDownClient* client, const CAddress& ip, uint16 port, bool bAck);
+	void	RequestNatTraversalCaps(CUpDownClient* client, const CAddress& ip, uint16 port);
 	void	ServiceUtp();
 	void	PumpUtpOnce();
 	utp_context* GetUtpContext() const { return m_pUtpContext; }
+	bool	IsNatTraversalEndpointReady() const { return m_hSocket != INVALID_SOCKET && m_nSocketFamily != AF_UNSPEC && m_port != 0; }
+	bool	EnsureNatTraversalEndpointReady(LPCTSTR pszReason);
+	bool	BuildUtpPeerEndpoint(const CAddress& IP, uint16 nPort, sockaddr_storage& rSockAddr, int& rnSockAddrLen) const;
 	void	SeedNatTraversalExpectation(CUpDownClient* client, const CAddress& ip, uint16 port);
 
 	bool	Create();
-	bool	Rebind();
+	bool	Recreate();
+	void	CloseForIpGuardBlock();
+	enum ERebindResult
+	{
+		RebindNoChange,
+		RebindSucceeded,
+		RebindFailedKeptOldSocket,
+		RebindRequiresRestart
+	};
+	ERebindResult Rebind(bool bForce = false);
 	uint16	GetConnectedPort()		{ return m_port; }
 	DWORD	GetLastRebindTime() const { return m_dwLastRebindTick; }
 	// Last public IPs observed at successful rebind (for cooldown bypass logic)
@@ -68,6 +85,10 @@ public:
 	SocketSentBytes  SendControlData(uint32 maxNumberOfBytesToSend, uint32 /*minFragSize*/); // ZZ:UploadBandWithThrottler (UDP)
 	bool	ProcessPacket(const BYTE* packet, UINT size, uint8 opcode, const CAddress& IP, uint16 port);
 	void	ProcessUtpPacket(const BYTE* packet, int size, const struct sockaddr* from, socklen_t fromlen);
+	void	ProcessQuicNatPacket(const BYTE* packet, int size, const struct sockaddr* from, socklen_t fromlen);
+	void	ProcessNatTraversalCapsFrame(const BYTE* packet, int size, const struct sockaddr* from, socklen_t fromlen, bool bAck);
+	void	TryStartNatTraversalAfterDirectCaps(CUpDownClient* client, const CAddress& ip, uint16 port);
+	bool	StartPassiveQuicNatEndpoint(CUpDownClient* client, const CAddress& ip, uint16 port, bool bTrustedTransportHint = false);
 protected:
 
 	virtual void	OnSend(int nErrorCode);
@@ -86,6 +107,8 @@ private:
 	DWORD	m_dwLastRebindTick;
 	uint32	m_dwLastRebindPublicIPv4;
 	CAddress m_LastRebindPublicIPv6;
+	ADDRESS_FAMILY m_nSocketFamily;
+	bool m_bSocketIPv6Only;
 
 	struct SIpPort {
 		uint16 nPort;

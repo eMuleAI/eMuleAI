@@ -74,7 +74,7 @@
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <ClCompile>
-      <AdditionalIncludeDirectories>srchybrid;$(VC_ATLMFC_SourcePath);$(UniversalCRTSdkDir)Include\10.0.22621.0\um;$(UniversalCRTSdkDir)Include\10.0.22621.0\shared;.;mbedtls\include;mbedtls\tf-psa-crypto\include;mbedtls\tf-psa-crypto\drivers\builtin\include;miniupnpc\include;ResizableLib;libutp\include\libutp;libmaxminddb\include;MediaInfoLib\Source;ZenLib</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>srchybrid;$(VC_ATLMFC_SourcePath);$(UniversalCRTSdkDir)Include\10.0.22621.0\um;$(UniversalCRTSdkDir)Include\10.0.22621.0\shared;.;mbedtls\include;mbedtls\include\mbedtls;mbedtls\tf-psa-crypto\include;mbedtls\tf-psa-crypto\drivers\builtin\include;miniupnpc\include;ResizableLib;libutp\include\libutp;libmaxminddb\include;MediaInfoLib\Source;ZenLib;$(SolutionDir)_Build\gmp\Generated;gmp\mini-gmp;$(SolutionDir)_Build\nettle\Generated;$(SolutionDir)_Build\nettle\Generated\nettle;nettle;$(SolutionDir)_Build\gnutls\Generated;gnutls\lib\includes;$(SolutionDir)_Build\ngtcp2\Generated;ngtcp2\lib\includes;ngtcp2\crypto\includes</AdditionalIncludeDirectories>
       <AdditionalOptions>/Zc:throwingNew /FS</AdditionalOptions>
       <ExternalAnglebracketReferences>true</ExternalAnglebracketReferences>
       <ExternalWarningLevel>TurnOffAllWarnings</ExternalWarningLevel>
@@ -83,7 +83,7 @@
       </IntrinsicFunctions>
       <Optimization>Disabled</Optimization>
       <PrecompiledHeader>Use</PrecompiledHeader>
-      <PreprocessorDefinitions>MINIUPNP_STATICLIB;SUPPORT_LARGE_FILES;_HAS_AUTO_PTR_ETC=1;XP_BUILD;_DEBUG;_ASSERTFILE;USE_STRING_IDS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>MINIUPNP_STATICLIB;GNUTLS_STATIC;NGTCP2_STATICLIB;MINI_GMP_LIMB_TYPE=long;SUPPORT_LARGE_FILES;XP_BUILD;_DEBUG;_ASSERTFILE;USE_STRING_IDS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
       <WarningLevel>EnableAllWarnings</WarningLevel>
       <DebugInformationFormat>EditAndContinue</DebugInformationFormat>
@@ -95,15 +95,15 @@
       </OmitFramePointers>
       <ExceptionHandling>Async</ExceptionHandling>
       <FunctionLevelLinking>true</FunctionLevelLinking>
-      <LanguageStandard>stdcpp17</LanguageStandard>
+      <LanguageStandard>stdcpp20</LanguageStandard>
       <LanguageStandard_C>stdc17</LanguageStandard_C>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>ADSIId.lib;bcrypt.lib;crypt32.lib;delayimp.lib;iphlpapi.lib;version.lib;winmm.lib;ws2_32.lib;$(SolutionDir)_Build\zlib\$(Configuration)\$(Platform)\zlib.lib;$(SolutionDir)_Build\cryptlib\$(Configuration)\$(Platform)\cryptlib.lib;$(SolutionDir)_Build\ResizableLib\$(Configuration)\$(Platform)\ResizableLib.lib;$(SolutionDir)_Build\miniupnpc\$(Configuration)\$(Platform)\miniupnpc.lib;$(SolutionDir)_Build\mbedTLS\$(Configuration)\$(Platform)\mbedTLS.lib;$(SolutionDir)_Build\libutp\$(Configuration)\$(Platform)\libutp.lib;$(SolutionDir)_Build\maxminddb\$(Configuration)\$(Platform)\maxminddb.lib;$(SolutionDir)_Build\ZenLib\$(Configuration)\$(Platform)\ZenLib.lib;$(SolutionDir)_Build\MediaInfoLib\$(Configuration)\$(Platform)\MediaInfoLib.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>ole32.lib;propsys.lib;runtimeobject.lib;shell32.lib;ADSIId.lib;bcrypt.lib;crypt32.lib;delayimp.lib;iphlpapi.lib;version.lib;winmm.lib;ws2_32.lib;$(SolutionDir)_Build\zlib\$(Configuration)\$(Platform)\zlib.lib;$(SolutionDir)_Build\cryptlib\$(Configuration)\$(Platform)\cryptlib.lib;$(SolutionDir)_Build\ResizableLib\$(Configuration)\$(Platform)\ResizableLib.lib;$(SolutionDir)_Build\miniupnpc\$(Configuration)\$(Platform)\miniupnpc.lib;$(SolutionDir)_Build\mbedTLS\$(Configuration)\$(Platform)\mbedTLS.lib;$(SolutionDir)_Build\libutp\$(Configuration)\$(Platform)\libutp.lib;$(SolutionDir)_Build\maxminddb\$(Configuration)\$(Platform)\maxminddb.lib;$(SolutionDir)_Build\ZenLib\$(Configuration)\$(Platform)\ZenLib.lib;$(SolutionDir)_Build\MediaInfoLib\$(Configuration)\$(Platform)\MediaInfoLib.lib;$(SolutionDir)_Build\ngtcp2\$(Configuration)\$(Platform)\ngtcp2.lib;$(SolutionDir)_Build\gnutls\$(Configuration)\$(Platform)\gnutls.lib;$(SolutionDir)_Build\nettle\$(Configuration)\$(Platform)\nettle.lib;$(SolutionDir)_Build\gmp\$(Configuration)\$(Platform)\gmp.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <AdditionalOptions>
       </AdditionalOptions>
-      <DelayLoadDLLs>gdiplus.dll;msimg32.dll;oleacc.dll;ws2_32.dll;%(DelayLoadDLLs)</DelayLoadDLLs>
+      <DelayLoadDLLs>gdiplus.dll;msimg32.dll;oleacc.dll;runtimeobject.dll;ws2_32.dll;%(DelayLoadDLLs)</DelayLoadDLLs>
       <IgnoreSpecificDefaultLibraries>mpr.lib;rasapi32.lib;secur32.lib;sensapi.lib;vfw32.lib;%(IgnoreSpecificDefaultLibraries)</IgnoreSpecificDefaultLibraries>
       <LargeAddressAware>true</LargeAddressAware>
       <OptimizeReferences>false</OptimizeReferences>
@@ -139,7 +139,7 @@ if errorlevel 1 exit 1</Command>
   </ItemGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>
-      <AdditionalIncludeDirectories>srchybrid;$(VC_ATLMFC_SourcePath);$(UniversalCRTSdkDir)Include\10.0.22621.0\um;$(UniversalCRTSdkDir)Include\10.0.22621.0\shared;.;mbedtls\include;mbedtls\tf-psa-crypto\include;mbedtls\tf-psa-crypto\drivers\builtin\include;miniupnpc\include;ResizableLib;libutp\include\libutp;libmaxminddb\include;MediaInfoLib\Source;ZenLib</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>srchybrid;$(VC_ATLMFC_SourcePath);$(UniversalCRTSdkDir)Include\10.0.22621.0\um;$(UniversalCRTSdkDir)Include\10.0.22621.0\shared;.;mbedtls\include;mbedtls\include\mbedtls;mbedtls\tf-psa-crypto\include;mbedtls\tf-psa-crypto\drivers\builtin\include;miniupnpc\include;ResizableLib;libutp\include\libutp;libmaxminddb\include;MediaInfoLib\Source;ZenLib;$(SolutionDir)_Build\gmp\Generated;gmp\mini-gmp;$(SolutionDir)_Build\nettle\Generated;$(SolutionDir)_Build\nettle\Generated\nettle;nettle;$(SolutionDir)_Build\gnutls\Generated;gnutls\lib\includes;$(SolutionDir)_Build\ngtcp2\Generated;ngtcp2\lib\includes;ngtcp2\crypto\includes</AdditionalIncludeDirectories>
       <AdditionalOptions>/Zc:throwingNew /FS</AdditionalOptions>
       <ExternalAnglebracketReferences>true</ExternalAnglebracketReferences>
       <ExternalWarningLevel>TurnOffAllWarnings</ExternalWarningLevel>
@@ -148,7 +148,7 @@ if errorlevel 1 exit 1</Command>
       </IntrinsicFunctions>
       <Optimization>Disabled</Optimization>
       <PrecompiledHeader>Use</PrecompiledHeader>
-      <PreprocessorDefinitions>MINIUPNP_STATICLIB;SUPPORT_LARGE_FILES;_HAS_AUTO_PTR_ETC=1;XP_BUILD;_DEBUG;_ASSERTFILE;USE_STRING_IDS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>MINIUPNP_STATICLIB;GNUTLS_STATIC;NGTCP2_STATICLIB;MINI_GMP_LIMB_TYPE=long;SUPPORT_LARGE_FILES;XP_BUILD;_DEBUG;_ASSERTFILE;USE_STRING_IDS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
       <WarningLevel>EnableAllWarnings</WarningLevel>
       <DebugInformationFormat>EditAndContinue</DebugInformationFormat>
@@ -162,13 +162,13 @@ if errorlevel 1 exit 1</Command>
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <ControlFlowGuard>
       </ControlFlowGuard>
-      <LanguageStandard>stdcpp17</LanguageStandard>
+      <LanguageStandard>stdcpp20</LanguageStandard>
       <LanguageStandard_C>stdc17</LanguageStandard_C>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>ADSIId.lib;bcrypt.lib;crypt32.lib;delayimp.lib;iphlpapi.lib;version.lib;winmm.lib;ws2_32.lib;$(SolutionDir)_Build\zlib\$(Configuration)\$(Platform)\zlib.lib;$(SolutionDir)_Build\cryptlib\$(Configuration)\$(Platform)\cryptlib.lib;$(SolutionDir)_Build\ResizableLib\$(Configuration)\$(Platform)\ResizableLib.lib;$(SolutionDir)_Build\miniupnpc\$(Configuration)\$(Platform)\miniupnpc.lib;$(SolutionDir)_Build\mbedTLS\$(Configuration)\$(Platform)\mbedTLS.lib;$(SolutionDir)_Build\libutp\$(Configuration)\$(Platform)\libutp.lib;$(SolutionDir)_Build\maxminddb\$(Configuration)\$(Platform)\maxminddb.lib;$(SolutionDir)_Build\ZenLib\$(Configuration)\$(Platform)\ZenLib.lib;$(SolutionDir)_Build\MediaInfoLib\$(Configuration)\$(Platform)\MediaInfoLib.lib;%(AdditionalDependencies)</AdditionalDependencies>
-      <DelayLoadDLLs>gdiplus.dll;msimg32.dll;oleacc.dll;ws2_32.dll;%(DelayLoadDLLs)</DelayLoadDLLs>
+      <AdditionalDependencies>ole32.lib;propsys.lib;runtimeobject.lib;shell32.lib;ADSIId.lib;bcrypt.lib;crypt32.lib;delayimp.lib;iphlpapi.lib;version.lib;winmm.lib;ws2_32.lib;$(SolutionDir)_Build\zlib\$(Configuration)\$(Platform)\zlib.lib;$(SolutionDir)_Build\cryptlib\$(Configuration)\$(Platform)\cryptlib.lib;$(SolutionDir)_Build\ResizableLib\$(Configuration)\$(Platform)\ResizableLib.lib;$(SolutionDir)_Build\miniupnpc\$(Configuration)\$(Platform)\miniupnpc.lib;$(SolutionDir)_Build\mbedTLS\$(Configuration)\$(Platform)\mbedTLS.lib;$(SolutionDir)_Build\libutp\$(Configuration)\$(Platform)\libutp.lib;$(SolutionDir)_Build\maxminddb\$(Configuration)\$(Platform)\maxminddb.lib;$(SolutionDir)_Build\ZenLib\$(Configuration)\$(Platform)\ZenLib.lib;$(SolutionDir)_Build\MediaInfoLib\$(Configuration)\$(Platform)\MediaInfoLib.lib;$(SolutionDir)_Build\ngtcp2\$(Configuration)\$(Platform)\ngtcp2.lib;$(SolutionDir)_Build\gnutls\$(Configuration)\$(Platform)\gnutls.lib;$(SolutionDir)_Build\nettle\$(Configuration)\$(Platform)\nettle.lib;$(SolutionDir)_Build\gmp\$(Configuration)\$(Platform)\gmp.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <DelayLoadDLLs>gdiplus.dll;msimg32.dll;oleacc.dll;runtimeobject.dll;ws2_32.dll;%(DelayLoadDLLs)</DelayLoadDLLs>
       <IgnoreSpecificDefaultLibraries>mpr.lib;rasapi32.lib;secur32.lib;sensapi.lib;vfw32.lib;%(IgnoreSpecificDefaultLibraries)</IgnoreSpecificDefaultLibraries>
       <OptimizeReferences>false</OptimizeReferences>
       <SubSystem>Windows</SubSystem>
@@ -186,7 +186,7 @@ if errorlevel 1 exit 1</Command>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM64'">
     <ClCompile>
-      <AdditionalIncludeDirectories>srchybrid;$(VC_ATLMFC_SourcePath);$(UniversalCRTSdkDir)Include\10.0.22621.0\um;$(UniversalCRTSdkDir)Include\10.0.22621.0\shared;.;mbedtls\include;mbedtls\tf-psa-crypto\include;mbedtls\tf-psa-crypto\drivers\builtin\include;miniupnpc\include;ResizableLib;libutp\include\libutp;libmaxminddb\include;MediaInfoLib\Source;ZenLib</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>srchybrid;$(VC_ATLMFC_SourcePath);$(UniversalCRTSdkDir)Include\10.0.22621.0\um;$(UniversalCRTSdkDir)Include\10.0.22621.0\shared;.;mbedtls\include;mbedtls\include\mbedtls;mbedtls\tf-psa-crypto\include;mbedtls\tf-psa-crypto\drivers\builtin\include;miniupnpc\include;ResizableLib;libutp\include\libutp;libmaxminddb\include;MediaInfoLib\Source;ZenLib;$(SolutionDir)_Build\gmp\Generated;gmp\mini-gmp;$(SolutionDir)_Build\nettle\Generated;$(SolutionDir)_Build\nettle\Generated\nettle;nettle;$(SolutionDir)_Build\gnutls\Generated;gnutls\lib\includes;$(SolutionDir)_Build\ngtcp2\Generated;ngtcp2\lib\includes;ngtcp2\crypto\includes</AdditionalIncludeDirectories>
       <AdditionalOptions>/Zc:enumTypes /Zc:throwingNew /FS</AdditionalOptions>
       <ExternalAnglebracketReferences>true</ExternalAnglebracketReferences>
       <ExternalWarningLevel>TurnOffAllWarnings</ExternalWarningLevel>
@@ -195,7 +195,7 @@ if errorlevel 1 exit 1</Command>
       </IntrinsicFunctions>
       <Optimization>Disabled</Optimization>
       <PrecompiledHeader>Use</PrecompiledHeader>
-      <PreprocessorDefinitions>MINIUPNP_STATICLIB;SUPPORT_LARGE_FILES;_HAS_AUTO_PTR_ETC=1;_DEBUG;_ASSERTFILE;USE_STRING_IDS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>MINIUPNP_STATICLIB;GNUTLS_STATIC;NGTCP2_STATICLIB;MINI_GMP_LIMB_TYPE=long;SUPPORT_LARGE_FILES;_DEBUG;_ASSERTFILE;USE_STRING_IDS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
       <WarningLevel>EnableAllWarnings</WarningLevel>
       <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
@@ -209,13 +209,13 @@ if errorlevel 1 exit 1</Command>
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <ControlFlowGuard>
       </ControlFlowGuard>
-      <LanguageStandard>stdcpp17</LanguageStandard>
+      <LanguageStandard>stdcpp20</LanguageStandard>
       <LanguageStandard_C>stdc17</LanguageStandard_C>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>ADSIId.lib;bcrypt.lib;crypt32.lib;delayimp.lib;iphlpapi.lib;version.lib;winmm.lib;ws2_32.lib;$(SolutionDir)_Build\zlib\$(Configuration)\$(Platform)\zlib.lib;$(SolutionDir)_Build\cryptlib\$(Configuration)\$(Platform)\cryptlib.lib;$(SolutionDir)_Build\ResizableLib\$(Configuration)\$(Platform)\ResizableLib.lib;$(SolutionDir)_Build\miniupnpc\$(Configuration)\$(Platform)\miniupnpc.lib;$(SolutionDir)_Build\mbedTLS\$(Configuration)\$(Platform)\mbedTLS.lib;$(SolutionDir)_Build\libutp\$(Configuration)\$(Platform)\libutp.lib;$(SolutionDir)_Build\maxminddb\$(Configuration)\$(Platform)\maxminddb.lib;$(SolutionDir)_Build\ZenLib\$(Configuration)\$(Platform)\ZenLib.lib;$(SolutionDir)_Build\MediaInfoLib\$(Configuration)\$(Platform)\MediaInfoLib.lib;%(AdditionalDependencies)</AdditionalDependencies>
-      <DelayLoadDLLs>gdiplus.dll;msimg32.dll;oleacc.dll;ws2_32.dll;%(DelayLoadDLLs)</DelayLoadDLLs>
+      <AdditionalDependencies>ole32.lib;propsys.lib;runtimeobject.lib;shell32.lib;ADSIId.lib;bcrypt.lib;crypt32.lib;delayimp.lib;iphlpapi.lib;version.lib;winmm.lib;ws2_32.lib;$(SolutionDir)_Build\zlib\$(Configuration)\$(Platform)\zlib.lib;$(SolutionDir)_Build\cryptlib\$(Configuration)\$(Platform)\cryptlib.lib;$(SolutionDir)_Build\ResizableLib\$(Configuration)\$(Platform)\ResizableLib.lib;$(SolutionDir)_Build\miniupnpc\$(Configuration)\$(Platform)\miniupnpc.lib;$(SolutionDir)_Build\mbedTLS\$(Configuration)\$(Platform)\mbedTLS.lib;$(SolutionDir)_Build\libutp\$(Configuration)\$(Platform)\libutp.lib;$(SolutionDir)_Build\maxminddb\$(Configuration)\$(Platform)\maxminddb.lib;$(SolutionDir)_Build\ZenLib\$(Configuration)\$(Platform)\ZenLib.lib;$(SolutionDir)_Build\MediaInfoLib\$(Configuration)\$(Platform)\MediaInfoLib.lib;$(SolutionDir)_Build\ngtcp2\$(Configuration)\$(Platform)\ngtcp2.lib;$(SolutionDir)_Build\gnutls\$(Configuration)\$(Platform)\gnutls.lib;$(SolutionDir)_Build\nettle\$(Configuration)\$(Platform)\nettle.lib;$(SolutionDir)_Build\gmp\$(Configuration)\$(Platform)\gmp.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <DelayLoadDLLs>gdiplus.dll;msimg32.dll;oleacc.dll;runtimeobject.dll;ws2_32.dll;%(DelayLoadDLLs)</DelayLoadDLLs>
       <IgnoreSpecificDefaultLibraries>mpr.lib;rasapi32.lib;secur32.lib;sensapi.lib;vfw32.lib;%(IgnoreSpecificDefaultLibraries)</IgnoreSpecificDefaultLibraries>
       <OptimizeReferences>false</OptimizeReferences>
       <SubSystem>Windows</SubSystem>
@@ -233,7 +233,7 @@ if errorlevel 1 exit 1</Command>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
     <ClCompile>
-      <AdditionalIncludeDirectories>srchybrid;$(VC_ATLMFC_SourcePath);$(UniversalCRTSdkDir)Include\10.0.22621.0\um;$(UniversalCRTSdkDir)Include\10.0.22621.0\shared;.;mbedtls\include;mbedtls\tf-psa-crypto\include;mbedtls\tf-psa-crypto\drivers\builtin\include;miniupnpc\include;ResizableLib;libutp\include\libutp;libmaxminddb\include;MediaInfoLib\Source;ZenLib</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>srchybrid;$(VC_ATLMFC_SourcePath);$(UniversalCRTSdkDir)Include\10.0.22621.0\um;$(UniversalCRTSdkDir)Include\10.0.22621.0\shared;.;mbedtls\include;mbedtls\include\mbedtls;mbedtls\tf-psa-crypto\include;mbedtls\tf-psa-crypto\drivers\builtin\include;miniupnpc\include;ResizableLib;libutp\include\libutp;libmaxminddb\include;MediaInfoLib\Source;ZenLib;$(SolutionDir)_Build\gmp\Generated;gmp\mini-gmp;$(SolutionDir)_Build\nettle\Generated;$(SolutionDir)_Build\nettle\Generated\nettle;nettle;$(SolutionDir)_Build\gnutls\Generated;gnutls\lib\includes;$(SolutionDir)_Build\ngtcp2\Generated;ngtcp2\lib\includes;ngtcp2\crypto\includes</AdditionalIncludeDirectories>
       <AdditionalOptions>/Zc:throwingNew</AdditionalOptions>
       <ExternalAnglebracketReferences>true</ExternalAnglebracketReferences>
       <ExternalWarningLevel>TurnOffAllWarnings</ExternalWarningLevel>
@@ -241,7 +241,7 @@ if errorlevel 1 exit 1</Command>
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <OmitFramePointers>true</OmitFramePointers>
       <PrecompiledHeader>Use</PrecompiledHeader>
-      <PreprocessorDefinitions>MINIUPNP_STATICLIB;SUPPORT_LARGE_FILES;_HAS_AUTO_PTR_ETC=1;NDEBUG;XP_BUILD;USE_STRING_IDS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>MINIUPNP_STATICLIB;GNUTLS_STATIC;NGTCP2_STATICLIB;MINI_GMP_LIMB_TYPE=long;SUPPORT_LARGE_FILES;NDEBUG;XP_BUILD;USE_STRING_IDS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <WarningLevel>EnableAllWarnings</WarningLevel>
       <InlineFunctionExpansion>AnySuitable</InlineFunctionExpansion>
       <FavorSizeOrSpeed>Speed</FavorSizeOrSpeed>
@@ -252,15 +252,15 @@ if errorlevel 1 exit 1</Command>
       <IntelJCCErratum>true</IntelJCCErratum>
       <GuardEHContMetadata>
       </GuardEHContMetadata>
-      <LanguageStandard>stdcpp17</LanguageStandard>
+      <LanguageStandard>stdcpp20</LanguageStandard>
       <LanguageStandard_C>stdc17</LanguageStandard_C>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
       <CallingConvention>Cdecl</CallingConvention>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>ADSIId.lib;bcrypt.lib;crypt32.lib;delayimp.lib;iphlpapi.lib;version.lib;winmm.lib;ws2_32.lib;$(SolutionDir)_Build\zlib\$(Configuration)\$(Platform)\zlib.lib;$(SolutionDir)_Build\cryptlib\$(Configuration)\$(Platform)\cryptlib.lib;$(SolutionDir)_Build\ResizableLib\$(Configuration)\$(Platform)\ResizableLib.lib;$(SolutionDir)_Build\miniupnpc\$(Configuration)\$(Platform)\miniupnpc.lib;$(SolutionDir)_Build\mbedTLS\$(Configuration)\$(Platform)\mbedTLS.lib;$(SolutionDir)_Build\libutp\$(Configuration)\$(Platform)\libutp.lib;$(SolutionDir)_Build\maxminddb\$(Configuration)\$(Platform)\maxminddb.lib;$(SolutionDir)_Build\ZenLib\$(Configuration)\$(Platform)\ZenLib.lib;$(SolutionDir)_Build\MediaInfoLib\$(Configuration)\$(Platform)\MediaInfoLib.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>ole32.lib;propsys.lib;runtimeobject.lib;shell32.lib;ADSIId.lib;bcrypt.lib;crypt32.lib;delayimp.lib;iphlpapi.lib;version.lib;winmm.lib;ws2_32.lib;$(SolutionDir)_Build\zlib\$(Configuration)\$(Platform)\zlib.lib;$(SolutionDir)_Build\cryptlib\$(Configuration)\$(Platform)\cryptlib.lib;$(SolutionDir)_Build\ResizableLib\$(Configuration)\$(Platform)\ResizableLib.lib;$(SolutionDir)_Build\miniupnpc\$(Configuration)\$(Platform)\miniupnpc.lib;$(SolutionDir)_Build\mbedTLS\$(Configuration)\$(Platform)\mbedTLS.lib;$(SolutionDir)_Build\libutp\$(Configuration)\$(Platform)\libutp.lib;$(SolutionDir)_Build\maxminddb\$(Configuration)\$(Platform)\maxminddb.lib;$(SolutionDir)_Build\ZenLib\$(Configuration)\$(Platform)\ZenLib.lib;$(SolutionDir)_Build\MediaInfoLib\$(Configuration)\$(Platform)\MediaInfoLib.lib;$(SolutionDir)_Build\ngtcp2\$(Configuration)\$(Platform)\ngtcp2.lib;$(SolutionDir)_Build\gnutls\$(Configuration)\$(Platform)\gnutls.lib;$(SolutionDir)_Build\nettle\$(Configuration)\$(Platform)\nettle.lib;$(SolutionDir)_Build\gmp\$(Configuration)\$(Platform)\gmp.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <AdditionalOptions>/safeseh</AdditionalOptions>
-      <DelayLoadDLLs>gdiplus.dll;msimg32.dll;oleacc.dll;ws2_32.dll;%(DelayLoadDLLs)</DelayLoadDLLs>
+      <DelayLoadDLLs>gdiplus.dll;msimg32.dll;oleacc.dll;runtimeobject.dll;ws2_32.dll;%(DelayLoadDLLs)</DelayLoadDLLs>
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <IgnoreSpecificDefaultLibraries>mpr.lib;rasapi32.lib;secur32.lib;sensapi.lib;vfw32.lib;%(IgnoreSpecificDefaultLibraries)</IgnoreSpecificDefaultLibraries>
       <LargeAddressAware>true</LargeAddressAware>
@@ -278,7 +278,7 @@ if errorlevel 1 exit 1</Command>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
-      <AdditionalIncludeDirectories>srchybrid;$(VC_ATLMFC_SourcePath);$(UniversalCRTSdkDir)Include\10.0.22621.0\um;$(UniversalCRTSdkDir)Include\10.0.22621.0\shared;.;mbedtls\include;mbedtls\tf-psa-crypto\include;mbedtls\tf-psa-crypto\drivers\builtin\include;miniupnpc\include;ResizableLib;libutp\include\libutp;libmaxminddb\include;MediaInfoLib\Source;ZenLib</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>srchybrid;$(VC_ATLMFC_SourcePath);$(UniversalCRTSdkDir)Include\10.0.22621.0\um;$(UniversalCRTSdkDir)Include\10.0.22621.0\shared;.;mbedtls\include;mbedtls\include\mbedtls;mbedtls\tf-psa-crypto\include;mbedtls\tf-psa-crypto\drivers\builtin\include;miniupnpc\include;ResizableLib;libutp\include\libutp;libmaxminddb\include;MediaInfoLib\Source;ZenLib;$(SolutionDir)_Build\gmp\Generated;gmp\mini-gmp;$(SolutionDir)_Build\nettle\Generated;$(SolutionDir)_Build\nettle\Generated\nettle;nettle;$(SolutionDir)_Build\gnutls\Generated;gnutls\lib\includes;$(SolutionDir)_Build\ngtcp2\Generated;ngtcp2\lib\includes;ngtcp2\crypto\includes</AdditionalIncludeDirectories>
       <AdditionalOptions>/Zc:throwingNew</AdditionalOptions>
       <ExternalAnglebracketReferences>true</ExternalAnglebracketReferences>
       <ExternalWarningLevel>TurnOffAllWarnings</ExternalWarningLevel>
@@ -286,7 +286,7 @@ if errorlevel 1 exit 1</Command>
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <OmitFramePointers>true</OmitFramePointers>
       <PrecompiledHeader>Use</PrecompiledHeader>
-      <PreprocessorDefinitions>MINIUPNP_STATICLIB;SUPPORT_LARGE_FILES;_HAS_AUTO_PTR_ETC=1;NDEBUG;XP_BUILD;USE_STRING_IDS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>MINIUPNP_STATICLIB;GNUTLS_STATIC;NGTCP2_STATICLIB;MINI_GMP_LIMB_TYPE=long;SUPPORT_LARGE_FILES;NDEBUG;XP_BUILD;USE_STRING_IDS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <WarningLevel>EnableAllWarnings</WarningLevel>
       <InlineFunctionExpansion>AnySuitable</InlineFunctionExpansion>
       <FavorSizeOrSpeed>Speed</FavorSizeOrSpeed>
@@ -295,14 +295,14 @@ if errorlevel 1 exit 1</Command>
       <IntelJCCErratum>true</IntelJCCErratum>
       <ControlFlowGuard>false</ControlFlowGuard>
       <GuardEHContMetadata>true</GuardEHContMetadata>
-      <LanguageStandard>stdcpp17</LanguageStandard>
+      <LanguageStandard>stdcpp20</LanguageStandard>
       <LanguageStandard_C>stdc17</LanguageStandard_C>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
       <DebugInformationFormat>None</DebugInformationFormat>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>ADSIId.lib;bcrypt.lib;crypt32.lib;delayimp.lib;iphlpapi.lib;version.lib;winmm.lib;ws2_32.lib;$(SolutionDir)_Build\zlib\$(Configuration)\$(Platform)\zlib.lib;$(SolutionDir)_Build\cryptlib\$(Configuration)\$(Platform)\cryptlib.lib;$(SolutionDir)_Build\ResizableLib\$(Configuration)\$(Platform)\ResizableLib.lib;$(SolutionDir)_Build\miniupnpc\$(Configuration)\$(Platform)\miniupnpc.lib;$(SolutionDir)_Build\mbedTLS\$(Configuration)\$(Platform)\mbedTLS.lib;$(SolutionDir)_Build\libutp\$(Configuration)\$(Platform)\libutp.lib;$(SolutionDir)_Build\maxminddb\$(Configuration)\$(Platform)\maxminddb.lib;$(SolutionDir)_Build\ZenLib\$(Configuration)\$(Platform)\ZenLib.lib;$(SolutionDir)_Build\MediaInfoLib\$(Configuration)\$(Platform)\MediaInfoLib.lib;%(AdditionalDependencies)</AdditionalDependencies>
-      <DelayLoadDLLs>gdiplus.dll;msimg32.dll;oleacc.dll;ws2_32.dll;%(DelayLoadDLLs)</DelayLoadDLLs>
+      <AdditionalDependencies>ole32.lib;propsys.lib;runtimeobject.lib;shell32.lib;ADSIId.lib;bcrypt.lib;crypt32.lib;delayimp.lib;iphlpapi.lib;version.lib;winmm.lib;ws2_32.lib;$(SolutionDir)_Build\zlib\$(Configuration)\$(Platform)\zlib.lib;$(SolutionDir)_Build\cryptlib\$(Configuration)\$(Platform)\cryptlib.lib;$(SolutionDir)_Build\ResizableLib\$(Configuration)\$(Platform)\ResizableLib.lib;$(SolutionDir)_Build\miniupnpc\$(Configuration)\$(Platform)\miniupnpc.lib;$(SolutionDir)_Build\mbedTLS\$(Configuration)\$(Platform)\mbedTLS.lib;$(SolutionDir)_Build\libutp\$(Configuration)\$(Platform)\libutp.lib;$(SolutionDir)_Build\maxminddb\$(Configuration)\$(Platform)\maxminddb.lib;$(SolutionDir)_Build\ZenLib\$(Configuration)\$(Platform)\ZenLib.lib;$(SolutionDir)_Build\MediaInfoLib\$(Configuration)\$(Platform)\MediaInfoLib.lib;$(SolutionDir)_Build\ngtcp2\$(Configuration)\$(Platform)\ngtcp2.lib;$(SolutionDir)_Build\gnutls\$(Configuration)\$(Platform)\gnutls.lib;$(SolutionDir)_Build\nettle\$(Configuration)\$(Platform)\nettle.lib;$(SolutionDir)_Build\gmp\$(Configuration)\$(Platform)\gmp.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <DelayLoadDLLs>gdiplus.dll;msimg32.dll;oleacc.dll;runtimeobject.dll;ws2_32.dll;%(DelayLoadDLLs)</DelayLoadDLLs>
       <IgnoreSpecificDefaultLibraries>mpr.lib;rasapi32.lib;secur32.lib;sensapi.lib;vfw32.lib;%(IgnoreSpecificDefaultLibraries)</IgnoreSpecificDefaultLibraries>
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
@@ -321,7 +321,7 @@ if errorlevel 1 exit 1</Command>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|ARM64'">
     <ClCompile>
-      <AdditionalIncludeDirectories>srchybrid;$(VC_ATLMFC_SourcePath);$(UniversalCRTSdkDir)Include\10.0.22621.0\um;$(UniversalCRTSdkDir)Include\10.0.22621.0\shared;.;mbedtls\include;mbedtls\tf-psa-crypto\include;mbedtls\tf-psa-crypto\drivers\builtin\include;miniupnpc\include;ResizableLib;libutp\include\libutp;libmaxminddb\include;MediaInfoLib\Source;ZenLib</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>srchybrid;$(VC_ATLMFC_SourcePath);$(UniversalCRTSdkDir)Include\10.0.22621.0\um;$(UniversalCRTSdkDir)Include\10.0.22621.0\shared;.;mbedtls\include;mbedtls\include\mbedtls;mbedtls\tf-psa-crypto\include;mbedtls\tf-psa-crypto\drivers\builtin\include;miniupnpc\include;ResizableLib;libutp\include\libutp;libmaxminddb\include;MediaInfoLib\Source;ZenLib;$(SolutionDir)_Build\gmp\Generated;gmp\mini-gmp;$(SolutionDir)_Build\nettle\Generated;$(SolutionDir)_Build\nettle\Generated\nettle;nettle;$(SolutionDir)_Build\gnutls\Generated;gnutls\lib\includes;$(SolutionDir)_Build\ngtcp2\Generated;ngtcp2\lib\includes;ngtcp2\crypto\includes</AdditionalIncludeDirectories>
       <AdditionalOptions>/Zc:enumTypes /Zc:throwingNew</AdditionalOptions>
       <ExternalAnglebracketReferences>true</ExternalAnglebracketReferences>
       <ExternalWarningLevel>TurnOffAllWarnings</ExternalWarningLevel>
@@ -329,7 +329,7 @@ if errorlevel 1 exit 1</Command>
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <OmitFramePointers>true</OmitFramePointers>
       <PrecompiledHeader>Use</PrecompiledHeader>
-      <PreprocessorDefinitions>MINIUPNP_STATICLIB;SUPPORT_LARGE_FILES;_HAS_AUTO_PTR_ETC=1;NDEBUG;USE_STRING_IDS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>MINIUPNP_STATICLIB;GNUTLS_STATIC;NGTCP2_STATICLIB;MINI_GMP_LIMB_TYPE=long;SUPPORT_LARGE_FILES;NDEBUG;USE_STRING_IDS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <WarningLevel>EnableAllWarnings</WarningLevel>
       <InlineFunctionExpansion>AnySuitable</InlineFunctionExpansion>
       <FavorSizeOrSpeed>Speed</FavorSizeOrSpeed>
@@ -337,14 +337,14 @@ if errorlevel 1 exit 1</Command>
       <ExceptionHandling>Async</ExceptionHandling>
       <ControlFlowGuard>false</ControlFlowGuard>
       <GuardEHContMetadata>true</GuardEHContMetadata>
-      <LanguageStandard>stdcpp17</LanguageStandard>
+      <LanguageStandard>stdcpp20</LanguageStandard>
       <LanguageStandard_C>stdc17</LanguageStandard_C>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
       <DebugInformationFormat>None</DebugInformationFormat>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>ADSIId.lib;bcrypt.lib;crypt32.lib;delayimp.lib;iphlpapi.lib;version.lib;winmm.lib;ws2_32.lib;$(SolutionDir)_Build\zlib\$(Configuration)\$(Platform)\zlib.lib;$(SolutionDir)_Build\cryptlib\$(Configuration)\$(Platform)\cryptlib.lib;$(SolutionDir)_Build\ResizableLib\$(Configuration)\$(Platform)\ResizableLib.lib;$(SolutionDir)_Build\miniupnpc\$(Configuration)\$(Platform)\miniupnpc.lib;$(SolutionDir)_Build\mbedTLS\$(Configuration)\$(Platform)\mbedTLS.lib;$(SolutionDir)_Build\libutp\$(Configuration)\$(Platform)\libutp.lib;$(SolutionDir)_Build\maxminddb\$(Configuration)\$(Platform)\maxminddb.lib;$(SolutionDir)_Build\ZenLib\$(Configuration)\$(Platform)\ZenLib.lib;$(SolutionDir)_Build\MediaInfoLib\$(Configuration)\$(Platform)\MediaInfoLib.lib;%(AdditionalDependencies)</AdditionalDependencies>
-      <DelayLoadDLLs>gdiplus.dll;msimg32.dll;oleacc.dll;ws2_32.dll;%(DelayLoadDLLs)</DelayLoadDLLs>
+      <AdditionalDependencies>ole32.lib;propsys.lib;runtimeobject.lib;shell32.lib;ADSIId.lib;bcrypt.lib;crypt32.lib;delayimp.lib;iphlpapi.lib;version.lib;winmm.lib;ws2_32.lib;$(SolutionDir)_Build\zlib\$(Configuration)\$(Platform)\zlib.lib;$(SolutionDir)_Build\cryptlib\$(Configuration)\$(Platform)\cryptlib.lib;$(SolutionDir)_Build\ResizableLib\$(Configuration)\$(Platform)\ResizableLib.lib;$(SolutionDir)_Build\miniupnpc\$(Configuration)\$(Platform)\miniupnpc.lib;$(SolutionDir)_Build\mbedTLS\$(Configuration)\$(Platform)\mbedTLS.lib;$(SolutionDir)_Build\libutp\$(Configuration)\$(Platform)\libutp.lib;$(SolutionDir)_Build\maxminddb\$(Configuration)\$(Platform)\maxminddb.lib;$(SolutionDir)_Build\ZenLib\$(Configuration)\$(Platform)\ZenLib.lib;$(SolutionDir)_Build\MediaInfoLib\$(Configuration)\$(Platform)\MediaInfoLib.lib;$(SolutionDir)_Build\ngtcp2\$(Configuration)\$(Platform)\ngtcp2.lib;$(SolutionDir)_Build\gnutls\$(Configuration)\$(Platform)\gnutls.lib;$(SolutionDir)_Build\nettle\$(Configuration)\$(Platform)\nettle.lib;$(SolutionDir)_Build\gmp\$(Configuration)\$(Platform)\gmp.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <DelayLoadDLLs>gdiplus.dll;msimg32.dll;oleacc.dll;runtimeobject.dll;ws2_32.dll;%(DelayLoadDLLs)</DelayLoadDLLs>
       <IgnoreSpecificDefaultLibraries>mpr.lib;rasapi32.lib;secur32.lib;sensapi.lib;vfw32.lib;%(IgnoreSpecificDefaultLibraries)</IgnoreSpecificDefaultLibraries>
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
@@ -382,23 +382,27 @@ if errorlevel 1 exit 1</Command>
     <ClCompile Include="srchybrid\eMuleAI\ConChecker.cpp" />
     <ClCompile Include="srchybrid\eMuleAI\DebugLeakHelper.cpp" />
     <ClCompile Include="srchybrid\eMuleAI\DesktopIntegration.cpp" />
-    <ClCompile Include="srchybrid\eMuleAI\DownloadChecker.cpp" />
+    <ClCompile Include="srchybrid\eMuleAI\DownloadValidator.cpp" />
     <ClCompile Include="srchybrid\eMuleAI\KeyHelper.cpp" />
     <ClCompile Include="srchybrid\eMuleAI\MenuXP.cpp" />
     <ClCompile Include="srchybrid\eMuleAI\ReadWriteLock.cpp" />
     <ClCompile Include="srchybrid\eMuleAI\DarkMode.cpp" />
     <ClCompile Include="srchybrid\eMuleAI\Shield.cpp" />
     <ClCompile Include="srchybrid\eMuleAI\FastKad.cpp" />
-    <ClCompile Include="srchybrid\eMuleAI\GeoLite2PP.cpp" />
-    <ClCompile Include="srchybrid\eMuleAI\GeoLite2PP_error_category.cpp" />
     <ClCompile Include="srchybrid\eMuleAI\MediaInfoLib.cpp" />
     <ClCompile Include="srchybrid\eMuleAI\PPgBlacklistPanel.cpp" />
     <ClCompile Include="srchybrid\eMuleAI\PPgProtectionPanel.cpp" />
     <ClCompile Include="srchybrid\eMuleAI\PPgMod.cpp" />
     <ClCompile Include="srchybrid\eMuleAI\SafeKad.cpp" />
+    <ClCompile Include="srchybrid\eMuleAI\SharedCache.cpp" />
+    <ClCompile Include="srchybrid\eMuleAI\NetBind.cpp" />
+    <ClCompile Include="srchybrid\eMuleAI\IpGuard.cpp" />
     <ClCompile Include="srchybrid\eMuleAI\SourceSaver.cpp" />
     <ClCompile Include="srchybrid\eMuleAI\SpeedGraph.cpp" />
+    <ClCompile Include="srchybrid\eMuleAI\NgTcp2GnuTlsBridge.cpp" />
+    <ClCompile Include="srchybrid\eMuleAI\QuicNatSocket.cpp" />
     <ClCompile Include="srchybrid\eMuleAI\UtpSocket.cpp" />
+    <ClCompile Include="srchybrid\eMuleAI\ToastNotify.cpp" />
     <ClCompile Include="srchybrid\CaptchaGenerator.cpp" />
     <ClCompile Include="srchybrid\CatDialog.cpp" />
     <ClCompile Include="srchybrid\ChatSelector.cpp" />
@@ -425,7 +429,6 @@ if errorlevel 1 exit 1</Command>
     <ClCompile Include="srchybrid\DeadSourceList.cpp" />
     <ClCompile Include="srchybrid\DialogMinTrayBtn.cpp" />
     <ClCompile Include="srchybrid\DirectDownloadDlg.cpp" />
-    <ClCompile Include="srchybrid\eMuleAI\GeoLiteDownloadDlg.cpp" />
     <ClCompile Include="srchybrid\DirectoryTreeCtrl.cpp" />
     <ClCompile Include="srchybrid\DownloadClient.cpp" />
     <ClCompile Include="srchybrid\DownloadClientsCtrl.cpp" />
@@ -450,7 +453,6 @@ if errorlevel 1 exit 1</Command>
     <ClCompile Include="srchybrid\FileDetailDlgStatistics.cpp" />
     <ClCompile Include="srchybrid\FileIdentifier.cpp" />
     <ClCompile Include="srchybrid\FileInfoDialog.cpp" />
-    <ClCompile Include="srchybrid\FirewallOpener.cpp" />
     <ClCompile Include="srchybrid\FrameGrabThread.cpp" />
     <ClCompile Include="srchybrid\Friend.cpp" />
     <ClCompile Include="srchybrid\FriendList.cpp" />
@@ -526,7 +528,7 @@ if errorlevel 1 exit 1</Command>
     <ClCompile Include="srchybrid\MuleStatusBarCtrl.cpp" />
     <ClCompile Include="srchybrid\MuleSystrayDlg.cpp" />
     <ClCompile Include="srchybrid\MuleToolBarCtrl.cpp" />
-    <ClCompile Include="srchybrid\eMuleAI\GeoLite2.cpp" />
+    <ClCompile Include="srchybrid\eMuleAI\IPGeolocation.cpp" />
     <ClCompile Include="srchybrid\NetworkInfoDlg.cpp" />
     <ClCompile Include="srchybrid\OScopeCtrl.cpp" />
     <ClCompile Include="srchybrid\OtherFunctions.cpp" />
@@ -679,7 +681,7 @@ if errorlevel 1 exit 1</Command>
     <ClInclude Include="srchybrid\eMuleAI\ConChecker.h" />
     <ClInclude Include="srchybrid\eMuleAI\DebugLeakHelper.h" />
     <ClInclude Include="srchybrid\eMuleAI\DesktopIntegration.h" />
-    <ClInclude Include="srchybrid\eMuleAI\DownloadChecker.h" />
+    <ClInclude Include="srchybrid\eMuleAI\DownloadValidator.h" />
     <ClInclude Include="srchybrid\eMuleAI\Json.hpp" />
     <ClInclude Include="srchybrid\eMuleAI\Json_fwd.hpp" />
     <ClInclude Include="srchybrid\eMuleAI\KeyHelper.h" />
@@ -689,18 +691,23 @@ if errorlevel 1 exit 1</Command>
     <ClInclude Include="srchybrid\eMuleAI\DarkMode.h" />
     <ClInclude Include="srchybrid\eMuleAI\Shield.h" />
     <ClInclude Include="srchybrid\eMuleAI\FastKad.h" />
-    <ClInclude Include="srchybrid\eMuleAI\GeoLite2PP.hpp" />
-    <ClInclude Include="srchybrid\eMuleAI\GeoLite2PP_error_category.hpp" />
     <ClInclude Include="srchybrid\eMuleAI\MediaInfoLib.h" />
     <ClInclude Include="srchybrid\eMuleAI\PPgBlacklistPanel.h" />
     <ClInclude Include="srchybrid\eMuleAI\PPgProtectionPanel.h" />
     <ClInclude Include="srchybrid\eMuleAI\PPgMod.h" />
     <ClInclude Include="srchybrid\eMuleAI\SafeKad.h" />
+    <ClInclude Include="srchybrid\eMuleAI\SharedCache.h" />
+    <ClInclude Include="srchybrid\eMuleAI\NetBind.h" />
+    <ClInclude Include="srchybrid\eMuleAI\IpGuard.h" />
     <ClInclude Include="srchybrid\eMuleAI\SourceSaver.h" />
     <ClInclude Include="srchybrid\eMuleAI\SpeedGraph.h" />
     <ClInclude Include="srchybrid\eMuleAI\ThreadpoolWrapper.h" />
     <ClInclude Include="srchybrid\eMuleAI\Timsort.hpp" />
+    <ClInclude Include="srchybrid\eMuleAI\NgTcp2GnuTlsBridge.h" />
+    <ClInclude Include="srchybrid\eMuleAI\QuicNatConfig.h" />
+    <ClInclude Include="srchybrid\eMuleAI\QuicNatSocket.h" />
     <ClInclude Include="srchybrid\eMuleAI\UtpSocket.h" />
+    <ClInclude Include="srchybrid\eMuleAI\ToastNotify.h" />
     <ClInclude Include="srchybrid\CaptchaGenerator.h" />
     <ClInclude Include="srchybrid\CatDialog.h" />
     <ClInclude Include="srchybrid\ChatSelector.h" />
@@ -730,7 +737,6 @@ if errorlevel 1 exit 1</Command>
     <ClInclude Include="srchybrid\DebugHelpers.h" />
     <ClInclude Include="srchybrid\DialogMinTrayBtn.h" />
     <ClInclude Include="srchybrid\DirectDownloadDlg.h" />
-    <ClInclude Include="srchybrid\eMuleAI\GeoLiteDownloadDlg.h" />
     <ClInclude Include="srchybrid\DirectoryTreeCtrl.h" />
     <ClInclude Include="srchybrid\DownloadClientsCtrl.h" />
     <ClInclude Include="srchybrid\DownloadListCtrl.h" />
@@ -757,7 +763,6 @@ if errorlevel 1 exit 1</Command>
     <ClInclude Include="srchybrid\FileDetailDlgStatistics.h" />
     <ClInclude Include="srchybrid\FileIdentifier.h" />
     <ClInclude Include="srchybrid\FileInfoDialog.h" />
-    <ClInclude Include="srchybrid\FirewallOpener.h" />
     <ClInclude Include="srchybrid\FrameGrabThread.h" />
     <ClInclude Include="srchybrid\Friend.h" />
     <ClInclude Include="srchybrid\FriendList.h" />
@@ -841,7 +846,7 @@ if errorlevel 1 exit 1</Command>
     <ClInclude Include="srchybrid\MuleStatusBarCtrl.h" />
     <ClInclude Include="srchybrid\MuleSystrayDlg.h" />
     <ClInclude Include="srchybrid\MuleToolBarCtrl.h" />
-    <ClInclude Include="srchybrid\eMuleAI\GeoLite2.h" />
+    <ClInclude Include="srchybrid\eMuleAI\IPGeolocation.h" />
     <ClInclude Include="srchybrid\NetworkInfoDlg.h" />
     <ClInclude Include="srchybrid\Opcodes.h" />
     <ClInclude Include="srchybrid\OScopeCtrl.h" />

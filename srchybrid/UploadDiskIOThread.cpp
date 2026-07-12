@@ -50,6 +50,12 @@ static char THIS_FILE[] = __FILE__;
 
 IMPLEMENT_DYNCREATE(CUploadDiskIOThread, CWinThread)
 
+namespace
+{
+	const DWORD UPLOAD_DISK_IO_THREAD_STOP_POLL_MS = 50;
+	const DWORD UPLOAD_DISK_IO_THREAD_STOP_SLOW_LOG_MS = 5000;
+}
+
 CUploadDiskIOThread::CUploadDiskIOThread()
 	: m_eventThreadEnded(FALSE, TRUE)
 	, m_hPort()
@@ -77,16 +83,43 @@ UINT AFX_CDECL CUploadDiskIOThread::RunProc(LPVOID pParam)
 
 void CUploadDiskIOThread::EndThread()
 {
-	m_Run = RUN_STOP;
-	PostQueuedCompletionStatus(m_hPort, 0, 0, NULL);
-	m_eventThreadEnded.Lock();
+	if (m_eventThreadEnded.Lock(0))
+		return;
+
+	InterlockedExchange8(&m_Run, RUN_STOP);
+	const DWORD dwStarted = ::GetTickCount();
+	bool bStopPosted = false;
+	bool bStopPostFailureLogged = false;
+	bool bSlowLogged = false;
+	for (;;) {
+		HANDLE hPort = m_hPort;
+		if (!bStopPosted && hPort != NULL) {
+			if (::PostQueuedCompletionStatus(hPort, 0, 0, NULL))
+				bStopPosted = true;
+			else if (!bStopPostFailureLogged) {
+				AddDebugLogLine(DLP_HIGH, false, _T("Upload disk IO thread stop signal failed. error=%lu\n"), ::GetLastError());
+				bStopPostFailureLogged = true;
+			}
+		}
+		if (m_eventThreadEnded.Lock(UPLOAD_DISK_IO_THREAD_STOP_POLL_MS))
+			return;
+		if (!bSlowLogged && ::GetTickCount() - dwStarted >= UPLOAD_DISK_IO_THREAD_STOP_SLOW_LOG_MS) {
+			AddDebugLogLine(DLP_HIGH, false, _T("Upload disk IO thread shutdown is still waiting. elapsed=%lu run=%d port=%p stopPosted=%u\n"), ::GetTickCount() - dwStarted, (int)m_Run, hPort, bStopPosted ? 1U : 0U);
+			bSlowLogged = true;
+		}
+		InterlockedExchange8(&m_Run, RUN_STOP);
+	}
 }
 
 UINT CUploadDiskIOThread::RunInternal()
 {
 	m_hPort = ::CreateIoCompletionPort(INVALID_HANDLE_VALUE, 0, 0, 1);
-	if (!m_hPort)
-		return ::GetLastError();
+	if (!m_hPort) {
+		const DWORD dwError = ::GetLastError();
+		m_Run = RUN_STOP;
+		m_eventThreadEnded.SetEvent();
+		return dwError;
+	}
 
 	DWORD dwRead = 0;
 	ULONG_PTR completionKey = 0;
@@ -199,8 +232,8 @@ void CUploadDiskIOThread::StartCreateNextBlockPackage(UploadingToClient_Struct *
 	// GetQueueSessionPayloadUp is probably outdated so also add the value reported by the sockets as sent
 	nCurQueueSessionPayloadUp += pSock->GetSentPayloadSinceLastCall(false);
 	uint64 addedPayloadQueueSession = pClient->GetQueueSessionUploadAdded();
-	// buffer at least 1 block (180KB) for normal uploads, and 5 blocks (~900KB) for fast uploads
-	const uint32 nBufferLimit = (pClient->GetUploadDatarate() > BIGBUFFER_MINDATARATE) ? (5 * EMBLOCKSIZE + 1) : (EMBLOCKSIZE + 1);
+	const UINT uBufferBlocks = theApp.uploadqueue != NULL ? theApp.uploadqueue->GetUploadBufferBlockCount(pClient) : 1;
+	const uint32 nBufferLimit = uBufferBlocks * EMBLOCKSIZE + 1;
 
 	if (addedPayloadQueueSession > nCurQueueSessionPayloadUp && addedPayloadQueueSession - nCurQueueSessionPayloadUp >= nBufferLimit)
 		return; // the buffered data is large enough already
@@ -237,38 +270,81 @@ void CUploadDiskIOThread::StartCreateNextBlockPackage(UploadingToClient_Struct *
 				throwCStr(_T("StartCreateNextBlockPackage: cannot open CKnownFile"));
 
 			// initiate read
-			OverlappedRead_Struct *pOverlappedRead = new OverlappedRead_Struct;
-			pOverlappedRead->oOverlap.Internal = 0;
-			pOverlappedRead->oOverlap.InternalHigh = 0;
-			*(uint64*)&pOverlappedRead->oOverlap.Offset = currentblock->StartOffset;
-			pOverlappedRead->oOverlap.hEvent = 0;
-			pOverlappedRead->pFile = pFile;
-			pOverlappedRead->pUploadClientStruct = pUploadClientStruct;
-			pOverlappedRead->uStartOffset = currentblock->StartOffset;
-			pOverlappedRead->uEndOffset = currentblock->EndOffset;
-			pOverlappedRead->pBuffer = new byte[(size_t)uTogo];
-
-			if (!::ReadFile(pFile->m_hRead, pOverlappedRead->pBuffer, (DWORD)uTogo, NULL, (LPOVERLAPPED)pOverlappedRead)) {
-				DWORD dwError = ::GetLastError();
-				if (dwError != ERROR_IO_PENDING) {
-					delete[] pOverlappedRead->pBuffer;
-					delete pOverlappedRead;
-
-					if (dwError == ERROR_INVALID_USER_BUFFER || dwError == ERROR_NOT_ENOUGH_MEMORY || dwError == ERROR_NOT_ENOUGH_QUOTA) {
-						theApp.QueueDebugLogLineEx(LOG_WARNING, _T("ReadFile failed, possibly too many pending requests, trying again later"));
-						return; // make this a recoverable error, as it might just be that we have too many requests in which case we just need to wait
-					}
-					throw _T("ReadFile Error: ") + GetErrorMessage(::GetLastError());
+			OverlappedRead_Struct *pOverlappedRead = NULL;
+			bool bReadReferenceAdded = false;
+			bool bPendingBlockCounted = false;
+			bool bPendingListLinked = false;
+			auto cleanupFailedReadDispatch = [&]() {
+				if (bPendingListLinked) {
+					m_listPendingIO.RemoveAt(pOverlappedRead->pos);
+					bPendingListLinked = false;
 				}
+				if (bPendingBlockCounted) {
+					::InterlockedDecrement(&pUploadClientStruct->m_nPendingIOBlocks);
+					bPendingBlockCounted = false;
+				}
+				if (bReadReferenceAdded) {
+					--pFile->nInUse;
+					bReadReferenceAdded = false;
+				}
+				if (pOverlappedRead != NULL)
+					delete[] pOverlappedRead->pBuffer;
+				delete pOverlappedRead;
+				pOverlappedRead = NULL;
+			};
+
+			try {
+				pOverlappedRead = new OverlappedRead_Struct;
+				pOverlappedRead->oOverlap.Internal = 0;
+				pOverlappedRead->oOverlap.InternalHigh = 0;
+				*(uint64*)&pOverlappedRead->oOverlap.Offset = currentblock->StartOffset;
+				pOverlappedRead->oOverlap.hEvent = 0;
+				pOverlappedRead->pFile = pFile;
+				pOverlappedRead->pUploadClientStruct = pUploadClientStruct;
+				pOverlappedRead->uStartOffset = currentblock->StartOffset;
+				pOverlappedRead->uEndOffset = currentblock->EndOffset;
+				pOverlappedRead->pBuffer = NULL;
+				pOverlappedRead->pBuffer = new byte[(size_t)uTogo];
+
+				++pFile->nInUse;
+				bReadReferenceAdded = true;
+				::InterlockedIncrement(&pUploadClientStruct->m_nPendingIOBlocks);
+				bPendingBlockCounted = true;
+				pOverlappedRead->pos = m_listPendingIO.AddTail(pOverlappedRead);
+				bPendingListLinked = true;
+
+				if (!::ReadFile(pFile->m_hRead, pOverlappedRead->pBuffer, (DWORD)uTogo, NULL, (LPOVERLAPPED)pOverlappedRead)) {
+					DWORD dwError = ::GetLastError();
+					if (dwError != ERROR_IO_PENDING) {
+						cleanupFailedReadDispatch();
+
+						if (dwError == ERROR_INVALID_USER_BUFFER || dwError == ERROR_NOT_ENOUGH_MEMORY || dwError == ERROR_NOT_ENOUGH_QUOTA) {
+							theApp.QueueDebugLogLineEx(LOG_WARNING, _T("ReadFile failed, possibly too many pending requests, trying again later"));
+							return; // make this a recoverable error, as it might just be that we have too many requests in which case we just need to wait
+						}
+						throw _T("ReadFile Error: ") + GetErrorMessage(dwError);
+					}
+				}
+			} catch (...) {
+				cleanupFailedReadDispatch();
+				throw;
 			}
-			++pFile->nInUse;
-			pOverlappedRead->pos = m_listPendingIO.AddTail(pOverlappedRead);
 			DEBUG_ONLY(dbgDataReadPending += uTogo);
 
+			Requested_Block_Struct *pDoneBlock = pUploadClientStruct->m_BlockRequests_queue.GetHead();
+			const SUploadBlockRequestKey doneKey(pDoneBlock->StartOffset, pDoneBlock->EndOffset, pDoneBlock->FileID);
+			pUploadClientStruct->m_DoneBlocks_keys.insert(doneKey);
+			try {
+				pUploadClientStruct->m_DoneBlocks_list.AddHead(pDoneBlock);
+			} catch (...) {
+				pUploadClientStruct->m_DoneBlocks_keys.erase(doneKey);
+				throw;
+			}
+			pUploadClientStruct->m_BlockRequests_keys.erase(doneKey);
+			pUploadClientStruct->m_BlockRequests_queue.RemoveHead();
 			addedPayloadQueueSession += uTogo;
 			pClient->SetQueueSessionUploadAdded(addedPayloadQueueSession);
 			pFile->statistic.AddBlockTransferred(currentblock->StartOffset, currentblock->EndOffset, 1);
-			pUploadClientStruct->m_DoneBlocks_list.AddHead(pUploadClientStruct->m_BlockRequests_queue.RemoveHead());
 		}
 		return; //no errors
 	} catch (const CString &ex) {
@@ -278,6 +354,7 @@ void CUploadDiskIOThread::StartCreateNextBlockPackage(UploadingToClient_Struct *
 		ex->Delete();
 	}
 	pUploadClientStruct->m_bIOError = true; // will let remove this client from the list in the main thread
+	theApp.QueueUploadDiskIoResultEvent(pClient, _T("upload-disk-read-queue-error"), ::GetLastError());
 }
 
 void CUploadDiskIOThread::ReadCompletionRoutine(DWORD dwRead, const OverlappedRead_Struct *pOvRead)
@@ -288,9 +365,26 @@ void CUploadDiskIOThread::ReadCompletionRoutine(DWORD dwRead, const OverlappedRe
 	}
 	ASSERT(pOvRead->pFile && pOvRead->pos);
 
-	--pOvRead->pFile->nInUse;
-
 	CKnownFile *pKnownFile = pOvRead->pFile;
+	UploadingToClient_Struct *pStruct = pOvRead->pUploadClientStruct;
+	CPacketList packetsList;
+	CClientReqSocket *pSocket = NULL;
+	bool bPendingBlockReleased = false;
+	auto releasePendingBlock = [&]() {
+		if (bPendingBlockReleased || pStruct == NULL || theApp.uploadqueue == NULL)
+			return;
+		CCriticalSection *pcsUploadListRead = NULL;
+		theApp.uploadqueue->GetUploadListTS(&pcsUploadListRead);
+		CSingleLock lockUploadListRead(pcsUploadListRead, TRUE);
+		ASSERT(lockUploadListRead.IsLocked());
+		bool bFound = false;
+		bool bRetired = false;
+		if (theApp.uploadqueue->HasUploadClientStructForDiskIO(pStruct, bFound, bRetired)) {
+			::InterlockedDecrement(&pStruct->m_nPendingIOBlocks);
+			bPendingBlockReleased = true;
+		}
+	};
+
 	if (m_Run) {
 		m_listPendingIO.RemoveAt(pOvRead->pos);
 		bool bReadError = !dwRead;
@@ -301,28 +395,21 @@ void CUploadDiskIOThread::ReadCompletionRoutine(DWORD dwRead, const OverlappedRe
 				, (DWORD)(pOvRead->uEndOffset - pOvRead->uStartOffset), dwRead);
 			bReadError = true;
 		}
-		if (pKnownFile->m_hRead != INVALID_HANDLE_VALUE) { //discard data from closed files
-			UploadingToClient_Struct *pStruct = pOvRead->pUploadClientStruct;
+		if (pKnownFile->m_hRead != INVALID_HANDLE_VALUE && theApp.uploadqueue != NULL && pStruct != NULL) { //discard data from closed files
 			DEBUG_ONLY(dbgDataReadPending -= pOvRead->uEndOffset - pOvRead->uStartOffset);
-			// check if the client struct is still in the upload list (otherwise it is a deleted pointer)
 			CCriticalSection *pcsUploadListRead = NULL;
-			const CUploadingPtrList &rUploadList = theApp.uploadqueue->GetUploadListTS(&pcsUploadListRead);
+			theApp.uploadqueue->GetUploadListTS(&pcsUploadListRead);
 			CSingleLock lockUploadListRead(pcsUploadListRead, TRUE);
 			ASSERT(lockUploadListRead.IsLocked());
-			bool bFound = (rUploadList.Find(pStruct) != NULL);
+			bool bFound = false;
+			bool bRetired = false;
+			const bool bKnownStruct = theApp.uploadqueue->HasUploadClientStructForDiskIO(pStruct, bFound, bRetired);
 
-			// all important prechecks done, create the packets
-			if (bFound && !bReadError) {
-				// Keep the uploadlist locked while working with the client object.
-				// Instead of sending the packets immediately, we store them
-				// and send after we have released the uploadlist lock -
-				// just to be sure there is no chance of a deadlock (now or in future version, also it doesn't cost us much)
-				CPacketList packetsList;
+			if (bFound && !bReadError && !pStruct->m_bIOError && pStruct->m_pClient != NULL) {
 				CUpDownClient *pClient = pStruct->m_pClient;
-				CClientReqSocket *pSocket =  pClient->socket;
+				pSocket = pClient->socket;
 				if (pSocket && pSocket->IsConnected()) {
-					// Try to use compression whenever possible (see CreatePackedPackets notes)
-					 if (pKnownFile->bCompress)
+					if (pKnownFile->bCompress)
 						CreatePackedPackets(*pOvRead, packetsList);
 					else
 						CreateStandardPackets(*pOvRead, packetsList);
@@ -330,29 +417,34 @@ void CUploadDiskIOThread::ReadCompletionRoutine(DWORD dwRead, const OverlappedRe
 					m_bSignalThrottler = true;
 				} else
 					theApp.QueueDebugLogLineEx(LOG_ERROR, _T("ReadCompletionRoutine: Client has no connected socket, %s"), (LPCTSTR)pClient->DbgGetClientInfo(true));
+			} else if (bFound && bReadError) {
+				pStruct->m_bIOError = true;
+				if (pStruct->m_pClient != NULL)
+					theApp.QueueUploadDiskIoResultEvent(pStruct->m_pClient, _T("upload-disk-read-completion-error"), ERROR_READ_FAULT);
+			} else if (bRetired)
+				theApp.QueueDebugLogLineEx(LOG_WARNING, _T("ReadCompletionRoutine: upload entry retired before reading finished; discarding block"));
+			else
+				theApp.QueueDebugLogLineEx(LOG_WARNING, _T("ReadCompletionRoutine: Client not found in uploadlist when reading finished; discarding block"));
 
-				lockUploadListRead.Unlock();
-
-				// now send out all packets we have made. By default, our socket object is not safe
-				// to use now either, because we have no lock on itself (to make sure it is not deleted)
-				// however the way we handle sockets, they cannot get deleted directly (takes 10s),
-				// so this isn't a problem in our case
-				while (!packetsList.IsEmpty() && pSocket != NULL) {
-					Packet *packet = packetsList.RemoveHead();
-					pSocket->SendPacket(packet, false, packet->uStatsPayLoad);
-				}
-			} else { // bReadError is true
-				if (bFound)
-					pStruct->m_bIOError = true;
-				else
-					theApp.QueueDebugLogLineEx(LOG_WARNING, _T("ReadCompletionRoutine: Client not found in uploadlist when reading finished; discarding block"));
-				lockUploadListRead.Unlock();
+			if (bKnownStruct) {
+				::InterlockedDecrement(&pStruct->m_nPendingIOBlocks);
+				bPendingBlockReleased = true;
 			}
-		}
-	} else if (pKnownFile)
-		DissociateFile(pKnownFile);
+			lockUploadListRead.Unlock();
 
-	// cleanup
+			while (!packetsList.IsEmpty() && pSocket != NULL) {
+				Packet *packet = packetsList.RemoveHead();
+				pSocket->SendPacket(packet, false, packet->uStatsPayLoad);
+			}
+		} else
+			releasePendingBlock();
+	} else {
+		if (pKnownFile)
+			DissociateFile(pKnownFile);
+		releasePendingBlock();
+	}
+
+	--pKnownFile->nInUse;
 	delete[] pOvRead->pBuffer;
 	delete pOvRead;
 }

@@ -33,8 +33,11 @@ public:
 
 	bool	WasCancelled() const		{ return m_cancel;}
 
+	virtual INT_PTR DoModal();
+
 protected:
 	CBrush	m_brush; //white background
+	CWnd*	m_pOverlayParent;
 
 	virtual void DoDataExchange(CDataExchange *pDX);    // DDX/DDV support
 	virtual BOOL OnInitDialog();

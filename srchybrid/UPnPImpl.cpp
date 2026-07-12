@@ -16,6 +16,7 @@
 //along with this program; if not, write to the Free Software
 //Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 #include "StdAfx.h"
+#include "emule.h"
 #include "UPnPImpl.h"
 
 #ifdef _DEBUG
@@ -54,6 +55,9 @@ void CUPnPImpl::SendResultMessage()
 
 void CUPnPImpl::LateEnableWebServerPort(uint16 nPort)
 {
+	if (theApp.IsNetworkActivityBlockedByBind())
+		return;
+
 	if (ArePortsForwarded() == TRIS_TRUE && IsReady()) {
 		m_nOldTCPWebPort = (m_nTCPWebPort == nPort ? 0 : m_nTCPWebPort);
 		m_nTCPWebPort = nPort;

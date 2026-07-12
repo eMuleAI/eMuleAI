@@ -1,4 +1,4 @@
-﻿//This file is part of eMule AI
+//This file is part of eMule AI
 //Copyright (C)2002-2026 Merkur ( strEmail.Format("%s@%s", "devteam", "emule-project.net") / https://www.emule-project.net )
 //Copyright (C)2026 eMule AI
 //
@@ -29,7 +29,7 @@
 #include "ListenSocket.h"
 #include "preferences.h"
 #include "ClientList.h"
-#include "eMuleAI/GeoLite2.h"
+#include "eMuleAI/IPGeolocation.h"
 #include "emuledlg.h" 
 #include "eMuleAI/DarkMode.h"
 #include <unordered_map>
@@ -42,6 +42,148 @@ static char THIS_FILE[] = __FILE__;
 
 namespace
 {
+	struct SClientDetailSnapshot
+	{
+		SClientDetailSnapshot() : bValid(false) {}
+		bool bValid;
+		CString strName;
+		CString strHash;
+		CString strSoft;
+		CString strGeo;
+		CString strIP;
+		CString strObfuscation;
+		CString strID;
+		CString strServerIP;
+		CString strServerName;
+		CString strLeecher;
+		CString strPunishment;
+		CString strDownloading;
+		CString strUploading;
+		CString strDown;
+		CString strUp;
+		CString strAverageDown;
+		CString strAverageUp;
+		CString strDownTotal;
+		CString strUpTotal;
+		CString strRatio;
+		CString strIdent;
+		CString strRating;
+		CString strScore;
+		CString strKad;
+		CString strPorts;
+	};
+
+	static CString FormatClientPorts(uint16 nTCPPort, uint16 nUDPPort)
+	{
+		CString strTCPPort;
+		CString strUDPPort;
+		if (nTCPPort != 0)
+			strTCPPort.Format(_T("%u"), nTCPPort);
+		else
+			strTCPPort = _T("?");
+		if (nUDPPort != 0)
+			strUDPPort.Format(_T("%u"), nUDPPort);
+		else
+			strUDPPort = _T("?");
+
+		const CString strFormat(GetResString(_T("CD_CLIENT_PORTS")));
+		CString strPorts;
+		strPorts.FormatMessage(strFormat, (LPCTSTR)strTCPPort, (LPCTSTR)strUDPPort);
+		return strPorts;
+	}
+
+	static void BuildClientDetailSnapshot(CUpDownClient* pClient, SClientDetailSnapshot& snapshot)
+	{
+		snapshot = SClientDetailSnapshot();
+		if (pClient == NULL)
+			return;
+
+		snapshot.bValid = true;
+		snapshot.strName = pClient->GetUserName() ? CString(pClient->GetUserName()) : CString(_T("?"));
+		snapshot.strHash = pClient->HasValidHash() ? md4str(pClient->GetUserHash()) : CString(_T("?"));
+		snapshot.strSoft = pClient->DbgGetFullClientSoftVer();
+		bool bLongCountryName = true;
+		snapshot.strGeo = theApp.ipgeolocation != NULL && theApp.ipgeolocation->IsIPGeolocationActive() ? pClient->GetGeolocationData(bLongCountryName) : CString(_T("?"));
+		snapshot.strIP = ipstr(!pClient->GetIP().IsNull() ? pClient->GetIP() : pClient->GetConnectIP());
+
+		LPCTSTR pszObfuscation = NULL;
+		if (!pClient->SupportsCryptLayer())
+			pszObfuscation = _T("IDENTNOSUPPORT");
+		else
+			pszObfuscation = (thePrefs.IsCryptLayerEnabled() && (pClient->RequestsCryptLayer() || thePrefs.IsCryptLayerPreferred()) && (pClient->IsObfuscatedConnectionEstablished() || pClient->socket == NULL || !pClient->socket->IsConnected())) ? _T("ENABLED") : _T("SUPPORTED");
+		snapshot.strObfuscation = GetResString(pszObfuscation);
+#if defined(_DEBUG)
+		if (pClient->IsObfuscatedConnectionEstablished())
+			snapshot.strObfuscation += _T("(In Use)");
+#endif
+		snapshot.strID = GetResString(pClient->HasLowID() ? _T("IDLOW") : _T("IDHIGH"));
+
+		if (pClient->GetServerIP()) {
+			snapshot.strServerIP = ipstr(pClient->GetServerIP());
+			const CServer *pServer = theApp.serverlist != NULL ? theApp.serverlist->GetServerByIPTCP(pClient->GetServerIP(), pClient->GetServerPort()) : NULL;
+			snapshot.strServerName = pServer ? pServer->GetListName() : CString(_T("?"));
+		} else {
+			snapshot.strServerIP = _T("?");
+			snapshot.strServerName = _T("?");
+		}
+
+		snapshot.strLeecher = pClient->GetPunishmentReason();
+		snapshot.strPunishment = pClient->GetPunishmentText();
+		const CKnownFile *pUploadFile = theApp.sharedfiles != NULL ? theApp.sharedfiles->GetFileByID(pClient->GetUploadFileID()) : NULL;
+		snapshot.strDownloading = pUploadFile ? pUploadFile->GetFileName() : CString(_T("-"));
+		snapshot.strUploading = pClient->GetRequestFile() ? pClient->GetRequestFile()->GetFileName() : CString(_T("-"));
+		snapshot.strDown = CastItoXBytes(pClient->GetTransferredDown());
+		snapshot.strUp = CastItoXBytes(pClient->GetTransferredUp());
+		snapshot.strAverageDown = CastItoXBytes(pClient->GetDownloadDatarate(), false, true);
+		snapshot.strAverageUp = CastItoXBytes(pClient->GetUploadDatarate(), false, true);
+
+		CClientCredits* pCredits = pClient->Credits();
+		if (pCredits != NULL) {
+			snapshot.strDownTotal = CastItoXBytes(pCredits->GetDownloadedTotal());
+			snapshot.strUpTotal = CastItoXBytes(pCredits->GetUploadedTotal());
+			snapshot.strRatio.Format(_T("%.1f [%.1f]"), pCredits->GetScoreRatio(pClient->GetIP()), (float)pClient->Credits()->GetMyScoreRatio(pClient->GetIP()));
+			if (theApp.clientcredits != NULL && theApp.clientcredits->CryptoAvailable()) {
+				switch (pCredits->GetCurrentIdentState(pClient->GetIP())) {
+				case IS_NOTAVAILABLE:
+					snapshot.strIdent = GetResString(_T("IDENTNOSUPPORT"));
+					break;
+				case IS_IDFAILED:
+				case IS_IDNEEDED:
+				case IS_IDBADGUY:
+					snapshot.strIdent = GetResString(_T("IDENTFAILED"));
+					break;
+				case IS_IDENTIFIED:
+					snapshot.strIdent = GetResString(_T("IDENTOK"));
+					break;
+				default:
+					snapshot.strIdent = _T("?");
+				}
+			} else
+				snapshot.strIdent = GetResString(_T("IDENTNOSUPPORT"));
+		} else {
+			snapshot.strDownTotal = _T("?");
+			snapshot.strUpTotal = _T("?");
+			snapshot.strRatio = _T("?");
+			snapshot.strIdent = _T("?");
+		}
+
+		if (pClient->GetUserName() && pCredits != NULL)
+			snapshot.strRating.Format(_T("%.1f"), (float)pClient->GetScore(false, pClient->IsDownloading(), true));
+		else
+			snapshot.strRating = _T("?");
+
+		if (pClient->GetUploadState() != US_NONE && pCredits != NULL) {
+			if (!pClient->GetFriendSlot())
+				snapshot.strScore.Format(_T("%u"), pClient->GetScore(false, pClient->IsDownloading(), false));
+			else
+				snapshot.strScore = GetResString(_T("FRIENDDETAIL"));
+		} else
+			snapshot.strScore = _T("-");
+
+		snapshot.strKad = GetResString(pClient->GetKadPort() ? _T("CONNECTED") : _T("DISCONNECTED"));
+		snapshot.strPorts = FormatClientPorts(pClient->GetUserPort(), pClient->GetUDPPort());
+	}
+
 	class CClientDetailRuntimeToken : public CObject
 	{
 	public:
@@ -61,8 +203,9 @@ namespace
 
 	CCriticalSection s_csClientDetailRuntimeTokens;
 	std::unordered_map<const CObject*, ClientRuntimeID> s_ClientDetailRuntimeTokens;
+	std::unordered_map<const CObject*, SClientDetailSnapshot> s_ClientDetailSnapshots;
 
-	CObject* CreateClientDetailToken(ClientRuntimeID uRuntimeID)
+	CObject* CreateClientDetailToken(ClientRuntimeID uRuntimeID, const SClientDetailSnapshot& snapshot)
 	{
 		if (uRuntimeID == 0)
 			return NULL;
@@ -71,6 +214,7 @@ namespace
 		{
 			CSingleLock tokenLock(&s_csClientDetailRuntimeTokens, TRUE);
 			s_ClientDetailRuntimeTokens[pToken] = uRuntimeID;
+			s_ClientDetailSnapshots[pToken] = snapshot;
 		}
 		return pToken;
 	}
@@ -85,8 +229,11 @@ namespace
 			const auto itToken = s_ClientDetailRuntimeTokens.find(pToken);
 			if (itToken != s_ClientDetailRuntimeTokens.end())
 				s_ClientDetailRuntimeTokens.erase(itToken);
+			const auto itSnapshot = s_ClientDetailSnapshots.find(pToken);
+			if (itSnapshot != s_ClientDetailSnapshots.end())
+				s_ClientDetailSnapshots.erase(itSnapshot);
 		}
-		delete static_cast<const CClientDetailRuntimeToken*>(pToken);
+		delete static_cast<CClientDetailRuntimeToken*>(pToken);
 	}
 
 	ClientRuntimeID ClientDetailRuntimeIDFromToken(const CObject* pToken)
@@ -105,6 +252,18 @@ namespace
 		return (uTokenValue & 1) != 0 ? static_cast<ClientRuntimeID>(uTokenValue >> 1) : 0;
 	}
 
+	bool ClientDetailSnapshotFromToken(const CObject* pToken, SClientDetailSnapshot& snapshot)
+	{
+		if (pToken == NULL)
+			return false;
+		CSingleLock tokenLock(&s_csClientDetailRuntimeTokens, TRUE);
+		const auto itSnapshot = s_ClientDetailSnapshots.find(pToken);
+		if (itSnapshot == s_ClientDetailSnapshots.end() || !itSnapshot->second.bValid)
+			return false;
+		snapshot = itSnapshot->second;
+		return true;
+	}
+
 	CObject* CreateTrackedClientDetailToken(const CUpDownClient* pClient)
 	{
 		if (pClient == NULL || theApp.clientlist == NULL)
@@ -114,7 +273,9 @@ namespace
 		if (pTrackedClient == NULL)
 			return NULL;
 
-		CObject* pToken = CreateClientDetailToken(pTrackedClient->GetRuntimeID());
+		SClientDetailSnapshot snapshot;
+		BuildClientDetailSnapshot(pTrackedClient, snapshot);
+		CObject* pToken = CreateClientDetailToken(pTrackedClient->GetRuntimeID(), snapshot);
 		pTrackedClient->ReleaseRuntimeReference();
 		return pToken;
 	}
@@ -142,6 +303,7 @@ static void ClearClientDetailView(CClientDetailPage* pPage)
 	SetClientDetailText(pPage, IDC_DSOFT, _T("?"));
 	SetClientDetailText(pPage, IDC_GEOLOCATION_TXT, _T("?"));
 	SetClientDetailText(pPage, IDC_CLIENT_IP, _T("?"));
+	SetClientDetailText(pPage, IDC_CLIENT_PORT, _T("?"));
 	SetClientDetailText(pPage, IDC_OBFUSCATION_STAT, _T("?"));
 	SetClientDetailText(pPage, IDC_DID, _T("?"));
 	SetClientDetailText(pPage, IDC_DSIP, _T("?"));
@@ -161,6 +323,44 @@ static void ClearClientDetailView(CClientDetailPage* pPage)
 	SetClientDetailText(pPage, IDC_DRATING, _T("?"));
 	SetClientDetailText(pPage, IDC_DSCORE, _T("-"));
 	SetClientDetailText(pPage, IDC_CLIENTDETAIL_KADCON, _T("?"));
+}
+
+static void ApplyClientDetailSnapshot(CClientDetailPage* pPage, const SClientDetailSnapshot& snapshot)
+{
+	if (pPage == NULL || !snapshot.bValid)
+		return;
+
+	CWnd* pFlagIcon = pPage->GetDlgItem(IDC_COUNTRY_FLAG_ICON);
+	if (pFlagIcon != NULL) {
+		((CStatic*)pFlagIcon)->SetIcon(NULL);
+		pFlagIcon->ShowWindow(SW_HIDE);
+	}
+
+	SetClientDetailText(pPage, IDC_DNAME, snapshot.strName);
+	SetClientDetailText(pPage, IDC_DHASH, snapshot.strHash);
+	SetClientDetailText(pPage, IDC_DSOFT, snapshot.strSoft);
+	SetClientDetailText(pPage, IDC_GEOLOCATION_TXT, snapshot.strGeo);
+	SetClientDetailText(pPage, IDC_CLIENT_IP, snapshot.strIP);
+	SetClientDetailText(pPage, IDC_CLIENT_PORT, snapshot.strPorts);
+	SetClientDetailText(pPage, IDC_OBFUSCATION_STAT, snapshot.strObfuscation);
+	SetClientDetailText(pPage, IDC_DID, snapshot.strID);
+	SetClientDetailText(pPage, IDC_DSIP, snapshot.strServerIP);
+	SetClientDetailText(pPage, IDC_DSNAME, snapshot.strServerName);
+	SetClientDetailText(pPage, IDC_LEECHER, snapshot.strLeecher);
+	SetClientDetailText(pPage, IDC_PUNISHMENT, snapshot.strPunishment);
+	SetClientDetailText(pPage, IDC_DDOWNLOADING, snapshot.strDownloading);
+	SetClientDetailText(pPage, IDC_UPLOADING, snapshot.strUploading);
+	SetClientDetailText(pPage, IDC_DDUP, snapshot.strDown);
+	SetClientDetailText(pPage, IDC_DDOWN, snapshot.strUp);
+	SetClientDetailText(pPage, IDC_DAVUR, snapshot.strAverageDown);
+	SetClientDetailText(pPage, IDC_DAVDR, snapshot.strAverageUp);
+	SetClientDetailText(pPage, IDC_DUPTOTAL, snapshot.strDownTotal);
+	SetClientDetailText(pPage, IDC_DDOWNTOTAL, snapshot.strUpTotal);
+	SetClientDetailText(pPage, IDC_DRATIO, snapshot.strRatio);
+	SetClientDetailText(pPage, IDC_CDIDENT, snapshot.strIdent);
+	SetClientDetailText(pPage, IDC_DRATING, snapshot.strRating);
+	SetClientDetailText(pPage, IDC_DSCORE, snapshot.strScore);
+	SetClientDetailText(pPage, IDC_CLIENTDETAIL_KADCON, snapshot.strKad);
 }
 
 class CScopedDetailClientRef
@@ -254,6 +454,7 @@ BOOL CClientDetailPage::OnInitDialog()
 	AddOrReplaceAnchor(this, IDC_UPLOADING, TOP_LEFT, TOP_RIGHT);
 	AddOrReplaceAnchor(this, IDC_OBFUSCATION_STAT, TOP_LEFT, TOP_RIGHT);
 	AddOrReplaceAnchor(this, IDC_CLIENT_IP, TOP_LEFT, TOP_RIGHT);
+	AddOrReplaceAnchor(this, IDC_CLIENT_PORT, TOP_LEFT, TOP_RIGHT);
 
 	AddAllOtherAnchors();
 	Localize();
@@ -270,20 +471,24 @@ BOOL CClientDetailPage::OnSetActive()
 		CScopedDetailClientRef clientRef;
 		CUpDownClient* client = ResolveClientDetailClient(pToken, clientRef);
 		if (client == NULL) {
-			ClearClientDetailView(this);
+			SClientDetailSnapshot snapshot;
+			if (ClientDetailSnapshotFromToken(pToken, snapshot))
+				ApplyClientDetailSnapshot(this, snapshot);
+			else
+				ClearClientDetailView(this);
 			m_bDataChanged = false;
 			return TRUE;
 		}
 
 			SetDlgItemText(IDC_DNAME, (client->GetUserName() ? client->GetUserName() : _T("?")));
-			SetDlgItemText(IDC_DHASH, (client->HasValidHash() ? (LPCTSTR)md4str(client->GetUserHash()) : _T("?")));
+			SetDlgItemText(IDC_DHASH, (client->HasValidHash() ? (LPCTSTR)md4str(client->GetUserHash()) : (LPCTSTR)_T("?")));
 		SetDlgItemText(IDC_DSOFT, client->DbgGetFullClientSoftVer());
 
 		bool longCountryName = true;
-		if (theApp.geolite2->IsGeoLite2Active())
+		if (theApp.ipgeolocation->IsIPGeolocationActive())
 			GetDlgItem(IDC_GEOLOCATION_TXT)->SetWindowText(client->GetGeolocationData(longCountryName));
-		if (theApp.geolite2->ShowCountryFlag()) {
-			countryflag = theApp.geolite2->GetFlagImageList()->ExtractIcon(client->GetCountryFlagIndex());
+		if (theApp.ipgeolocation->ShowCountryFlag()) {
+			countryflag = theApp.ipgeolocation->GetFlagImageList()->ExtractIcon(client->GetCountryFlagIndex());
 			((CStatic*)GetDlgItem(IDC_COUNTRY_FLAG_ICON))->SetIcon(countryflag);
 			((CStatic*)GetDlgItem(IDC_COUNTRY_FLAG_ICON))->ShowWindow(SW_SHOW);
 			RECT rect1;
@@ -310,6 +515,7 @@ BOOL CClientDetailPage::OnSetActive()
 			buffer += _T("(In Use)");
 #endif
 		GetDlgItem(IDC_CLIENT_IP)->SetWindowText(ipstr(!client->GetIP().IsNull() ? client->GetIP() : client->GetConnectIP()));
+		SetDlgItemText(IDC_CLIENT_PORT, FormatClientPorts(client->GetUserPort(), client->GetUDPPort()));
 
 		SetDlgItemText(IDC_OBFUSCATION_STAT, buffer);
 
@@ -318,7 +524,7 @@ BOOL CClientDetailPage::OnSetActive()
 		if (client->GetServerIP()) {
 			SetDlgItemText(IDC_DSIP, ipstr(client->GetServerIP()));
 			const CServer *cserver = theApp.serverlist->GetServerByIPTCP(client->GetServerIP(), client->GetServerPort());
-			SetDlgItemText(IDC_DSNAME, cserver ? (LPCTSTR)cserver->GetListName() : _T("?"));
+			SetDlgItemText(IDC_DSNAME, cserver ? (LPCTSTR)cserver->GetListName() : (LPCTSTR)_T("?"));
 		} else {
 			SetDlgItemText(IDC_DSIP, _T("?"));
 			SetDlgItemText(IDC_DSNAME, _T("?"));
@@ -328,9 +534,9 @@ BOOL CClientDetailPage::OnSetActive()
 		GetDlgItem(IDC_PUNISHMENT)->SetWindowText(client->GetPunishmentText());
 
 		const CKnownFile *file = theApp.sharedfiles->GetFileByID(client->GetUploadFileID());
-		SetDlgItemText(IDC_DDOWNLOADING, file ? (LPCTSTR)file->GetFileName() : _T("-"));
+		SetDlgItemText(IDC_DDOWNLOADING, file ? (LPCTSTR)file->GetFileName() : (LPCTSTR)_T("-"));
 
-		SetDlgItemText(IDC_UPLOADING, client->GetRequestFile() ? (LPCTSTR)client->GetRequestFile()->GetFileName() : _T("-"));
+		SetDlgItemText(IDC_UPLOADING, client->GetRequestFile() ? (LPCTSTR)client->GetRequestFile()->GetFileName() : (LPCTSTR)_T("-"));
 		SetDlgItemText(IDC_DDUP, CastItoXBytes(client->GetTransferredDown()));
 		SetDlgItemText(IDC_DDOWN, CastItoXBytes(client->GetTransferredUp()));
 		SetDlgItemText(IDC_DAVUR, CastItoXBytes(client->GetDownloadDatarate(), false, true));
@@ -427,6 +633,7 @@ void CClientDetailPage::Localize()
 	SetDlgItemText(IDC_STATIC_PUNISHMENT, GetResString(_T("PUNISHMENT")) + _T(':'));
 	SetDlgItemText(IDC_STATIC_SOFTWARE, GetResString(_T("CD_CSOFT")) + _T(':'));
 	SetDlgItemText(IDC_STATIC_CLIENT_IP, GetResString(_T("CD_UIP")));
+	SetDlgItemText(IDC_STATIC_CLIENT_PORT, GetResString(_T("PORT")) + _T(':'));
 }
 
 

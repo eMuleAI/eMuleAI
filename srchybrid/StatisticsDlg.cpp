@@ -386,8 +386,7 @@ void CStatisticsDlg::DoResize_HL(int delta)
 	initCSize();
 
 	ShowInterval();
-	Invalidate();
-	UpdateWindow();
+	Invalidate(FALSE);
 }
 
 void CStatisticsDlg::DoResize_HR(int delta)
@@ -410,8 +409,7 @@ void CStatisticsDlg::DoResize_HR(int delta)
 	initCSize();
 
 	ShowInterval();
-	Invalidate();
-	UpdateWindow();
+	Invalidate(FALSE);
 }
 
 void CStatisticsDlg::DoResize_V(int delta)
@@ -448,8 +446,7 @@ void CStatisticsDlg::DoResize_V(int delta)
 	initCSize();
 
 	ShowInterval();
-	Invalidate();
-	UpdateWindow();
+	Invalidate(FALSE);
 }
 
 LRESULT CStatisticsDlg::DefWindowProc(UINT message, WPARAM wParam, LPARAM lParam)
@@ -2742,7 +2739,7 @@ void CStatisticsDlg::UpdateClientCountries(int branchIndex, const CClientStatsSn
 	HTREEITEM child = m_stattree.ItemHasChildren(countriesRoot) ? m_stattree.GetChildItem(countriesRoot) : NULL;
 	CString sText;
 
-	if (!theApp.geolite2->IsGeoLite2Active()) {
+	if (!theApp.ipgeolocation->IsIPGeolocationActive()) {
 		sText.Format(_T("Countries: <%s>"), GetResString(_T("DISABLED")));
 		m_stattree.SetItemText(countriesRoot, sText);
 		m_stattree.DeleteRestChildItems(child);
@@ -2836,7 +2833,7 @@ void CStatisticsDlg::UpdateClientBranch(int branchIndex, const CClientStatsSnaps
 		sText.AppendFormat(_T(" (%1.1f%%)"), perc * snapshot.stats[0]);
 		m_stattree.SetItemText(m_clientSoftware[branchIndex][7], sText);
 
-		CString aiName = MOD_NAME;
+		CString aiName = _T("eMule AI");
 		double aiPerc = snapshot.stats[2] > 0 ? 100.0 * static_cast<double>(snapshot.aiClientTotal) / snapshot.stats[2] : 0.0;
 		sText.Format(_T("%s: %u (%1.1f%%)"), (LPCTSTR)aiName, snapshot.aiClientTotal, aiPerc);
 		m_stattree.SetItemText(m_clientAiRoot[branchIndex], sText);

@@ -6,6 +6,19 @@ struct SocketSentBytes
 	uint32	sentBytesStandardPackets;
 	uint32	sentBytesControlPackets;
 	bool	success;
+	uint32	sentBytesForDatarate = 0;
+	bool	hasSentBytesForDatarate = false;
+
+	uint32 GetSentBytesForDatarate() const
+	{
+		return hasSentBytesForDatarate ? sentBytesForDatarate : sentBytesStandardPackets + sentBytesControlPackets;
+	}
+
+	void SetSentBytesForDatarate(uint32 uBytes)
+	{
+		sentBytesForDatarate = uBytes;
+		hasSentBytesForDatarate = true;
+	}
 };
 
 class ThrottledControlSocket

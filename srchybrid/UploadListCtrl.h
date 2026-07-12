@@ -1,4 +1,4 @@
-//This file is part of eMule AI
+﻿//This file is part of eMule AI
 //Copyright (C)2002-2026 Merkur ( strEmail.Format("%s@%s", "devteam", "emule-project.net") / https://www.emule-project.net )
 //Copyright (C)2026 eMule AI
 //
@@ -16,10 +16,13 @@
 //along with this program; if not, write to the Free Software
 //Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 #pragma once
+#include "emule.h"
 #include "MuleListCtrl.h"
 #include "ListCtrlItemWalk.h"
 #include "ToolTipCtrlX.h"
+#include "UploadQueue.h"
 #include <map>
+#include <set>
 
 class CUpDownClient;
 
@@ -37,6 +40,7 @@ public:
 	void	Init();
 	void	AddClient(CUpDownClient *client);
 	void	RemoveClient(CUpDownClient* client);
+	void	RemoveClientByRuntimeID(DWORD uRuntimeID);
 	void	RefreshClient(const CUpDownClient *client);
 	void	HideClient(CUpDownClient* client);
 	void	ShowClient(CUpDownClient* client);
@@ -48,10 +52,12 @@ public:
 	void	ShowSelectedUserDetails();
 	virtual CObject* GetNextSelectableItem() override;
 	virtual CObject* GetPrevSelectableItem() override;
-	typedef std::map<CUpDownClient*, CUpDownClient*> ListItemsMapType;
+	typedef DWORD UploadClientItemID;
+	typedef std::set<UploadClientItemID> ListItemsMapType;
 	ListItemsMapType m_ListItemsMap;
-	
-	// Override to maintain sort order after updates
+
+	// Row refreshes use the throttled list sort path.
+	virtual bool ShouldMaintainSortOrderOnUpdate() const override { return GetSortItem() != -1; }
 	virtual void MaintainSortOrderAfterUpdate() override;
 protected:
 	CToolTipCtrlX m_tooltip;
@@ -60,6 +66,8 @@ protected:
 	virtual int GetDefaultPersistentInfoTipExtraLeftPadding(const SPersistentInfoTipContext& context) const override;
 
 	void SetAllIcons();
+	void RequestUploadListRedrawForRange(int iFirst, int iLast);
+	int FindSortedInsertIndex(UploadClientItemID uRuntimeID);
 	const CString GetItemDisplayText(CUpDownClient *client, const int iSubItem) const;
 	static int CALLBACK SortProc(const LPARAM lParam1, const LPARAM lParam2, const LPARAM lParamSort);
 

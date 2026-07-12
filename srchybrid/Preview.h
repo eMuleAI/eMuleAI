@@ -113,9 +113,9 @@ public:
 	HICON GetPreviewAppIcon(int AppIndex);
 };
 
-CPreviewApps& BB_GetPreviewApps();
-void BB_FreePreviewApps() noexcept;
+CPreviewApps& GetPreviewAppsStorage();
+void FreePreviewAppsStorage() noexcept;
 
-#define thePreviewApps BB_GetPreviewApps()
+#define thePreviewApps GetPreviewAppsStorage()
 
 void ExecutePartFile(CPartFile *file, LPCTSTR pszCommand, LPCTSTR pszCommandArgs);

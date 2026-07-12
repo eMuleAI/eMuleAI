@@ -6,10 +6,12 @@ class CButtonsTabCtrl : public CTabCtrl
 
 public:
 	CButtonsTabCtrl() = default;
+	void RefreshDarkScrollButtons();
 
 protected:
 	virtual void PreSubclassWindow();
 	virtual void DrawItem(LPDRAWITEMSTRUCT lpDIS);
+	afx_msg void OnSize(UINT nType, int cx, int cy);
 
 	DECLARE_MESSAGE_MAP()
 };

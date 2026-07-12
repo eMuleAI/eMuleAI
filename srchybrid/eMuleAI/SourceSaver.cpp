@@ -1,4 +1,4 @@
-//This file is part of eMule AI
+﻿//This file is part of eMule AI
 //Copyright (C)2026 eMule AI
 
 #include "StdAfx.h"
@@ -12,9 +12,41 @@
 #include "Preferences.h"
 #include "Log.h"
 #include "PartFileWriteThread.h"
+#include "ListenSocket.h"
 
 #define RELOADTIME	3600000 //60 minutes	
 #define RESAVETIME	 600000 //10 minutes
+
+namespace
+{
+	const DWORD kSourceSaverStartupGraceMs = 15000;
+	const DWORD kSourceSaverUiThrottleMs = 750;
+	const DWORD kSourceSaverBusyUiDeferMs = 250;
+
+	bool CanRunSourceSaverDiskIoNow(DWORD dwNow)
+	{
+		if (!theApp.IsUiThread() || theApp.IsClosing())
+			return true;
+
+		static DWORD s_dwStartupMetadataReadyTick = 0;
+		static DWORD s_dwNextAllowedTick = 0;
+		if (s_dwStartupMetadataReadyTick == 0)
+			s_dwStartupMetadataReadyTick = dwNow;
+		if (static_cast<int>(dwNow - s_dwStartupMetadataReadyTick) < static_cast<int>(kSourceSaverStartupGraceMs))
+			return false;
+		if (static_cast<int>(dwNow - s_dwNextAllowedTick) < 0)
+			return false;
+
+		const UINT uQueueStatus = HIWORD(::GetQueueStatus(QS_KEY | QS_MOUSE | QS_PAINT));
+		if ((uQueueStatus & (QS_KEY | QS_MOUSE | QS_PAINT)) != 0) {
+			s_dwNextAllowedTick = dwNow + kSourceSaverBusyUiDeferMs;
+			return false;
+		}
+
+		s_dwNextAllowedTick = dwNow + kSourceSaverUiThrottleMs;
+		return true;
+	}
+}
 
 CSourceSaver::CSourceSaver(void)
 {
@@ -35,18 +67,49 @@ CSourceSaver::CSourceData::CSourceData(CUpDownClient* client, const CString& exp
 	serverport = client->GetServerPort();
 	partsavailable = client->GetAvailablePartCount();
 	expiration = exp;
+	bWasDownloading = client->GetDownloadState() == DS_DOWNLOADING;
+	bWasOnQueue = client->GetDownloadState() == DS_ONQUEUE;
 }
 
 CSourceSaver::~CSourceSaver(void)
 {
+	ClearSources();
+}
+
+void CSourceSaver::ClearSources()
+{
+	while (!sources.IsEmpty())
+		delete sources.RemoveHead();
+}
+
+CString CSourceSaver::GetSourcesFilePath(const CPartFile* file)
+{
+	if (file == NULL)
+		return CString();
+
+	CString strSourcesFilePath(file->GetTmpPath());
+	if (strSourcesFilePath.IsEmpty() || file->GetPartMetFileName().IsEmpty())
+		return CString();
+
+	MakeFoldername(strSourcesFilePath);
+	strSourcesFilePath += file->GetPartMetFileName();
+	strSourcesFilePath += _T(".txtsrc");
+	return strSourcesFilePath;
 }
 
 bool CSourceSaver::Process(CPartFile* file) // return false if sources not saved
 {
-	if ((int)(::GetTickCount() - m_dwLastTimeSaved) > RESAVETIME) {
-		_tmakepath(szslsfilepath,NULL,(CString)file->GetTmpPath(), file->GetPartMetFileName(),_T(".txtsrc"));
+	if (!theApp.AllStartupMetadataReady())
+		return false;
+
+	const DWORD dwNow = ::GetTickCount();
+	if ((int)(dwNow - m_dwLastTimeSaved) > RESAVETIME) {
+		if (!CanRunSourceSaverDiskIoNow(dwNow))
+			return false;
+		if (GetSourcesFilePath(file).IsEmpty())
+			return false;
 		m_dwLastTimeSaved = ::GetTickCount() + (rand() * 30000 / RAND_MAX) - 15000;
-		sources.RemoveAll();
+		ClearSources();
 		LoadSourcesFromFile(file);
 		SaveSources(file, false);
 		
@@ -55,8 +118,7 @@ bool CSourceSaver::Process(CPartFile* file) // return false if sources not saved
 			AddSourcesToDownload(file);
 		}
 
-		while (!sources.IsEmpty()) 
-			delete sources.RemoveHead();
+		ClearSources();
 		
 		return true;
 	}
@@ -65,20 +127,29 @@ bool CSourceSaver::Process(CPartFile* file) // return false if sources not saved
 
 void CSourceSaver::DeleteFile(CPartFile* file)
 {
-	TCHAR szslsfilepath[_MAX_PATH];
-	_tmakepath(szslsfilepath,NULL,(CString)file->GetTmpPath(), file->GetPartMetFileName(),_T(".txtsrc"));
-	if (_tremove(szslsfilepath) && errno != ENOENT)
-		AddLogLine(true, _T("Failed to delete '%s'. You'll need to delete this file manually."), szslsfilepath);
+	ClearSources();
+	const CString strSourcesFilePath(GetSourcesFilePath(file));
+	if (strSourcesFilePath.IsEmpty())
+		return;
+	if (!DeleteFileLongPath(strSourcesFilePath)) {
+		const DWORD dwError = ::GetLastError();
+		if (dwError != ERROR_FILE_NOT_FOUND && dwError != ERROR_PATH_NOT_FOUND)
+			AddLogLine(true, GetResString(_T("FAILED_TO_DELETE_FILE_MANUALLY")), (LPCTSTR)strSourcesFilePath);
+	}
 }
 
-void CSourceSaver::LoadSourcesFromFile(CPartFile*)
+void CSourceSaver::LoadSourcesFromFile(CPartFile* file)
 {
+	const CString strSourcesFilePath(GetSourcesFilePath(file));
+	if (strSourcesFilePath.IsEmpty())
+		return;
+
 	CString strLine;
 	CStdioFile f;
-	if (!f.Open(szslsfilepath, CFile::modeRead | CFile::typeText))
+	if (!f.Open(PreparePathForWin32LongPath(strSourcesFilePath), CFile::modeRead | CFile::typeText))
 		return;
 	while(f.ReadString(strLine)) {
-		if (strLine.GetAt(0) == '#')
+		if (strLine.IsEmpty() || strLine.GetAt(0) == '#')
 			continue;
 		int pos = strLine.Find(':');
 		if (pos == -1)
@@ -132,31 +203,113 @@ void CSourceSaver::LoadSourcesFromFile(CPartFile*)
     f.Close();
 }
 
-void CSourceSaver::AddSourcesToDownload(CPartFile* file) 
+void CSourceSaver::AddSourcesToDownload(CPartFile* file)
 {
-	for (POSITION pos = sources.GetHeadPosition(); pos; sources.GetNext(pos)) {
+	(void)AddSourcesToDownload(file, sources);
+}
+
+UINT CSourceSaver::AddSourcesToDownload(CPartFile* file, Sources& sourceList)
+{
+	if (file == NULL || theApp.downloadqueue == NULL)
+		return 0;
+
+	const UINT uSourceCountBefore = file->GetSourceCount();
+	UINT uQueueStatesRestored = 0;
+	UINT uImmediateRestartCandidates = 0;
+	for (POSITION pos = sourceList.GetHeadPosition(); pos != NULL;) {
 		if (file->GetMaxSources() <= file->GetSourceCount())
-			return;
+			break;
 
-		CSourceData* cur_src = sources.GetAt(pos);
-		CUpDownClient* newclient; 
+		CSourceData* cur_src = sourceList.GetNext(pos);
+		if (cur_src == NULL)
+			continue;
 
+		CUpDownClient* newclient;
 		if (!cur_src->sourceID || cur_src->nSrcExchangeVer >= 3) // Only LowID's are set to nonzero integers. IPv4 or IPv6 is saved and loaded instead of LowID for this case. nSrcExchangeVer should be >= 3 except very old clients.
 			newclient = new CUpDownClient(file, cur_src->sourcePort, cur_src->sourceID ? cur_src->sourceID : cur_src->sourceIP.ToUInt32(true), cur_src->serverip, cur_src->serverport, false, cur_src->sourceIP);
 		else
 			newclient = new CUpDownClient(file, cur_src->sourcePort, cur_src->sourceID, cur_src->serverip, cur_src->serverport, true);
 
 		newclient->SetSourceFrom(SF_SLS);
-		theApp.downloadqueue->CheckAndAddSource(file, newclient, SF_SLS);
-        
+		CUpDownClient* pResolvedSource = NULL;
+		theApp.downloadqueue->CheckAndAddSource(file, newclient, SF_SLS, true, &pResolvedSource);
+		if (pResolvedSource == NULL || pResolvedSource->GetRequestFile() != file)
+			continue;
+
+		if (cur_src->bWasDownloading) {
+			const EDownloadState eDownloadState = pResolvedSource->GetDownloadState();
+			const bool bCanRestartConnectedSource = eDownloadState == DS_ONQUEUE || eDownloadState == DS_CONNECTED || eDownloadState == DS_NONE;
+			if (bCanRestartConnectedSource && pResolvedSource->GetUploadState() != US_BANNED && pResolvedSource->socket != NULL && pResolvedSource->socket->IsConnected() && pResolvedSource->CheckHandshakeFinished()) {
+				if (eDownloadState == DS_NONE)
+					pResolvedSource->SetDownloadState(DS_ONQUEUE, _T("SourceSave: restore active source before resume"));
+				pResolvedSource->SetSentCancelTransfer(true);
+				++uImmediateRestartCandidates;
+			}
+		} else if (cur_src->bWasOnQueue && pResolvedSource->GetDownloadState() == DS_NONE) {
+			pResolvedSource->SetDownloadState(DS_ONQUEUE, _T("SourceSave: restore remote queue state"));
+			++uQueueStatesRestored;
+		}
 	}
+	if ((uQueueStatesRestored != 0 || uImmediateRestartCandidates != 0) && thePrefs.GetDebugSourceExchange())
+		AddDebugLogLine(DLP_LOW, false, _T("[SourceSave] Resume runtime state restored. Queued=%u Immediate=%u File=\"%s\""), uQueueStatesRestored, uImmediateRestartCandidates, (LPCTSTR)EscPercent(file->GetFileName()));
+	const UINT uSourceCountAfter = file->GetSourceCount();
+	return uSourceCountAfter > uSourceCountBefore ? uSourceCountAfter - uSourceCountBefore : 0;
 }
 
-void CSourceSaver::SaveSources(CPartFile* file, bool bForce)
+UINT CSourceSaver::SaveSourcesOnStop(CPartFile* file)
 {
+	ClearSources();
+	if (file == NULL || !thePrefs.GetSaveLoadSources())
+		return 0;
+
+	const int iMaxSources = thePrefs.GetSaveLoadSourcesMaxSources();
+	if (iMaxSources > 0) {
+		const CString strExpiration(CalcExpiration(thePrefs.GetSaveLoadSourcesExpirationDays()));
+		for (int iPriorityPass = 0; iPriorityPass < 3; ++iPriorityPass) {
+			for (POSITION pos = file->srclist.GetHeadPosition(); pos != NULL;) {
+				if (static_cast<UINT>(sources.GetCount()) >= static_cast<UINT>(iMaxSources))
+					break;
+
+				CUpDownClient* cur_src = file->srclist.GetNext(pos);
+				if (cur_src == NULL || !cur_src->IsValidSource())
+					continue;
+				const EDownloadState eDownloadState = cur_src->GetDownloadState();
+				const bool bMatchesPriorityPass = (iPriorityPass == 0 && eDownloadState == DS_DOWNLOADING)
+					|| (iPriorityPass == 1 && eDownloadState == DS_ONQUEUE)
+					|| (iPriorityPass == 2 && eDownloadState != DS_DOWNLOADING && eDownloadState != DS_ONQUEUE);
+				if (!bMatchesPriorityPass)
+					continue;
+				if (cur_src->RequiresCryptLayer() || thePrefs.IsCryptLayerRequired())
+					continue;
+				sources.AddTail(new CSourceData(cur_src, strExpiration));
+			}
+		}
+	}
+
+	SaveSources(file, true);
+	return static_cast<UINT>(sources.GetCount());
+}
+
+UINT CSourceSaver::LoadSourcesOnResume(CPartFile* file)
+{
+	if (file == NULL || !thePrefs.GetSaveLoadSources())
+		return 0;
+
+	if (sources.IsEmpty())
+		LoadSourcesFromFile(file);
+	const UINT uAddedSources = AddSourcesToDownload(file, sources);
+	ClearSources();
+	return uAddedSources;
+}
+
+SaveSourcesData* CSourceSaver::BuildSaveSourcesSnapshot(CPartFile* file, bool bForce, bool bMarkInQueue)
+{
+	if (file == NULL)
+		return NULL;
+
 	CSingleLock sSaveSourcesLock(&file->m_SaveSourcesLock, FALSE);
 	if (sSaveSourcesLock.IsLocked()) // Source are being saved inside the thread. Don't make GUI thread to wait it, return here and try next time.
-		return;
+		return NULL;
 	sSaveSourcesLock.Lock(); // Lock is free, lets lock it and do the job.
 
 	CSourceData* sourcedata;
@@ -232,20 +385,118 @@ void CSourceSaver::SaveSources(CPartFile* file, bool bForce)
 			file->srcstosave.AddTail(new CSourceData(cur_sourcedata));
 
 	}
-	sSaveSourcesLock.Unlock(); // We finished updating srcstosave. Now we can unlock the lock before proceeding interaction with the thread.
+	const CString strSourcesFilePath(GetSourcesFilePath(file));
+	const bool bQueueSaveSources = !strSourcesFilePath.IsEmpty() && (bForce || thePrefs.GetCommitFiles() >= 2 || (thePrefs.GetCommitFiles() >= 1 && theApp.IsClosing())) && (!bMarkInQueue || !file->m_bSaveSourcesInQueue);
+	SaveSourcesData* pSaveSourcesData = NULL;
+	if (bQueueSaveSources) {
+		pSaveSourcesData = new SaveSourcesData;
+		pSaveSourcesData->lGeneration = file->NextSaveSourcesGeneration();
+		pSaveSourcesData->strSourcesFilePath = strSourcesFilePath;
+		pSaveSourcesData->strED2kLink = file->GetED2kLink();
+		pSaveSourcesData->rows.reserve(static_cast<size_t>(file->srcstosave.GetCount()));
+		if (bMarkInQueue)
+			file->m_bSaveSourcesInQueue = true;
+	}
+	while (!file->srcstosave.IsEmpty()) {
+		CSourceData* cur_src = file->srcstosave.RemoveHead();
+		if (pSaveSourcesData != NULL) {
+			SSaveSourceSnapshotRow row;
+			row.sourceIP = cur_src->sourceIP;
+			row.sourceID = cur_src->sourceID;
+			row.sourcePort = cur_src->sourcePort;
+			row.serverip = cur_src->serverip;
+			row.serverport = cur_src->serverport;
+			row.expiration = cur_src->expiration;
+			row.nSrcExchangeVer = cur_src->nSrcExchangeVer;
+			pSaveSourcesData->rows.push_back(row);
+		}
+		delete cur_src;
+	}
+	sSaveSourcesLock.Unlock();
+	return pSaveSourcesData;
+}
+
+void CSourceSaver::SaveSources(CPartFile* file, bool bForce)
+{
+	SaveSourcesData* pSaveSourcesData = BuildSaveSourcesSnapshot(file, bForce, true);
+	if (pSaveSourcesData == NULL)
+		return;
 
 	// We'll submit a command to the thread only if there's no save sources met command in queue
-	if (file && !file->m_bSaveSourcesInQueue && (bForce || thePrefs.GetCommitFiles() >= 2 || (thePrefs.GetCommitFiles() >= 1 && theApp.IsClosing()))) {
-		CPartFileWriteThread* pThread = theApp.m_pPartFileWriteThread;
-		if (pThread && pThread->IsRunning()) {
-			CSingleLock sFlushListLock(&pThread->m_lockFlushList, TRUE);
-			file->m_bSaveSourcesInQueue = true;
-			pThread->m_FlushList.AddTail(ToWrite{ file, NULL, NULL, new SaveSourcesData{ thePrefs.GetSaveLoadSourcesMaxSources(), thePrefs.GetSaveLoadSourcesExpirationDays(), thePrefs.IsCryptLayerRequired() } });
+	CPartFileWriteThread* pThread = theApp.m_pPartFileWriteThread;
+	if (pThread && pThread->IsRunning()) {
+		CSingleLock sFlushListLock(&pThread->m_lockFlushList, TRUE);
+		pThread->m_FlushList.AddTail(ToWrite{ file, NULL, NULL, pSaveSourcesData, NULL, NULL, NULL });
+		pSaveSourcesData = NULL;
 
-			if (!pThread->m_FlushList.IsEmpty()) //let it sleep if nothing to do
-				pThread->WakeUpCall();
+		if (!pThread->m_FlushList.IsEmpty()) //let it sleep if nothing to do
+			pThread->WakeUpCall();
+	}
+	if (pSaveSourcesData != NULL) {
+		const CString strTmpSourcesFilePath(pSaveSourcesData->strSourcesFilePath + _T(".tmp"));
+		AddDebugLogLine(DLP_HIGH, false, _T("[AsyncDiskWrite] name=\"SLS\" generation=%ld result=failed reason=thread-unavailable error=%lu shutdownFallback=%u temp=\"%s\" final=\"%s\"\n"),
+			pSaveSourcesData->lGeneration, static_cast<DWORD>(ERROR_SERVICE_NOT_ACTIVE), theApp.IsClosing() ? 1U : 0U, (LPCTSTR)strTmpSourcesFilePath, (LPCTSTR)pSaveSourcesData->strSourcesFilePath);
+		theApp.QueueAsyncDiskWriteResultEvent(_T("SLS"), pSaveSourcesData->lGeneration, _T("failed"), _T("thread-unavailable"), strTmpSourcesFilePath, pSaveSourcesData->strSourcesFilePath, theApp.IsClosing(), ERROR_SERVICE_NOT_ACTIVE);
+		if (file != NULL) {
+			CSingleLock sResetSaveSourcesLock(&file->m_SaveSourcesLock, TRUE);
+			file->m_bSaveSourcesInQueue = false;
 		}
 	}
+	delete pSaveSourcesData;
+}
+
+bool CSourceSaver::WriteSourcesSnapshotNow(const SaveSourcesData& data, bool bShutdownFallback)
+{
+	const CString strTmpSourcesFilePath(data.strSourcesFilePath + _T(".tmp"));
+	if (data.strSourcesFilePath.IsEmpty()) {
+		theApp.QueueAsyncDiskWriteResultEvent(_T("SLS"), data.lGeneration, _T("failed"), _T("invalid-path"), strTmpSourcesFilePath, data.strSourcesFilePath, bShutdownFallback, ERROR_INVALID_PARAMETER);
+		return false;
+	}
+
+	CString strLine;
+	CStdioFile f;
+	CFileException fex;
+	if (!f.Open(PreparePathForWin32LongPath(strTmpSourcesFilePath), CFile::modeCreate | CFile::modeWrite | CFile::typeText, &fex)) {
+		theApp.QueueAsyncDiskWriteResultEvent(_T("SLS"), data.lGeneration, _T("failed"), _T("open-temp"), strTmpSourcesFilePath, data.strSourcesFilePath, bShutdownFallback, static_cast<DWORD>(fex.m_lOsError));
+		return false;
+	}
+
+	try {
+		f.WriteString(_T("#format: SourceIP/LowID:SourcePort,ExpirationDate(yymmddhhmm),SourceExchangeVersion,ServerIP,ServerPort;\r\n"));
+		f.WriteString(_T("#") + data.strED2kLink + _T("\r\n"));
+
+		for (std::vector<SSaveSourceSnapshotRow>::const_iterator it = data.rows.begin(); it != data.rows.end(); ++it) {
+			if (it->sourceID)
+				strLine.Format(_T("%i:%i,%s,%i,%s:%i;\r\n"), it->sourceID, it->sourcePort, it->expiration, it->nSrcExchangeVer, ipstr(it->serverip), it->serverport);
+			else
+				strLine.Format(_T("%s:%i,%s,%i,%s:%i;\r\n"), it->sourceIP.ToStringC(), it->sourcePort, it->expiration, it->nSrcExchangeVer, ipstr(it->serverip), it->serverport);
+			f.WriteString(strLine);
+		}
+
+		f.Close();
+	} catch (CFileException *ex) {
+		const DWORD dwWriteError = static_cast<DWORD>(ex->m_lOsError);
+		ex->Delete();
+		f.Abort();
+		(void)DeleteFileLongPath(strTmpSourcesFilePath);
+		theApp.QueueAsyncDiskWriteResultEvent(_T("SLS"), data.lGeneration, _T("failed"), _T("write-temp"), strTmpSourcesFilePath, data.strSourcesFilePath, bShutdownFallback, dwWriteError);
+		return false;
+	} catch (...) {
+		f.Abort();
+		(void)DeleteFileLongPath(strTmpSourcesFilePath);
+		theApp.QueueAsyncDiskWriteResultEvent(_T("SLS"), data.lGeneration, _T("failed"), _T("write-temp"), strTmpSourcesFilePath, data.strSourcesFilePath, bShutdownFallback, ERROR_WRITE_FAULT);
+		return false;
+	}
+
+	if (!MoveFileExLongPath(strTmpSourcesFilePath, data.strSourcesFilePath, MOVEFILE_REPLACE_EXISTING)) {
+		const DWORD dwPublishError = ::GetLastError();
+		(void)DeleteFileLongPath(strTmpSourcesFilePath);
+		theApp.QueueAsyncDiskWriteResultEvent(_T("SLS"), data.lGeneration, _T("failed"), _T("publish-final"), strTmpSourcesFilePath, data.strSourcesFilePath, bShutdownFallback, dwPublishError);
+		return false;
+	}
+	if (!bShutdownFallback)
+		theApp.QueueAsyncDiskWriteResultEvent(_T("SLS"), data.lGeneration, _T("success"), _T("published"), strTmpSourcesFilePath, data.strSourcesFilePath, bShutdownFallback);
+	return true;
 }
 
 CString CSourceSaver::CalcExpiration(int Days)

@@ -52,6 +52,49 @@ namespace
 	const int kSharedFilesFilterMinGapFromButtons = 3;
 	const int kSharedFilesFilterRightMargin = 4;
 	const int kSharedFilesFilterMinWidth = 120;
+	const WPARAM kAutoReloadDeferredDispatchRequest = 4;
+
+	enum ESharedFilesAutoReloadFlags
+	{
+		AutoReloadFiles = 0x01,
+		AutoReloadRoots = 0x02,
+		AutoReloadWatchedDirectories = 0x04,
+		AutoReloadVisibleFileSystem = 0x08
+	};
+
+	DWORD AutoReloadRequestToFlags(WPARAM wpRequest)
+	{
+		switch (wpRequest) {
+		case 1:
+			return AutoReloadRoots;
+		case 2:
+			return AutoReloadWatchedDirectories;
+		case 3:
+			return AutoReloadVisibleFileSystem;
+		case kAutoReloadDeferredDispatchRequest:
+			return 0;
+		default:
+			return AutoReloadFiles;
+		}
+	}
+
+	class CScopedTreeSelectionSyncBlocker
+	{
+	public:
+		explicit CScopedTreeSelectionSyncBlocker(bool& rbFlag)
+			: m_rbFlag(rbFlag)
+		{
+			m_rbFlag = true;
+		}
+
+		~CScopedTreeSelectionSyncBlocker()
+		{
+			m_rbFlag = false;
+		}
+
+	private:
+		bool& m_rbFlag;
+	};
 
 	int GetPageBottomOverflow(CWnd *pPage)
 	{
@@ -101,13 +144,15 @@ BEGIN_MESSAGE_MAP(CSharedFilesWnd, CResizableDialog)
 	ON_BN_CLICKED(IDC_UPDATE_METADATA, OnBnClickedUpdateMetaData)
 	ON_MESSAGE(UM_SHOWFILESCOUNT, OnShowFilesCount)
 	ON_MESSAGE(UM_METADATAUPDATED, OnMetadataUpdated)
-	ON_MESSAGE(UM_AUTO_RELOAD_SHARED_FILES, OnAutoReloadSharedFiles) // 0 = file-level change (fast list reload) 1 = roots changed (force tree + scan + watcher rebuild) 2 = directory created/removed under a shared root (force tree)
+	ON_MESSAGE(UM_SHARED_FILES_SELECTION_DETAILS, OnSelectedFilesDetails)
+	ON_MESSAGE(UM_AUTO_RELOAD_SHARED_FILES, OnAutoReloadSharedFiles) // 0 = file-level change, 1 = roots changed, 2 = watched directory change, 3 = visible file-system branch poll
 	ON_MESSAGE(UM_SHARED_FILES_ADJUST_DETAILS_PANEL, OnAdjustDetailsPanelHeight)
 
 END_MESSAGE_MAP()
 
 CSharedFilesWnd::CSharedFilesWnd(CWnd *pParent /*=NULL*/)
 	: CResizableDialog(CSharedFilesWnd::IDD, pParent)
+	, icon_files(NULL)
 	, m_astrFilterTemp()
 	, m_nFilterColumnLastApplied()
 	, m_bColumnDiff(false)
@@ -116,7 +161,14 @@ CSharedFilesWnd::CSharedFilesWnd(CWnd *pParent /*=NULL*/)
 	, m_bDetailsVisible(true)
 	, m_bDetailsPanelHeightAdjustmentPending(false)
 	, m_bDeferredTreeInitPending(true)
-	, icon_files(NULL)
+	, m_bSuppressTreeSelectionSync(false)
+	, m_lShowFilesCountPending(0)
+	, m_lMetadataUpdatedPending(0)
+	, m_lSelectedFilesDetailsPending(0)
+	, m_lSelectedFilesDetailsForce(0)
+	, m_dwPendingAutoReloadFlags(0)
+	, m_dwDeferredAutoReloadFlags(0)
+	, m_lAutoReloadSharedFilesPending(0)
 {
 }
 
@@ -138,6 +190,7 @@ void CSharedFilesWnd::DoDataExchange(CDataExchange *pDX)
 BOOL CSharedFilesWnd::OnInitDialog()
 {
 	CResizableDialog::OnInitDialog();
+	ModifyStyle(0, WS_CLIPCHILDREN);
 	SetAllIcons();
 
 	sharedfilesctrl.Init();
@@ -159,7 +212,7 @@ BOOL CSharedFilesWnd::OnInitDialog()
 	CRect rcFiles;
 	sharedfilesctrl.GetWindowRect(rcFiles);
 	ScreenToClient(rcFiles);
-	VERIFY(m_dlgDetails.Create(this, DS_CONTROL | DS_SETFONT | WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS, WS_EX_CONTROLPARENT));
+	VERIFY(m_dlgDetails.Create(this, DS_CONTROL | DS_SETFONT | WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN | WS_CLIPSIBLINGS, WS_EX_CONTROLPARENT));
 	m_dlgDetails.SetWindowPos(NULL, rcFiles.left, rcFiles.bottom + 4, rcFiles.Width() + 2, rcSpl.bottom - (rcFiles.bottom + 3), 0);
 	AddOrReplaceAnchor(this, m_dlgDetails, BOTTOM_LEFT, BOTTOM_RIGHT);
 
@@ -239,8 +292,7 @@ void CSharedFilesWnd::DoResize(int iDelta)
 	m_wndSplitter.SetRange(rcWnd.left + SPLITTER_RANGE_MIN, rcWnd.left + SPLITTER_RANGE_MAX);
 
 	RequestDetailsPanelHeightAdjustment();
-	Invalidate();
-	UpdateWindow();
+	Invalidate(FALSE);
 }
 
 void CSharedFilesWnd::EnsureFilterControlLayout()
@@ -282,7 +334,7 @@ void CSharedFilesWnd::EnsureFilterControlLayout()
 	m_ctlFilter.SetWindowPos(NULL, iNewLeft, rcFilter.top, iNewWidth, rcFilter.Height(), SWP_NOOWNERZORDER | SWP_NOZORDER | SWP_NOACTIVATE);
 }
 
-void CSharedFilesWnd::Reload(bool bForceTreeReload, bool bUserForced)
+void CSharedFilesWnd::Reload(bool bForceTreeReload, bool bUserForced, LONG lDirWatchGeneration)
 {
 	// Avoid touching the directory tree on pure file-level changes.
 	if (bForceTreeReload) {
@@ -292,7 +344,7 @@ void CSharedFilesWnd::Reload(bool bForceTreeReload, bool bUserForced)
 		sharedfilesctrl.SetDirectoryFilter(m_ctlSharedDirTree.GetSelectedFilter(), false);
 	}
 
-	theApp.sharedfiles->Reload(); // Always refresh the shared files list (fast path for file-only changes).
+	theApp.sharedfiles->Reload(lDirWatchGeneration); // Always refresh the shared files list (fast path for file-only changes).
 
 	if (bForceTreeReload) {
 		if (theApp.DirWatchRootsChanged())
@@ -330,34 +382,94 @@ void CSharedFilesWnd::OnSize(UINT nType, int cx, int cy)
 
 void CSharedFilesWnd::OnBnClickedReloadSharedFiles()
 {
-	CWaitCursor curWait;
 	Reload(true, true); // Manual reload: user explicitly requests full tree rebuild
 }
 
 void CSharedFilesWnd::OnBnClickedUpdateMetaData()
 {
-	CWaitCursor curWait;
 	theApp.sharedfiles->RebuildMetaData();
 }
 
 // Coalesced auto-reload from threadpool I/O watcher; keep it cheap and deterministic.
 LRESULT CSharedFilesWnd::OnAutoReloadSharedFiles(WPARAM wParam, LPARAM)
 {
+	DWORD dwReloadFlags = 0;
+	{
+		CSingleLock lock(&m_autoReloadRequestLock, TRUE);
+		dwReloadFlags = m_dwPendingAutoReloadFlags | AutoReloadRequestToFlags(wParam);
+		m_dwPendingAutoReloadFlags = 0;
+		InterlockedExchange(&m_lAutoReloadSharedFilesPending, 0);
+	}
+
+	MSG msg;
+	while (::PeekMessage(&msg, m_hWnd, UM_AUTO_RELOAD_SHARED_FILES, UM_AUTO_RELOAD_SHARED_FILES, PM_REMOVE))
+		dwReloadFlags |= AutoReloadRequestToFlags(msg.wParam);
+
+	const DWORD dwDeferrableReloadFlags = AutoReloadFiles | AutoReloadWatchedDirectories;
+	if ((dwReloadFlags & AutoReloadRoots) == 0 && (dwReloadFlags & dwDeferrableReloadFlags) != 0 && theApp.sharedfiles != NULL && theApp.sharedfiles->HasActiveSharedFilesWork()) {
+		const DWORD dwDeferredReloadFlags = dwReloadFlags & dwDeferrableReloadFlags;
+		{
+			CSingleLock lock(&m_autoReloadRequestLock, TRUE);
+			m_dwDeferredAutoReloadFlags |= dwDeferredReloadFlags;
+		}
+		dwReloadFlags &= ~dwDeferredReloadFlags;
+		if (dwReloadFlags == 0)
+			return 0;
+	}
+
+	const bool bNeedFileReload = (dwReloadFlags & AutoReloadFiles) != 0;
+	const bool bNeedRootReload = (dwReloadFlags & AutoReloadRoots) != 0;
+	const bool bNeedWatchedDirectoryReload = (dwReloadFlags & AutoReloadWatchedDirectories) != 0;
+	const bool bNeedVisibleFileSystemPoll = (dwReloadFlags & AutoReloadVisibleFileSystem) != 0;
+
+	if (bNeedVisibleFileSystemPoll) {
+		bool bTreeChanged = false;
+		{
+			CScopedTreeSelectionSyncBlocker suppressSelectionSync(m_bSuppressTreeSelectionSync);
+			bTreeChanged = m_ctlSharedDirTree.RefreshVisibleFileSystemBranchesIfNeeded();
+		}
+
+		if (bTreeChanged) {
+			ApplySelectedTreeFilter(true);
+			ShowSelectedFilesDetails();
+		}
+
+		if (!bNeedFileReload && !bNeedRootReload && !bNeedWatchedDirectoryReload)
+			return 0;
+	}
+
+	// Apply watcher-side deleted-dir pruning before reconcile/reload so the model matches the upcoming tree refresh.
+	if (bNeedWatchedDirectoryReload)
+		theApp.DrainDeletedAutoSharedDirs();
+
+	CStringArray changedDirs;
+	if (bNeedWatchedDirectoryReload) {
+		theApp.DrainDirWatchChangedDirectories(changedDirs);
+		if (changedDirs.GetCount() > 0) {
+			CScopedTreeSelectionSyncBlocker suppressSelectionSync(m_bSuppressTreeSelectionSync);
+			m_ctlSharedDirTree.RefreshVisibleSharedBranches(changedDirs);
+			m_ctlSharedDirTree.RefreshVisibleFileSystemBranches(changedDirs);
+		}
+
+		ApplySelectedTreeFilter(false);
+	}
+
 	CStringArray changedFiles;
 	theApp.DrainDirWatchChangedFiles(changedFiles);
 	if (changedFiles.GetCount() > 0)
 		theApp.sharedfiles->ReconcileMovedSharedFiles(changedFiles);
 
-	// Drain auto-added subdirs (if any) before rebuilding tree, so model matches view
-	if (wParam == 2) // Directory-level change
+	// Drain auto-added subdirs before rebuilding tree, so model matches view.
+	if (bNeedWatchedDirectoryReload)
 		theApp.DrainAutoSharedNewDirs();
 
-	if (wParam == 1) {
-		Reload(true, true); // Structural change in root set: force tree reload
-	} else if (wParam == 2)
-		Reload(true, false); // Directory created/removed under a root: let tree detect structural change and rebuild only if needed
-	else
-		Reload(false); // File-level change: fast path
+	const LONG lDirWatchGeneration = (!bNeedRootReload && (bNeedFileReload || bNeedWatchedDirectoryReload)) ? theApp.GetDirWatchChangeGeneration() : 0;
+	if (bNeedRootReload)
+		Reload(true, true, 0); // Structural root changes must cancel stale pending hash work.
+	else if (bNeedWatchedDirectoryReload)
+		Reload(true, false, lDirWatchGeneration); // Directory created/removed under a root: let tree detect structural change and rebuild only if needed.
+	else if (bNeedFileReload)
+		Reload(false, false, lDirWatchGeneration); // File-level change: fast path.
 
 	if (theApp.uploadqueue != NULL && !theApp.sharedfiles->IsReloading())
 		theApp.uploadqueue->PruneWaitersForMissingSharedFiles();
@@ -414,7 +526,7 @@ BOOL CSharedFilesWnd::PreTranslateMessage(MSG *pMsg)
 			sharedfilesctrl.SetItemState(-1, 0, LVIS_SELECTED);
 			sharedfilesctrl.SetItemState(it, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
 			sharedfilesctrl.SetSelectionMark(it);   // display selection mark correctly!
-			sharedfilesctrl.ShowComments(reinterpret_cast<CShareableFile*>(sharedfilesctrl.GetItemData(it)));
+			sharedfilesctrl.ShowComments(reinterpret_cast<CShareableFile*>(sharedfilesctrl.GetItemObject(it)));
 			return TRUE;
 		}
 		break;
@@ -472,6 +584,52 @@ void CSharedFilesWnd::SetAllIcons()
 	static_cast<CStatic*>(GetDlgItem(IDC_FILES_ICO))->SetIcon(icon_files);
 }
 
+void CSharedFilesWnd::ApplySelectedTreeFilter(bool bRefreshList)
+{
+	CDirectoryItem* pNewDirectoryFilter = m_ctlSharedDirTree.GetSelectedFilter();
+	if (pNewDirectoryFilter == NULL)
+		return;
+
+	if (m_bDeferredTreeInitPending && (pNewDirectoryFilter->m_eItemType == SDI_DIRECTORY || (pNewDirectoryFilter->m_eItemType == SDI_INCOMING && thePrefs.GetAutoShareSubdirs()))) {
+		TryCompleteDeferredTreeInit();
+		pNewDirectoryFilter = m_ctlSharedDirTree.GetSelectedFilter();
+		if (pNewDirectoryFilter == NULL)
+			return;
+	}
+
+	if (!sharedfilesctrl)
+		return;
+
+	sharedfilesctrl.m_eFilter = FilterType::Shared; // Set default value
+
+	if (pNewDirectoryFilter->m_eItemType == SDI_ALLHISTORY || (m_ctlSharedDirTree.GetSelectedFilterParent() && m_ctlSharedDirTree.GetSelectedFilterParent()->m_eItemType == SDI_ALLHISTORY))
+		sharedfilesctrl.m_eFilter = FilterType::History;
+
+	// This part needs to be executed after SetDirectoryFilter since they uses m_eItemType.
+	if (sharedfilesctrl.m_eFilter != FilterType::History) {
+		if ((m_ctlSharedDirTree.GetSelectedFilter() && m_ctlSharedDirTree.GetSelectedFilter()->m_eItemType == SDI_DUP) ||
+			(m_ctlSharedDirTree.GetSelectedFilterParent() && m_ctlSharedDirTree.GetSelectedFilterParent()->m_eItemType == SDI_DUP))
+			sharedfilesctrl.m_eFilter = FilterType::Duplicate;
+		else if (m_ctlSharedDirTree.GetSelectedFilter() && (m_ctlSharedDirTree.GetSelectedFilter()->m_eItemType == SDI_UNSHAREDDIRECTORY || m_ctlSharedDirTree.GetSelectedFilter()->m_eItemType == SDI_FILESYSTEMPARENT))
+			sharedfilesctrl.m_eFilter = FilterType::FileSystem;
+	}
+
+	if (sharedfilesctrl.m_eFilter == FilterType::History)
+		sharedfilesctrl.SetExtendedStyle(LVS_EX_FULLROWSELECT | LVS_EX_INFOTIP | LVS_EX_DOUBLEBUFFER);
+	else if (sharedfilesctrl.CheckBoxesEnabled())
+		sharedfilesctrl.SetExtendedStyle(LVS_EX_FULLROWSELECT | LVS_EX_INFOTIP | LVS_EX_CHECKBOXES | LVS_EX_DOUBLEBUFFER);
+	else
+		sharedfilesctrl.SetExtendedStyle(LVS_EX_FULLROWSELECT | LVS_EX_INFOTIP | LVS_EX_DOUBLEBUFFER);
+
+	if (sharedfilesctrl.m_eFilter == FilterType::FileSystem)
+		GetDlgItem(IDC_UPDATE_METADATA)->EnableWindow(FALSE);
+	else
+		GetDlgItem(IDC_UPDATE_METADATA)->EnableWindow(TRUE);
+
+	SetAllIcons();
+	sharedfilesctrl.SetDirectoryFilter(pNewDirectoryFilter, bRefreshList);
+}
+
 void CSharedFilesWnd::Localize()
 {
 	LocalizeInternal(false);
@@ -519,49 +677,11 @@ void CSharedFilesWnd::TryCompleteDeferredTreeInit()
 void CSharedFilesWnd::OnTvnSelChangedSharedDirsTree(LPNMHDR, LRESULT* pResult)
 {
 	*pResult = 0;
-	CDirectoryItem* pNewDirectoryFilter = m_ctlSharedDirTree.GetSelectedFilter();
-	if (pNewDirectoryFilter == NULL)
+	if (m_bSuppressTreeSelectionSync)
 		return;
 
-	if (m_bDeferredTreeInitPending && (pNewDirectoryFilter->m_eItemType == SDI_DIRECTORY || (pNewDirectoryFilter->m_eItemType == SDI_INCOMING && thePrefs.GetAutoShareSubdirs()))) {
-		TryCompleteDeferredTreeInit();
-		pNewDirectoryFilter = m_ctlSharedDirTree.GetSelectedFilter();
-		if (pNewDirectoryFilter == NULL)
-			return;
-	}
-
-	if (!sharedfilesctrl || sharedfilesctrl.GetDirectoryFilter() == pNewDirectoryFilter)
-		return; // If the selected filter has not changed, we don't need to do anything.
-
-	sharedfilesctrl.m_eFilter = FilterType::Shared; // Set default value
-
-	if (pNewDirectoryFilter->m_eItemType == SDI_ALLHISTORY || (m_ctlSharedDirTree.GetSelectedFilterParent() && m_ctlSharedDirTree.GetSelectedFilterParent()->m_eItemType == SDI_ALLHISTORY))
-		sharedfilesctrl.m_eFilter = FilterType::History;
-
-	// This part needs to be executed after SetDirectoryFilter since they uses m_eItemType.
-	if (sharedfilesctrl.m_eFilter != FilterType::History) {
-		if ((m_ctlSharedDirTree.GetSelectedFilter() && m_ctlSharedDirTree.GetSelectedFilter()->m_eItemType == SDI_DUP) ||
-			(m_ctlSharedDirTree.GetSelectedFilterParent() && m_ctlSharedDirTree.GetSelectedFilterParent()->m_eItemType == SDI_DUP))
-			sharedfilesctrl.m_eFilter = FilterType::Duplicate;
-		else if (m_ctlSharedDirTree.GetSelectedFilter() && (m_ctlSharedDirTree.GetSelectedFilter()->m_eItemType == SDI_UNSHAREDDIRECTORY || m_ctlSharedDirTree.GetSelectedFilter()->m_eItemType == SDI_FILESYSTEMPARENT))
-			sharedfilesctrl.m_eFilter = FilterType::FileSystem;
-	}
-
-	if (sharedfilesctrl.m_eFilter == FilterType::History)
-		sharedfilesctrl.SetExtendedStyle(LVS_EX_FULLROWSELECT | LVS_EX_INFOTIP | LVS_EX_DOUBLEBUFFER);
-	else if (sharedfilesctrl.CheckBoxesEnabled())
-		sharedfilesctrl.SetExtendedStyle(LVS_EX_FULLROWSELECT | LVS_EX_INFOTIP | LVS_EX_CHECKBOXES | LVS_EX_DOUBLEBUFFER);
-	else
-		sharedfilesctrl.SetExtendedStyle(LVS_EX_FULLROWSELECT | LVS_EX_INFOTIP | LVS_EX_DOUBLEBUFFER);
-	
-	if (sharedfilesctrl.m_eFilter == FilterType::FileSystem)
-		GetDlgItem(IDC_UPDATE_METADATA)->EnableWindow(FALSE);
-	else
-		GetDlgItem(IDC_UPDATE_METADATA)->EnableWindow(TRUE);
-
-	SetAllIcons();
 	// We don't want to reload the list when creating the tree, because it will be reloaded after the tree is created anyway.
-	sharedfilesctrl.SetDirectoryFilter(m_ctlSharedDirTree.GetSelectedFilter(), !m_ctlSharedDirTree.IsCreatingTree());
+	ApplySelectedTreeFilter(!m_ctlSharedDirTree.IsCreatingTree());
 }
 
 LRESULT CSharedFilesWnd::DefWindowProc(UINT message, WPARAM wParam, LPARAM lParam)
@@ -605,8 +725,6 @@ LRESULT CSharedFilesWnd::DefWindowProc(UINT message, WPARAM wParam, LPARAM lPara
 
 LRESULT CSharedFilesWnd::OnChangeFilter(WPARAM wParam, LPARAM lParam)
 {
-	CWaitCursor curWait; // this may take a while
-
 	CEditDelayed::SFilterParam* pFilterParam = reinterpret_cast<CEditDelayed::SFilterParam*>(wParam);
 	bool m_bForceApplyFilter = false;
 	uint32 m_nFilterColumnTemp = 0;
@@ -674,6 +792,24 @@ void CSharedFilesWnd::SetToolTipsDelay(DWORD dwDelay)
 	sharedfilesctrl.SetToolTipsDelay(dwDelay);
 }
 
+void CSharedFilesWnd::PostSelectedFilesDetailsAsync(bool bForce)
+{
+	if (!::IsWindow(m_hWnd))
+		return;
+	if (bForce)
+		InterlockedExchange(&m_lSelectedFilesDetailsForce, 1);
+	if (InterlockedCompareExchange(&m_lSelectedFilesDetailsPending, 1, 0) == 0)
+		PostMessage(UM_SHARED_FILES_SELECTION_DETAILS);
+}
+
+LRESULT CSharedFilesWnd::OnSelectedFilesDetails(WPARAM, LPARAM)
+{
+	InterlockedExchange(&m_lSelectedFilesDetailsPending, 0);
+	const bool bForce = InterlockedExchange(&m_lSelectedFilesDetailsForce, 0) != 0;
+	ShowSelectedFilesDetails(bForce);
+	return 0;
+}
+
 void CSharedFilesWnd::ShowSelectedFilesDetails(bool bForce)
 {
 	CTypedPtrList<CPtrList, CShareableFile*> selectedList;
@@ -682,7 +818,9 @@ void CSharedFilesWnd::ShowSelectedFilesDetails(bool bForce)
 		int i = 0;
 		for (POSITION pos = sharedfilesctrl.GetFirstSelectedItemPosition(); pos != NULL;) {
 			int index = sharedfilesctrl.GetNextSelectedItem(pos);
-			CKnownFile* cur_file = sharedfilesctrl.m_ListedItemsVector[index];
+			if (index < 0 || static_cast<size_t>(index) >= sharedfilesctrl.m_ListedItemsVector.size())
+				continue;
+			CKnownFile* cur_file = sharedfilesctrl.m_ListedItemsVector[static_cast<size_t>(index)];
 			CShareableFile* file = reinterpret_cast<CShareableFile*>(cur_file);
 			if (file != NULL) {
 				selectedList.AddTail(file);
@@ -697,8 +835,10 @@ void CSharedFilesWnd::ShowSelectedFilesDetails(bool bForce)
 			POSITION pos = sharedfilesctrl.GetFirstSelectedItemPosition();
 			if (pos) {
 				int index = sharedfilesctrl.GetNextSelectedItem(pos);
-				CKnownFile* cur_file = sharedfilesctrl.m_ListedItemsVector[index];
-				pFile = reinterpret_cast<CShareableFile*>(cur_file);
+				if (index >= 0 && static_cast<size_t>(index) < sharedfilesctrl.m_ListedItemsVector.size()) {
+					CKnownFile* cur_file = sharedfilesctrl.m_ListedItemsVector[static_cast<size_t>(index)];
+					pFile = reinterpret_cast<CShareableFile*>(cur_file);
+				}
 			}
 		}
 		static_cast<CStatic*>(GetDlgItem(IDC_SF_FICON))->SetIcon(pFile ? icon_files : NULL);
@@ -752,10 +892,53 @@ void CSharedFilesWnd::ShowDetailsPanel(bool bShow)
 	thePrefs.SetShowSharedFilesDetails(bShow);
 
 	UpdateDetailsPanelLayout();
-	sharedfilesctrl.SetFocus();
 	ShowSelectedFilesDetails();
+	RedrawDetailsPanelArea();
+	sharedfilesctrl.SetFocus();
 	if (m_bDetailsVisible)
 		RequestDetailsPanelHeightAdjustment();
+}
+
+void CSharedFilesWnd::RedrawDetailsPanelArea()
+{
+	if (!::IsWindow(m_hWnd))
+		return;
+
+	CRect rcRedraw;
+	sharedfilesctrl.GetWindowRect(&rcRedraw);
+	ScreenToClient(&rcRedraw);
+
+	CRect rcChild;
+	if (::IsWindow(m_dlgDetails.GetSafeHwnd())) {
+		m_dlgDetails.GetWindowRect(&rcChild);
+		ScreenToClient(&rcChild);
+		rcRedraw.UnionRect(&rcRedraw, &rcChild);
+	}
+
+	CWnd *pName = GetDlgItem(IDC_SF_FNAME);
+	if (pName != NULL) {
+		pName->GetWindowRect(&rcChild);
+		ScreenToClient(&rcChild);
+		rcRedraw.UnionRect(&rcRedraw, &rcChild);
+	}
+
+	CWnd *pIcon = GetDlgItem(IDC_SF_FICON);
+	if (pIcon != NULL) {
+		pIcon->GetWindowRect(&rcChild);
+		ScreenToClient(&rcChild);
+		rcRedraw.UnionRect(&rcRedraw, &rcChild);
+	}
+
+	CWnd *pButton = GetDlgItem(IDC_SF_HIDESHOWDETAILS);
+	if (pButton != NULL) {
+		pButton->GetWindowRect(&rcChild);
+		ScreenToClient(&rcChild);
+		rcRedraw.UnionRect(&rcRedraw, &rcChild);
+	}
+
+	RedrawWindow(&rcRedraw, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
+	if (::IsWindow(m_dlgDetails.GetSafeHwnd()) && m_dlgDetails.IsWindowVisible())
+		m_dlgDetails.RedrawWindow(NULL, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
 }
 
 void CSharedFilesWnd::RequestDetailsPanelHeightAdjustment()
@@ -765,6 +948,69 @@ void CSharedFilesWnd::RequestDetailsPanelHeightAdjustment()
 
 	m_bDetailsPanelHeightAdjustmentPending = true;
 	PostMessage(UM_SHARED_FILES_ADJUST_DETAILS_PANEL);
+}
+
+void CSharedFilesWnd::PostShowFilesCountAsync()
+{
+	if (!::IsWindow(m_hWnd))
+		return;
+	if (InterlockedCompareExchange(&m_lShowFilesCountPending, 1, 0) != 0)
+		return;
+	if (!PostMessage(UM_SHOWFILESCOUNT, 0, 0))
+		InterlockedExchange(&m_lShowFilesCountPending, 0);
+}
+
+void CSharedFilesWnd::PostMetadataUpdatedAsync()
+{
+	if (!::IsWindow(m_hWnd))
+		return;
+	if (InterlockedCompareExchange(&m_lMetadataUpdatedPending, 1, 0) != 0)
+		return;
+	if (!PostMessage(UM_METADATAUPDATED, 0, 0))
+		InterlockedExchange(&m_lMetadataUpdatedPending, 0);
+}
+
+bool CSharedFilesWnd::PostAutoReloadSharedFilesAsync(WPARAM wpRequest)
+{
+	if (!::IsWindow(m_hWnd))
+		return false;
+
+	bool bPostMessage = false;
+	{
+		CSingleLock lock(&m_autoReloadRequestLock, TRUE);
+		m_dwPendingAutoReloadFlags |= AutoReloadRequestToFlags(wpRequest);
+		bPostMessage = InterlockedCompareExchange(&m_lAutoReloadSharedFilesPending, 1, 0) == 0;
+	}
+	if (bPostMessage && !PostMessage(UM_AUTO_RELOAD_SHARED_FILES, wpRequest, 0)) {
+		InterlockedExchange(&m_lAutoReloadSharedFilesPending, 0);
+		return false;
+	}
+	return true;
+}
+
+void CSharedFilesWnd::PostDeferredAutoReloadSharedFilesIfIdle()
+{
+	if (!::IsWindow(m_hWnd) || theApp.IsClosing() || theApp.sharedfiles == NULL || theApp.sharedfiles->HasActiveSharedFilesWork())
+		return;
+
+	DWORD dwDeferredReloadFlags = 0;
+	bool bPostMessage = false;
+	{
+		CSingleLock lock(&m_autoReloadRequestLock, TRUE);
+		dwDeferredReloadFlags = m_dwDeferredAutoReloadFlags;
+		if (dwDeferredReloadFlags == 0)
+			return;
+
+		m_dwDeferredAutoReloadFlags = 0;
+		m_dwPendingAutoReloadFlags |= dwDeferredReloadFlags;
+		bPostMessage = InterlockedCompareExchange(&m_lAutoReloadSharedFilesPending, 1, 0) == 0;
+	}
+
+	if (bPostMessage && !PostMessage(UM_AUTO_RELOAD_SHARED_FILES, kAutoReloadDeferredDispatchRequest, 0)) {
+		CSingleLock lock(&m_autoReloadRequestLock, TRUE);
+		m_dwDeferredAutoReloadFlags |= dwDeferredReloadFlags;
+		InterlockedExchange(&m_lAutoReloadSharedFilesPending, 0);
+	}
 }
 
 void CSharedFilesWnd::AdjustDetailsPanelHeightForPageOverflow()
@@ -788,14 +1034,16 @@ void CSharedFilesWnd::AdjustDetailsPanelHeightForPageOverflow()
 			break;
 
 		rcDetailDlg.top -= iMoveUp;
-		m_dlgDetails.MoveWindow(&rcDetailDlg);
+		m_dlgDetails.MoveWindow(&rcDetailDlg, FALSE);
 		UpdateDetailsPanelLayout();
-		m_dlgDetails.RedrawWindow(NULL, NULL, RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN);
+		m_dlgDetails.RedrawWindow(NULL, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
 		bAdjusted = true;
 	}
 
-	if (bAdjusted)
+	if (bAdjusted) {
 		AddOrReplaceAnchor(this, m_dlgDetails, BOTTOM_LEFT, BOTTOM_RIGHT);
+		RedrawDetailsPanelArea();
+	}
 }
 
 void CSharedFilesWnd::OnBnClickedSfHideshowdetails()
@@ -805,8 +1053,12 @@ void CSharedFilesWnd::OnBnClickedSfHideshowdetails()
 
 void CSharedFilesWnd::OnLvnItemchangedSflist(LPNMHDR, LRESULT *pResult)
 {
-	if (!sharedfilesctrl.IsSelectionRestoreInProgress())
-		ShowSelectedFilesDetails();
+	if (!sharedfilesctrl.IsSelectionRestoreInProgress()) {
+		if (sharedfilesctrl.GetSelectedCount() > 1)
+			PostSelectedFilesDetailsAsync();
+		else
+			ShowSelectedFilesDetails();
+	}
 	*pResult = 0;
 }
 
@@ -815,6 +1067,7 @@ void CSharedFilesWnd::OnShowWindow(BOOL bShow, UINT)
 	if (bShow) {
 		ShowSelectedFilesDetails(true);
 		RequestDetailsPanelHeightAdjustment();
+		PostAutoReloadSharedFilesAsync(3);
 	}
 }
 
@@ -891,31 +1144,48 @@ BOOL CSharedFileDetailsModelessSheet::OnInitDialog()
 {
 	EnableStackedTabs(FALSE);
 	BOOL bResult = CListViewPropertySheet::OnInitDialog();
+	ModifyStyle(0, WS_CLIPCHILDREN);
 	HighColorTab::UpdateImageList(*this);
 	InitWindowStyles(this);
 
 	m_tabDark.m_bClosable = false;
 
-	if (IsDarkModeEnabled()) {
-		HWND hTab = PropSheet_GetTabControl(m_hWnd);
-		if (hTab != NULL) {
-			::SetWindowTheme(hTab, _T(""), _T(""));
-			m_tabDark.SubclassWindow(hTab);
-		}
-	}
+	EnsureDarkModeTabControl();
 
 	return bResult;
 }
 
+void CSharedFileDetailsModelessSheet::EnsureDarkModeTabControl()
+{
+	if (!IsDarkModeEnabled() || !::IsWindow(GetSafeHwnd()))
+		return;
+
+	HWND hTab = PropSheet_GetTabControl(m_hWnd);
+	if (hTab == NULL)
+		return;
+
+	::SetWindowTheme(hTab, _T(""), _T(""));
+	if (m_tabDark.GetSafeHwnd() == NULL)
+		m_tabDark.SubclassWindow(hTab);
+
+	::RedrawWindow(hTab, NULL, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_UPDATENOW);
+}
+
 int CSharedFileDetailsModelessSheet::GetRequiredHeightCompensation()
 {
-	int iOverflow = GetPageBottomOverflow(GetActivePage());
-	if (iOverflow > 0)
-		return iOverflow;
+	CPropertyPage *pActivePage = GetActivePage();
+	int iOverflow = 0;
+
+	// The archive preview is a resizable list page. Do not let its bottom anchored controls grow the host panel; the v1.4 compensation is only for fixed label/groupbox pages which can overflow with CJK or large fonts.
+	if (pActivePage != &m_wndArchiveInfo) {
+		iOverflow = GetPageBottomOverflow(pActivePage);
+		if (iOverflow > 0)
+			return iOverflow;
+	}
 
 	for (int iPage = 0; iPage < GetPageCount(); ++iPage) {
 		CPropertyPage *pPage = GetPage(iPage);
-		if (pPage == GetActivePage())
+		if (pPage == pActivePage || pPage == &m_wndArchiveInfo)
 			continue;
 		const int iPageOverflow = GetPageBottomOverflow(pPage);
 		if (iPageOverflow > iOverflow)
@@ -975,14 +1245,22 @@ void CSharedFilesWnd::OnLvnItemchangedHlist(NMHDR* /*pNMHDR*/, LRESULT* pResult)
 	*pResult = 0;
 }
 
-LRESULT CSharedFilesWnd::OnShowFilesCount(WPARAM wParam, LPARAM lParam)
+LRESULT CSharedFilesWnd::OnShowFilesCount(WPARAM, LPARAM)
 {
+	MSG msg;
+	while (::PeekMessage(&msg, m_hWnd, UM_SHOWFILESCOUNT, UM_SHOWFILESCOUNT, PM_REMOVE)) {
+	}
+	InterlockedExchange(&m_lShowFilesCountPending, 0);
 	sharedfilesctrl.ShowFilesCount();
 	return 0;
 }
 
-LRESULT CSharedFilesWnd::OnMetadataUpdated(WPARAM wParam, LPARAM lParam)
+LRESULT CSharedFilesWnd::OnMetadataUpdated(WPARAM, LPARAM)
 {
+	MSG msg;
+	while (::PeekMessage(&msg, m_hWnd, UM_METADATAUPDATED, UM_METADATAUPDATED, PM_REMOVE)) {
+	}
+	InterlockedExchange(&m_lMetadataUpdatedPending, 0);
 	sharedfilesctrl.ReloadList(true, LSF_SELECTION);
 	return 0;
 }

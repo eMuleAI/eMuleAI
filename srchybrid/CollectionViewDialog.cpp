@@ -27,12 +27,28 @@
 #include "CatDialog.h"
 #include "SearchDlg.h"
 #include "SearchList.h"
+#include <vector>
+#include <memory>
 
 #ifdef _DEBUG
 #define new DEBUG_NEW
 #undef THIS_FILE
 static char THIS_FILE[] = __FILE__;
 #endif
+
+static void AppendCollectionDownloadSnapshot(const CCollectionFile *pFile, std::vector<CemuleApp::SDownloadFileSnapshot> &snapshots)
+{
+	if (pFile == NULL)
+		return;
+
+	CemuleApp::SDownloadFileSnapshot snapshot;
+	snapshot.m_strFileName = pFile->GetFileName();
+	snapshot.m_uFileSize = pFile->GetFileSize();
+	memcpy(snapshot.m_abyFileHash, pFile->GetFileHash(), sizeof(snapshot.m_abyFileHash));
+	if (pFile->GetFileIdentifierC().HasAICHHash())
+		snapshot.m_strAICHHash = pFile->GetFileIdentifierC().GetAICHHash().GetString();
+	snapshots.push_back(snapshot);
+}
 
 #define	PREF_INI_SECTION	_T("CollectionViewDlg")
 
@@ -41,6 +57,8 @@ IMPLEMENT_DYNAMIC(CCollectionViewDialog, CDialog)
 BEGIN_MESSAGE_MAP(CCollectionViewDialog, CResizableDialog)
 	ON_BN_CLICKED(IDC_VCOLL_CLOSE, OnBnClickedOk)
 	ON_BN_CLICKED(IDC_VIEWCOLLECTIONDL, OnBnClickedViewCollection)
+	ON_BN_CLICKED(IDC_VIEWCOLLECTIONDLSEL, OnBnClickedViewCollectionSelected)
+	ON_NOTIFY(LVN_ITEMCHANGED, IDC_COLLECTIONVEWLIST, OnLvnItemChangedCollectionList)
 	ON_NOTIFY(NM_DBLCLK, IDC_COLLECTIONVEWLIST, OnNmDblClkCollectionList)
 END_MESSAGE_MAP()
 
@@ -68,6 +86,7 @@ void CCollectionViewDialog::DoDataExchange(CDataExchange *pDX)
 	DDX_Control(pDX, IDC_COLLECTIONVIEWLISTLABEL, m_CollectionViewListLabel);
 	DDX_Control(pDX, IDC_COLLECTIONVIEWLISTICON, m_CollectionViewListIcon);
 	DDX_Control(pDX, IDC_VIEWCOLLECTIONDL, m_CollectionDownload);
+	DDX_Control(pDX, IDC_VIEWCOLLECTIONDLSEL, m_CollectionDownloadSelected);
 	DDX_Control(pDX, IDC_VCOLL_CLOSE, m_CollectionExit);
 	DDX_Control(pDX, IDC_COLLECTIONVIEWAUTHOR, m_CollectionViewAuthor);
 	DDX_Control(pDX, IDC_COLLECTIONVIEWAUTHORKEY, m_CollectionViewAuthorKey);
@@ -103,7 +122,8 @@ BOOL CCollectionViewDialog::OnInitDialog()
 
 	m_icoColl = theApp.LoadIcon(_T("AABCollectionFileType"));
 	m_CollectionViewListIcon.SetIcon(m_icoColl);
-	m_CollectionDownload.SetWindowText(GetResString(_T("DOWNLOAD")));
+	m_CollectionDownload.SetWindowText(GetResString(_T("DOWNLOAD_ALL")));
+	m_CollectionDownloadSelected.SetWindowText(GetResString(_T("DOWNLOAD_SELECTED")));
 	m_CollectionExit.SetWindowText(GetResString(_T("CW_CLOSE")));
 	SetDlgItemText(IDC_COLLECTIONVIEWAUTHORLABEL, GetResString(_T("AUTHOR")) + _T(':'));
 	SetDlgItemText(IDC_COLLECTIONVIEWAUTHORKEYLABEL, GetResString(_T("AUTHORKEY")) + _T(':'));
@@ -124,25 +144,25 @@ BOOL CCollectionViewDialog::OnInitDialog()
 	AddOrReplaceAnchor(this, IDC_COLLECTIONVIEWAUTHORKEY, BOTTOM_LEFT, BOTTOM_RIGHT);
 	AddOrReplaceAnchor(this, IDC_VCOLL_CLOSE, BOTTOM_RIGHT);
 	AddOrReplaceAnchor(this, IDC_VIEWCOLLECTIONDL, BOTTOM_RIGHT);
+	AddOrReplaceAnchor(this, IDC_VIEWCOLLECTIONDLSEL, BOTTOM_RIGHT);
 	EnableSaveRestore(PREF_INI_SECTION);
 
-	for (CCollectionFilesMap::CPair *pair = m_pCollection->m_CollectionFilesMap.PGetFirstAssoc(); pair != NULL; pair = m_pCollection->m_CollectionFilesMap.PGetNextAssoc(pair)) {
-		const CCollectionFile *pFile = pair->value;
-		int iImage = theApp.GetFileTypeSystemImageIdx(pFile->GetFileName());
-		int iItem = m_CollectionViewList.InsertItem(LVIF_TEXT | LVIF_PARAM | (iImage > 0 ? LVIF_IMAGE : 0), m_CollectionViewList.GetItemCount(), EMPTY, 0, 0, iImage, (LPARAM)pFile);
-		if (iItem >= 0) {
-			m_CollectionViewList.SetItemText(iItem, colName, pFile->GetFileName());
-			m_CollectionViewList.SetItemText(iItem, colSize, (LPCTSTR)CastItoXBytes(pFile->GetFileSize()));
-			m_CollectionViewList.SetItemText(iItem, colHash, md4str(pFile->GetFileHash()));
-		}
-	}
+	std::vector<CAbstractFile*> aCollectionFiles;
+	aCollectionFiles.reserve(static_cast<size_t>(m_pCollection->m_CollectionFilesMap.GetCount()));
+	for (CCollectionFilesMap::CPair *pair = m_pCollection->m_CollectionFilesMap.PGetFirstAssoc(); pair != NULL; pair = m_pCollection->m_CollectionFilesMap.PGetNextAssoc(pair))
+		aCollectionFiles.push_back(pair->value);
 
-	for (int iItem = m_CollectionViewList.GetItemCount(); --iItem >= 0;)
-		m_CollectionViewList.SetItemState(iItem, LVIS_SELECTED, LVIS_SELECTED);
+	m_CollectionViewList.SetRedraw(false);
+	m_CollectionViewList.SetVirtualFiles(aCollectionFiles);
+	if (!aCollectionFiles.empty())
+		m_CollectionViewList.SetSelectionMark(0);
+	m_CollectionViewList.SetRedraw(true);
+	m_CollectionViewList.Invalidate(FALSE);
 
 	CString strTitle;
 	strTitle.Format(_T("%s (%d)"), (LPCTSTR)GetResString(_T("COLLECTIONLIST")), m_CollectionViewList.GetItemCount());
 	m_CollectionViewListLabel.SetWindowText(strTitle);
+	UpdateDownloadSelectedButtonState();
 
 	return TRUE;
 }
@@ -153,8 +173,46 @@ void CCollectionViewDialog::OnNmDblClkCollectionList(LPNMHDR, LRESULT *pResult)
 	*pResult = 0;
 }
 
+void CCollectionViewDialog::OnLvnItemChangedCollectionList(LPNMHDR, LRESULT *pResult)
+{
+	UpdateDownloadSelectedButtonState();
+	*pResult = 0;
+}
+
+void CCollectionViewDialog::DownloadAll()
+{
+	StartDownload(false);
+}
+
 void CCollectionViewDialog::DownloadSelected()
 {
+	StartDownload(true);
+}
+
+void CCollectionViewDialog::StartDownload(bool bSelectedOnly)
+{
+	std::shared_ptr<std::vector<CemuleApp::SDownloadFileSnapshot> > pSnapshots(new std::vector<CemuleApp::SDownloadFileSnapshot>());
+	if (bSelectedOnly) {
+		const UINT uSelectedCount = m_CollectionViewList.GetSelectedCount();
+		if (uSelectedCount == 0)
+			return;
+		pSnapshots->reserve(uSelectedCount);
+		for (POSITION pos = m_CollectionViewList.GetFirstSelectedItemPosition(); pos != NULL;) {
+			const int index = m_CollectionViewList.GetNextSelectedItem(pos);
+			if (index >= 0)
+				AppendCollectionDownloadSnapshot(reinterpret_cast<CCollectionFile*>(m_CollectionViewList.GetItemData(index)), *pSnapshots);
+		}
+	} else {
+		if (m_pCollection == NULL || m_pCollection->m_CollectionFilesMap.IsEmpty())
+			return;
+		pSnapshots->reserve(static_cast<size_t>(m_pCollection->m_CollectionFilesMap.GetCount()));
+		for (CCollectionFilesMap::CPair *pair = m_pCollection->m_CollectionFilesMap.PGetFirstAssoc(); pair != NULL; pair = m_pCollection->m_CollectionFilesMap.PGetNextAssoc(pair))
+			AppendCollectionDownloadSnapshot(pair->value, *pSnapshots);
+	}
+
+	if (pSnapshots->empty())
+		return;
+
 	int iNewIndex = 0;
 	for (INT_PTR iIndex = thePrefs.GetCatCount(); --iIndex > 0;)
 		if (!m_pCollection->m_sCollectionName.CompareNoCase(thePrefs.GetCategory(iIndex)->strTitle)) {
@@ -167,30 +225,24 @@ void CCollectionViewDialog::DownloadSelected()
 		theApp.emuledlg->searchwnd->UpdateCatTabs();
 	}
 
-	CTypedPtrList<CPtrList, CCollectionFile*> collectionFileList;
-	for (POSITION pos = m_CollectionViewList.GetFirstSelectedItemPosition(); pos != NULL;) {
-		int index = m_CollectionViewList.GetNextSelectedItem(pos);
-		if (index >= 0)
-			collectionFileList.AddTail(reinterpret_cast<CCollectionFile*>(m_CollectionViewList.GetItemData(index)));
-	}
+	theApp.AddFileSnapshotsToDownload(pSnapshots, iNewIndex);
+	if (theApp.emuledlg != NULL)
+		theApp.emuledlg->RefreshActiveBulkOperationOverlays();
+}
 
-	while (!collectionFileList.IsEmpty()) {
-		const CCollectionFile *pFile = collectionFileList.RemoveHead();
-		if (pFile) {
-			if (thePrefs.GetDownloadChecker()) {
-				UINT result = theApp.DownloadChecker->CheckFile(pFile->GetFileHash(), pFile->GetFileName(), pFile->GetFileSize(), true);
-				if (result) {
-					if (thePrefs.GetBlacklistManual() && thePrefs.GetDownloadCheckerMarkAsBlacklisted() && (result == theApp.DownloadChecker->EDownloadCheckerResult::SimilarName))
-						theApp.searchlist->MarkHashAsBlacklisted(CSKey(pFile->GetFileHash()));
-					continue;
-				}
-			}
-			theApp.downloadqueue->AddSearchToDownload(pFile->GetED2kLink(), thePrefs.AddNewFilesPaused(), iNewIndex);
-		}
-	}
+void CCollectionViewDialog::UpdateDownloadSelectedButtonState()
+{
+	if (::IsWindow(m_CollectionDownloadSelected.GetSafeHwnd()))
+		m_CollectionDownloadSelected.EnableWindow(m_CollectionViewList.GetSelectedCount() > 0);
 }
 
 void CCollectionViewDialog::OnBnClickedViewCollection()
+{
+	DownloadAll();
+	OnBnClickedOk();
+}
+
+void CCollectionViewDialog::OnBnClickedViewCollectionSelected()
 {
 	DownloadSelected();
 	OnBnClickedOk();

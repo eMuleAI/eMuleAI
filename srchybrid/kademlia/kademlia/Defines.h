@@ -45,7 +45,8 @@ namespace Kademlia
 #define K							10u
 #define KBASE						4
 #define KK							5
-#define ALPHA_QUERY					3
+#define ALPHA_QUERY					5	// Raised from 3; not a protocol change, just wider local Kad lookup parallelism for modern hardware and networks.
+#define KADEMLIA_FIND_VALUE_MORE_REASKS	4
 #define LOG_BASE_EXPONENT			5
 #define HELLO_TIMEOUT				20
 #define SEARCH_JUMPSTART			1

@@ -1,6 +1,6 @@
 --- /dev/null
 +++ b/mbedtls/include/mbedtls/threading_alt.h
-@@ -0,0 +1,15 @@
+@@ -0,0 +1,19 @@
 +#pragma once
 +#ifdef _MSC_VER
 +#ifndef WIN32_LEAN_AND_MEAN
@@ -20,3 +20,19 @@
 +} mbedtls_platform_condition_variable_t;
 +
 +#endif
+--- a/mbedtls/tf-psa-crypto/include/psa/crypto_config.h
++++ b/mbedtls/tf-psa-crypto/include/psa/crypto_config.h
+@@ -434,5 +434,5 @@
+  * Uncomment this to allow your own alternate threading implementation.
+  */
+-//#define MBEDTLS_THREADING_ALT
++#define MBEDTLS_THREADING_ALT
+ 
+ /**
+@@ -468,5 +468,5 @@
+  * Enable this layer to allow use of mutexes within Mbed TLS
+  */
+-//#define MBEDTLS_THREADING_C
++#define MBEDTLS_THREADING_C
+ 
+ /* Memory buffer allocator options */

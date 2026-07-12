@@ -33,12 +33,21 @@ static char THIS_FILE[] = __FILE__;
 namespace
 {
 	CBarShader* g_pSharedFileSpreadHistoryBar = NULL;
+	const INT_PTR kMaxSpreadListEntries = 4096;
 
 	CBarShader& GetSharedFileSpreadHistoryBar()
 	{
 		if (g_pSharedFileSpreadHistoryBar == NULL)
 			g_pSharedFileSpreadHistoryBar = new CBarShader(16);
 		return *g_pSharedFileSpreadHistoryBar;
+	}
+
+	INT_PTR GetSpreadListEntryLimit(const CKnownFile* pFile)
+	{
+		if (pFile == NULL || pFile->GetPartCount() == 0)
+			return 64;
+		const INT_PTR iPartBasedLimit = static_cast<INT_PTR>(pFile->GetPartCount()) * 4 + 4;
+		return max(static_cast<INT_PTR>(64), min(kMaxSpreadListEntries, iPartBasedLimit));
 	}
 }
 
@@ -48,6 +57,7 @@ void CStatisticFile::MergeFileStats(CStatisticFile *toMerge)
 	accepted += toMerge->GetAccepts();
 	transferred += toMerge->GetTransferred();
 	SetAllTimeRequests(alltimerequested + toMerge->GetAllTimeRequests());
+	SetLastRequestTime(max(m_tLastRequest, toMerge->GetLastRequestTime()));
 	SetAllTimeTransferred(alltimetransferred + toMerge->GetAllTimeTransferred());
 	SetAllTimeAccepts(alltimeaccepted + toMerge->GetAllTimeAccepts());
 
@@ -70,6 +80,7 @@ void CStatisticFile::AddRequest()
 {
 	++requested;
 	++alltimerequested;
+	m_tLastRequest = time(NULL);
 	++theApp.knownfiles->requested;
 	theApp.sharedfiles->UpdateFile(fileParent);
 }
@@ -102,6 +113,8 @@ void CStatisticFile::AddBlockTransferred(uint64 start, uint64 end, uint64 count)
 	CSingleLock lockSpreadList(&m_mutSpreadList, TRUE);
 	if (spreadlist.IsEmpty())
 		spreadlist.SetAt(0, 0);
+	if (spreadlist.GetCount() >= GetSpreadListEntryLimit(fileParent))
+		return;
 
 	POSITION endpos = spreadlist.FindFirstKeyAfter(end);
 	if (endpos != NULL)
@@ -230,6 +243,11 @@ void CStatisticFile::SetAllTimeRequests(uint32 nVal)
 void CStatisticFile::SetAllTimeAccepts(uint32 nVal)
 {
 	alltimeaccepted = nVal;
+}
+
+void CStatisticFile::SetLastRequestTime(time_t tVal)
+{
+	m_tLastRequest = max(static_cast<time_t>(0), tVal);
 }
 
 void CStatisticFile::SetAllTimeTransferred(uint64 nVal)

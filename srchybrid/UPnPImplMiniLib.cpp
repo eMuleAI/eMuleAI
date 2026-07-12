@@ -148,6 +148,9 @@ void CUPnPImplMiniLib::DeletePorts(bool bSkipLock)
 
 void CUPnPImplMiniLib::StartDiscovery(uint16 nTCPPort, uint16 nUDPPort, uint16 nTCPWebPort)
 {
+	if (theApp.IsNetworkActivityBlockedByBind())
+		return;
+
 	DebugLog(_T("Using MiniUPnPLib based implementation"));
 	DebugLog(_T("miniupnpc (c) 2005-2025 Thomas Bernard - http://miniupnp.free.fr/"));
 	GetOldPorts();
@@ -164,6 +167,9 @@ void CUPnPImplMiniLib::StartDiscovery(uint16 nTCPPort, uint16 nUDPPort, uint16 n
 
 bool CUPnPImplMiniLib::CheckAndRefresh()
 {
+	if (theApp.IsNetworkActivityBlockedByBind())
+		return false;
+
 	// in CheckAndRefresh we don't do any new time consuming discovery tries, we expect to find the same router like the first time
 	// and of course we also don't delete old ports (this was done in Discovery) but only check that our current mappings still exist
 	// and refresh them if not
@@ -204,6 +210,8 @@ int CUPnPImplMiniLib::CStartDiscoveryThread::Run()
 {
 	DbgSetThreadName("CUPnPImplMiniLib::CStartDiscoveryThread");
 	if (!m_pOwner)
+		return 0;
+	if (theApp.IsNetworkActivityBlockedByBind())
 		return 0;
 
 	CSingleLock sLock(&m_pOwner->m_mutBusy);

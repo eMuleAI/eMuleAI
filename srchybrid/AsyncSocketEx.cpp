@@ -63,10 +63,13 @@ to tim.kosse@filezilla-project.org
 
 #include "stdafx.h"
 #include "DebugHelpers.h"
+#include "emule.h"
 #include "AsyncSocketEx.h"
 
 #include "AsyncSocketExLayer.h"
 #include "eMuleAI/UtpSocket.h"
+#include "eMuleAI/QuicNatSocket.h"
+#include "eMuleAI/NetBind.h"
 #include "Log.h"
 #include "Preferences.h"
 
@@ -383,7 +386,7 @@ public:
 
 				CAsyncSocketEx *pSocket = pWnd->m_pAsyncSocketExWindowData[wParam].m_pSocket;
 				CAsyncSocketExLayer::t_LayerNotifyMsg *pMsg = reinterpret_cast<CAsyncSocketExLayer::t_LayerNotifyMsg*>(lParam);
-				if (!pMsg || !pSocket || (pSocket->m_SocketData.hSocket == INVALID_SOCKET && !pSocket->HaveUtpLayer()) || pSocket->m_SocketData.hSocket != pMsg->hSocket) {
+				if (!pMsg || !pSocket || (pSocket->m_SocketData.hSocket == INVALID_SOCKET && !pSocket->HaveNatTraversalLayer()) || pSocket->m_SocketData.hSocket != pMsg->hSocket) {
 					delete pMsg;
 					return 0;
 				}
@@ -619,6 +622,11 @@ CAsyncSocketEx::~CAsyncSocketEx()
 
 bool CAsyncSocketEx::Create(UINT nSocketPort /*=0*/, int nSocketType /*=SOCK_STREAM*/, long lEvent /*=FD_DEFAULT*/, const CString& sSocketAddress /*=CString()*/, ADDRESS_FAMILY nFamily /*=AF_INET*/, bool reusable /*=false*/)
 {
+	if (theApp.IsNetworkSocketCreationBlockedByBind()) {
+		WSASetLastError(WSAENETDOWN);
+		return false;
+	}
+
 	//Close the socket, although this should not happen
 	if (GetSocketHandle() != INVALID_SOCKET) {
 		ASSERT(0);
@@ -684,6 +692,10 @@ bool CAsyncSocketEx::Create(UINT nSocketPort /*=0*/, int nSocketType /*=SOCK_STR
 		Close();
 		return false;
 	}
+	if (!ApplyConfiguredIpv4UnicastInterface()) {
+		Close();
+		return false;
+	}
 
 #ifndef NOSOCKETSTATES
 	SetState(unconnected);
@@ -729,13 +741,23 @@ bool CAsyncSocketEx::Bind(UINT nSocketPort, const CString &sSocketAddress)
 			struct sockaddr_storage ss;
 			int sslen = sizeof(ss);
 
-			CString m_strTemp = sSocketAddress;
-			if (WSAStringToAddressA((LPSTR)m_strTemp.GetBuffer(m_strTemp.GetLength()), AF_INET6, NULL, (struct sockaddr*)&ss, &sslen) == 0)
+			CStringA strSocketAddressA(sSocketAddress);
+			LPCSTR pszSocketAddress = strSocketAddressA;
+			if (WSAStringToAddressA(const_cast<LPSTR>(pszSocketAddress), AF_INET6, NULL, (struct sockaddr*)&ss, &sslen) == 0)
 				sockAddr.sin6_addr = ((struct sockaddr_in6*)&ss)->sin6_addr;
-			else
-			{
-				WSASetLastError(WSAEINVAL);
-				return FALSE;
+			else {
+				sockaddr_in sa4 = { 0 };
+				int sa4len = sizeof(sa4);
+				if (WSAStringToAddressA(const_cast<LPSTR>(pszSocketAddress), AF_INET, NULL, reinterpret_cast<sockaddr*>(&sa4), &sa4len) == 0) {
+					memset(&sockAddr.sin6_addr, 0, sizeof(sockAddr.sin6_addr));
+					sockAddr.sin6_addr.s6_addr[10] = 0xFF;
+					sockAddr.sin6_addr.s6_addr[11] = 0xFF;
+					memcpy(&sockAddr.sin6_addr.s6_addr[12], &sa4.sin_addr, sizeof(sa4.sin_addr));
+				}
+				else {
+					WSASetLastError(WSAEINVAL);
+					return FALSE;
+				}
 			}
 		}
 		sockAddr.sin6_family = AF_INET6;
@@ -905,6 +927,11 @@ int CAsyncSocketEx::Receive(void *lpBuf, int nBufLen, int nFlags /*=0*/)
 
 int CAsyncSocketEx::Send(const void *lpBuf, int nBufLen, int nFlags /*=0*/)
 {
+	if (theApp.IsNetworkActivityBlockedByBind()) {
+		WSASetLastError(WSAENETDOWN);
+		return SOCKET_ERROR;
+	}
+
 	if (m_pFirstLayer)
 		return m_pFirstLayer->Send(lpBuf, nBufLen, nFlags);
 	return send(m_SocketData.hSocket, (LPSTR)lpBuf, nBufLen, nFlags);
@@ -912,6 +939,11 @@ int CAsyncSocketEx::Send(const void *lpBuf, int nBufLen, int nFlags /*=0*/)
 
 bool CAsyncSocketEx::Connect(const CString &sHostAddress, UINT nHostPort)
 {
+	if (theApp.IsNetworkActivityBlockedByBind()) {
+		WSASetLastError(WSAENETDOWN);
+		return false;
+	}
+
 	if (m_pFirstLayer) {
 		bool res = m_pFirstLayer->Connect(sHostAddress, nHostPort);
 #ifndef NOSOCKETSTATES
@@ -1023,6 +1055,11 @@ bool CAsyncSocketEx::Connect(const CString &sHostAddress, UINT nHostPort)
 
 BOOL CAsyncSocketEx::Connect(const LPSOCKADDR lpSockAddr, int nSockAddrLen)
 {
+	if (theApp.IsNetworkActivityBlockedByBind()) {
+		WSASetLastError(WSAENETDOWN);
+		return FALSE;
+	}
+
 	if (thePrefs.GetLogNatTraversalEvents())
 		AddDebugLogLine(DLP_VERYLOW, false, _T("[uTP-DEBUG] CAsyncSocketEx::Connect: m_pFirstLayer=%p"), m_pFirstLayer);
 	BOOL res;
@@ -1259,10 +1296,28 @@ BOOL CAsyncSocketEx::HaveUtpLayer(bool bActive)
 	return FALSE;
 }
 
+BOOL CAsyncSocketEx::HaveQuicNatLayer(bool bActive)
+{
+	if (m_pFirstLayer && m_pFirstLayer->IsQuicNatLayer())
+	{
+		if (bActive && m_pFirstLayer->GetLayerState() != connected)
+			return FALSE;
+		return TRUE;
+	}
+	return FALSE;
+}
+
+BOOL CAsyncSocketEx::HaveNatTraversalLayer(bool bActive)
+{
+	return HaveUtpLayer(bActive) || HaveQuicNatLayer(bActive);
+}
+
 BOOL CAsyncSocketEx::GetSockOpt(int nOptionName, void *lpOptionValue, int *lpOptionLen, int nLevel /*=SOL_SOCKET*/)
 {
 	if (HaveUtpLayer())
 		return ((CUtpSocket*)m_pFirstLayer)->GetSockOpt(nOptionName, lpOptionValue, lpOptionLen);
+	if (HaveQuicNatLayer())
+		return ((CQuicNatSocket*)m_pFirstLayer)->GetSockOpt(nOptionName, lpOptionValue, lpOptionLen);
 	return !getsockopt(m_SocketData.hSocket, nLevel, nOptionName, (LPSTR)lpOptionValue, lpOptionLen);
 }
 
@@ -1270,13 +1325,43 @@ BOOL CAsyncSocketEx::SetSockOpt(int nOptionName, const void *lpOptionValue, int 
 {
 	if (HaveUtpLayer())
 		return ((CUtpSocket*)m_pFirstLayer)->SetSockOpt(nOptionName, lpOptionValue, nOptionLen);
+	if (HaveQuicNatLayer())
+		return ((CQuicNatSocket*)m_pFirstLayer)->SetSockOpt(nOptionName, lpOptionValue, nOptionLen);
 	return !setsockopt(m_SocketData.hSocket, nLevel, nOptionName, (LPSTR)lpOptionValue, nOptionLen);
 }
 
 
 
+bool CAsyncSocketEx::ApplyConfiguredIpv4UnicastInterface()
+{
+	if (!thePrefs.IsIpGuardEnabled() || thePrefs.GetActiveBindResolveResult() != NBR_Resolved)
+		return true;
 
+	const CAddress::EAF eBindFamily = thePrefs.GetActiveBindResolvedFamily();
+	if ((eBindFamily == CAddress::IPv4 && m_SocketData.nFamily != AF_INET) || (eBindFamily == CAddress::IPv6 && m_SocketData.nFamily != AF_INET6)) {
+		DebugLogError(_T("IP Guard bind enforcement: refusing socket because bound address family does not match socket family (interface=%s)"), (LPCTSTR)thePrefs.GetActiveBindInterfaceName());
+		WSASetLastError(WSAEAFNOSUPPORT);
+		return false;
+	}
 
+	int nError = 0;
+	bool bApplied = false;
+	if (m_SocketData.nFamily == AF_INET)
+		bApplied = CNetBind::ApplyIpv4UnicastInterfaceOption(m_SocketData.hSocket, m_SocketData.nFamily, true, true, thePrefs.GetActiveBindIpv4IfIndex(), &nError);
+	else if (m_SocketData.nFamily == AF_INET6)
+		bApplied = CNetBind::ApplyIpv6UnicastInterfaceOption(m_SocketData.hSocket, m_SocketData.nFamily, true, true, thePrefs.GetActiveBindIpv6IfIndex(), &nError);
+	else
+		bApplied = true;
+	if (bApplied)
+		return true;
+
+	DebugLogError(_T("IP Guard bind enforcement failed: unicast interface could not be applied to %s (family=%d, error=%d)"),
+		(LPCTSTR)thePrefs.GetActiveBindInterfaceName(),
+		static_cast<int>(m_SocketData.nFamily),
+		nError);
+	WSASetLastError(nError);
+	return false;
+}
 
 bool CAsyncSocketEx::SetFamily(ADDRESS_FAMILY nFamily)
 {
@@ -1289,6 +1374,11 @@ bool CAsyncSocketEx::SetFamily(ADDRESS_FAMILY nFamily)
 
 bool CAsyncSocketEx::TryNextProtocol()
 {
+	if (theApp.IsNetworkActivityBlockedByBind()) {
+		WSASetLastError(WSAENETDOWN);
+		return false;
+	}
+
 	closesocket(m_SocketData.hSocket);
 	DetachHandle();
 
@@ -1304,7 +1394,7 @@ bool CAsyncSocketEx::TryNextProtocol()
 
 		if (AsyncSelect(m_lEvent))
 			if (!m_pFirstLayer || !WSAAsyncSelect(m_SocketData.hSocket, GetHelperWindowHandle(), WM_SOCKETEX_NOTIFY + m_SocketData.nSocketIndex, FD_DEFAULT))
-				if (Bind(m_nSocketPort, m_sSocketAddress)) {
+				if (Bind(m_nSocketPort, m_sSocketAddress) && ApplyConfiguredIpv4UnicastInterface()) {
 					ret = Connect(m_SocketData.nextAddr->ai_addr, (int)m_SocketData.nextAddr->ai_addrlen);
 					if (ret || GetLastError() == WSAEWOULDBLOCK)
 						break;

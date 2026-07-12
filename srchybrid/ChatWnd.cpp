@@ -130,7 +130,7 @@ void CChatWnd::ShowFriendMsgDetails(CFriend *pFriend)
 		if (linkedc) {
 			SetDlgItemText(IDC_FRIENDS_NAME_EDIT, linkedc->GetUserName());
 			SetDlgItemText(IDC_FRIENDS_USERHASH_EDIT, md4str(linkedc->GetUserHash()));
-			SetDlgItemText(IDC_FRIENDS_CLIENTE_EDIT, linkedc->GetClientSoftVer());
+			SetDlgItemText(IDC_FRIENDS_CLIENTE_EDIT, linkedc->DbgGetFullClientSoftVer());
 		} else {
 			SetDlgItemText(IDC_FRIENDS_NAME_EDIT, (pFriend->m_strName.IsEmpty() ? _T("?") : (LPCTSTR)pFriend->m_strName));
 			SetDlgItemText(IDC_FRIENDS_USERHASH_EDIT, (pFriend->HasUserhash() ? (LPCTSTR)md4str(pFriend->m_abyUserhash) : _T("?")));
@@ -306,8 +306,7 @@ void CChatWnd::DoResize(int iDelta)
 	m_wndSplitterHorz.SetRange(rcWnd.left + SPLITTER_HORZ_RANGE_MIN + SPLITTER_HORZ_WIDTH / 2
 							, rcWnd.left + SPLITTER_HORZ_RANGE_MAX - SPLITTER_HORZ_WIDTH / 2);
 
-	Invalidate();
-	UpdateWindow();
+	Invalidate(FALSE);
 }
 
 LRESULT CChatWnd::DefWindowProc(UINT uMessage, WPARAM wParam, LPARAM lParam)
@@ -443,8 +442,10 @@ LRESULT CChatWnd::OnCloseTab(WPARAM wParam, LPARAM)
 {
 	TCITEM ti;
 	ti.mask = TCIF_PARAM;
-	if (chatselector.GetItem((int)wParam, &ti))
-		chatselector.EndSession(reinterpret_cast<CChatItem*>(ti.lParam)->client);
+	if (chatselector.GetItem((int)wParam, &ti)) {
+		const CChatItem *ci = reinterpret_cast<CChatItem*>(ti.lParam);
+		chatselector.EndSessionByRuntime(ci->runtimeID, ci->runtimeGeneration);
+	}
 	EnableClose();
 	return TRUE;
 }

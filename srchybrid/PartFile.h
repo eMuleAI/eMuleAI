@@ -1,4 +1,4 @@
-//Copyright (C)2002-2026 Merkur ( strEmail.Format("%s@%s", "devteam", "emule-project.net") / https://www.emule-project.net )
+﻿//Copyright (C)2002-2026 Merkur ( strEmail.Format("%s@%s", "devteam", "emule-project.net") / https://www.emule-project.net )
 //Copyright (C)2026 eMule AI
 //
 //This program is free software; you can redistribute it and/or
@@ -72,6 +72,7 @@ enum EPartFileLoadResult
 #define	FILE_COMPLETION_THREAD_FAILED	0x0000
 #define	FILE_COMPLETION_THREAD_SUCCESS	0x0001
 #define	FILE_COMPLETION_THREAD_RENAMED	0x0002
+#define	FILE_COMPLETION_THREAD_EXTENSION_FIXED	0x0004
 
 enum EPartFileOp
 {
@@ -84,6 +85,7 @@ enum EPartFileOp
 
 class CSearchFile;
 class CUpDownClient;
+class CPartFile;
 enum EDownloadState : uint8;
 class CSafeMemFile;
 class CED2KFileLink;
@@ -140,6 +142,16 @@ struct PartfileSourceCache
 
 typedef CTypedPtrList<CPtrList, CUpDownClient*> CUpDownClientPtrList;
 
+struct PartFileCreateResult;
+
+struct PartFileComplete_Struct
+{
+	CPartFile* pPartFile;
+	DWORD dwRuntimeID;
+	uchar abyFileHash[16];
+	DWORD dwResult;
+};
+
 class CPartFile : public CKnownFile
 {
 	DECLARE_DYNAMIC(CPartFile)
@@ -147,7 +159,8 @@ class CPartFile : public CKnownFile
 
 public:
 	explicit CPartFile(UINT cat = 0);
-	explicit CPartFile(CSearchFile *searchresult, UINT cat = 0);
+	explicit CPartFile(CSearchFile *searchresult, UINT cat = 0, bool bDeferDiskCreate = false);
+	explicit CPartFile(LPCTSTR pszFileName, uint64 uFileSize, const uchar *pFileHash, LPCTSTR pszAICHHash, UINT cat = 0, bool bDeferDiskCreate = false, bool bSkipExistingCheck = false);
 	explicit CPartFile(const CString &edonkeylink, UINT cat = 0);
 	explicit CPartFile(const CED2KFileLink &fileLink, UINT cat = 0);
 	virtual	~CPartFile();
@@ -165,6 +178,11 @@ public:
 	};
 
 	PartMetFileDataStruct* PartMetFileData;
+
+	LONG	NextPartMetSaveGeneration()						{ return InterlockedIncrement(&m_lPartMetSaveGeneration); }
+	LONG	GetPartMetSaveGeneration() const				{ return InterlockedCompareExchange(const_cast<volatile LONG*>(&m_lPartMetSaveGeneration), 0, 0); }
+	LONG	NextSaveSourcesGeneration()						{ return InterlockedIncrement(&m_lSaveSourcesGeneration); }
+	LONG	GetSaveSourcesGeneration() const				{ return InterlockedCompareExchange(const_cast<volatile LONG*>(&m_lSaveSourcesGeneration), 0, 0); }
 
 	bool	IsPartFile() const							{ return (status != PS_COMPLETE); }
 
@@ -197,12 +215,22 @@ public:
 
 	void	InitializeFromLink(const CED2KFileLink &fileLink, UINT cat = 0);
 	uint32	Process(uint32 reducedownload, UINT icounter);
-	EPartFileLoadResult	LoadPartFile(LPCTSTR in_directory, LPCTSTR in_filename, EPartFileFormat *pOutCheckFileFormat = NULL); //filename = *.part.met
-	EPartFileLoadResult	ImportShareazaTempfile(LPCTSTR in_directory, LPCTSTR in_filename, EPartFileFormat *pOutCheckFileFormat = NULL);
+	EPartFileLoadResult	LoadPartFile(LPCTSTR in_directory, LPCTSTR in_filename, EPartFileFormat *pOutCheckFileFormat = NULL, bool bDeferHashing = false); //filename = *.part.met
+	EPartFileLoadResult	ImportShareazaTempfile(LPCTSTR in_directory, LPCTSTR in_filename, EPartFileFormat *pOutCheckFileFormat = NULL, bool bDeferHashing = false);
 
-	bool	SavePartFile(bool bDontOverrideBak = false);
+	bool	SavePartFile(bool bDontOverrideBak = false, bool bForceSynchronous = false);
 	bool	SavePartFileThreaded(bool bDontOverrideBak = false);
+	void	SetSkipPartFileSaveOnDelete(bool bSkip)	{ m_bSkipPartFileSaveOnDelete = bSkip; }
+	bool	HasDeferredInitialPartMetSave() const			{ return m_bDeferredInitialPartMetSave; }
+	bool	FlushDeferredInitialPartMetSave();
+	bool	HasPendingPartFileDiskCreate() const			{ return m_bPartFileDiskCreatePending; }
+	bool	HasUnqueuedPartFileDiskCreate() const		{ return m_bPartFileDiskCreatePending && !m_bPartFileDiskCreateQueued; }
+	bool	QueuePendingPartFileDiskCreate();
+	bool	ApplyPartFileDiskCreateResult(const PartFileCreateResult& result);
+	bool	StartPartFileRehash();
+	bool	StartDeferredCompletionHash();
 	void	PartFileHashFinished(CKnownFile *result);
+	void	PartFileHashFailed();
 	bool	HashSinglePart(UINT partnumber, bool *pbAICHReportedOK = NULL); // true = OK, false = corrupted
 
 	void	AddGap(uint64 start, uint64 end);
@@ -287,7 +315,7 @@ public:
 
 	void	OpenFile() const;
 	void	PreviewFile(const int iAppIndex = -1);
-	void	DeletePartFile(bool bAddToCanceledMet = true);
+	bool	DeletePartFile(bool bAddToCanceledMet = true, uint64 uDownloadRemoveSequence = 0, uint64 uDownloadRemoveCorrelationId = 0, bool bQueueDownloadListRowsRemoved = true);
 	void	StopFile(bool bCancel);
 	void	PauseFile(bool bInsufficient = false);
 	void	StopPausedFile();
@@ -332,6 +360,8 @@ public:
 
 	void	FlushBuffersExceptionHandler(CFileException *ex);
 	void	FlushBuffersExceptionHandler();
+	bool	HasBufferedWriteData() const					{ return m_nTotalBufferData > 0; }
+	uint64	GetBufferedDataBytes() const					{ return m_nTotalBufferData; }
 
 	void	PerformFileCompleteEnd(DWORD dwResult);
 
@@ -365,9 +395,10 @@ public:
 
 	bool	GetPreviewPrio() const						{ return m_bpreviewprio; }
 	void	SetPreviewPrio(bool in)						{ m_bpreviewprio = in; }
-	bool	IsAutoRenameToMajorityNameEnabled() const	{ return m_bAutoRenameToMajorityName; }
+	bool	IsAutoRenameToMajorityNameEnabled() const;
 	void	SetAutoRenameToMajorityName(bool bEnabled);
-	void	ToggleAutoRenameToMajorityName()			{ SetAutoRenameToMajorityName(!m_bAutoRenameToMajorityName); }
+	void	ToggleAutoRenameToMajorityName()			{ SetAutoRenameToMajorityName(!IsAutoRenameToMajorityNameEnabled()); }
+	void	RefreshAutoRenameToMajorityNamePolicy(bool bOldAutoRenameToMajorityNameEnabled = false, bool bOldAutoRenameToMajorityNameForNewDownloadsOnly = false);
 	void	UpdateSourceFileName(CUpDownClient* pSource);
 	void	RemoveSourceFileName(CUpDownClient* pSource);
 
@@ -385,6 +416,8 @@ public:
 	time_t	m_tLastSeenCompleteForAutoDelete;
 	bool	m_bAutoDeletePendingWhileBusy;
 	LONG	m_lAutoDeleteStateGeneration;
+	volatile LONG m_lPartMetSaveGeneration;
+	volatile LONG m_lSaveSourcesGeneration;
 	CCriticalSection m_SavePartFileLock;
 	CCriticalSection m_PartStatusLock;
 	CCriticalSection m_SaveSourcesLock;
@@ -401,6 +434,13 @@ public:
 	const  uint32	GetSourceCacheAmount() const { return m_sourcecache.GetCount(); }
 
 private:
+	enum EAutoRenameToMajorityNameMode
+	{
+		ARMM_INHERIT = 0,
+		ARMM_FORCE_ENABLED = 1,
+		ARMM_FORCE_DISABLED = 2
+	};
+
 	CArray<uint16, uint16> m_SrcIncPartFrequency;
 public:
 	const bool GetNextRequestedBlockICS(CUpDownClient* sender, Requested_Block_Struct** newblocks, int& iCount);
@@ -433,11 +473,17 @@ public:
 	CSourceSaver m_sourcesaver;
 	bool m_bSaveSourcesInQueue;
 	bool m_bFlushPartMetInQueue;
+	bool m_bDeferredInitialPartMetSave;
+	bool m_bPartFileDiskCreatePending;
+	bool m_bPartFileDiskCreateQueued;
+	bool m_bSkipPartFileSaveOnDelete;
+	bool m_bPartFileHashFailed;
 
 protected:
 	bool	GetNextEmptyBlockInPart(UINT partNumber, Requested_Block_Struct *pReqBlock) const;
 	void	CompleteFile(bool bIsHashingDone);
-	void	CreatePartFile(UINT cat = 0);
+	void	CreatePartFile(UINT cat = 0, bool bDeferDiskCreate = false);
+	bool	QueueDeferredPartFileDiskCreate(LPCTSTR pszPartFilePath);
 	void	Init();
 	bool	HasPendingBufferedWriteBookkeeping() const;
 	bool	HasBufferedWriteOnPart(UINT nPart) const;
@@ -507,8 +553,10 @@ private:
 	bool	m_bDelayDelete;
 	bool	m_bpreviewprio;
 	bool	m_bProcessingPendingAICHRecovery;
-	bool	m_bAutoRenameToMajorityName;
+	bool	m_bAutoRenameToMajorityNameDirty;
 	int		m_iLastAutoRenameToMajorityAction;
+	DWORD	m_dwNextAutoRenameToMajorityNameCheck;
+	EAutoRenameToMajorityNameMode m_eAutoRenameToMajorityNameMode;
 	DWORD	m_uRuntimeID;
 	DWORD	m_uNextImportOperationID;
 	DWORD	m_uActiveImportOperationID;
@@ -517,8 +565,15 @@ private:
 	CString	m_strLastAutoRenameToMajorityCandidate;
 	CMap<CUpDownClient*, CUpDownClient*, CString, CString> m_mapSourceFileNames;
 	CMap<CString, LPCTSTR, int, int> m_mapSourceFileNameCounts;
+	CMap<CString, LPCTSTR, CString, CString> m_mapSourceFileNameDisplayNames;
 
 	void	ApplyAutoRenameToMajorityName();
+	void	QueueDeferredAutoRenameToMajorityName();
+	void	ProcessDeferredAutoRenameToMajorityName(DWORD dwTick);
+	bool	IsAutoRenameToMajorityNameDefaultEnabled() const;
+	bool	IsAutoRenameToMajorityNameRuntimeEnabled() const;
+	void	ApplyAutoRenameDefaultForNewDownload();
+	void	SetAutoRenameToMajorityNameMode(UINT uMode);
 	bool	GetMajoritySourceFileName(CString& strMajorityFileName);
 	void	ResetAutoRenameToMajorityTracking();
 };

@@ -182,7 +182,9 @@ BOOL CPPgDisplay::OnApply()
 
 	if (mintotray_old != thePrefs.mintotray)
 		theApp.emuledlg->TrayMinimizeToTrayChange();
-	if (!thePrefs.ShowRatesOnTitle())
+	if (thePrefs.ShowRatesOnTitle())
+		theApp.emuledlg->ShowTransferRate(true);
+	else
 		theApp.emuledlg->SetWindowText(theApp.emuledlg->GetMainWindowTitleText());
 
 	SetModified(FALSE);

@@ -26,6 +26,7 @@
 #include "Statistics.h"
 #include "ClientCredits.h"
 #include "DownloadQueue.h"
+#include "ServerConnect.h"
 #include "ClientUDPSocket.h"
 #include "emuledlg.h"
 #include "TransferDlg.h"
@@ -46,8 +47,38 @@
 static char THIS_FILE[] = __FILE__;
 #endif
 
+namespace
+{
+	bool GuardUpDownClientMutation(LPCTSTR pszEntryPoint)
+	{
+		return theApp.GuardModelMutation(CemuleApp::ModelMutationUpDownClient, pszEntryPoint);
+	}
+}
+
 //	members of CUpDownClient
 //	which are mainly used for downloading functions
+namespace
+{
+	const DWORD kNatTraversalDuplicateFileRequestWindow = SEC2MS(2);
+	const uint32 kMaxCompressedBlockInputBytes = EMBLOCKSIZE + 300;
+	const uint32 kMaxCompressedBlockOutputBytes = EMBLOCKSIZE + 300;
+
+	void QueueCompressedBlockParseFailure(LPCTSTR pszStage, DWORD dwLastError)
+	{
+		theApp.QueueNetworkParserFailureEvent(CemuleApp::NetworkParseCompressedBlock, pszStage, dwLastError);
+	}
+}
+
+CUpDownClient::SCompressedBlockParseResult::SCompressedBlockParseResult()
+	: m_pBuffer(NULL)
+	, m_uBufferSize(0)
+	, m_uStartOffset(0)
+	, m_uEndOffset(0)
+	, m_iZLibResult(Z_DATA_ERROR)
+	, m_bValid(false)
+{
+}
+
 CBarShader CUpDownClient::s_StatusBar(16);
 void CUpDownClient::DrawStatusBar(CDC *dc, const CRect &rect, bool onlygreyrect, bool  bFlat) const
 {
@@ -289,19 +320,19 @@ void CUpDownClient::TriggerFileRequestIfNeeded()
 	// Only send request if: 1) we have a reqfile, 2) DS_CONNECTED, 3) no pending request (or NAT-T bypass)
 	
 	// For NAT-T/uTP connections, bypass QueueRankPending check - it may be stale from previous connection attempts
-	bool bIsUtpConnection = (socket && socket->HaveUtpLayer());
-	bool bBypassPendingCheck = bIsUtpConnection && HasLowID();
+	bool bIsNatTraversalConnection = (socket && socket->HaveNatTraversalLayer());
+	bool bBypassPendingCheck = bIsNatTraversalConnection && HasLowID();
 
 	// Keep ED2K file request strictly after Hello/HelloAnswer on uTP.
 	// Sending OP_STARTUPLOADREQ before handshake completion can lead to connection aborts on simultaneous connects.
-	if (bIsUtpConnection && IsHelloAnswerPending()) {
+	if (bIsNatTraversalConnection && IsHelloAnswerPending()) {
 		if (thePrefs.GetLogNatTraversalEvents())
 			DebugLog(_T("[NatTraversal] TriggerFileRequestIfNeeded: Waiting for OP_HELLOANSWER before file request, %s"), (LPCTSTR)EscPercent(DbgGetClientInfo()));
 		return;
 	}
 	
 	// If reqfile is NULL and this is a NAT-T connection, try to find the request file
-	if (m_reqfile == NULL && bIsUtpConnection) {
+	if (m_reqfile == NULL && bIsNatTraversalConnection) {
 		// Try to resolve request file from download queue by this client's IP/port
 		CAddress cip = GetConnectIP().IsNull() ? GetIP() : GetConnectIP();
 		uint16 cport = GetKadPort() ? GetKadPort() : GetUDPPort();
@@ -330,25 +361,33 @@ void CUpDownClient::TriggerFileRequestIfNeeded()
 					 (m_fQueueRankPending == 0 || bBypassPendingCheck));
 	
 	if (bCanSend) {
+		if (bIsNatTraversalConnection && !IsCurrentNatTraversalTransportCompatible()) {
+			if (thePrefs.GetLogNatTraversalEvents())
+				DebugLog(_T("[NatTraversal] TriggerFileRequestIfNeeded: resetting incompatible NAT-T transport before file request, %s"), (LPCTSTR)EscPercent(DbgGetClientInfo()));
+			ResetNatTraversalSocketForTransportChange(_T("NAT-T transport renegotiation before file request"), true);
+			TryToConnect(true, false, NULL, true);
+			return;
+		}
+
 		// Clear pending flag for NAT-T if we're bypassing
 		if (bBypassPendingCheck && m_fQueueRankPending != 0) {
 			if (thePrefs.GetLogNatTraversalEvents())
-				DebugLog(_T("[NatTraversal] TriggerFileRequestIfNeeded: Clearing stale QueueRankPending for uTP connection"));
+				DebugLog(_T("[NatTraversal] TriggerFileRequestIfNeeded: Clearing stale QueueRankPending for NAT-T connection"));
 			m_fQueueRankPending = 0;
 		}
 		if (thePrefs.GetLogNatTraversalEvents())
 			DebugLog(_T("[NatTraversal] TriggerFileRequestIfNeeded: Sending file request for %s via %s"),
 				(LPCTSTR)EscPercent(DbgGetClientInfo()), 
-				bIsUtpConnection ? _T("uTP") : _T("TCP"));
+				bIsNatTraversalConnection ? ((socket && socket->HaveQuicNatLayer()) ? _T("QUIC") : _T("uTP")) : _T("TCP"));
 		SendFileRequest();
 	} else if (m_reqfile != NULL && m_fQueueRankPending != 0 && !bBypassPendingCheck) {
 		if (thePrefs.GetLogNatTraversalEvents())
 			DebugLog(_T("[NatTraversal] TriggerFileRequestIfNeeded: Skipping SendFileRequest (already pending, QueueRankPending=%u), %s"),
 				(unsigned)m_fQueueRankPending, (LPCTSTR)EscPercent(DbgGetClientInfo()));
 	} else if (thePrefs.GetLogNatTraversalEvents()) {
-		DebugLog(_T("[NatTraversal] TriggerFileRequestIfNeeded: Conditions not met (state=%d reqfile=%s pending=%u uTP=%d), %s"),
+		DebugLog(_T("[NatTraversal] TriggerFileRequestIfNeeded: Conditions not met (state=%d reqfile=%s pending=%u natt=%d), %s"),
 			GetDownloadState(), m_reqfile ? _T("YES") : _T("NULL"), 
-			(unsigned)m_fQueueRankPending, bIsUtpConnection ? 1 : 0, (LPCTSTR)EscPercent(DbgGetClientInfo()));
+			(unsigned)m_fQueueRankPending, bIsNatTraversalConnection ? 1 : 0, (LPCTSTR)EscPercent(DbgGetClientInfo()));
 	}
 }
 
@@ -361,6 +400,27 @@ void CUpDownClient::SendFileRequest()
 		ASSERT(0);
 		return;
 	}
+
+	if (socket != NULL && socket->HaveNatTraversalLayer()) {
+		void* pNatTraversalLayer = socket->HaveQuicNatLayer()
+			? static_cast<void*>(socket->GetQuicNatLayer())
+			: static_cast<void*>(socket->GetUtpLayer());
+		const DWORD dwNow = ::GetTickCount();
+		if (pNatTraversalLayer != NULL
+			&& m_pLastNatTraversalFileRequestLayer == pNatTraversalLayer
+			&& md4equ(m_achLastNatTraversalFileRequestHash, m_reqfile->GetFileHash())
+			&& (DWORD)(dwNow - m_dwLastNatTraversalFileRequestTick) < kNatTraversalDuplicateFileRequestWindow)
+		{
+			if (thePrefs.GetLogNatTraversalEvents())
+				DebugLog(_T("[NatTraversal] Suppressed duplicate file request on the same NAT-T session, file=%s client=%s"),
+					(LPCTSTR)EscPercent(m_reqfile->GetFileName()), (LPCTSTR)EscPercent(DbgGetClientInfo()));
+			return;
+		}
+		m_pLastNatTraversalFileRequestLayer = pNatTraversalLayer;
+		m_dwLastNatTraversalFileRequestTick = dwNow;
+		md4cpy(m_achLastNatTraversalFileRequestHash, m_reqfile->GetFileHash());
+	}
+
 	IncrementAskedCountDown();
 	const bool bCanUseExtendedInfo = (GetExtendedRequestsVersion() > 0);
 	const bool bCanUseExtCompleteSources = (bCanUseExtendedInfo && GetExtendedRequestsVersion() > 1);
@@ -505,7 +565,7 @@ void CUpDownClient::SendFileRequest()
 			Packet *packet1;
 			if (SupportsSourceExchange2()) {
 				packet1 = new Packet(OP_REQUESTSOURCES2, 19, OP_EMULEPROT);
-				PokeUInt8(&packet->pBuffer[0], SupportsExtendedSourceExchange() ? SOURCEEXCHANGEEXT_VERSION : SOURCEEXCHANGE2_VERSION);
+				PokeUInt8(&packet1->pBuffer[0], SupportsExtendedSourceExchange() ? SOURCEEXCHANGEEXT_VERSION : SOURCEEXCHANGE2_VERSION);
 				const uint16 nOptions = 0; // 16 ... Reserved
 				PokeUInt16(&packet1->pBuffer[1], nOptions);
 				md4cpy(&packet1->pBuffer[3], m_reqfile->GetFileHash());
@@ -532,7 +592,7 @@ void CUpDownClient::SendFileRequest()
 	}
 	SetLastAskedTime();
 	if (thePrefs.GetLogNatTraversalEvents()) {
-		DebugLog(_T("[NatTraversal] SendFileRequest dispatched to %s via %s (reqfile=%s)"), (LPCTSTR)EscPercent(DbgGetClientInfo()), (socket && socket->HaveUtpLayer()) ? _T("uTP") : _T("TCP"), m_reqfile ? (LPCTSTR)EscPercent(m_reqfile->GetFileName()) : _T("<null>"));
+		DebugLog(_T("[NatTraversal] SendFileRequest dispatched to %s via %s (reqfile=%s)"), (LPCTSTR)EscPercent(DbgGetClientInfo()), (socket && socket->HaveQuicNatLayer()) ? _T("QUIC") : ((socket && socket->HaveUtpLayer()) ? _T("uTP") : _T("TCP")), m_reqfile ? (LPCTSTR)EscPercent(m_reqfile->GetFileName()) : (LPCTSTR)_T("<null>"));
 	}
 }
 
@@ -542,12 +602,24 @@ void CUpDownClient::SendStartupLoadReq()
 		ASSERT(0);
 		return;
 	}
+	if (GetDownloadState() == DS_DOWNLOADING) {
+		if (thePrefs.GetLogNatTraversalEvents())
+			DebugLog(_T("[NatTraversal] SendStartupLoadReq: already downloading; skipping duplicate OP_STARTUPLOADREQ for %s"), (LPCTSTR)EscPercent(DbgGetClientInfo()));
+		if (m_PendingBlocks_list.IsEmpty())
+			SendBlockRequests();
+		return;
+	}
+	if (m_fQueueRankPending != 0 && GetDownloadState() == DS_ONQUEUE) {
+		if (thePrefs.GetLogNatTraversalEvents())
+			DebugLog(_T("[NatTraversal] SendStartupLoadReq: upload request already pending; skipping duplicate OP_STARTUPLOADREQ for %s"), (LPCTSTR)EscPercent(DbgGetClientInfo()));
+		return;
+	}
 	m_fQueueRankPending = 1;
 	m_fUnaskQueueRankRecv = 0;
 	if (thePrefs.GetDebugClientTCPLevel() > 0)
 		DebugSend("OP_StartupLoadReq", this);
 	if (thePrefs.GetLogNatTraversalEvents()) {
-		DebugLog(_T("[NatTraversal] Sending OP_STARTUPLOADREQ to %s (file=%s)"), (LPCTSTR)EscPercent(DbgGetClientInfo()), m_reqfile ? (LPCTSTR)EscPercent(m_reqfile->GetFileName()) : _T("<null>"));
+		DebugLog(_T("[NatTraversal] Sending OP_STARTUPLOADREQ to %s (file=%s)"), (LPCTSTR)EscPercent(DbgGetClientInfo()), m_reqfile ? (LPCTSTR)EscPercent(m_reqfile->GetFileName()) : (LPCTSTR)_T("<null>"));
 	}
 	CSafeMemFile dataStartupLoadReq(16);
 	dataStartupLoadReq.WriteHash16(m_reqfile->GetFileHash());
@@ -572,6 +644,7 @@ void CUpDownClient::ProcessFileInfo(CSafeMemFile &data, CPartFile *file)
 	if (p)
 		throw GetResString(_T("ERR_WRONGFILEID")) + p;
 
+	m_bNatFileRequestCloseRetryUsed = false;
 	m_strClientFilename = data.ReadString(GetUnicodeSupport() != UTF8strNone);
 	m_reqfile->UpdateSourceFileName(this);
 	if (thePrefs.GetDebugClientTCPLevel() > 0)
@@ -627,6 +700,9 @@ void CUpDownClient::ProcessFileStatus(bool bUdpPacket, CSafeMemFile &data, CPart
 			, m_reqfile ? _T("==NULL") : _T("!=file"));
 		throw str;
 	}
+
+	if (!bUdpPacket)
+		m_bNatFileRequestCloseRetryUsed = false;
 
 	if (file->GetStatus() == PS_COMPLETE || file->GetStatus() == PS_COMPLETING)
 		return;
@@ -686,12 +762,12 @@ void CUpDownClient::ProcessFileStatus(bool bUdpPacket, CSafeMemFile &data, CPart
 
 	if (bUdpPacket) {
 		if (!bPartsNeeded && thePrefs.GetLogNatTraversalEvents())
-			AddDebugLogLine(DLP_LOW, false, _T("[NatTraversal][Cause] ProcessFileStatus: source reported no needed parts via UDP, %s, file=\"%s\", parts=%u"), (LPCTSTR)EscPercent(DbgGetClientInfo()), m_reqfile ? (LPCTSTR)EscPercent(m_reqfile->GetFileName()) : _T(""), m_nPartCount);
+			AddDebugLogLine(DLP_LOW, false, _T("[NatTraversal][Cause] ProcessFileStatus: source reported no needed parts via UDP, %s, file=\"%s\", parts=%u"), (LPCTSTR)EscPercent(DbgGetClientInfo()), m_reqfile ? (LPCTSTR)EscPercent(m_reqfile->GetFileName()) : (LPCTSTR)_T(""), m_nPartCount);
 		SetDownloadState(bPartsNeeded ? DS_ONQUEUE : DS_NONEEDEDPARTS);
 	} else {
 		if (!bPartsNeeded) {
 			if (thePrefs.GetLogNatTraversalEvents())
-				AddDebugLogLine(DLP_LOW, false, _T("[NatTraversal][Cause] ProcessFileStatus: source reported no needed parts via TCP, %s, file=\"%s\", parts=%u"), (LPCTSTR)EscPercent(DbgGetClientInfo()), m_reqfile ? (LPCTSTR)EscPercent(m_reqfile->GetFileName()) : _T(""), m_nPartCount);
+				AddDebugLogLine(DLP_LOW, false, _T("[NatTraversal][Cause] ProcessFileStatus: source reported no needed parts via TCP, %s, file=\"%s\", parts=%u"), (LPCTSTR)EscPercent(DbgGetClientInfo()), m_reqfile ? (LPCTSTR)EscPercent(m_reqfile->GetFileName()) : (LPCTSTR)_T(""), m_nPartCount);
 			SetDownloadState(DS_NONEEDEDPARTS);
 			SwapToAnotherFile(_T("A4AF for NNP file. CUpDownClient::ProcessFileStatus() TCP"), true, false, false, NULL, true, true);
 		} else if (m_reqfile->m_bMD4HashsetNeeded || (m_reqfile->IsAICHPartHashSetNeeded() && SupportsFileIdentifiers()
@@ -754,7 +830,7 @@ void CUpDownClient::OnUnexpectedBlockWhileNotDownloading(uint32 /*uSize*/)
 		SendCancelTransfer();
 }
 
-void CUpDownClient::OnUnexpectedBlockWhileDownloading(uint64 /*nStartPos*/, uint64 /*nEndPos*/, uint32 /*uSize*/)
+void CUpDownClient::OnUnexpectedBlockWhileDownloading(uint64 nStartPos, uint64 nEndPos, uint32 uSize)
 {
 	// Burst window to collapse floods (10s window).
 	DWORD now = ::GetTickCount();
@@ -763,6 +839,17 @@ void CUpDownClient::OnUnexpectedBlockWhileDownloading(uint64 /*nStartPos*/, uint
 	m_dwLastUnexpectedBlockTick = now;
 	if (m_uUnexpectedBlockBurst < 0x7FFFFFFF)
 		++m_uUnexpectedBlockBurst;
+
+	const bool bActiveUtpDownload = socket != NULL && socket->IsConnected() && socket->HaveNatTraversalLayer() && GetDownloadState() == DS_DOWNLOADING;
+	if (bActiveUtpDownload) {
+		if (thePrefs.GetLogNatTraversalEvents() && (m_uUnexpectedBlockBurst <= 3 || (m_uUnexpectedBlockBurst % 64) == 0)) {
+			AddDebugLogLine(DLP_LOW, false, _T("[NatTraversal] Ignoring delayed duplicate NAT-T block without cancelling or resending pending requests (burst=%u, range=%I64u-%I64u, size=%u), %s"),
+				m_uUnexpectedBlockBurst, nStartPos, nEndPos, uSize, (LPCTSTR)EscPercent(DbgGetClientInfo()));
+		}
+		if (m_PendingBlocks_list.IsEmpty())
+			SendBlockRequests();
+		return;
+	}
 
 	// After small burst, politely cancel to stop sender and resync our requests.
 	if (m_uUnexpectedBlockBurst >= 3) {
@@ -797,6 +884,9 @@ static LPCTSTR NatTraversalDbgDownloadStateName(EDownloadState eState)
 
 void CUpDownClient::SetDownloadState(EDownloadState nNewState, LPCTSTR pszReason)
 {
+	if (!GuardUpDownClientMutation(_T("CUpDownClient::SetDownloadState")))
+		return;
+
 	if (m_eDownloadState != nNewState) {
 		const EDownloadState eOldState = m_eDownloadState;
 		if (thePrefs.GetLogNatTraversalEvents()) {
@@ -811,7 +901,7 @@ void CUpDownClient::SetDownloadState(EDownloadState nNewState, LPCTSTR pszReason
 						NatTraversalDbgDownloadStateName(eOldState),
 						NatTraversalDbgDownloadStateName(nNewState),
 						pszReason != NULL ? pszReason : _T(""),
-						m_reqfile != NULL ? (LPCTSTR)m_reqfile->GetFileName() : _T(""),
+						m_reqfile != NULL ? (LPCTSTR)m_reqfile->GetFileName() : (LPCTSTR)_T(""),
 						static_cast<UINT>(m_PendingBlocks_list.GetCount()),
 						static_cast<UINT>(GetRemoteQueueRank()),
 						IsRemoteQueueFull() ? 1 : 0);
@@ -820,6 +910,9 @@ void CUpDownClient::SetDownloadState(EDownloadState nNewState, LPCTSTR pszReason
 					break;
 			}
 		}
+
+		if (nNewState == DS_CONNECTED || nNewState == DS_DOWNLOADING)
+			ResetNatTRendezvousSession();
 
 		switch (nNewState) {
 		case DS_CONNECTING:
@@ -964,6 +1057,7 @@ void CUpDownClient::ProcessHashSet(const uchar *packet, uint32 size, bool bFileI
 				m_reqfile->SetAICHHashSetNeeded(true);
 			m_fHashsetRequestingMD4 = 0;
 			m_fHashsetRequestingAICH = 0;
+			m_dwHashsetRequestSent = 0;
 			throw GetResString(_T("ERR_BADHASHSET"));
 		}
 		if (m_fHashsetRequestingMD4)
@@ -988,11 +1082,21 @@ void CUpDownClient::ProcessHashSet(const uchar *packet, uint32 size, bool bFileI
 		}
 		if (!m_reqfile->GetFileIdentifier().LoadMD4HashsetFromFile(data, true)) {
 			m_reqfile->m_bMD4HashsetNeeded = true;
+			m_dwHashsetRequestSent = 0;
 			throw GetResString(_T("ERR_BADHASHSET"));
 		}
 	}
+	m_bNatFileRequestCloseRetryUsed = false;
 	m_fHashsetRequestingMD4 = 0;
 	m_fHashsetRequestingAICH = 0;
+	m_dwHashsetRequestSent = 0;
+	if (GetDownloadState() == DS_DOWNLOADING) {
+		if (thePrefs.GetLogNatTraversalEvents())
+			DebugLog(_T("[NatTraversal] ProcessHashSet: hashset completed while already downloading; keeping active transfer for %s"), (LPCTSTR)EscPercent(DbgGetClientInfo()));
+		if (m_PendingBlocks_list.IsEmpty())
+			SendBlockRequests();
+		return;
+	}
 	SendStartupLoadReq();
 }
 
@@ -1020,7 +1124,9 @@ void CUpDownClient::CreateBlockRequests(int blockCount)
 
 void CUpDownClient::SendBlockRequests()
 {
-	m_dwLastBlockReceived = ::GetTickCount();
+	if (!GuardUpDownClientMutation(_T("CUpDownClient::SendBlockRequests")) || !theApp.GuardModelMutation(CemuleApp::ModelMutationPartFile, _T("CUpDownClient::SendBlockRequests")))
+		return;
+
 	if (!m_reqfile)
 		return;
 
@@ -1034,7 +1140,10 @@ void CUpDownClient::SendBlockRequests()
 	// Restrict the number of requested blocks when we are on a slow/standby/trickle slot or
 	// download is limited on our side.
 	int blockCount; // max pending block requests
-	if (IsEmuleClient() && m_byCompatibleClient == 0 && GetDownloadDatarate() < 9 * 1024)
+	const bool bNatTraversalStartup = socket != NULL && socket->HaveNatTraversalLayer() && GetDownloadState() == DS_DOWNLOADING && !GetTransferredDownMini();
+	if (bNatTraversalStartup)
+		blockCount = 3;
+	else if (IsEmuleClient() && m_byCompatibleClient == 0 && GetDownloadDatarate() < 9 * 1024)
 		blockCount = (GetDownloadDatarate() < 4 * 1024) ? 1 : 2;
 	else if (GetDownloadDatarate() > 75 * 1024)
 		blockCount = (GetDownloadDatarate() > 150 * 1024) ? 9 : 6;
@@ -1043,8 +1152,26 @@ void CUpDownClient::SendBlockRequests()
 
 	CreateBlockRequests(blockCount);
 	if (m_PendingBlocks_list.IsEmpty()) {
+		const bool bUtpNatDownload = socket != NULL && socket->HaveNatTraversalLayer() && HasLowID() && GetDownloadState() == DS_DOWNLOADING;
+		const uint64 uReqFileSize = m_reqfile != NULL ? (uint64)m_reqfile->GetFileSize() : 0;
+		const bool bFileStillNeedsData = uReqFileSize != 0 && !m_reqfile->IsCompleteSafe((uint64)0, uReqFileSize - 1);
+		const DWORD dwNow = ::GetTickCount();
+		const bool bRecentUsefulBlock = m_dwLastBlockReceived != 0 && dwNow - m_dwLastBlockReceived <= SEC2MS(60);
+		const bool bCanUseOneShotNatRecovery = bUtpNatDownload && bFileStillNeedsData && bRecentUsefulBlock && m_uNoPendingBlockReaskBurst == 0;
+		if (bCanUseOneShotNatRecovery) {
+			if (thePrefs.GetLogNatTraversalEvents()) {
+				AddDebugLogLine(DLP_LOW, false, _T("[NatTraversal] SendBlockRequests: one-shot no-pending-block recovery for active NAT-T source, %s, file=\"%s\""),
+					(LPCTSTR)EscPercent(DbgGetClientInfo()), m_reqfile ? (LPCTSTR)EscPercent(m_reqfile->GetFileName()) : (LPCTSTR)_T(""));
+			}
+			++m_uNoPendingBlockReaskBurst;
+			SetRemoteQueueRank(0);
+			SetAskedCountDown(0);
+			SetDownloadState(DS_CONNECTING, _T("No pending blocks on active NAT-T source; one recovery reask before NNP."));
+			TrigNextSafeAskForDownload(m_reqfile);
+			return;
+		}
 		if (thePrefs.GetLogNatTraversalEvents())
-			AddDebugLogLine(DLP_LOW, false, _T("[NatTraversal][Cause] SendBlockRequests: no pending blocks were generated, %s, file=\"%s\""), (LPCTSTR)EscPercent(DbgGetClientInfo()), m_reqfile ? (LPCTSTR)EscPercent(m_reqfile->GetFileName()) : _T(""));
+			AddDebugLogLine(DLP_LOW, false, _T("[NatTraversal][Cause] SendBlockRequests: no pending blocks were generated, %s, file=\"%s\""), (LPCTSTR)EscPercent(DbgGetClientInfo()), m_reqfile ? (LPCTSTR)EscPercent(m_reqfile->GetFileName()) : (LPCTSTR)_T(""));
 		SendCancelTransfer();
 		SetDownloadState(DS_NONEEDEDPARTS);
 		SwapToAnotherFile(_T("A4AF for NNP file. CUpDownClient::SendBlockRequests()"), true, false, false, NULL, true, true);
@@ -1145,7 +1272,29 @@ void CUpDownClient::SendBlockRequests()
 	if (thePrefs.GetLogNatTraversalEvents())
 		AddDebugLogLine(DLP_LOW, false, _T("[NatTraversal] Sending OP_REQUESTPARTS to %s, File=%s"), (LPCTSTR)EscPercent(DbgGetClientInfo()), (LPCTSTR)EscPercent(m_reqfile->GetFileName()));
 
-	SendPacket(packet, true);
+	const bool bRequestSent = SendPacket(packet, true);
+	if (!bRequestSent) {
+		for (POSITION posReset = listToRequest.GetHeadPosition(); posReset != NULL;)
+			listToRequest.GetNext(posReset)->fQueued = 0;
+
+		if (thePrefs.GetLogNatTraversalEvents())
+			AddDebugLogLine(DLP_LOW, false, _T("[NatTraversal] SendBlockRequests: OP_REQUESTPARTS could not be sent; moving stalled source out of active download state, %s"), (LPCTSTR)EscPercent(DbgGetClientInfo()));
+
+		if (GetDownloadState() == DS_DOWNLOADING) {
+			if (socket != NULL && !socket->IsConnected()) {
+				socket->Safe_Delete();
+				socket = NULL;
+			}
+			SetRemoteQueueRank(0);
+			SetAskedCountDown(0);
+			SetDownloadState(DS_CONNECTING, _T("Block request could not be sent because the socket is not connected."));
+			TrigNextSafeAskForDownload(m_reqfile);
+		}
+		return;
+	}
+
+	if (m_dwLastBlockReceived == 0)
+		m_dwLastBlockReceived = ::GetTickCount();
 	// we want this packet to get out ASAP, especially for high-speed downloads
 	// so wake up the throttler if it was idle and fell asleep
 	theApp.uploadBandwidthThrottler->NewUploadDataAvailable();
@@ -1165,7 +1314,7 @@ void CUpDownClient::CheckNatTraversalStall()
 
 	// 2. Is LowID and NAT-T/uTP client ?
 	// Access socket only if safe.
-	if (!HasLowID() || !socket || !socket->HaveUtpLayer()) return;
+	if (!HasLowID() || !socket || !socket->HaveNatTraversalLayer()) return;
 
 	// 3. Last block time logic
 	// If data flow stops, we assume NAT tunnel might be closing or packet loss occurred.
@@ -1186,8 +1335,9 @@ void CUpDownClient::CheckNatTraversalStall()
 		return;
 
 	if (thePrefs.GetLogNatTraversalEvents())
-		AddDebugLogLine(DLP_LOW, false, _T("[NatTraversal] Stall detected (%ums ago, burst=%u, retry=%ums), triggering re-ask for %s"), dwTimeSinceLastBlock, m_uNatStallRecoverBurst, dwRetryInterval, (LPCTSTR)EscPercent(DbgGetClientInfo()));
+		AddDebugLogLine(DLP_LOW, false, _T("[NatTraversal] Stall detected (%ums ago, burst=%u, retry=%ums), evaluating controlled re-ask for %s"), dwTimeSinceLastBlock, m_uNatStallRecoverBurst, dwRetryInterval, (LPCTSTR)EscPercent(DbgGetClientInfo()));
 
+	const bool bAllowQueuedReset = m_uNatStallRecoverBurst == 0;
 	m_dwLastNatStallRecover = dwNow;
 	if (m_uNatStallRecoverBurst < kNatStallRecoverBurstMax)
 		++m_uNatStallRecoverBurst;
@@ -1202,7 +1352,7 @@ void CUpDownClient::CheckNatTraversalStall()
 	}
 
 	UINT uResetQueuedBlocks = 0;
-	if (!bHasUnqueuedPending) {
+	if (!bHasUnqueuedPending && bAllowQueuedReset) {
 		for (POSITION pos = m_PendingBlocks_list.GetHeadPosition(); pos != NULL && uResetQueuedBlocks < kNatStallQueuedResetLimit;) {
 			Pending_Block_Struct *pPending = m_PendingBlocks_list.GetNext(pos);
 			if (pPending->fQueued != 0) {
@@ -1215,13 +1365,14 @@ void CUpDownClient::CheckNatTraversalStall()
 	if (thePrefs.GetLogNatTraversalEvents()) {
 		if (bHasUnqueuedPending)
 			AddDebugLogLine(DLP_LOW, false, _T("[NatTraversal] Stall recovery: queued reset skipped (already has unqueued pending block) for %s"), (LPCTSTR)EscPercent(DbgGetClientInfo()));
+		else if (bAllowQueuedReset)
+			AddDebugLogLine(DLP_LOW, false, _T("[NatTraversal] Stall recovery: reset %u queued pending block(s) before one controlled re-ask for %s"), uResetQueuedBlocks, (LPCTSTR)EscPercent(DbgGetClientInfo()));
 		else
-			AddDebugLogLine(DLP_LOW, false, _T("[NatTraversal] Stall recovery: reset %u queued pending block(s) before re-ask for %s"), uResetQueuedBlocks, (LPCTSTR)EscPercent(DbgGetClientInfo()));
+			AddDebugLogLine(DLP_LOW, false, _T("[NatTraversal] Stall recovery: duplicate queued-block re-ask suppressed while waiting for the current requests, %s"), (LPCTSTR)EscPercent(DbgGetClientInfo()));
 	}
 
-	// Re-send block requests. This sends an OP_REQUESTPARTS packet.
-	// This acts as a keep-alive/hole-punch packet and tells the uploader we are still waiting.
-	SendBlockRequests();
+	if (bHasUnqueuedPending || uResetQueuedBlocks != 0 || m_PendingBlocks_list.IsEmpty())
+		SendBlockRequests();
 }
 
 /* Barry - Originally, this method wrote to disk only when a full 180k block
@@ -1241,9 +1392,6 @@ void CUpDownClient::CheckNatTraversalStall()
 */
 void CUpDownClient::ProcessBlockPacket(const uchar *packet, uint32 size, bool packed, bool bI64Offsets)
 {
-	if (thePrefs.GetLogNatTraversalEvents())
-		AddDebugLogLine(DLP_LOW, false, _T("[NatTraversal] ProcessBlockPacket: Entry, size=%u, packed=%d, client=%s"), size, packed, (LPCTSTR)EscPercent(DbgGetClientInfo()));
-
 	if (!bI64Offsets) {
 		uint32 nDbgStartPos = *(uint32*)&packet[16];
 		if (thePrefs.GetDebugClientTCPLevel() > 1) {
@@ -1261,11 +1409,6 @@ void CUpDownClient::ProcessBlockPacket(const uchar *packet, uint32 size, bool pa
 		return;
 	}
 
-	// Update stats
-	m_dwLastBlockReceived = ::GetTickCount();
-	if (m_uNatStallRecoverBurst != 0)
-		m_uNatStallRecoverBurst = 0;
-
 	// Read data from packet
 	CSafeMemFile data(packet, size);
 	uchar fileID[MDX_DIGEST_SIZE];
@@ -1273,7 +1416,23 @@ void CUpDownClient::ProcessBlockPacket(const uchar *packet, uint32 size, bool pa
 	int nHeaderSize = MDX_DIGEST_SIZE;
 
 	// Check that this data is for the correct file
-	if (!m_reqfile || !md4equ(packet, m_reqfile->GetFileHash())) {
+	if (!m_reqfile || !md4equ(fileID, m_reqfile->GetFileHash())) {
+		const bool bActiveUtpDownload = socket != NULL && socket->IsConnected() && socket->HaveNatTraversalLayer() && HasLowID() && GetDownloadState() == DS_DOWNLOADING;
+		if (bActiveUtpDownload) {
+			CPartFile* pReaskFile = m_reqfile;
+			if (thePrefs.GetLogNatTraversalEvents()) {
+				AddDebugLogLine(DLP_LOW, false, _T("[NatTraversal] Wrong-file NAT-T block from %s; cancelling current block requests (packet=%s, current=%s)"),
+					(LPCTSTR)EscPercent(DbgGetClientInfo()), (LPCTSTR)md4str(fileID), pReaskFile != NULL ? (LPCTSTR)md4str(pReaskFile->GetFileHash()) : (LPCTSTR)_T("<none>"));
+			}
+			ClearDownloadBlockRequests();
+			SendCancelTransfer();
+			SetRemoteQueueRank(0);
+			SetAskedCountDown(0);
+			SetDownloadState(DS_CONNECTING, _T("Wrong file block received on active NAT-T source."));
+			if (pReaskFile != NULL)
+				TrigNextSafeAskForDownload(pReaskFile);
+			return;
+		}
 		ClearDownloadBlockRequests(); // release pending blocks on protocol mismatch
 		throw GetResString(_T("ERR_WRONGFILEID")) + _T(" (ProcessBlockPacket)");
 	}
@@ -1358,69 +1517,37 @@ void CUpDownClient::ProcessBlockPacket(const uchar *packet, uint32 size, bool pa
 					, cur_block->block
 					, this
 					, true); //copy data to a new buffer
-		} else { // Packed
-			ASSERT((int)size > 0);
-			// Create space to store unzipped data, the size is only an initial guess, will be resized in unzip() if not big enough
-			// Don't get too big
-			uint32 lenUnzipped = min(size * 2, EMBLOCKSIZE + 300);
-			BYTE *unzipped = new BYTE[lenUnzipped];
-
-			// Try to unzip the packet
-			int result = unzip(cur_block, &packet[nHeaderSize], uTransferredFileDataSize, &unzipped, &lenUnzipped);
-			// no block can be uncompressed to >2GB, 'lenUnzipped' is obviously erroneous.
-			if (result == Z_OK && (int)lenUnzipped >= 0) {
-				if (lenUnzipped > 0) { // Write any unzipped data to disk
-					ASSERT((int)lenUnzipped > 0);
-
-					// Use the current start and end positions for the uncompressed data
-					nStartPos = cur_block->block->StartOffset + cur_block->totalUnzipped - lenUnzipped;
-					nEndPos = cur_block->block->StartOffset + cur_block->totalUnzipped - 1;
-
-					if (nStartPos > cur_block->block->EndOffset || nEndPos > cur_block->block->EndOffset) {
-						DebugLogError(_T("PrcBlkPkt: ") + GetResString(_T("ERR_CORRUPTCOMPRPKG")), (LPCTSTR)EscPercent(m_reqfile->GetFileName()), 666);
-						m_reqfile->RemoveBlockFromList(cur_block->block->StartOffset, cur_block->block->EndOffset);
-						// There is no chance to recover from this error
-					} else {
-						// Write uncompressed data to file
-						lenWritten = m_reqfile->WriteToBuffer(uTransferredFileDataSize
-							, unzipped
-							, nStartPos
-							, nEndPos
-							, cur_block->block
-							, this
-							, false); //use the given buffer, no copy
-						if (lenWritten)
-							unzipped = NULL; //do not delete the buffer
-					}
+		}
+		else {
+			SCompressedBlockParseResult parseResult;
+			if (ParseCompressedBlockPacket(cur_block, &packet[nHeaderSize], uTransferredFileDataSize, &parseResult)) {
+				if (parseResult.m_uBufferSize > 0) {
+					lenWritten = m_reqfile->WriteToBuffer(uTransferredFileDataSize, parseResult.m_pBuffer, parseResult.m_uStartOffset, parseResult.m_uEndOffset, cur_block->block, this, false);
+					if (lenWritten)
+						parseResult.m_pBuffer = NULL;
 				}
-			} else {
+				nStartPos = parseResult.m_uStartOffset;
+				nEndPos = parseResult.m_uEndOffset;
+			}
+			else {
 				if (thePrefs.GetVerbose()) {
 					CString strZipError;
 					if (cur_block->zStream && cur_block->zStream->msg)
 						strZipError.Format(_T(" - %hs"), cur_block->zStream->msg);
-					if (result == Z_OK && (int)lenUnzipped < 0) {
-						ASSERT(0);
-						strZipError.AppendFormat(_T("; Z_OK,lenUnzipped=%u"), lenUnzipped);
-					}
-					DebugLogError(_T("PrcBlkPkt: ") + GetResString(_T("ERR_CORRUPTCOMPRPKG")) + strZipError, (LPCTSTR)EscPercent(m_reqfile->GetFileName()), result);
+					DebugLogError(_T("PrcBlkPkt: ") + GetResString(_T("ERR_CORRUPTCOMPRPKG")) + strZipError, (LPCTSTR)EscPercent(m_reqfile->GetFileName()), parseResult.m_iZLibResult);
 				}
 				m_reqfile->RemoveBlockFromList(cur_block->block->StartOffset, cur_block->block->EndOffset);
 
-				// If we had a zstream error, there is no chance that we could recover from it,
-				// nor that we could use the current zstream (which is in error state) any longer.
 				if (cur_block->zStream) {
 					inflateEnd(cur_block->zStream);
 					delete cur_block->zStream;
 					cur_block->zStream = NULL;
 				}
 
-				// Although we can't further use the current zstream, there is no need to disconnect the sending
-				// client because the next zstream (a series of 10K-blocks which build a 180K-block) could be
-				// valid again. Just ignore all further blocks for the current zstream.
 				cur_block->fZStreamError = 1;
 				cur_block->totalUnzipped = 0;
 			}
-			delete[] unzipped;
+			delete[] parseResult.m_pBuffer;
 		}
 
 		// These checks only need to be done if any data was written
@@ -1428,6 +1555,10 @@ void CUpDownClient::ProcessBlockPacket(const uchar *packet, uint32 size, bool pa
 		// file data is being in buffers.
 		// Hence additional checks.
 		if (lenWritten > 0 && !m_PendingBlocks_list.IsEmpty() && cur_block->block) {
+			m_dwLastBlockReceived = ::GetTickCount();
+			if (m_uNatStallRecoverBurst != 0)
+				m_uNatStallRecoverBurst = 0;
+			m_uNoPendingBlockReaskBurst = 0;
 			m_nTransferredDown += uTransferredFileDataSize;
 			m_nCurSessionPayloadDown += lenWritten;
 			cur_block->block->transferred += lenWritten; //cur_block->block was invalid!
@@ -1450,6 +1581,57 @@ void CUpDownClient::ProcessBlockPacket(const uchar *packet, uint32 size, bool pa
 	}
 
 	OnUnexpectedBlockWhileDownloading(nStartPos, nEndPos, uTransferredFileDataSize);
+}
+
+bool CUpDownClient::ParseCompressedBlockPacket(Pending_Block_Struct *block, const BYTE *zipped, uint32 lenZipped, SCompressedBlockParseResult *pResult)
+{
+	if (pResult == NULL || block == NULL || block->block == NULL || zipped == NULL || lenZipped == 0 || lenZipped > kMaxCompressedBlockInputBytes) {
+		QueueCompressedBlockParseFailure(_T("compressed-block-input-size"), ERROR_INVALID_DATA);
+		return false;
+	}
+
+	pResult->m_uBufferSize = min(lenZipped * 2, kMaxCompressedBlockOutputBytes);
+	if (pResult->m_uBufferSize == 0)
+		pResult->m_uBufferSize = 1;
+	try {
+		pResult->m_pBuffer = new BYTE[pResult->m_uBufferSize];
+	}
+	catch (...) {
+		QueueCompressedBlockParseFailure(_T("compressed-block-allocation"), ERROR_NOT_ENOUGH_MEMORY);
+		pResult->m_uBufferSize = 0;
+		return false;
+	}
+
+	pResult->m_iZLibResult = unzip(block, zipped, lenZipped, &pResult->m_pBuffer, &pResult->m_uBufferSize);
+	if (pResult->m_iZLibResult != Z_OK) {
+		QueueCompressedBlockParseFailure(_T("compressed-block-inflate"), ERROR_INVALID_DATA);
+		pResult->m_uBufferSize = 0;
+		return false;
+	}
+
+	if (pResult->m_uBufferSize == 0) {
+		pResult->m_uStartOffset = block->block->StartOffset + block->totalUnzipped;
+		pResult->m_uEndOffset = pResult->m_uStartOffset;
+		pResult->m_bValid = true;
+		return true;
+	}
+
+	if (pResult->m_uBufferSize > kMaxCompressedBlockOutputBytes || block->totalUnzipped < pResult->m_uBufferSize) {
+		QueueCompressedBlockParseFailure(_T("compressed-block-output-size"), ERROR_INVALID_DATA);
+		pResult->m_uBufferSize = 0;
+		return false;
+	}
+
+	pResult->m_uStartOffset = block->block->StartOffset + block->totalUnzipped - pResult->m_uBufferSize;
+	pResult->m_uEndOffset = block->block->StartOffset + block->totalUnzipped - 1;
+	if (pResult->m_uStartOffset > block->block->EndOffset || pResult->m_uEndOffset > block->block->EndOffset || pResult->m_uEndOffset < pResult->m_uStartOffset) {
+		QueueCompressedBlockParseFailure(_T("compressed-block-range"), ERROR_INVALID_DATA);
+		pResult->m_uBufferSize = 0;
+		return false;
+	}
+
+	pResult->m_bValid = true;
+	return true;
 }
 
 int CUpDownClient::unzip(Pending_Block_Struct *block, const BYTE *zipped, uint32 lenZipped, BYTE **unzipped, uint32 *lenUnzipped, int iRecursion)
@@ -1514,26 +1696,48 @@ int CUpDownClient::unzip(Pending_Block_Struct *block, const BYTE *zipped, uint32
 			*lenUnzipped = zS->total_out - block->totalUnzipped;
 			block->totalUnzipped = zS->total_out;
 		} else if ((err == Z_OK) && (zS->avail_out == 0) && (zS->avail_in != 0)) {
-			// Output array was not big enough, call recursively until there is enough space
 			TRACE_UNZIP("; output array not big enough (ain=%u)\n", zS->avail_in);
 
-			// What size should we try next
-			*lenUnzipped *= 2;
-			uint32 newLength = *lenUnzipped;
+			const uint32 uProduced = zS->total_out - block->totalUnzipped;
+			if (uProduced >= kMaxCompressedBlockOutputBytes) {
+				QueueCompressedBlockParseFailure(_T("compressed-block-output-limit"), ERROR_INVALID_DATA);
+				return Z_DATA_ERROR;
+			}
+
+			uint32 newLength = *lenUnzipped * 2;
 			if (newLength == 0)
 				newLength = lenZipped * 2;
+			if (newLength <= *lenUnzipped)
+				newLength = *lenUnzipped + 1;
+			if (newLength > kMaxCompressedBlockOutputBytes)
+				newLength = kMaxCompressedBlockOutputBytes;
+			if (newLength <= uProduced) {
+				QueueCompressedBlockParseFailure(_T("compressed-block-output-limit"), ERROR_INVALID_DATA);
+				return Z_DATA_ERROR;
+			}
 
 			// Copy any data that was successfully unzipped to new array
-			BYTE *temp = new BYTE[newLength];
-			ASSERT(zS->total_out - block->totalUnzipped <= newLength);
-			memcpy(temp, *unzipped, zS->total_out - block->totalUnzipped);
+			BYTE *temp = NULL;
+			try {
+				temp = new BYTE[newLength];
+			}
+			catch (...) {
+				QueueCompressedBlockParseFailure(_T("compressed-block-allocation"), ERROR_NOT_ENOUGH_MEMORY);
+				return Z_MEM_ERROR;
+			}
+			if (uProduced > newLength) {
+				delete[] temp;
+				QueueCompressedBlockParseFailure(_T("compressed-block-overflow"), Z_BUF_ERROR);
+				return Z_BUF_ERROR;
+			}
+			memcpy(temp, *unzipped, uProduced);
 			delete[] *unzipped;
 			*unzipped = temp;
 			*lenUnzipped = newLength;
 
 			// Position stream output to correct place in new array
-			zS->next_out = *unzipped + (zS->total_out - block->totalUnzipped);
-			zS->avail_out = *lenUnzipped - (zS->total_out - block->totalUnzipped);
+			zS->next_out = *unzipped + uProduced;
+			zS->avail_out = *lenUnzipped - uProduced;
 
 			// Try again
 			err = unzip(block, zS->next_in, zS->avail_in, unzipped, lenUnzipped, iRecursion + 1);
@@ -1550,7 +1754,7 @@ int CUpDownClient::unzip(Pending_Block_Struct *block, const BYTE *zipped, uint32
 				if (zS->msg || err != Z_OK)
 					strZipError.Format(_T(" %d: '%hs'"), err, zS->msg ? zS->msg : zError(err));
 				TRACE_UNZIP("; Error: %s\n", strZipError);
-				DebugLogError(_T("Unexpected zip error%s in file \"%s\""), (LPCTSTR)EscPercent(strZipError), m_reqfile ? (LPCTSTR)EscPercent(m_reqfile->GetFileName()) : EMPTY);
+				DebugLogError(_T("Unexpected zip error%s in file \"%s\""), (LPCTSTR)EscPercent(strZipError), m_reqfile ? (LPCTSTR)EscPercent(m_reqfile->GetFileName()) : (LPCTSTR)EMPTY);
 			}
 		}
 
@@ -1558,7 +1762,7 @@ int CUpDownClient::unzip(Pending_Block_Struct *block, const BYTE *zipped, uint32
 			*lenUnzipped = 0;
 	} catch (...) {
 		if (thePrefs.GetVerbose())
-			DebugLogError(_T("Unknown exception in %hs: file \"%s\""), __FUNCTION__, m_reqfile ? (LPCTSTR)EscPercent(m_reqfile->GetFileName()) : EMPTY);
+			DebugLogError(_T("Unknown exception in %hs: file \"%s\""), __FUNCTION__, m_reqfile ? (LPCTSTR)EscPercent(m_reqfile->GetFileName()) : (LPCTSTR)EMPTY);
 		err = Z_DATA_ERROR;
 		ASSERT(0);
 	}
@@ -1588,34 +1792,117 @@ uint32 CUpDownClient::CalculateDownloadRate()
 	return m_nDownDatarate;
 }
 
+void CUpDownClient::CheckHashsetRequestTimeout()
+{
+	if (GetDownloadState() != DS_REQHASHSET || m_dwHashsetRequestSent == 0)
+		return;
+
+	const DWORD dwNow = ::GetTickCount();
+	if ((DWORD)(dwNow - m_dwHashsetRequestSent) < DOWNLOADTIMEOUT)
+		return;
+
+	if (m_reqfile != NULL) {
+		if (m_fHashsetRequestingMD4)
+			m_reqfile->m_bMD4HashsetNeeded = true;
+		if (m_fHashsetRequestingAICH)
+			m_reqfile->SetAICHHashSetNeeded(true);
+	}
+
+	m_fHashsetRequestingMD4 = 0;
+	m_fHashsetRequestingAICH = 0;
+	m_dwHashsetRequestSent = 0;
+
+	if (thePrefs.GetLogNatTraversalEvents())
+		DebugLogWarning(_T("[NatTraversal] Hashset request timed out; scheduling reconnect/reask instead of leaving source in ReqHashSet, %s"), (LPCTSTR)EscPercent(DbgGetClientInfo()));
+
+	if (socket != NULL && !socket->IsConnected()) {
+		socket->Safe_Delete();
+		socket = NULL;
+	}
+	SetRemoteQueueRank(0);
+	SetAskedCountDown(0);
+	SetDownloadState(DS_CONNECTING, _T("Hashset request timeout."));
+	if (m_reqfile != NULL)
+		TrigNextSafeAskForDownload(m_reqfile);
+}
+
 void CUpDownClient::CheckDownloadTimeout()
 {
 	DWORD now = ::GetTickCount();
-	if (socket && socket->IsConnected() && socket->HaveUtpLayer() && GetDownloadState() == DS_DOWNLOADING && !m_PendingBlocks_list.IsEmpty()) {
+	if (GetDownloadState() == DS_DOWNLOADING && (socket == NULL || !socket->IsConnected()) && m_dwLastBlockReceived != 0 && now >= m_dwLastBlockReceived + SEC2MS(30)) {
+		if (thePrefs.GetLogNatTraversalEvents())
+			DebugLogWarning(_T("[NatTraversal] Downloading source has no connected socket; forcing reconnect instead of leaving it stalled, %s"), (LPCTSTR)EscPercent(DbgGetClientInfo()));
+		if (socket != NULL && !socket->IsConnected()) {
+			socket->Safe_Delete();
+			socket = NULL;
+		}
+		SetRemoteQueueRank(0);
+		SetAskedCountDown(0);
+		SetDownloadState(DS_CONNECTING, _T("Downloading source lost its socket."));
+		if (m_reqfile != NULL)
+			TrigNextSafeAskForDownload(m_reqfile);
+		return;
+	}
+	if (socket && socket->IsConnected() && socket->HaveNatTraversalLayer() && GetDownloadState() == DS_DOWNLOADING && !m_PendingBlocks_list.IsEmpty() && m_dwLastBlockReceived != 0) {
 		const DWORD kUtpReaskTimeout = DOWNLOADTIMEOUT / 2;
-		if (now >= m_dwLastBlockReceived + kUtpReaskTimeout) {
-			// Re-ask pending blocks after a stalled uTP receive window to avoid premature queue fallback.
-			for (POSITION pos = m_PendingBlocks_list.GetHeadPosition(); pos != NULL;)
-				m_PendingBlocks_list.GetNext(pos)->fQueued = 0;
-			SendBlockRequests();
+		const DWORD dwTimeSinceLastUsefulBlock = now - m_dwLastBlockReceived;
+		if (dwTimeSinceLastUsefulBlock >= kUtpReaskTimeout && dwTimeSinceLastUsefulBlock < DOWNLOADTIMEOUT && now - m_dwLastNatStallRecover >= SEC2MS(20)) {
+			m_dwLastNatStallRecover = now;
+			bool bHasUnqueuedPending = false;
+			for (POSITION pos = m_PendingBlocks_list.GetHeadPosition(); pos != NULL;) {
+				if (m_PendingBlocks_list.GetNext(pos)->fQueued == 0) {
+					bHasUnqueuedPending = true;
+					break;
+				}
+			}
+			if (bHasUnqueuedPending || m_PendingBlocks_list.IsEmpty())
+				SendBlockRequests();
+			else if (thePrefs.GetLogNatTraversalEvents())
+				AddDebugLogLine(DLP_LOW, false, _T("[NatTraversal] Half-timeout queued-block re-ask suppressed; waiting for controlled recovery or reconnect, %s"), (LPCTSTR)EscPercent(DbgGetClientInfo()));
 			return;
 		}
 	}
-	if (now >= m_dwLastBlockReceived + DOWNLOADTIMEOUT) {
-		const bool bActiveUtpTransfer = (socket != NULL && socket->IsConnected() && socket->HaveUtpLayer() && GetDownloadState() == DS_DOWNLOADING);
+	if (m_dwLastBlockReceived != 0 && now >= m_dwLastBlockReceived + DOWNLOADTIMEOUT) {
+		const bool bActiveNatTraversalTransfer = (socket != NULL && socket->IsConnected() && socket->HaveNatTraversalLayer() && GetDownloadState() == DS_DOWNLOADING);
+		const CAddress natPeerIP = GetConnectIP().IsNull() ? GetIP() : GetConnectIP();
+		const uint16 natPeerPort = GetKadPort() != 0 ? GetKadPort() : GetUDPPort();
+		const bool bPeerSupportsUtpFallback = HasDirectNatTraversalCaps() ? HasDirectNatTraversalUtpSupport() : GetNatTraversalSupport();
+		const bool bEstablishedQuicStall = bActiveNatTraversalTransfer && socket->HaveQuicNatLayer() && !natPeerIP.IsNull() && natPeerPort != 0
+			&& GetSessionPayloadDown() != 0 && !m_PendingBlocks_list.IsEmpty() && m_uNatStallRecoverBurst != 0
+			&& thePrefs.IsNatTraversalUtpAllowed() && bPeerSupportsUtpFallback;
 		if (socket != NULL && !socket->IsRawDataMode())
 			SendCancelTransfer();
 		else
 			ASSERT(0);
 
-		if (bActiveUtpTransfer) {
-			if (thePrefs.GetLogNatTraversalEvents())
-				DebugLogWarning(_T("[NatTraversal] Download timeout on active uTP transfer; forcing reconnect, %s"), (LPCTSTR)EscPercent(DbgGetClientInfo()));
+		if (bActiveNatTraversalTransfer) {
+			if (bEstablishedQuicStall)
+				MarkNatTraversalQuicFailed(natPeerIP, natPeerPort, _T("established QUIC transfer made no useful progress"));
+			CUpDownClient* pServingEServerBuddy = theApp.clientlist != NULL ? theApp.clientlist->GetServingEServerBuddy() : NULL;
+			const bool bCanRetryViaEServerBuddy = thePrefs.IsEnableNatTraversal()
+				&& theApp.serverconnect != NULL && theApp.serverconnect->IsConnected() && theApp.serverconnect->IsLowID()
+				&& pServingEServerBuddy != NULL && pServingEServerBuddy->socket != NULL && pServingEServerBuddy->socket->IsConnected()
+				&& HasLowID() && CanRouteViaServingEServerBuddy(pServingEServerBuddy)
+				&& m_reqfile != NULL;
+
+			if (thePrefs.GetLogNatTraversalEvents()) {
+				DebugLogWarning(_T("[NatTraversal] Download timeout on active NAT-T transfer; forcing reconnect%s, %s"),
+					bCanRetryViaEServerBuddy ? _T(" via eServer buddy relay") : _T(""), (LPCTSTR)EscPercent(DbgGetClientInfo()));
+			}
 			SetRemoteQueueRank(0);
 			SetAskedCountDown(0);
+			m_dwLastBlockReceived = 0;
+			m_uNatStallRecoverBurst = 0;
+			m_dwLastNatStallRecover = 0;
+			ClearDownloadBlockRequests();
 			socket->Safe_Delete();
 			socket = NULL;
-			SetDownloadState(DS_CONNECTING, _T("Timeout. More than 100 seconds since last complete block was received."));
+			SetDownloadState(DS_CONNECTING, _T("Timeout. More than 100 seconds since last useful block was received."));
+			if (bCanRetryViaEServerBuddy && SendEServerRelayRequest(this)) {
+				m_eConnectingState = CCS_SERVERCALLBACK;
+				theApp.clientlist->AddConnectingClient(this);
+				return;
+			}
 			if (m_reqfile != NULL)
 				TrigNextSafeAskForDownload(m_reqfile);
 			return;
@@ -1762,9 +2049,9 @@ void CUpDownClient::UDPReaskForDownload()
 
 void CUpDownClient::UpdateDisplayedInfo(bool force)
 {
-	theApp.emuledlg->transferwnd->GetDownloadList()->UpdateItem(this);
+	theApp.emuledlg->transferwnd->GetDownloadList()->UpdateItem(this, force);
 	theApp.emuledlg->transferwnd->GetClientList()->RefreshClient(this, -1, CClientListCtrl::kSortImpactDownloadState | CClientListCtrl::kSortImpactTransferredDown);
-	theApp.emuledlg->transferwnd->GetDownloadClientsList()->RefreshClient(this);
+	theApp.QueueUploadClientRowsChanged(this, CemuleApp::UploadClientUiTargetDownloadClients);
 }
 
 bool CUpDownClient::IsInNoNeededList(const CPartFile *fileToCheck) const
@@ -1777,7 +2064,7 @@ bool CUpDownClient::SwapToRightFile(CPartFile *SwapTo, CPartFile *cur_file, bool
 	bool printDebug = debug && thePrefs.GetLogA4AF();
 
 	if (printDebug) {
-		AddDebugLogLine(DLP_LOW, false, _T("oooo Debug: SwapToRightFile. Start compare SwapTo: %s and cur_file %s"), SwapTo ? (LPCTSTR)EscPercent(SwapTo->GetFileName()) : _T("null"), (LPCTSTR)EscPercent(cur_file->GetFileName()));
+		AddDebugLogLine(DLP_LOW, false, _T("oooo Debug: SwapToRightFile. Start compare SwapTo: %s and cur_file %s"), SwapTo ? (LPCTSTR)EscPercent(SwapTo->GetFileName()) : (LPCTSTR)_T("null"), (LPCTSTR)EscPercent(cur_file->GetFileName()));
 		AddDebugLogLine(DLP_LOW, false, _T("oooo Debug: doAgressiveSwapping: %s"), doAgressiveSwapping ? _T("true") : _T("false"));
 	}
 
@@ -1883,6 +2170,9 @@ bool CUpDownClient::SwapToRightFile(CPartFile *SwapTo, CPartFile *cur_file, bool
 
 bool CUpDownClient::SwapToAnotherFile(LPCTSTR reason, bool bIgnoreNoNeeded, bool ignoreSuspensions, bool bRemoveCompletely, CPartFile *toFile, bool allowSame, bool isAboutToAsk, bool debug)
 {
+	if (!GuardUpDownClientMutation(_T("CUpDownClient::SwapToAnotherFile")))
+		return false;
+
 	bool printDebug = debug && thePrefs.GetLogA4AF();
 
 	if (printDebug)
@@ -1927,7 +2217,7 @@ bool CUpDownClient::SwapToAnotherFile(LPCTSTR reason, bool bIgnoreNoNeeded, bool
 	}
 
 	CPartFile *SwapTo = NULL;
-	POSITION finalpos = NULL;
+	CPartFile *usedListFile = NULL;
 	CTypedPtrList<CPtrList, CPartFile*> *usedList = NULL;
 
 	if (allowSame && !bRemoveCompletely) {
@@ -1972,7 +2262,7 @@ bool CUpDownClient::SwapToAnotherFile(LPCTSTR reason, bool bIgnoreNoNeeded, bool
 						SwapTo = cur_file;
 						SwapToIsNNP = false;
 						usedList = &m_OtherRequests_list;
-						finalpos = pos2;
+						usedListFile = cur_file;
 						break;
 					}
 				} else {
@@ -1996,7 +2286,7 @@ bool CUpDownClient::SwapToAnotherFile(LPCTSTR reason, bool bIgnoreNoNeeded, bool
 						SwapTo = cur_file;
 						SwapToIsNNP = false;
 						usedList = &m_OtherRequests_list;
-						finalpos = pos2;
+						usedListFile = cur_file;
 					} else {
 						if (printDebug) //SwapToRightFile ensured that SwapTo != NULL
 							AddDebugLogLine(DLP_VERYLOW, false, _T("ooo Debug: Keeping file %s"), (LPCTSTR)EscPercent(SwapTo->GetFileName()));
@@ -2046,7 +2336,7 @@ bool CUpDownClient::SwapToAnotherFile(LPCTSTR reason, bool bIgnoreNoNeeded, bool
 
 					SwapTo = cur_file;
 					usedList = &m_OtherNoNeeded_list;
-					finalpos = pos2;
+					usedListFile = cur_file;
 					break;
 				}
 			} else {
@@ -2070,7 +2360,7 @@ bool CUpDownClient::SwapToAnotherFile(LPCTSTR reason, bool bIgnoreNoNeeded, bool
 					SwapTo = cur_file;
 					SwapToIsNNP = true;
 					usedList = &m_OtherNoNeeded_list;
-					finalpos = pos2;
+					usedListFile = cur_file;
 				} else {
 					if (printDebug) //SwapToRightFile ensured that SwapTo != NULL
 						AddDebugLogLine(DLP_VERYLOW, false, _T("ooo Debug: Keeping file %s"), (LPCTSTR)EscPercent(SwapTo->GetFileName()));
@@ -2119,8 +2409,11 @@ bool CUpDownClient::SwapToAnotherFile(LPCTSTR reason, bool bIgnoreNoNeeded, bool
 		if (SwapTo != m_reqfile && DoSwap(SwapTo, bRemoveCompletely, strInfo)) {
 			if (debug && thePrefs.GetLogA4AF())
 				AddDebugLogLine(DLP_LOW, false, _T("ooo Debug: Swap successful."));
-			if (usedList && finalpos)
-				usedList->RemoveAt(finalpos);
+			if (usedList && usedListFile) {
+				POSITION usedPos = usedList->Find(usedListFile);
+				if (usedPos)
+					usedList->RemoveAt(usedPos);
+			}
 			return true;
 		}
 		if (printDebug)
@@ -2144,8 +2437,10 @@ bool CUpDownClient::DoSwap(CPartFile* SwapTo, bool bRemoveCompletely, LPCTSTR re
 		// function here is still (again) a performance problem, there is a more efficient way to handle
 		// the 'Find' situation. Hint: usage of a node ptr which is stored in the CUpDownClient.
 		POSITION pos = m_reqfile->srclist.Find(this);
-		if (pos)
+		if (pos) {
+			theApp.downloadqueue->UnregisterDownloadSource(m_reqfile, this);
 			m_reqfile->srclist.RemoveAt(pos);
+		}
 		else
 			AddDebugLogLine(DLP_HIGH, false, _T("o-o Unsync between partfile->srclist and client otherfiles list. Swapping client where client has file as reqfile, but file doesn't have client in srclist. %s Remove = %s '%s'   -->   '%s'  SwapReason: %s"), (LPCTSTR)EscPercent(DbgGetClientInfo()), (bRemoveCompletely ? _T("Yes") : _T("No")), m_reqfile ? (LPCTSTR)EscPercent(m_reqfile->GetFileName()) : (LPCTSTR)EMPTY, (LPCTSTR)EscPercent(SwapTo->GetFileName()), (LPCTSTR)EscPercent(reason));
 
@@ -2179,6 +2474,7 @@ bool CUpDownClient::DoSwap(CPartFile* SwapTo, bool bRemoveCompletely, LPCTSTR re
 	theApp.emuledlg->transferwnd->GetDownloadList()->RemoveSource(this, SwapTo);
 	SetRequestFile(SwapTo);
 	SwapTo->srclist.AddTail(this);
+	theApp.downloadqueue->RegisterDownloadSource(SwapTo, this);
 	theApp.emuledlg->transferwnd->GetDownloadList()->AddSource(SwapTo, this, false);
 	return true;
 }
@@ -2288,6 +2584,12 @@ bool CUpDownClient::IsValidSource() const
 
 void CUpDownClient::StartDownload()
 {
+	m_dwLastBlockReceived = ::GetTickCount();
+	m_dwLastNatStallRecover = 0;
+	m_uNatStallRecoverBurst = 0;
+	m_dwLastUnexpectedBlockTick = 0;
+	m_uUnexpectedBlockBurst = 0;
+	SetSentCancelTransfer(false);
 	SetDownloadState(DS_DOWNLOADING);
 	InitTransferredDownMini();
 	SetDownStartTime();
@@ -2305,6 +2607,11 @@ void CUpDownClient::SendCancelTransfer()
 	if (!GetSentCancelTransfer()) {
 		if (thePrefs.GetDebugClientTCPLevel() > 0)
 			DebugSend("OP_CancelTransfer", this);
+		if (thePrefs.GetLogNatTraversalEvents()) {
+			AddDebugLogLine(DLP_LOW, false, _T("[NatTraversal] Sending OP_CANCELTRANSFER to %s (state=%d, pendingBlocks=%i, reqfile=%s)"),
+				(LPCTSTR)EscPercent(DbgGetClientInfo()), GetDownloadState(), (int)m_PendingBlocks_list.GetCount(),
+				m_reqfile != NULL ? (LPCTSTR)EscPercent(m_reqfile->GetFileName()) : (LPCTSTR)_T("<null>"));
+		}
 
 		Packet *pCancelTransferPacket = new Packet(OP_CANCELTRANSFER, 0);
 		theStats.AddUpDataOverheadFileRequest(pCancelTransferPacket->size);
@@ -2315,15 +2622,41 @@ void CUpDownClient::SendCancelTransfer()
 
 void CUpDownClient::SetRequestFile(CPartFile *pReqFile)
 {
-	if (pReqFile != m_reqfile || m_reqfile == NULL)
+	if (!GuardUpDownClientMutation(_T("CUpDownClient::SetRequestFile")))
+		return;
+
+	if (pReqFile != m_reqfile || m_reqfile == NULL) {
+		if (pReqFile != m_reqfile) {
+			ClearDownloadBlockRequests();
+			m_dwLastBlockReceived = 0;
+			m_dwLastNatStallRecover = 0;
+			m_dwHashsetRequestSent = 0;
+			m_uNatStallRecoverBurst = 0;
+			m_dwLastUnexpectedBlockTick = 0;
+			m_uUnexpectedBlockBurst = 0;
+			m_uNoPendingBlockReaskBurst = 0;
+			m_dwLastInvalidBlockStateTick = 0;
+			m_uInvalidBlockStateBurst = 0;
+			m_fHashsetRequestingMD4 = 0;
+			m_fHashsetRequestingAICH = 0;
+			m_fQueueRankPending = 0;
+			m_fUnaskQueueRankRecv = 0;
+			SetSentCancelTransfer(false);
+			m_bNatFileRequestCloseRetryUsed = false;
+			ResetNatTRendezvousSession();
+			ClearNatRendezvousTransportPin();
+			ClearNatTFatalConnectFailure();
+		}
 		ResetFileStatusInfo();
+	}
 	m_reqfile = pReqFile;
 }
 
 void CUpDownClient::ProcessAcceptUpload()
 {
+	m_bNatFileRequestCloseRetryUsed = false;
     if (thePrefs.GetLogNatTraversalEvents()) {
-        DebugLog(_T("[NatTraversal] OP_ACCEPTUPLOADREQ received from %s (file=%s), entering download path"), (LPCTSTR)EscPercent(DbgGetClientInfo()), m_reqfile ? (LPCTSTR)EscPercent(m_reqfile->GetFileName()) : _T("<null>"));
+        DebugLog(_T("[NatTraversal] OP_ACCEPTUPLOADREQ received from %s (file=%s), entering download path"), (LPCTSTR)EscPercent(DbgGetClientInfo()), m_reqfile ? (LPCTSTR)EscPercent(m_reqfile->GetFileName()) : (LPCTSTR)_T("<null>"));
     }
 	// Upload slot is accepted, queue-rank request is no longer pending.
 	m_fQueueRankPending = 0;
@@ -2345,6 +2678,7 @@ void CUpDownClient::ProcessEdonkeyQueueRank(const uchar *packet, UINT size)
 {
 	CSafeMemFile data(packet, size);
 	uint32 rank = data.ReadUInt32();
+	m_bNatFileRequestCloseRetryUsed = false;
 	if (thePrefs.GetDebugClientTCPLevel() > 0)
 		Debug(_T("  QR=%u (prev. %d)\n"), rank, IsRemoteQueueFull() ? UINT_MAX : (UINT)GetRemoteQueueRank());
 	SetRemoteQueueRank(rank, GetDownloadState() == DS_ONQUEUE);
@@ -2357,6 +2691,7 @@ void CUpDownClient::ProcessEmuleQueueRank(const uchar *packet, UINT size)
 	if (size != 12)
 		throw GetResString(_T("ERR_BADSIZE"));
 	uint16 rank = PeekUInt16(packet);
+	m_bNatFileRequestCloseRetryUsed = false;
 	if (thePrefs.GetDebugClientTCPLevel() > 0)
 		Debug(_T("  QR=%u\n"), rank); // no prev. QR available for eMule clients
 	SetRemoteQueueFull(false);
@@ -2403,6 +2738,10 @@ void CUpDownClient::SetReqFileAICHHash(CAICHHash *val)
 
 void CUpDownClient::SendAICHRequest(CPartFile *pForFile, uint16 nPart)
 {
+	if (!GuardUpDownClientMutation(_T("CUpDownClient::SendAICHRequest"))
+		|| !theApp.GuardModelMutation(CemuleApp::ModelMutationPartFile, _T("CUpDownClient::SendAICHRequest")))
+		return;
+
 	CAICHRequestedData request;
 	request.m_nPart = nPart;
 	request.m_pClient = this;
@@ -2422,6 +2761,11 @@ void CUpDownClient::SendAICHRequest(CPartFile *pForFile, uint16 nPart)
 
 void CUpDownClient::ProcessAICHAnswer(const uchar *packet, UINT size)
 {
+	if (!GuardUpDownClientMutation(_T("CUpDownClient::ProcessAICHAnswer"))
+		|| !theApp.GuardModelMutation(CemuleApp::ModelMutationPartFile, _T("CUpDownClient::ProcessAICHAnswer"))
+		|| !theApp.GuardModelMutation(CemuleApp::ModelMutationDownloadQueue, _T("CUpDownClient::ProcessAICHAnswer")))
+		return;
+
 	if (!m_fAICHRequested)
 		throwCStr(_T("Received unrequested AICH Packet"));
 
@@ -2521,6 +2865,11 @@ void CUpDownClient::ProcessAICHRequest(const uchar *packet, UINT size)
 
 void CUpDownClient::ProcessAICHFileHash(CSafeMemFile *data, CPartFile *file, const CAICHHash *pAICHHash)
 {
+	if (!GuardUpDownClientMutation(_T("CUpDownClient::ProcessAICHFileHash"))
+		|| !theApp.GuardModelMutation(CemuleApp::ModelMutationPartFile, _T("CUpDownClient::ProcessAICHFileHash"))
+		|| !theApp.GuardModelMutation(CemuleApp::ModelMutationDownloadQueue, _T("CUpDownClient::ProcessAICHFileHash")))
+		return;
+
 	CPartFile *pPartFile = file;
 	if (pPartFile == NULL && data != NULL) {
 		uchar abyHash[MDX_DIGEST_SIZE];
@@ -2611,8 +2960,23 @@ void CUpDownClient::SendHashSetRequest()
 			m_reqfile->m_bMD4HashsetNeeded = false;
 		}
 		theStats.AddUpDataOverheadFileRequest(packet->size);
-		SendPacket(packet);
-		SetDownloadState(DS_REQHASHSET);
+		if (SendPacket(packet, true)) {
+			m_dwHashsetRequestSent = ::GetTickCount();
+			SetDownloadState(DS_REQHASHSET);
+		} else {
+			if (m_reqfile != NULL) {
+				if (m_fHashsetRequestingMD4)
+					m_reqfile->m_bMD4HashsetNeeded = true;
+				if (m_fHashsetRequestingAICH)
+					m_reqfile->SetAICHHashSetNeeded(true);
+			}
+			m_fHashsetRequestingMD4 = 0;
+			m_fHashsetRequestingAICH = 0;
+			m_dwHashsetRequestSent = 0;
+			SetDownloadState(DS_CONNECTING, _T("Hashset request send failed."));
+			if (m_reqfile != NULL)
+				TrigNextSafeAskForDownload(m_reqfile);
+		}
 	} else
 		ASSERT(0);
 }

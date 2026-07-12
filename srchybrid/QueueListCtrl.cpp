@@ -25,6 +25,7 @@
 #include "KademliaWnd.h"
 #include "emuledlg.h"
 #include "FriendList.h"
+#include "Friend.h"
 #include "UploadQueue.h"
 #include "TransferDlg.h"
 #include "OtherFunctions.h"
@@ -49,17 +50,53 @@ static char THIS_FILE[] = __FILE__;
 
 namespace
 {
-	CObject* CreateClientDetailWalkerToken(const CUpDownClient* pClient)
+
+
+	class CQueueClientReference
 	{
-		if (pClient == NULL || theApp.clientlist == NULL)
-			return NULL;
+	public:
+		CQueueClientReference()
+			: m_pClient(NULL)
+		{
+		}
 
-		CUpDownClient* pTrackedClient = theApp.clientlist->AcquireTrackedClientByPointer(pClient);
-		if (pTrackedClient == NULL)
-			return NULL;
+		~CQueueClientReference()
+		{
+			Release();
+		}
 
-		const ClientRuntimeID uRuntimeID = pTrackedClient->GetRuntimeID();
-		pTrackedClient->ReleaseRuntimeReference();
+		void Attach(CUpDownClient* pClient)
+		{
+			if (m_pClient == pClient)
+				return;
+			Release();
+			m_pClient = pClient;
+		}
+
+		CUpDownClient* Get() const
+		{
+			return m_pClient;
+		}
+
+		void Release()
+		{
+			if (m_pClient != NULL) {
+				m_pClient->ReleaseRuntimeReference();
+				m_pClient = NULL;
+			}
+		}
+
+	private:
+		CUpDownClient* m_pClient;
+	};
+
+	CUpDownClient* AcquireRuntimeClient(CQueueListCtrl::QueueClientItemID uRuntimeID)
+	{
+		return (uRuntimeID != 0 && theApp.clientlist != NULL) ? theApp.clientlist->AcquireTrackedClientByRuntimeID(static_cast<ClientRuntimeID>(uRuntimeID)) : NULL;
+	}
+
+	CObject* CreateClientDetailWalkerToken(CQueueListCtrl::QueueClientItemID uRuntimeID)
+	{
 		return uRuntimeID != 0 ? reinterpret_cast<CObject*>((static_cast<ULONG_PTR>(uRuntimeID) << 1) | 1) : NULL;
 	}
 }
@@ -118,14 +155,15 @@ void CQueueListCtrl::Init()
 	InsertColumn(14, EMPTY, LVCFMT_RIGHT, 80);
 	InsertColumn(15, EMPTY, LVCFMT_RIGHT, 100);
 	InsertColumn(16, EMPTY, LVCFMT_LEFT, 100);
-	InsertColumn(17, EMPTY, LVCFMT_LEFT, 100);
+	InsertColumn(17, EMPTY, LVCFMT_LEFT, 90);
 	InsertColumn(18, EMPTY, LVCFMT_LEFT, 100);
 	InsertColumn(19, EMPTY, LVCFMT_LEFT, 100);
-	InsertColumn(20, EMPTY, LVCFMT_RIGHT, 100);
+	InsertColumn(20, EMPTY, LVCFMT_LEFT, 100);
 	InsertColumn(21, EMPTY, LVCFMT_RIGHT, 100);
-	InsertColumn(22, EMPTY, LVCFMT_LEFT, 100);
-	InsertColumn(23, EMPTY, LVCFMT_RIGHT, 60);
+	InsertColumn(22, EMPTY, LVCFMT_RIGHT, 100);
+	InsertColumn(23, EMPTY, LVCFMT_LEFT, 100);
 	InsertColumn(24, EMPTY, LVCFMT_RIGHT, 60);
+	InsertColumn(25, EMPTY, LVCFMT_RIGHT, 60);
 
 	SetAllIcons();
 	LoadSettings();
@@ -135,7 +173,7 @@ void CQueueListCtrl::Init()
 
 void CQueueListCtrl::Localize()
 {
-	static const LPCTSTR uids[25] =
+	static const LPCTSTR uids[26] =
 	{
 		_T("QL_USERNAME"), _T("FILE"), _T("FILEPRIO"), _T("QL_RATING"), _T("SCORE")
 		, _T("ASKED"), _T("LAST_ASKED"), _T("ENTERQUEUE"), _T("UPSTATUS")
@@ -147,6 +185,7 @@ void CQueueListCtrl::Localize()
 		, _T("SHAREDFILESCOUNTCOLUMN")
 		, _T("SHAREDFILESLASTQUERIED")
 		, _T("FRIEND")
+		, _T("FRIEND_SLOT")
         , _T("ID_TYPE")
         , _T("BAD_CLIENT_TYPE")
         , _T("PUNISHMENT")
@@ -181,17 +220,27 @@ void CQueueListCtrl::DrawItem(LPDRAWITEMSTRUCT lpDrawItemStruct)
 		return;
 
 	CRect rcItem(lpDrawItemStruct->rcItem);
-	CMemoryDC dc(CDC::FromHandle(lpDrawItemStruct->hDC), rcItem);
+	CRect rcClientFullRow;
+	GetClientRect(&rcClientFullRow);
+	CRect rcPaint(rcClientFullRow.left, rcItem.top, rcClientFullRow.right, rcItem.bottom);
+	CMemoryDC dc(CDC::FromHandle(lpDrawItemStruct->hDC), rcPaint);
 	BOOL bCtrlFocused;
 	InitItemMemDC(dc, lpDrawItemStruct, bCtrlFocused);
 
 	// Set selected item background color
 	if ((lpDrawItemStruct->itemState & ODS_SELECTED) != 0)
-		dc.FillSolidRect(rcItem, GetCustomSysColor(COLOR_HIGHLIGHT));
+		dc.FillSolidRect(rcPaint, GetCustomSysColor(COLOR_HIGHLIGHT));
 
 	RECT rcClient;
 	GetClientRect(&rcClient);
-	CUpDownClient *client = reinterpret_cast<CUpDownClient*>(lpDrawItemStruct->itemData);
+	const QueueClientItemID uRuntimeID = static_cast<QueueClientItemID>(lpDrawItemStruct->itemData);
+	if (m_ListItemsMap.find(uRuntimeID) == m_ListItemsMap.end())
+		return;
+	CQueueClientReference clientRef;
+	clientRef.Attach(AcquireRuntimeClient(uRuntimeID));
+	CUpDownClient* client = clientRef.Get();
+	if (client == NULL)
+		return;
 
 	const CHeaderCtrl *pHeaderCtrl = GetHeaderCtrl();
 	int iCount = pHeaderCtrl->GetItemCount();
@@ -207,20 +256,22 @@ void CQueueListCtrl::DrawItem(LPDRAWITEMSTRUCT lpDrawItemStruct)
 		rcItem.left = itemLeft;
 		rcItem.right = itemLeft + iColumnWidth;
 		if (rcItem.left < rcItem.right && HaveIntersection(rcClient, rcItem)) {
-			const CString &sItem(GetItemDisplayText(client, iColumn));
+			const CString sItem(GetItemDisplayText(client, iColumn));
 			switch (iColumn) {
 			case 0: //user name
 			{
-					int iImage;
-					UINT uOverlayImage;
+					int iImage = 0;
+					UINT uOverlayImage = 0;
 					client->GetDisplayImage(iImage, uOverlayImage);
 
 					const POINT point = { rcItem.left, rcItem.top + iIconY };
 					SafeImageListDraw(m_pImageList, dc, iImage, point, ILD_NORMAL | INDEXTOOVERLAYMASK(uOverlayImage));
-					if (theApp.geolite2->ShowCountryFlag() && IsColumnHidden(12)) {
+					if (theApp.ipgeolocation->ShowCountryFlag() && IsColumnHidden(12)) {
 						rcItem.left += 20;
 						POINT point2 = { rcItem.left,rcItem.top + 1 };
-						theApp.geolite2->GetFlagImageList()->DrawIndirect(&theApp.geolite2->GetFlagImageDrawParams(dc, client->GetCountryFlagIndex(), point2));
+						IMAGELISTDRAWPARAMS flagDrawParams = theApp.ipgeolocation->GetFlagImageDrawParams(dc, client->GetCountryFlagIndex(), point2);
+
+						theApp.ipgeolocation->GetFlagImageList()->DrawIndirect(&flagDrawParams);
 						rcItem.left += sm_iSubItemInset;
 					}
 					rcItem.left += 17;
@@ -247,9 +298,10 @@ void CQueueListCtrl::DrawItem(LPDRAWITEMSTRUCT lpDrawItemStruct)
 			break;
 			case 12:
 			{
-				if (theApp.geolite2->ShowCountryFlag()) {
+				if (theApp.ipgeolocation->ShowCountryFlag()) {
 					POINT point2 = { rcItem.left,rcItem.top + 1 };
-					theApp.geolite2->GetFlagImageList()->DrawIndirect(&theApp.geolite2->GetFlagImageDrawParams(dc, client->GetCountryFlagIndex(), point2));
+					IMAGELISTDRAWPARAMS flagDrawParams = theApp.ipgeolocation->GetFlagImageDrawParams(dc, client->GetCountryFlagIndex(), point2);
+					theApp.ipgeolocation->GetFlagImageList()->DrawIndirect(&flagDrawParams);
 					rcItem.left += 22;
 				}
 				rcItem.left += sm_iIconOffset;
@@ -263,12 +315,26 @@ void CQueueListCtrl::DrawItem(LPDRAWITEMSTRUCT lpDrawItemStruct)
 
 	DrawFocusRect(dc, &lpDrawItemStruct->rcItem, lpDrawItemStruct->itemState & ODS_FOCUS, bCtrlFocused, lpDrawItemStruct->itemState & ODS_SELECTED);
 
-	QueueItemUpdated((LPARAM)client);
 }
+
+void CQueueListCtrl::RequestQueueListRedrawForRange(int iFirst, int iLast)
+{
+	if (theApp.GetBackendLifecycleState() >= CemuleApp::BackendLifecycleStoppingUiUpdates || !::IsWindow(m_hWnd))
+		return;
+	if (iFirst < 0 || iLast < iFirst || GetItemCount() <= 0)
+		return;
+	iFirst = max(0, iFirst);
+	iLast = min(iLast, GetItemCount() - 1);
+	if (iLast >= iFirst)
+		RequestRowRedrawAsync(iFirst, iLast);
+}
+
 
 const CString CQueueListCtrl::GetItemDisplayText(CUpDownClient* client, const int iSubItem) const
 {
 	CString sText;
+	if (client == NULL)
+		return sText;
 	switch (iSubItem) {
 	case 0:
 		if (client->GetUserName() != NULL)
@@ -341,7 +407,7 @@ const CString CQueueListCtrl::GetItemDisplayText(CUpDownClient* client, const in
 		sText = md4str(client->GetUserHash());
 		break;
 	case 11:
-		sText.Format(_T("%s:%u"), ipstr(!client->GetIP().IsNull() ? client->GetIP() : client->GetConnectIP()), client->GetUserPort());
+		sText.Format(_T("%s:%u"), (LPCTSTR)ipstr(!client->GetIP().IsNull() ? client->GetIP() : client->GetConnectIP()), client->GetUserPort());
 		break;
 	case 12:
 		sText = client->GetGeolocationData();
@@ -354,7 +420,7 @@ const CString CQueueListCtrl::GetItemDisplayText(CUpDownClient* client, const in
 		break;
 	case 15:
 		if (client->m_tSharedFilesLastQueriedTime)
-			sText.Format(_T(" %s"), CastSecondsToHM((time(NULL) - client->m_tSharedFilesLastQueriedTime)));
+			sText.Format(_T(" %s"), (LPCTSTR)CastSecondsToHM((time(NULL) - client->m_tSharedFilesLastQueriedTime)));
 		else
 			sText = EMPTY;
 		break;
@@ -365,40 +431,43 @@ const CString CQueueListCtrl::GetItemDisplayText(CUpDownClient* client, const in
 			sText = GetResString(_T("NO"));
 		break;
 	case 17:
+		sText = GetResString(client->GetFriendSlot() ? _T("YES") : _T("NO"));
+		break;
+	case 18:
 		if (client->HasLowID())
 			sText = GetResString(_T("IDLOW"));
 		else
 			sText = GetResString(_T("IDHIGH"));
 		break;
-	case 18:
+	case 19:
 		sText = client->GetPunishmentReason();
 		break;
-	case 19:
+	case 20:
 		sText = client->GetPunishmentText();
 		break;
-	case 20:
-		if (client->tFirstSeen)
-			sText.Format(_T(" %s"), CastSecondsToHM(time(NULL) - client->tFirstSeen));
-		else
-			sText = _T("Unknown");
-		break;
 	case 21:
-		if (client->tLastSeen)
-			sText.Format(_T(" %s"), CastSecondsToHM(time(NULL) - client->tLastSeen));
+		if (client->tFirstSeen)
+			sText.Format(_T(" %s"), (LPCTSTR)CastSecondsToHM(time(NULL) - client->tFirstSeen));
 		else
 			sText = _T("Unknown");
 		break;
 	case 22:
-		sText = client->m_strClientNote;
+		if (client->tLastSeen)
+			sText.Format(_T(" %s"), (LPCTSTR)CastSecondsToHM(time(NULL) - client->tLastSeen));
+		else
+			sText = _T("Unknown");
 		break;
 	case 23:
+		sText = client->m_strClientNote;
+		break;
+	case 24:
 		{
 			const CKnownFile *file = theApp.sharedfiles->GetFileByID(client->GetUploadFileID());
 			if (file)
 				sText.Format(_T("%.1f"), file->GetAllTimeRatio());
 		}
 		break;
-	case 24:
+	case 25:
 		{
 			const CKnownFile *file = theApp.sharedfiles->GetFileByID(client->GetUploadFileID());
 			if (file)
@@ -411,7 +480,7 @@ const CString CQueueListCtrl::GetItemDisplayText(CUpDownClient* client, const in
 
 int CQueueListCtrl::GetDefaultPersistentInfoTipExtraLeftPadding(const SPersistentInfoTipContext& context) const
 {
-	if (!theApp.geolite2->ShowCountryFlag())
+	if (!theApp.ipgeolocation->ShowCountryFlag())
 		return 0;
 
 	if (context.iSubItem == 12)
@@ -426,22 +495,16 @@ int CQueueListCtrl::GetDefaultPersistentInfoTipExtraLeftPadding(const SPersisten
 void CQueueListCtrl::OnLvnGetDispInfo(LPNMHDR pNMHDR, LRESULT *pResult)
 {
 	if (!theApp.IsClosing()) {
-		// Although we have an owner drawn listview control we store the text for the primary item in the
-		// listview, to be capable of quick searching those items via the keyboard. Because our listview
-		// items may change their contents, we do this via a text callback function. The listview control
-		// will send us the LVN_DISPINFO notification if it needs to know the contents of the primary item.
-		//
-		// But, the listview control sends this notification all the time, even if we do not search for an item.
-		// At least this notification is only sent for the visible items and not for all items in the list.
-		// Though, because this function is invoked *very* often, do *NOT* put any time consuming code in here.
-		//
-		// Vista: That callback is used to get the strings for the label tips for the sub(!)-items.
-		//
 		const LVITEMW &rItem = reinterpret_cast<NMLVDISPINFO*>(pNMHDR)->item;
-		if (rItem.mask & LVIF_TEXT) {
-			CUpDownClient *pClient = reinterpret_cast<CUpDownClient*>(rItem.lParam);
-			if (pClient != NULL)
-				_tcsncpy_s(rItem.pszText, rItem.cchTextMax, GetItemDisplayText(pClient, rItem.iSubItem), _TRUNCATE);
+		if ((rItem.mask & LVIF_TEXT) && rItem.pszText != NULL && rItem.cchTextMax > 0) {
+			QueueClientItemID uRuntimeID = 0;
+			if (rItem.iItem >= 0)
+				uRuntimeID = static_cast<QueueClientItemID>(GetItemData(rItem.iItem));
+			CQueueClientReference clientRef;
+			clientRef.Attach(AcquireRuntimeClient(uRuntimeID));
+			CUpDownClient* client = clientRef.Get();
+			CString strText = client != NULL ? GetItemDisplayText(client, rItem.iSubItem) : CString();
+			_tcsncpy_s(rItem.pszText, rItem.cchTextMax, strText, _TRUNCATE);
 		}
 	}
 	*pResult = 0;
@@ -476,8 +539,18 @@ void CQueueListCtrl::OnLvnColumnClick(LPNMHDR pNMHDR, LRESULT *pResult)
 
 int CALLBACK CQueueListCtrl::SortProc(const LPARAM lParam1, const LPARAM lParam2, const LPARAM lParamSort)
 {
-	CUpDownClient* item1 = reinterpret_cast<CUpDownClient*>(lParam1);
-	CUpDownClient* item2 = reinterpret_cast<CUpDownClient*>(lParam2);
+	CQueueClientReference item1Ref;
+	CQueueClientReference item2Ref;
+	item1Ref.Attach(AcquireRuntimeClient(static_cast<CQueueListCtrl::QueueClientItemID>(lParam1)));
+	item2Ref.Attach(AcquireRuntimeClient(static_cast<CQueueListCtrl::QueueClientItemID>(lParam2)));
+	CUpDownClient* item1 = item1Ref.Get();
+	CUpDownClient* item2 = item2Ref.Get();
+	if (item1 == NULL && item2 == NULL)
+		return 0;
+	if (item1 == NULL)
+		return 1;
+	if (item2 == NULL)
+		return -1;
 
 	int iResult = 0;
 	switch (LOWORD(lParamSort)) {
@@ -561,24 +634,27 @@ int CALLBACK CQueueListCtrl::SortProc(const LPARAM lParam1, const LPARAM lParam2
 		iResult = CompareUnsigned(item1->IsFriend(), item2->IsFriend());
 		break;
 	case 17:
-		iResult = CompareUnsigned(item1->HasLowID(), item2->HasLowID());
+		iResult = CompareUnsigned(item1->GetFriendSlot(), item2->GetFriendSlot());
 		break;
 	case 18:
-		iResult = CompareLocaleStringNoCase(item1->GetPunishmentReason(), item2->GetPunishmentReason());
+		iResult = CompareUnsigned(item1->HasLowID(), item2->HasLowID());
 		break;
 	case 19:
-		iResult = CompareLocaleStringNoCase(item1->GetPunishmentText(), item2->GetPunishmentText());
+		iResult = CompareLocaleStringNoCase(item1->GetPunishmentReason(), item2->GetPunishmentReason());
 		break;
 	case 20:
-		iResult = CompareUnsigned(item1->tFirstSeen, item2->tFirstSeen);
+		iResult = CompareLocaleStringNoCase(item1->GetPunishmentText(), item2->GetPunishmentText());
 		break;
 	case 21:
-		iResult = CompareUnsigned(item1->tLastSeen, item2->tLastSeen);
+		iResult = CompareUnsigned(item1->tFirstSeen, item2->tFirstSeen);
 		break;
 	case 22:
-		iResult = CompareLocaleStringNoCase(item1->m_strClientNote, item2->m_strClientNote);
+		iResult = CompareUnsigned(item1->tLastSeen, item2->tLastSeen);
 		break;
 	case 23:
+		iResult = CompareLocaleStringNoCase(item1->m_strClientNote, item2->m_strClientNote);
+		break;
+	case 24:
 		{
 			const CKnownFile *file1 = theApp.sharedfiles->GetFileByID(item1->GetUploadFileID());
 			const CKnownFile *file2 = theApp.sharedfiles->GetFileByID(item2->GetUploadFileID());
@@ -590,7 +666,7 @@ int CALLBACK CQueueListCtrl::SortProc(const LPARAM lParam1, const LPARAM lParam2
 				iResult = (file1 == NULL) ? 1 : -1;
 		}
 		break;
-	case 24:
+	case 25:
 		{
 			const CKnownFile *file1 = theApp.sharedfiles->GetFileByID(item1->GetUploadFileID());
 			const CKnownFile *file2 = theApp.sharedfiles->GetFileByID(item2->GetUploadFileID());
@@ -617,7 +693,9 @@ void CQueueListCtrl::OnNmDblClk(LPNMHDR, LRESULT *pResult)
 {
 	int iSel = GetNextItem(-1, LVIS_SELECTED | LVIS_FOCUSED);
 	if (iSel >= 0) {
-		CUpDownClient *client = reinterpret_cast<CUpDownClient*>(GetItemData(iSel));
+		CQueueClientReference clientRef;
+		clientRef.Attach(AcquireRuntimeClient(static_cast<QueueClientItemID>(GetItemData(iSel))));
+		CUpDownClient* client = clientRef.Get();
 		if (client) {
 			CClientDetailDialog dialog(client, this);
 			dialog.DoModal();
@@ -629,8 +707,12 @@ void CQueueListCtrl::OnNmDblClk(LPNMHDR, LRESULT *pResult)
 void CQueueListCtrl::OnContextMenu(CWnd*, CPoint point)
 {
 	int iSel = GetNextItem(-1, LVIS_SELECTED | LVIS_FOCUSED);
-	const CUpDownClient *client = reinterpret_cast<CUpDownClient*>(iSel >= 0 ? GetItemData(iSel) : NULL);
+	CQueueClientReference clientRef;
+	if (iSel >= 0)
+		clientRef.Attach(AcquireRuntimeClient(static_cast<QueueClientItemID>(GetItemData(iSel))));
+	const CUpDownClient* client = clientRef.Get();
 	const bool is_ed2k = client && client->IsEd2kClient();
+	const CFriend *pFriend = client != NULL ? client->GetFriend() : NULL;
 
 	CMenuXP ClientMenu;
 	ClientMenu.CreatePopupMenu();
@@ -638,6 +720,8 @@ void CQueueListCtrl::OnContextMenu(CWnd*, CPoint point)
 	ClientMenu.AppendMenu(MF_STRING | (client ? MF_ENABLED : MF_GRAYED), MP_DETAIL, GetResString(_T("SHOWDETAILS")), _T("CLIENTDETAILS"));
 	ClientMenu.SetDefaultItem(MP_DETAIL);
 	ClientMenu.AppendMenu(MF_STRING | ((is_ed2k && !client->IsFriend()) ? MF_ENABLED : MF_GRAYED), MP_ADDFRIEND, GetResString(_T("ADDFRIEND")), _T("ADDFRIEND"));
+	ClientMenu.AppendMenu(MF_STRING | (pFriend != NULL ? MF_ENABLED : MF_GRAYED), MP_FRIENDSLOT, GetResString(_T("FRIENDSLOT")), _T("FRIENDSLOT"));
+	ClientMenu.CheckMenuItem(MP_FRIENDSLOT, (pFriend != NULL && pFriend->GetFriendSlot()) ? MF_CHECKED : MF_UNCHECKED);
 	ClientMenu.AppendMenu(MF_STRING | (is_ed2k ? MF_ENABLED : MF_GRAYED), MP_MESSAGE, GetResString(_T("SEND_MSG")), _T("SENDMESSAGE"));
 	ClientMenu.AppendMenu(MF_STRING | ((is_ed2k && client->GetViewSharedFilesSupport()) ? MF_ENABLED : MF_GRAYED), MP_SHOWLIST, GetResString(_T("VIEWFILES")), _T("VIEWFILES"));
 	ClientMenu.AppendMenu(MF_STRING | (client ? MF_ENABLED : MF_GRAYED), MP_EDIT_NOTE, GetResString(_T("EDIT_CLIENT_NOTE")), _T("RENAME"));
@@ -685,7 +769,11 @@ BOOL CQueueListCtrl::OnCommand(WPARAM wParam, LPARAM)
 
 	int iSel = GetNextItem(-1, LVIS_SELECTED | LVIS_FOCUSED);
 	if (iSel >= 0) {
-		CUpDownClient *client = reinterpret_cast<CUpDownClient*>(GetItemData(iSel));
+		CQueueClientReference clientRef;
+		clientRef.Attach(AcquireRuntimeClient(static_cast<QueueClientItemID>(GetItemData(iSel))));
+		CUpDownClient* client = clientRef.Get();
+		if (client == NULL)
+			return TRUE;
 		auto RefreshQueueCountAfterManualPunishment = []() {
 			if (theApp.emuledlg != NULL && theApp.emuledlg->transferwnd != NULL)
 				theApp.emuledlg->transferwnd->InvalidateQueueCount(true);
@@ -706,12 +794,23 @@ BOOL CQueueListCtrl::OnCommand(WPARAM wParam, LPARAM)
 			}
 		break;
 		case MP_ADDFRIEND:
-			if (theApp.friendlist->AddFriend(client))
-				Update(iSel);
+			if (theApp.friendlist->AddFriend(client)) {
+				RequestRowRedrawAsync(iSel, iSel);
+			}
+			break;
+		case MP_FRIENDSLOT:
+			{
+				CFriend *pFriend = client->GetFriend();
+				if (pFriend != NULL) {
+					pFriend->SetFriendSlot(!pFriend->GetFriendSlot());
+					theApp.friendlist->SaveList();
+					RequestRowRedrawAsync(iSel, iSel);
+				}
+			}
 			break;
 		case MP_UNBAN:
 			if (client->IsBanned() || client->IsBadClient()) {
-				client->UnBan();
+				theApp.shield->SetPunishment(client,GetResString(_T("PUNISHMENT_REASON_MANUAL_CANCELATION")), PR_MANUAL, P_NOPUNISHMENT);
 				Update(iSel);
 				RefreshQueueCountAfterManualPunishment();
 			}
@@ -801,22 +900,38 @@ BOOL CQueueListCtrl::OnCommand(WPARAM wParam, LPARAM)
 	return TRUE;
 }
 
-void CQueueListCtrl::AddClient(CUpDownClient* client, bool resetclient)
+int CQueueListCtrl::FindSortedInsertIndex(QueueClientItemID uRuntimeID)
+{
+	const int iItemCount = GetItemCount();
+	if (GetSortItem() == -1 || iItemCount <= 0)
+		return iItemCount;
+
+	const LPARAM lParamSort = MAKELONG(GetSortItem(), !GetSortAscending());
+	for (int iItem = 0; iItem < iItemCount; ++iItem) {
+		if (SortProc((LPARAM)uRuntimeID, (LPARAM)GetItemData(iItem), lParamSort) < 0)
+			return iItem;
+	}
+	return iItemCount;
+}
+
+void CQueueListCtrl::AddClient(CUpDownClient* client)
 {
 	if (theApp.IsClosing() || client == NULL)
 		return;
 
-	if (resetclient && client) {
-		client->SetWaitStartTime();
-		client->SetAskedCount(1);
-	}
 
-	ASSERT(m_ListItemsMap.find(client) == m_ListItemsMap.end()); // The same file shall be added only once
-	m_ListItemsMap.emplace(client, client);
+	SClientItemId id;
+	if (!CUploadQueue::GetClientItemId(client, id))
+		return;
+
+	if (m_ListItemsMap.find(id.m_uRuntimeID) != m_ListItemsMap.end())
+		return;
+	m_ListItemsMap.insert(id.m_uRuntimeID);
 
 	if (!thePrefs.IsQueueListDisabled() && !IsFilteredOut(client)) {
-		int iItem = InsertItem(LVIF_TEXT | LVIF_PARAM, GetItemCount(), LPSTR_TEXTCALLBACK, 0, 0, 0, (LPARAM)client);
-		Update(iItem);
+		const int iItem = InsertItem(LVIF_TEXT | LVIF_PARAM, FindSortedInsertIndex(id.m_uRuntimeID), LPSTR_TEXTCALLBACK, 0, 0, 0, (LPARAM)id.m_uRuntimeID);
+		if (iItem >= 0)
+			RequestQueueListRedrawForRange(iItem, iItem);
 		theApp.emuledlg->transferwnd->m_pwndTransfer->UpdateListCount();
 	}
 }
@@ -826,14 +941,24 @@ void CQueueListCtrl::RemoveClient(CUpDownClient* client)
 	if (theApp.IsClosing() || client == NULL)
 		return;
 
-	// Retrieve all entries matching the File or linked to the file
-	auto it = m_ListItemsMap.find(client);
-	if (it != m_ListItemsMap.end()) { // If client is on the map we can proceed
-		// Remove it from the m_ListItems
+	SClientItemId id;
+	if (!CUploadQueue::GetClientItemId(client, id))
+		return;
+
+	RemoveClientByRuntimeID(id.m_uRuntimeID);
+}
+
+void CQueueListCtrl::RemoveClientByRuntimeID(DWORD uRuntimeID)
+{
+	if (theApp.IsClosing() || uRuntimeID == 0)
+		return;
+
+	auto it = m_ListItemsMap.find(uRuntimeID);
+	if (it != m_ListItemsMap.end()) {
 		m_ListItemsMap.erase(it);
-		LVFINDINFO find;
+		LVFINDINFO find = {};
 		find.flags = LVFI_PARAM;
-		find.lParam = (LPARAM)client;
+		find.lParam = (LPARAM)uRuntimeID;
 		int iItem = FindItem(&find);
 		if (iItem >= 0) {
 			DeleteItem(iItem);
@@ -847,30 +972,61 @@ void CQueueListCtrl::RefreshClient(const CUpDownClient* client)
 	if (theApp.IsClosing() || !client || theApp.emuledlg->activewnd != theApp.emuledlg->transferwnd || !theApp.emuledlg->transferwnd->GetQueueList()->IsWindowVisible())
 		return;
 
-	QueueItemUpdate((LPARAM)client);
+	SClientItemId id;
+	if (!CUploadQueue::GetClientItemId(client, id))
+		return;
+	LVFINDINFO find = {};
+	find.flags = LVFI_PARAM;
+	find.lParam = (LPARAM)id.m_uRuntimeID;
+	int iItem = FindItem(&find);
+	if (iItem < 0)
+		return;
+
+	MaintainSortOrderAfterThrottledUpdate();
+	iItem = FindItem(&find);
+	if (IsItemIndexVisible(iItem))
+		RequestQueueListRedrawForRange(iItem, iItem);
 }
 
 void CQueueListCtrl::UpdateView()
 {
-	for (auto it = m_ListItemsMap.begin(); it != m_ListItemsMap.end(); ++it) {
-		CUpDownClient* cur_item = it->second;
-		if (cur_item) {
-			if (!IsFilteredOut(cur_item))
-				ShowClient(cur_item);
-			else
-				HideClient(cur_item);
+	for (auto it = m_ListItemsMap.begin(); it != m_ListItemsMap.end();) {
+		const QueueClientItemID uRuntimeID = *it;
+		CQueueClientReference clientRef;
+		clientRef.Attach(AcquireRuntimeClient(uRuntimeID));
+		CUpDownClient* cur_item = clientRef.Get();
+		if (cur_item == NULL) {
+			LVFINDINFO find = {};
+			find.flags = LVFI_PARAM;
+			find.lParam = (LPARAM)uRuntimeID;
+			const int iItem = FindItem(&find);
+			if (iItem >= 0)
+				DeleteItem(iItem);
+			auto itErase = it++;
+			m_ListItemsMap.erase(itErase);
+			continue;
 		}
+
+		if (!IsFilteredOut(cur_item))
+			ShowClient(cur_item);
+		else
+			HideClient(cur_item);
+		++it;
 	}
 	theApp.emuledlg->transferwnd->m_pwndTransfer->UpdateListCount();
+	RequestQueueListRedrawForRange(0, GetItemCount() - 1);
 }
 
 void CQueueListCtrl::HideClient(CUpDownClient* client)
 {
-	if (m_ListItemsMap.find(client) != m_ListItemsMap.end()) { // If client is on the map we can proceed
-		// Find entry in CListCtrl and update object
-		LVFINDINFO find;
+	SClientItemId id;
+	if (!CUploadQueue::GetClientItemId(client, id))
+		return;
+
+	if (m_ListItemsMap.find(id.m_uRuntimeID) != m_ListItemsMap.end()) { // If client is on the map we can proceed
+		LVFINDINFO find = {};
 		find.flags = LVFI_PARAM;
-		find.lParam = (LPARAM)client;
+		find.lParam = (LPARAM)id.m_uRuntimeID;
 		int iItem = FindItem(&find);
 		if (iItem >= 0) {
 			DeleteItem(iItem);
@@ -881,13 +1037,19 @@ void CQueueListCtrl::HideClient(CUpDownClient* client)
 
 void CQueueListCtrl::ShowClient(CUpDownClient* client)
 {
-	if (m_ListItemsMap.find(client) != m_ListItemsMap.end()) { // If client is on the map we can proceed
-		// Check if entry is already in the List
-		LVFINDINFO find;
+	SClientItemId id;
+	if (!CUploadQueue::GetClientItemId(client, id))
+		return;
+
+	if (m_ListItemsMap.find(id.m_uRuntimeID) != m_ListItemsMap.end()) { // If client is on the map we can proceed
+		LVFINDINFO find = {};
 		find.flags = LVFI_PARAM;
-		find.lParam = (LPARAM)client;
-		if (FindItem(&find) == -1)
-			InsertItem(LVIF_PARAM | LVIF_TEXT, GetItemCount(), LPSTR_TEXTCALLBACK, 0, 0, 0, (LPARAM)client);
+		find.lParam = (LPARAM)id.m_uRuntimeID;
+		if (FindItem(&find) == -1) {
+			const int iItem = InsertItem(LVIF_PARAM | LVIF_TEXT, FindSortedInsertIndex(id.m_uRuntimeID), LPSTR_TEXTCALLBACK, 0, 0, 0, (LPARAM)id.m_uRuntimeID);
+			if (iItem >= 0)
+				RequestQueueListRedrawForRange(iItem, iItem);
+		}
 	}
 }
 
@@ -928,7 +1090,9 @@ void CQueueListCtrl::ShowSelectedUserDetails()
 	SetItemState(it, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
 	SetSelectionMark(it);   // display selection mark correctly!
 
-	CUpDownClient *client = reinterpret_cast<CUpDownClient*>(GetItemData(GetSelectionMark()));
+	CQueueClientReference clientRef;
+	clientRef.Attach(AcquireRuntimeClient(static_cast<QueueClientItemID>(GetItemData(GetSelectionMark()))));
+	CUpDownClient* client = clientRef.Get();
 	if (client) {
 		CClientDetailDialog dialog(client, this);
 		dialog.DoModal();
@@ -947,7 +1111,7 @@ CObject* CQueueListCtrl::GetNextSelectableItem()
 
 	const int iSelectedItem = GetNextSelectedItem(pos);
 	for (int iNewItem = iSelectedItem + 1; iNewItem < iItemCount; ++iNewItem) {
-		CObject* pToken = CreateClientDetailWalkerToken(reinterpret_cast<CUpDownClient*>(GetItemData(iNewItem)));
+		CObject* pToken = CreateClientDetailWalkerToken(static_cast<QueueClientItemID>(GetItemData(iNewItem)));
 		if (pToken == NULL)
 			continue;
 
@@ -973,7 +1137,7 @@ CObject* CQueueListCtrl::GetPrevSelectableItem()
 
 	const int iSelectedItem = GetNextSelectedItem(pos);
 	for (int iNewItem = iSelectedItem - 1; iNewItem >= 0; --iNewItem) {
-		CObject* pToken = CreateClientDetailWalkerToken(reinterpret_cast<CUpDownClient*>(GetItemData(iNewItem)));
+		CObject* pToken = CreateClientDetailWalkerToken(static_cast<QueueClientItemID>(GetItemData(iNewItem)));
 		if (pToken == NULL)
 			continue;
 
@@ -990,8 +1154,9 @@ CObject* CQueueListCtrl::GetPrevSelectableItem()
 void CQueueListCtrl::ShowQueueClients()
 {
 	DeleteAllItems();
+	m_ListItemsMap.clear();
 	for (CUpDownClient *update = NULL; (update = theApp.uploadqueue->GetNextClient(update)) != NULL;)
-		AddClient(update, false);
+		AddClient(update);
 }
 
 // Barry - Refresh the queue every 10 secs
@@ -1006,7 +1171,7 @@ void CALLBACK CQueueListCtrl::QueueUpdateTimer(HWND /*hwnd*/, UINT /*uiMsg*/, UI
 		{
 			CUpDownClient *update = NULL;
 			while ((update = theApp.uploadqueue->GetNextClient(update)) != NULL)
-				theApp.emuledlg->transferwnd->GetQueueList()->RefreshClient(update);
+				theApp.QueueUploadClientRowsChanged(update, CemuleApp::UploadClientUiTargetQueueList);
 		}
 	}
 	CATCH_DFLT_EXCEPTIONS(_T("CQueueListCtrl::QueueUpdateTimer"))
@@ -1017,7 +1182,9 @@ void CQueueListCtrl::OnKeyDown(UINT nChar, UINT nRepCnt, UINT nFlags)
 	if (nChar == 'C' && GetKeyState(VK_CONTROL) < 0) {
 		int iSel = GetNextItem(-1, LVIS_SELECTED | LVIS_FOCUSED);
 		if (iSel >= 0) {
-			CUpDownClient* client = reinterpret_cast<CUpDownClient*>(GetItemData(iSel));
+			CQueueClientReference clientRef;
+			clientRef.Attach(AcquireRuntimeClient(static_cast<QueueClientItemID>(GetItemData(iSel))));
+			CUpDownClient* client = clientRef.Get();
 			if (client) {
 				theApp.CopyTextToClipboard(md4str(client->GetUserHash()));
 				theApp.emuledlg->statusbar->SetText(GetResString(_T("USER_HASH_COPIED_TO_CLIPBOARD")), SBarLog, 0);
@@ -1029,10 +1196,12 @@ void CQueueListCtrl::OnKeyDown(UINT nChar, UINT nRepCnt, UINT nFlags)
 	if (nChar == 'X' && GetKeyState(VK_CONTROL) < 0) {
 		int iSel = GetNextItem(-1, LVIS_SELECTED | LVIS_FOCUSED);
 		if (iSel >= 0) {
-			CUpDownClient* client = reinterpret_cast<CUpDownClient*>(GetItemData(iSel));
+			CQueueClientReference clientRef;
+			clientRef.Attach(AcquireRuntimeClient(static_cast<QueueClientItemID>(GetItemData(iSel))));
+			CUpDownClient* client = clientRef.Get();
 			if (client) {
 				CString m_strClientIpport;
-				m_strClientIpport.Format(_T("%s:%u"), ipstr(client->GetConnectIP()), client->GetUserPort());
+				m_strClientIpport.Format(_T("%s:%u"), (LPCTSTR)ipstr(client->GetConnectIP()), client->GetUserPort());
 				if (!m_strClientIpport.IsEmpty()) {
 					theApp.CopyTextToClipboard(m_strClientIpport);
 					theApp.emuledlg->statusbar->SetText(GetResString(_T("USER_IP_PORT_COPIED_TO_CLIPBOARD")), SBarLog, 0);
@@ -1047,6 +1216,11 @@ void CQueueListCtrl::OnKeyDown(UINT nChar, UINT nRepCnt, UINT nFlags)
 
 void CQueueListCtrl::MaintainSortOrderAfterUpdate()
 {
-	if (GetSortItem() != -1) // Re-sort the list to maintain sort order after updates
-		SortItems(SortProc, MAKELONG(GetSortItem(), !GetSortAscending()));
+	if (!::IsWindow(m_hWnd) || GetSortItem() == -1)
+		return;
+
+	SetRedraw(false);
+	SortItems(SortProc, MAKELONG(GetSortItem(), !GetSortAscending()));
+	SetRedraw(true);
+	Invalidate(FALSE);
 }

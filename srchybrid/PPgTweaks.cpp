@@ -51,6 +51,7 @@ IMPLEMENT_DYNAMIC(CPPgTweaks, CPropertyPage)
 BEGIN_MESSAGE_MAP(CPPgTweaks, CPropertyPage)
 	ON_WM_HSCROLL()
 	ON_WM_DESTROY()
+	ON_WM_SIZE()
 	ON_MESSAGE(UM_TREEOPTSCTRL_NOTIFY, OnTreeOptsCtrlNotify)
 	ON_WM_HELPINFO()
 	ON_BN_CLICKED(IDC_OPENPREFINI, OnBnClickedOpenprefini)
@@ -88,7 +89,6 @@ CPPgTweaks::CPPgTweaks()
 	, m_htiExtractMetaDataID3Lib()
 	, m_htiExtractMetaDataNever()
 	, m_htiFilterLANIPs()
-	, m_htiFirewallStartup()
 	, m_htiFullAlloc()
 	, m_htiImportParts()
 	, m_htiLog2Disk()
@@ -104,6 +104,7 @@ CPPgTweaks::CPPgTweaks()
 	, m_htiLogRetryFailedTcp()
 	, m_htiLogExtendedSXEvents()
 	, m_htiLogNatTraversalEvents()
+	, m_htiLogUiResponsivenessEvents()
 	, m_htiMaxCon5Sec()
 	, m_htiMaxHalfOpen()
 	, m_htiMinFreeDiskSpace()
@@ -148,7 +149,6 @@ CPPgTweaks::CPPgTweaks()
 	, m_bDynUpEnabled()
 	, m_bExtControls()
 	, m_bFilterLANIPs()
-	, m_bFirewallStartup()
 	, m_bFullAlloc()
 	, m_bImportParts()
 	, m_bInitializedTreeOpts()
@@ -164,6 +164,7 @@ CPPgTweaks::CPPgTweaks()
 	, m_bLogRetryFailedTcp()
 	, m_bLogExtendedSXEvents()
 	, m_bLogNatTraversalEvents()
+	, m_bLogUiResponsivenessEvents()
 	, m_bResolveShellLinks()
 	, m_bSkipWANIPSetup()
 	, m_bSkipWANPPPSetup()
@@ -213,7 +214,6 @@ void CPPgTweaks::DoDataExchange(CDataExchange *pDX)
 		//
 		m_htiAutoTakeEd2kLinks = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("AUTOTAKEED2KLINKS")), TVI_ROOT, m_bAutoTakeEd2kLinks);
 		m_htiCreditSystem = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("USECREDITSYSTEM")), TVI_ROOT, m_bCreditSystem);
-		m_htiFirewallStartup = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("FO_PREF_STARTUP")), TVI_ROOT, m_bFirewallStartup);
 		m_htiFilterLANIPs = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("PW_FILTER")), TVI_ROOT, m_bFilterLANIPs);
 		m_htiExtControls = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("SHOWEXTSETTINGS")), TVI_ROOT, m_bExtControls);
 		m_htiA4AFSaveCpu = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("A4AF_SAVE_CPU")), TVI_ROOT, m_bA4AFSaveCpu); // ZZ:DownloadManager
@@ -262,6 +262,7 @@ void CPPgTweaks::DoDataExchange(CDataExchange *pDX)
 			m_htiLogRetryFailedTcp = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("RETRYFAILEDTCP_LOGEVENTS")), m_htiVerboseGroup, m_bLogRetryFailedTcp);
 			m_htiLogExtendedSXEvents = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("EXTENDED_SOURCE_EXCHANGE_LOGEVENTS")), m_htiVerboseGroup, m_bLogExtendedSXEvents);
 			m_htiLogNatTraversalEvents = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("NATTRAVERSAL_LOGEVENTS")), m_htiVerboseGroup, m_bLogNatTraversalEvents);
+			m_htiLogUiResponsivenessEvents = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("UIRESPONSIVENESS_LOGEVENTS")), m_htiVerboseGroup, m_bLogUiResponsivenessEvents);
 		}
 
 		/////////////////////////////////////////////////////////////////////////////
@@ -324,8 +325,6 @@ void CPPgTweaks::DoDataExchange(CDataExchange *pDX)
 	WORD wv = thePrefs.GetWindowsVersion();
 	DDX_TreeCheck(pDX, IDC_EXT_OPTS, m_htiAutoTakeEd2kLinks, m_bAutoTakeEd2kLinks);
 	DDX_TreeCheck(pDX, IDC_EXT_OPTS, m_htiCreditSystem, m_bCreditSystem);
-	DDX_TreeCheck(pDX, IDC_EXT_OPTS, m_htiFirewallStartup, m_bFirewallStartup);
-	m_ctrlTreeOptions.SetCheckBoxEnable(m_htiFirewallStartup, wv == _WINVER_XP_ && !IsRunningXPSP2());
 	DDX_TreeCheck(pDX, IDC_EXT_OPTS, m_htiFilterLANIPs, m_bFilterLANIPs);
 	DDX_TreeCheck(pDX, IDC_EXT_OPTS, m_htiExtControls, m_bExtControls);
 	DDX_TreeCheck(pDX, IDC_EXT_OPTS, m_htiA4AFSaveCpu, m_bA4AFSaveCpu);
@@ -362,55 +361,59 @@ void CPPgTweaks::DoDataExchange(CDataExchange *pDX)
 		DDX_TreeCheck(pDX, IDC_EXT_OPTS, m_htiVerbose, m_bVerbose);
 	if (m_htiDebug2Disk) {
 		DDX_TreeCheck(pDX, IDC_EXT_OPTS, m_htiDebug2Disk, m_bDebug2Disk);
-		m_ctrlTreeOptions.SetCheckBoxEnable(m_htiDebug2Disk, m_bVerbose);
+		m_ctrlTreeOptions.SetCheckBoxEnable(m_htiDebug2Disk, TRUE);
 	}
 	if (m_htiDebugSourceExchange) {
 		DDX_TreeCheck(pDX, IDC_EXT_OPTS, m_htiDebugSourceExchange, m_bDebugSourceExchange);
-		m_ctrlTreeOptions.SetCheckBoxEnable(m_htiDebugSourceExchange, m_bVerbose);
+		m_ctrlTreeOptions.SetCheckBoxEnable(m_htiDebugSourceExchange, TRUE);
 	}
 	if (m_htiLogBannedClients) {
 		DDX_TreeCheck(pDX, IDC_EXT_OPTS, m_htiLogBannedClients, m_bLogBannedClients);
-		m_ctrlTreeOptions.SetCheckBoxEnable(m_htiLogBannedClients, m_bVerbose);
+		m_ctrlTreeOptions.SetCheckBoxEnable(m_htiLogBannedClients, TRUE);
 	}
 	if (m_htiLogRatingDescReceived) {
 		DDX_TreeCheck(pDX, IDC_EXT_OPTS, m_htiLogRatingDescReceived, m_bLogRatingDescReceived);
-		m_ctrlTreeOptions.SetCheckBoxEnable(m_htiLogRatingDescReceived, m_bVerbose);
+		m_ctrlTreeOptions.SetCheckBoxEnable(m_htiLogRatingDescReceived, TRUE);
 	}
 	if (m_htiLogSecureIdent) {
 		DDX_TreeCheck(pDX, IDC_EXT_OPTS, m_htiLogSecureIdent, m_bLogSecureIdent);
-		m_ctrlTreeOptions.SetCheckBoxEnable(m_htiLogSecureIdent, m_bVerbose);
+		m_ctrlTreeOptions.SetCheckBoxEnable(m_htiLogSecureIdent, TRUE);
 	}
 	if (m_htiLogFilteredIPs) {
 		DDX_TreeCheck(pDX, IDC_EXT_OPTS, m_htiLogFilteredIPs, m_bLogFilteredIPs);
-		m_ctrlTreeOptions.SetCheckBoxEnable(m_htiLogFilteredIPs, m_bVerbose);
+		m_ctrlTreeOptions.SetCheckBoxEnable(m_htiLogFilteredIPs, TRUE);
 	}
 	if (m_htiLogFileSaving) {
 		DDX_TreeCheck(pDX, IDC_EXT_OPTS, m_htiLogFileSaving, m_bLogFileSaving);
-		m_ctrlTreeOptions.SetCheckBoxEnable(m_htiLogFileSaving, m_bVerbose);
+		m_ctrlTreeOptions.SetCheckBoxEnable(m_htiLogFileSaving, TRUE);
 	}
 	if (m_htiLogA4AF) {
 		DDX_TreeCheck(pDX, IDC_EXT_OPTS, m_htiLogA4AF, m_bLogA4AF);
-		m_ctrlTreeOptions.SetCheckBoxEnable(m_htiLogA4AF, m_bVerbose);
+		m_ctrlTreeOptions.SetCheckBoxEnable(m_htiLogA4AF, TRUE);
 	}
 	if (m_htiLogUlDlEvents) {
 		DDX_TreeCheck(pDX, IDC_EXT_OPTS, m_htiLogUlDlEvents, m_bLogUlDlEvents);
-		m_ctrlTreeOptions.SetCheckBoxEnable(m_htiLogUlDlEvents, m_bVerbose);
+		m_ctrlTreeOptions.SetCheckBoxEnable(m_htiLogUlDlEvents, TRUE);
 	}
 	if (m_htiLogSpamRating) {
 		DDX_TreeCheck(pDX, IDC_EXT_OPTS, m_htiLogSpamRating, m_bLogSpamRating);
-		m_ctrlTreeOptions.SetCheckBoxEnable(m_htiLogSpamRating, m_bVerbose);
+		m_ctrlTreeOptions.SetCheckBoxEnable(m_htiLogSpamRating, TRUE);
 	}
 	if (m_htiLogRetryFailedTcp) {
 		DDX_TreeCheck(pDX, IDC_EXT_OPTS, m_htiLogRetryFailedTcp, m_bLogRetryFailedTcp);
-		m_ctrlTreeOptions.SetCheckBoxEnable(m_htiLogRetryFailedTcp, m_bVerbose);
+		m_ctrlTreeOptions.SetCheckBoxEnable(m_htiLogRetryFailedTcp, TRUE);
 	}
 	if (m_htiLogExtendedSXEvents) {
 		DDX_TreeCheck(pDX, IDC_EXT_OPTS, m_htiLogExtendedSXEvents, m_bLogExtendedSXEvents);
-		m_ctrlTreeOptions.SetCheckBoxEnable(m_htiLogExtendedSXEvents, m_bVerbose);
+		m_ctrlTreeOptions.SetCheckBoxEnable(m_htiLogExtendedSXEvents, TRUE);
 	}
 	if (m_htiLogNatTraversalEvents) {
 		DDX_TreeCheck(pDX, IDC_EXT_OPTS, m_htiLogNatTraversalEvents, m_bLogNatTraversalEvents);
-		m_ctrlTreeOptions.SetCheckBoxEnable(m_htiLogNatTraversalEvents, m_bVerbose);
+		m_ctrlTreeOptions.SetCheckBoxEnable(m_htiLogNatTraversalEvents, TRUE);
+	}
+	if (m_htiLogUiResponsivenessEvents) {
+		DDX_TreeCheck(pDX, IDC_EXT_OPTS, m_htiLogUiResponsivenessEvents, m_bLogUiResponsivenessEvents);
+		m_ctrlTreeOptions.SetCheckBoxEnable(m_htiLogUiResponsivenessEvents, TRUE);
 	}
 	/////////////////////////////////////////////////////////////////////////////
 	// USS group
@@ -444,23 +447,22 @@ BOOL CPPgTweaks::OnInitDialog()
 	m_iMaxHalfOpen = thePrefs.GetMaxHalfConnections();
 	m_bConditionalTCPAccept = thePrefs.GetConditionalTCPAccept();
 	m_bAutoTakeEd2kLinks = thePrefs.AutoTakeED2KLinks();
-	if (thePrefs.GetEnableVerboseOptions()) {
-		m_bVerbose = thePrefs.m_bVerbose;
-		m_bDebug2Disk = thePrefs.debug2disk;							// do *not* use the corresponding 'Get...' function here!
-		m_bDebugSourceExchange = thePrefs.m_bDebugSourceExchange;		// do *not* use the corresponding 'Get...' function here!
-		m_bLogBannedClients = thePrefs.m_bLogBannedClients;				// do *not* use the corresponding 'Get...' function here!
-		m_bLogRatingDescReceived = thePrefs.m_bLogRatingDescReceived;	// do *not* use the corresponding 'Get...' function here!
-		m_bLogSecureIdent = thePrefs.m_bLogSecureIdent;					// do *not* use the corresponding 'Get...' function here!
-		m_bLogFilteredIPs = thePrefs.m_bLogFilteredIPs;					// do *not* use the corresponding 'Get...' function here!
-		m_bLogFileSaving = thePrefs.m_bLogFileSaving;					// do *not* use the corresponding 'Get...' function here!
-		m_bLogA4AF = thePrefs.m_bLogA4AF;							    // do *not* use the corresponding 'Get...' function here! // ZZ:DownloadManager
-		m_bLogUlDlEvents = thePrefs.m_bLogUlDlEvents;
-		m_bLogSpamRating = thePrefs.m_bLogSpamRating;
-		m_bLogRetryFailedTcp = thePrefs.m_bLogRetryFailedTcp;
-		m_bLogExtendedSXEvents = thePrefs.m_bLogExtendedSXEvents;
-		m_bLogNatTraversalEvents = thePrefs.m_bLogNatTraversalEvents;
-		m_iLogLevel = 5 - thePrefs.m_byLogLevel;
-	}
+	m_bVerbose = thePrefs.m_bVerbose;
+	m_bDebug2Disk = thePrefs.debug2disk;							// do *not* use the corresponding 'Get...' function here!
+	m_bDebugSourceExchange = thePrefs.m_bDebugSourceExchange;		// do *not* use the corresponding 'Get...' function here!
+	m_bLogBannedClients = thePrefs.m_bLogBannedClients;				// do *not* use the corresponding 'Get...' function here!
+	m_bLogRatingDescReceived = thePrefs.m_bLogRatingDescReceived;	// do *not* use the corresponding 'Get...' function here!
+	m_bLogSecureIdent = thePrefs.m_bLogSecureIdent;					// do *not* use the corresponding 'Get...' function here!
+	m_bLogFilteredIPs = thePrefs.m_bLogFilteredIPs;					// do *not* use the corresponding 'Get...' function here!
+	m_bLogFileSaving = thePrefs.m_bLogFileSaving;					// do *not* use the corresponding 'Get...' function here!
+	m_bLogA4AF = thePrefs.m_bLogA4AF;							    // do *not* use the corresponding 'Get...' function here! // ZZ:DownloadManager
+	m_bLogUlDlEvents = thePrefs.m_bLogUlDlEvents;
+	m_bLogSpamRating = thePrefs.m_bLogSpamRating;
+	m_bLogRetryFailedTcp = thePrefs.m_bLogRetryFailedTcp;
+	m_bLogExtendedSXEvents = thePrefs.m_bLogExtendedSXEvents;
+	m_bLogNatTraversalEvents = thePrefs.m_bLogNatTraversalEvents;
+	m_bLogUiResponsivenessEvents = thePrefs.m_bLogUiResponsivenessEvents;
+	m_iLogLevel = 5 - thePrefs.m_byLogLevel;
 	m_bLog2Disk = thePrefs.log2disk;
 	m_bCreditSystem = thePrefs.m_bCreditSystem;
 	m_iCommitFiles = thePrefs.m_iCommitFiles;
@@ -476,7 +478,6 @@ BOOL CPPgTweaks::OnInitDialog()
 	m_fMinFreeDiskSpaceMB = (float)(thePrefs.m_uMinFreeDiskSpace / (1024.0 * 1024.0));
 	m_uFreeDiskSpaceCheckPeriod = thePrefs.m_uFreeDiskSpaceCheckPeriod;
 	m_sYourHostname = thePrefs.GetYourHostname();
-	m_bFirewallStartup = ((thePrefs.GetWindowsVersion() == _WINVER_XP_) ? thePrefs.m_bOpenPortsOnStartUp : 0);
 	m_bAutoArchDisable = !thePrefs.m_bAutomaticArcPreviewStart;
 
 	m_bDynUpEnabled = thePrefs.m_bDynUpEnabled;
@@ -518,6 +519,7 @@ BOOL CPPgTweaks::OnInitDialog()
 	m_ctlQueueSize.SetPageSize(10);
 
 	Localize();
+	UpdateLayout();
 
 	return TRUE;  // return TRUE unless you set the focus to the control
 				  // EXCEPTION: OCX Property Pages should return FALSE
@@ -568,29 +570,28 @@ BOOL CPPgTweaks::OnApply()
 		theLog.Close();
 	thePrefs.log2disk = m_bLog2Disk;
 
-	if (thePrefs.GetEnableVerboseOptions()) {
-		if (!thePrefs.GetDebug2Disk() && m_bVerbose && m_bDebug2Disk)
-			theVerboseLog.Open();
-		else if (thePrefs.GetDebug2Disk() && (!m_bVerbose || !m_bDebug2Disk))
-			theVerboseLog.Close();
-		thePrefs.debug2disk = m_bDebug2Disk;
+	if (!thePrefs.GetDebug2Disk() && m_bVerbose && m_bDebug2Disk)
+		theVerboseLog.Open();
+	else if (thePrefs.GetDebug2Disk() && (!m_bVerbose || !m_bDebug2Disk))
+		theVerboseLog.Close();
+	thePrefs.debug2disk = m_bDebug2Disk;
 
-		thePrefs.m_bDebugSourceExchange = m_bDebugSourceExchange;
-		thePrefs.m_bLogBannedClients = m_bLogBannedClients;
-		thePrefs.m_bLogRatingDescReceived = m_bLogRatingDescReceived;
-		thePrefs.m_bLogSecureIdent = m_bLogSecureIdent;
-		thePrefs.m_bLogFilteredIPs = m_bLogFilteredIPs;
-		thePrefs.m_bLogFileSaving = m_bLogFileSaving;
-		thePrefs.m_bLogA4AF = m_bLogA4AF;
-		thePrefs.m_bLogUlDlEvents = m_bLogUlDlEvents;
-		thePrefs.m_bLogSpamRating = m_bLogSpamRating;
-		thePrefs.m_bLogRetryFailedTcp = m_bLogRetryFailedTcp;
-		thePrefs.m_bLogExtendedSXEvents = m_bLogExtendedSXEvents;
-		thePrefs.m_bLogNatTraversalEvents = m_bLogNatTraversalEvents;
-		thePrefs.m_byLogLevel = 5 - m_iLogLevel;
+	thePrefs.m_bDebugSourceExchange = m_bDebugSourceExchange;
+	thePrefs.m_bLogBannedClients = m_bLogBannedClients;
+	thePrefs.m_bLogRatingDescReceived = m_bLogRatingDescReceived;
+	thePrefs.m_bLogSecureIdent = m_bLogSecureIdent;
+	thePrefs.m_bLogFilteredIPs = m_bLogFilteredIPs;
+	thePrefs.m_bLogFileSaving = m_bLogFileSaving;
+	thePrefs.m_bLogA4AF = m_bLogA4AF;
+	thePrefs.m_bLogUlDlEvents = m_bLogUlDlEvents;
+	thePrefs.m_bLogSpamRating = m_bLogSpamRating;
+	thePrefs.m_bLogRetryFailedTcp = m_bLogRetryFailedTcp;
+	thePrefs.m_bLogExtendedSXEvents = m_bLogExtendedSXEvents;
+	thePrefs.m_bLogNatTraversalEvents = m_bLogNatTraversalEvents;
+	thePrefs.m_bLogUiResponsivenessEvents = m_bLogUiResponsivenessEvents;
+	thePrefs.m_byLogLevel = 5 - m_iLogLevel;
 
-		thePrefs.m_bVerbose = m_bVerbose; // store after related options were stored!
-	}
+	thePrefs.m_bVerbose = m_bVerbose; // store after related options were stored!
 
 	thePrefs.m_bCreditSystem = m_bCreditSystem;
 	thePrefs.m_iCommitFiles = m_iCommitFiles;
@@ -622,7 +623,6 @@ BOOL CPPgTweaks::OnApply()
 		thePrefs.SetYourHostname(m_sYourHostname);
 		theApp.emuledlg->serverwnd->UpdateMyInfo();
 	}
-	thePrefs.m_bOpenPortsOnStartUp = m_bFirewallStartup;
 
 	thePrefs.m_bDynUpEnabled = m_bDynUpEnabled;
 	thePrefs.m_minupload = (uint32)m_iDynUpMinUpload;
@@ -687,6 +687,80 @@ void CPPgTweaks::LocalizeEditLabel(HTREEITEM item, LPCTSTR strid)
 		m_ctrlTreeOptions.SetEditLabel(item, GetResString(strid));
 }
 
+void CPPgTweaks::UpdateLayout()
+{
+	CWnd* pTree = GetDlgItem(IDC_EXT_OPTS);
+	if (pTree == NULL || !::IsWindow(pTree->GetSafeHwnd()))
+		return;
+
+	static const UINT uBottomControlIDs[] =
+	{
+		IDC_BTL_TEXT,
+		IDC_BTL,
+		IDC_FILEBUFFERSIZE_STATIC,
+		IDC_FILEBUFFERSIZE,
+		IDC_QUEUESIZE_STATIC,
+		IDC_PREFINI_STATIC,
+		IDC_QUEUESIZE,
+		IDC_OPENPREFINI
+	};
+
+	CRect rcClient;
+	GetClientRect(&rcClient);
+
+	CRect rcTree;
+	pTree->GetWindowRect(&rcTree);
+	ScreenToClient(&rcTree);
+
+	CRect rcControls;
+	bool bHasControlsRect = false;
+	for (int i = 0; i < _countof(uBottomControlIDs); ++i) {
+		CWnd* pControl = GetDlgItem(uBottomControlIDs[i]);
+		if (pControl == NULL || !::IsWindow(pControl->GetSafeHwnd()))
+			return;
+
+		CRect rcControl;
+		pControl->GetWindowRect(&rcControl);
+		ScreenToClient(&rcControl);
+		if (!bHasControlsRect) {
+			rcControls = rcControl;
+			bHasControlsRect = true;
+		} else {
+			rcControls.left = min(rcControls.left, rcControl.left);
+			rcControls.top = min(rcControls.top, rcControl.top);
+			rcControls.right = max(rcControls.right, rcControl.right);
+			rcControls.bottom = max(rcControls.bottom, rcControl.bottom);
+		}
+	}
+	if (!bHasControlsRect)
+		return;
+
+	const int iTreeBottomGap = max(0, rcControls.top - rcTree.bottom);
+	const int iBottomMargin = max(1, rcControls.left / 2);
+	const int iControlsTop = max(rcTree.top + iTreeBottomGap + 1, rcClient.bottom - iBottomMargin - rcControls.Height());
+	const int iOffsetY = iControlsTop - rcControls.top;
+	if (iOffsetY != 0) {
+		for (int i = 0; i < _countof(uBottomControlIDs); ++i) {
+			CWnd* pControl = GetDlgItem(uBottomControlIDs[i]);
+			CRect rcControl;
+			pControl->GetWindowRect(&rcControl);
+			ScreenToClient(&rcControl);
+			rcControl.OffsetRect(0, iOffsetY);
+			pControl->MoveWindow(&rcControl);
+		}
+	}
+
+	rcTree.bottom = iControlsTop - iTreeBottomGap;
+	if (rcTree.bottom > rcTree.top)
+		pTree->MoveWindow(&rcTree);
+}
+
+void CPPgTweaks::OnSize(UINT nType, int cx, int cy)
+{
+	CPropertyPage::OnSize(nType, cx, cy);
+	UpdateLayout();
+}
+
 void CPPgTweaks::Localize()
 {
 	if (m_hWnd) {
@@ -727,7 +801,6 @@ void CPPgTweaks::Localize()
 		LocalizeItemText(m_htiExtractMetaDataID3Lib, _T("META_DATA_ID3LIB"));
 		LocalizeItemText(m_htiExtractMetaDataNever, _T("NEVER"));
 		LocalizeItemText(m_htiFilterLANIPs, _T("PW_FILTER"));
-		LocalizeItemText(m_htiFirewallStartup, _T("FO_PREF_STARTUP"));
 		LocalizeItemText(m_htiFullAlloc, _T("FULLALLOC"));
 		LocalizeItemText(m_htiImportParts, _T("ENABLEIMPORTPARTS"));
 		LocalizeItemText(m_htiLog2Disk, _T("LOG2DISK"));
@@ -742,6 +815,7 @@ void CPPgTweaks::Localize()
 		LocalizeItemText(m_htiLogRetryFailedTcp, _T("RETRYFAILEDTCP_LOGEVENTS"));
 		LocalizeItemText(m_htiLogExtendedSXEvents, _T("EXTENDED_SOURCE_EXCHANGE_LOGEVENTS"));
 		LocalizeItemText(m_htiLogNatTraversalEvents, _T("NATTRAVERSAL_LOGEVENTS"));
+		LocalizeItemText(m_htiLogUiResponsivenessEvents, _T("UIRESPONSIVENESS_LOGEVENTS"));
 		LocalizeItemText(m_htiResolveShellLinks, _T("RESOLVELINKS"));
 		LocalizeItemText(m_htiSkipWANIPSetup, _T("UPNPSKIPWANIP"));
 		LocalizeItemText(m_htiSkipWANPPPSetup, _T("UPNPSKIPWANPPP"));
@@ -786,6 +860,7 @@ void CPPgTweaks::OnDestroy()
 	m_htiLogRetryFailedTcp = NULL;
 	m_htiLogExtendedSXEvents = NULL;
 	m_htiLogNatTraversalEvents = NULL;
+	m_htiLogUiResponsivenessEvents = NULL;
 	m_htiCreditSystem = NULL;
 	m_htiLog2Disk = NULL;
 	m_htiDebug2Disk = NULL;
@@ -803,7 +878,6 @@ void CPPgTweaks::OnDestroy()
 	m_htiMinFreeDiskSpace = NULL;
 	m_htiFreeDiskSpaceCheckPeriod = NULL;
 	m_htiYourHostname = NULL;
-	m_htiFirewallStartup = NULL;
 	m_htiDynUp = NULL;
 	m_htiDynUpEnabled = NULL;
 	m_htiDynUpMinUpload = NULL;
@@ -837,31 +911,33 @@ LRESULT CPPgTweaks::OnTreeOptsCtrlNotify(WPARAM wParam, LPARAM lParam)
 			BOOL bCheck;
 			if (m_ctrlTreeOptions.GetCheckBox(m_htiVerbose, bCheck)) {
 				if (m_htiDebug2Disk)
-					m_ctrlTreeOptions.SetCheckBoxEnable(m_htiDebug2Disk, bCheck);
+					m_ctrlTreeOptions.SetCheckBoxEnable(m_htiDebug2Disk, TRUE);
 				if (m_htiDebugSourceExchange)
-					m_ctrlTreeOptions.SetCheckBoxEnable(m_htiDebugSourceExchange, bCheck);
+					m_ctrlTreeOptions.SetCheckBoxEnable(m_htiDebugSourceExchange, TRUE);
 				if (m_htiLogBannedClients)
-					m_ctrlTreeOptions.SetCheckBoxEnable(m_htiLogBannedClients, bCheck);
+					m_ctrlTreeOptions.SetCheckBoxEnable(m_htiLogBannedClients, TRUE);
 				if (m_htiLogRatingDescReceived)
-					m_ctrlTreeOptions.SetCheckBoxEnable(m_htiLogRatingDescReceived, bCheck);
+					m_ctrlTreeOptions.SetCheckBoxEnable(m_htiLogRatingDescReceived, TRUE);
 				if (m_htiLogSecureIdent)
-					m_ctrlTreeOptions.SetCheckBoxEnable(m_htiLogSecureIdent, bCheck);
+					m_ctrlTreeOptions.SetCheckBoxEnable(m_htiLogSecureIdent, TRUE);
 				if (m_htiLogFilteredIPs)
-					m_ctrlTreeOptions.SetCheckBoxEnable(m_htiLogFilteredIPs, bCheck);
+					m_ctrlTreeOptions.SetCheckBoxEnable(m_htiLogFilteredIPs, TRUE);
 				if (m_htiLogFileSaving)
-					m_ctrlTreeOptions.SetCheckBoxEnable(m_htiLogFileSaving, bCheck);
+					m_ctrlTreeOptions.SetCheckBoxEnable(m_htiLogFileSaving, TRUE);
 				if (m_htiLogA4AF)
-					m_ctrlTreeOptions.SetCheckBoxEnable(m_htiLogA4AF, bCheck);
+					m_ctrlTreeOptions.SetCheckBoxEnable(m_htiLogA4AF, TRUE);
 				if (m_htiLogUlDlEvents)
-					m_ctrlTreeOptions.SetCheckBoxEnable(m_htiLogUlDlEvents, bCheck);
+					m_ctrlTreeOptions.SetCheckBoxEnable(m_htiLogUlDlEvents, TRUE);
 				if (m_htiLogSpamRating)
-					m_ctrlTreeOptions.SetCheckBoxEnable(m_htiLogSpamRating, bCheck);
+					m_ctrlTreeOptions.SetCheckBoxEnable(m_htiLogSpamRating, TRUE);
 				if (m_htiLogRetryFailedTcp)
-					m_ctrlTreeOptions.SetCheckBoxEnable(m_htiLogRetryFailedTcp, bCheck);
+					m_ctrlTreeOptions.SetCheckBoxEnable(m_htiLogRetryFailedTcp, TRUE);
 				if (m_htiLogExtendedSXEvents)
-					m_ctrlTreeOptions.SetCheckBoxEnable(m_htiLogExtendedSXEvents, bCheck);
+					m_ctrlTreeOptions.SetCheckBoxEnable(m_htiLogExtendedSXEvents, TRUE);
 				if (m_htiLogNatTraversalEvents)
-					m_ctrlTreeOptions.SetCheckBoxEnable(m_htiLogNatTraversalEvents, bCheck);
+					m_ctrlTreeOptions.SetCheckBoxEnable(m_htiLogNatTraversalEvents, TRUE);
+				if (m_htiLogUiResponsivenessEvents)
+					m_ctrlTreeOptions.SetCheckBoxEnable(m_htiLogUiResponsivenessEvents, TRUE);
 			}
 		}
 		SetModified();

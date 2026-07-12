@@ -251,6 +251,7 @@ BEGIN_MESSAGE_MAP(CFileInfoDialog, CResizablePage)
 	ON_MESSAGE(UM_MEDIA_INFO_RESULT, OnMediaInfoResult)
 	ON_MESSAGE(UM_DATA_CHANGED, OnDataChanged)
 	ON_WM_DESTROY()
+	ON_WM_ERASEBKGND()
 END_MESSAGE_MAP()
 
 CFileInfoDialog::CFileInfoDialog()
@@ -267,7 +268,6 @@ CFileInfoDialog::CFileInfoDialog()
 
 BOOL CFileInfoDialog::OnInitDialog()
 {
-	CWaitCursor curWait; // we may get quite busy here.
 	ReplaceRichEditCtrl(GetDlgItem(IDC_FULL_FILE_INFO), this, GetDlgItem(IDC_FD_XI1)->GetFont());
 	CResizablePage::OnInitDialog();
 	InitWindowStyles(this);
@@ -360,6 +360,17 @@ void CFileInfoDialog::OnDestroy()
 	CResizablePage::OnDestroy();
 }
 
+BOOL CFileInfoDialog::OnEraseBkgnd(CDC* pDC)
+{
+	if (pDC == NULL)
+		return CResizablePage::OnEraseBkgnd(pDC);
+
+	CRect rcClient;
+	GetClientRect(&rcClient);
+	pDC->FillSolidRect(&rcClient, GetCustomSysColor(IsDarkModeEnabled() ? COLOR_WINDOW : COLOR_3DFACE));
+	return TRUE;
+}
+
 BOOL CFileInfoDialog::OnSetActive()
 {
 	if (!CResizablePage::OnSetActive())
@@ -371,13 +382,20 @@ BOOL CFileInfoDialog::OnSetActive()
 		if (m_uMediaInfoRequestId == 0)
 			++m_uMediaInfoRequestId;
 		m_pFiles.RemoveAll();
-		for (int i = m_paFiles->GetSize(); --i >= 0;)
-			m_pFiles.Add((*m_paFiles)[i]);
+		if (m_paFiles != NULL) {
+			for (int i = m_paFiles->GetSize(); --i >= 0;)
+				m_pFiles.Add((*m_paFiles)[i]);
+		}
 
-		CGetMediaInfoThread *pThread = (CGetMediaInfoThread*)AfxBeginThread(RUNTIME_CLASS(CGetMediaInfoThread), THREAD_PRIORITY_LOWEST, 0, CREATE_SUSPENDED);
-		if (pThread) {
-			pThread->SetValues(m_hWnd, m_paFiles, (HFONT)GetDlgItem(IDC_FD_XI1)->GetFont()->m_hObject, m_uMediaInfoRequestId);
-			pThread->ResumeThread();
+		if (m_paFiles == NULL || m_paFiles->GetSize() == 0) {
+			ShowUnavailableMediaInfo();
+		} else {
+			CGetMediaInfoThread *pThread = (CGetMediaInfoThread*)AfxBeginThread(RUNTIME_CLASS(CGetMediaInfoThread), THREAD_PRIORITY_LOWEST, 0, CREATE_SUSPENDED);
+			if (pThread) {
+				pThread->SetValues(m_hWnd, m_paFiles, (HFONT)GetDlgItem(IDC_FD_XI1)->GetFont()->m_hObject, m_uMediaInfoRequestId);
+				pThread->ResumeThread();
+			} else
+				ShowUnavailableMediaInfo();
 		}
 		m_bDataChanged = false;
 	}
@@ -502,6 +520,14 @@ void CFileInfoDialog::InitDisplay(LPCTSTR pStr)
 
 }
 
+void CFileInfoDialog::ShowUnavailableMediaInfo()
+{
+	SetDlgItemText(IDC_FD_XI3, GetResString(_T("VIDEO")));
+	SetDlgItemText(IDC_FD_XI4, GetResString(_T("AUDIO")));
+	InitDisplay(EMPTY);
+	RedrawWindow(NULL, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
+}
+
 LRESULT CFileInfoDialog::OnMediaInfoResult(WPARAM, LPARAM lParam)
 {
 	SMediaInfoThreadResult *pThreadRes = (SMediaInfoThreadResult*)lParam;
@@ -513,11 +539,13 @@ LRESULT CFileInfoDialog::OnMediaInfoResult(WPARAM, LPARAM lParam)
 	}
 	CArray<SMediaInfo> *paMediaInfo = pThreadRes->paMediaInfo;
 	if (paMediaInfo == NULL) {
+		ShowUnavailableMediaInfo();
 		delete pThreadRes;
 		return 1;
 	}
 
 	if (paMediaInfo->GetSize() != m_pFiles.GetSize()) {
+		ShowUnavailableMediaInfo();
 		delete pThreadRes;
 		return 1;
 	}
@@ -636,7 +664,7 @@ LRESULT CFileInfoDialog::OnMediaInfoResult(WPARAM, LPARAM lParam)
 			SetDlgItemText(IDC_VBITRATE, EMPTY);
 
 		if (!bDiffVideoWidth && ami.video.bmiHeader.biWidth && !bDiffVideoHeight && ami.video.bmiHeader.biHeight) {
-			buffer.Format(_T("%i x %i"), abs(ami.video.bmiHeader.biWidth), abs(ami.video.bmiHeader.biHeight));
+			buffer.Format(_T("%i x %i"), static_cast<int>(abs(static_cast<long>(ami.video.bmiHeader.biWidth))), static_cast<int>(abs(static_cast<long>(ami.video.bmiHeader.biHeight))));
 			SetDlgItemText(IDC_VWIDTH, buffer);
 		} else
 			SetDlgItemText(IDC_VWIDTH, EMPTY);
@@ -1246,14 +1274,14 @@ bool CGetMediaInfoThread::GetMediaInfo(HWND hWndOwner, const SFileContext &fileC
 											if (mi->iVideoStreams == 1) {
 												mi->video = *pVIH;
 												if (mi->video.bmiHeader.biWidth && mi->video.bmiHeader.biHeight)
-													mi->fVideoAspectRatio = abs(mi->video.bmiHeader.biWidth) / (double)abs(mi->video.bmiHeader.biHeight);
+													mi->fVideoAspectRatio = static_cast<int>(abs(static_cast<long>(mi->video.bmiHeader.biWidth))) / (double)static_cast<int>(abs(static_cast<long>(mi->video.bmiHeader.biHeight)));
 												mi->video.dwBitRate = 0; // don't use this value
 												mi->strVideoFormat = GetVideoFormatName(mi->video.bmiHeader.biCompression);
 												pMediaDet->get_FrameRate(&mi->fVideoFrameRate);
 												bFoundHeader = true;
 											} else {
 												mi->strInfo << _T("   ") << GetResString(_T("CODEC")) << _T(":\t") << GetVideoFormatName(pVIH->bmiHeader.biCompression) << _T("\n");
-												mi->strInfo << _T("   ") << GetResString(_T("WIDTH")) << _T(" x ") << GetResString(_T("HEIGHT")) << _T(":\t") << abs(pVIH->bmiHeader.biWidth) << _T(" x ") << abs(pVIH->bmiHeader.biHeight) << _T("\n");
+												mi->strInfo << _T("   ") << GetResString(_T("WIDTH")) << _T(" x ") << GetResString(_T("HEIGHT")) << _T(":\t") << static_cast<int>(abs(static_cast<long>(pVIH->bmiHeader.biWidth))) << _T(" x ") << static_cast<int>(abs(static_cast<long>(pVIH->bmiHeader.biHeight))) << _T("\n");
 												// do not use that 'dwBitRate', whatever this number is, it's not
 												// the bit rate of the *encoded* video stream. Seems to be the bit rate
 												// of the *decoded* stream
@@ -1372,7 +1400,7 @@ bool CGetMediaInfoThread::GetMediaInfo(HWND hWndOwner, const SFileContext &fileC
 										mi->strInfo << _T("\n");
 									mi->OutputFileName();
 									mi->strInfo.SetSelectionCharFormat(mi->strInfo.m_cfBold);
-									mi->strInfo << GetResString(_T("UNKNOWN")) << _T(" Stream #") << i + 1 << _T("\n");
+									mi->strInfo << GetResString(_T("UNKNOWN")) << _T(" Stream #") << static_cast<int>(i + 1) << _T("\n");
 
 									double fLength;
 									if (SUCCEEDED(pMediaDet->get_StreamLength(&fLength)) && fLength) {

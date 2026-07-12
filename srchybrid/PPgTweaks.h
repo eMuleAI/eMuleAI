@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 #include "TreeOptionsCtrlEx.h"
 
 class CPPgTweaks : public CPropertyPage
@@ -11,6 +11,7 @@ class CPPgTweaks : public CPropertyPage
 	};
 	void LocalizeItemText(HTREEITEM item, LPCTSTR strid);
 	void LocalizeEditLabel(HTREEITEM item, LPCTSTR strid);
+	void UpdateLayout();
 
 public:
 	CPPgTweaks();
@@ -54,7 +55,6 @@ protected:
 	//HTREEITEM m_htiExtractMetaDataMediaDet;
 	HTREEITEM m_htiExtractMetaDataNever;
 	HTREEITEM m_htiFilterLANIPs;
-	HTREEITEM m_htiFirewallStartup;
 	HTREEITEM m_htiFullAlloc;
 	HTREEITEM m_htiImportParts;
 	HTREEITEM m_htiLog2Disk;
@@ -70,6 +70,7 @@ protected:
 	HTREEITEM m_htiLogRetryFailedTcp;
 	HTREEITEM m_htiLogExtendedSXEvents;
 	HTREEITEM m_htiLogNatTraversalEvents;
+	HTREEITEM m_htiLogUiResponsivenessEvents;
 	HTREEITEM m_htiMaxCon5Sec;
 	HTREEITEM m_htiMaxHalfOpen;
 	HTREEITEM m_htiMinFreeDiskSpace;
@@ -116,7 +117,6 @@ protected:
 	bool m_bDynUpEnabled;
 	bool m_bExtControls;
 	bool m_bFilterLANIPs;
-	bool m_bFirewallStartup;
 	bool m_bFullAlloc;
 	bool m_bImportParts;
 	bool m_bInitializedTreeOpts;
@@ -132,6 +132,7 @@ protected:
 	bool m_bLogRetryFailedTcp;
 	bool m_bLogExtendedSXEvents;
 	bool m_bLogNatTraversalEvents;
+	bool m_bLogUiResponsivenessEvents;
 	bool m_bResolveShellLinks;
 	bool m_bSkipWANIPSetup;
 	bool m_bSkipWANPPPSetup;
@@ -147,6 +148,7 @@ protected:
 	DECLARE_MESSAGE_MAP()
 	afx_msg void OnHScroll(UINT nSBCode, UINT nPos, CScrollBar *pScrollBar);
 	afx_msg void OnDestroy();
+	afx_msg void OnSize(UINT nType, int cx, int cy);
 	afx_msg LRESULT OnTreeOptsCtrlNotify(WPARAM wParam, LPARAM lParam);
 	afx_msg void OnHelp();
 	afx_msg BOOL OnHelpInfo(HELPINFO*);

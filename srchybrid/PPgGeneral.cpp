@@ -85,7 +85,7 @@ static void GetLocaleNamesCompat(LPCTSTR code, CString &localized, CString &nati
 	}
 
 	if (localized.IsEmpty() || localized == code) {
-		localized = native.IsEmpty() ? code : native;
+		localized = native.IsEmpty() ? CString(code) : native;
 	}
 	if (native.IsEmpty()) {
 		native = localized;
@@ -283,7 +283,7 @@ BOOL CPPgGeneral::OnApply()
 			theApp.emuledlg->ircwnd->Localize();
 			theApp.emuledlg->kademliawnd->Localize();
 
-			RedrawWindow(nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW | RDW_ALLCHILDREN | RDW_FRAME); // Invalidate and repaint every child window
+			RedrawWindow(nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_FRAME);
 			SetWindowPos(nullptr, 0, 0, 0, 0, SWP_NOZORDER | SWP_NOMOVE | SWP_NOSIZE | SWP_FRAMECHANGED); // Force non-client area (title bar, borders) to be repainted
 			}
 		}

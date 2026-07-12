@@ -45,11 +45,20 @@ static char THIS_FILE[] = __FILE__;
 
 #define	IDT_CHATITEMS	20
 
+static CUpDownClient* AcquireChatItemClient(const CChatItem *ci)
+{
+	if (ci == NULL || theApp.clientlist == NULL || ci->runtimeID == 0 || ci->runtimeGeneration == 0)
+		return NULL;
+	return theApp.clientlist->AcquireTrackedClientByRuntimeIDAndGeneration(ci->runtimeID, ci->runtimeGeneration);
+}
+
 ///////////////////////////////////////////////////////////////////////////////
 // CChatItem
 
 CChatItem::CChatItem()
 	: client()
+	, runtimeID(0)
+	, runtimeGeneration(0)
 	, log()
 	, history_pos()
 	, notify()
@@ -138,6 +147,8 @@ CChatItem* CChatSelector::StartSession(CUpDownClient *client, bool show)
 
 	CChatItem *chatitem = new CChatItem();
 	chatitem->client = client;
+	chatitem->runtimeID = client != NULL ? client->GetRuntimeID() : 0;
+	chatitem->runtimeGeneration = client != NULL ? client->GetRuntimeGeneration() : 0;
 	chatitem->log = new CHTRichEditCtrl;
 
 	CRect rcChat;
@@ -162,7 +173,7 @@ CChatItem* CChatSelector::StartSession(CUpDownClient *client, bool show)
 
 	if (thePrefs.GetIRCAddTimeStamp())
 		AddTimeStamp(chatitem);
-	chatitem->log->AppendKeyWord(GetResString(_T("CHAT_START")) + ((client->GetUserName() == NULL || client->GetUserName()[0] == '\0') ? _T('(') + md4str(client->GetUserHash()) + _T(')') : client->GetUserName()) + _T('\n'), STATUS_MSG_COLOR);
+	chatitem->log->AppendKeyWord(GetResString(_T("CHAT_START")) + ((client->GetUserName() == NULL || client->GetUserName()[0] == '\0') ? CString(_T('(') + md4str(client->GetUserHash()) + _T(')')) : CString(client->GetUserName())) + _T('\n'), STATUS_MSG_COLOR);
 
 	client->SetChatState(MS_CHATTING);
 
@@ -189,11 +200,35 @@ CChatItem* CChatSelector::StartSession(CUpDownClient *client, bool show)
 
 int CChatSelector::GetTabByClient(CUpDownClient *client)
 {
+	if (client == NULL)
+		return -1;
+
+	const int iRuntimeTab = GetTabByRuntime(client->GetRuntimeID(), client->GetRuntimeGeneration());
+	if (iRuntimeTab >= 0)
+		return iRuntimeTab;
+
 	TCITEM ti;
 	ti.mask = TCIF_PARAM;
 	for (int i = GetItemCount(); --i >= 0;)
 		if (GetItem(i, &ti) && reinterpret_cast<CChatItem*>(ti.lParam)->client == client)
 			return i;
+	return -1;
+}
+
+int CChatSelector::GetTabByRuntime(DWORD uRuntimeID, LONG lRuntimeGeneration)
+{
+	if (uRuntimeID == 0 || lRuntimeGeneration == 0)
+		return -1;
+
+	TCITEM ti;
+	ti.mask = TCIF_PARAM;
+	for (int i = GetItemCount(); --i >= 0;) {
+		if (GetItem(i, &ti)) {
+			const CChatItem *ci = reinterpret_cast<CChatItem*>(ti.lParam);
+			if (ci != NULL && ci->runtimeID == uRuntimeID && ci->runtimeGeneration == lRuntimeGeneration)
+				return i;
+		}
+	}
 	return -1;
 }
 
@@ -209,12 +244,25 @@ CChatItem* CChatSelector::GetItemByIndex(int index)
 
 CChatItem* CChatSelector::GetItemByClient(CUpDownClient *client)
 {
+	if (client == NULL)
+		return NULL;
+
+	CChatItem *ci = GetItemByRuntime(client->GetRuntimeID(), client->GetRuntimeGeneration());
+	if (ci != NULL)
+		return ci;
+
 	TCITEM ti;
 	ti.mask = TCIF_PARAM;
 	for (int i = GetItemCount(); --i >= 0;)
 		if (GetItem(i, &ti) && reinterpret_cast<CChatItem*>(ti.lParam)->client == client)
 			return reinterpret_cast<CChatItem*>(ti.lParam);
 	return NULL;
+}
+
+CChatItem* CChatSelector::GetItemByRuntime(DWORD uRuntimeID, LONG lRuntimeGeneration)
+{
+	const int iIndex = GetTabByRuntime(uRuntimeID, lRuntimeGeneration);
+	return iIndex >= 0 ? GetItemByIndex(iIndex) : NULL;
 }
 
 void CChatSelector::ProcessMessage(CUpDownClient *sender, const CString &message)
@@ -259,7 +307,7 @@ void CChatSelector::ProcessMessage(CUpDownClient *sender, const CString &message
 	}
 }
 
-void CChatSelector::ShowCaptchaRequest(CUpDownClient *sender, HBITMAP bmpCaptcha)
+bool CChatSelector::ShowCaptchaRequest(CUpDownClient *sender, HBITMAP bmpCaptcha)
 {
 	CChatItem *ci = GetItemByClient(sender);
 	if (ci != NULL) {
@@ -268,7 +316,9 @@ void CChatSelector::ShowCaptchaRequest(CUpDownClient *sender, HBITMAP bmpCaptcha
 		ci->log->AppendKeyWord(_T("*** ") + GetResString(_T("CAPTCHAREQUEST")), STATUS_MSG_COLOR);
 		ci->log->AddCaptcha(bmpCaptcha);
 		ci->log->AddLine(_T("\n"));
+		return true;
 	}
+	return false;
 }
 
 void CChatSelector::ShowCaptchaResult(CUpDownClient *sender, const CString &strResult)
@@ -287,40 +337,46 @@ bool CChatSelector::SendText(const CString &rstrText)
 	if (!ci)
 		return false;
 
+	CUpDownClient *pClient = AcquireChatItemClient(ci);
+	if (pClient == NULL)
+		return false;
+
 	if (ci->history.GetCount() == thePrefs.GetMaxChatHistoryLines())
 		ci->history.RemoveAt(0);
 	ci->history.Add(rstrText);
 	ci->history_pos = ci->history.GetCount();
 
 	// advance spam filter stuff
-	ci->client->IncMessagesSent();
-	ci->client->SetSpammer(false);
-	if (ci->client->GetChatState() == MS_CONNECTING)
+	pClient->IncMessagesSent();
+	pClient->SetSpammer(false);
+	if (pClient->GetChatState() == MS_CONNECTING) {
+		pClient->ReleaseRuntimeReference();
 		return false;
+	}
 
-	if (ci->client->GetChatCaptchaState() == CA_CAPTCHARECV)
-		ci->client->SetChatCaptchaState(CA_SOLUTIONSENT);
-	else if (ci->client->GetChatCaptchaState() == CA_SOLUTIONSENT)
+	if (pClient->GetChatCaptchaState() == CA_CAPTCHARECV)
+		pClient->SetChatCaptchaState(CA_SOLUTIONSENT);
+	else if (pClient->GetChatCaptchaState() == CA_SOLUTIONSENT)
 		ASSERT(0); // we responded to a captcha, but didn't hear from the client afterwards - hopefully it's just lag and this message would get through
 	else
-		ci->client->SetChatCaptchaState(CA_ACCEPTING);
+		pClient->SetChatCaptchaState(CA_ACCEPTING);
 
 	// there are three cases on connecting/sending the message:
-	if (ci->client->socket && ci->client->socket->IsConnected()) {
+	if (pClient->socket && pClient->socket->IsConnected()) {
 		// 1.) the client is connected already - this is simple, just send it
-		ci->client->SendChatMessage(rstrText);
+		pClient->SendChatMessage(rstrText);
 		if (thePrefs.GetIRCAddTimeStamp())
 			AddTimeStamp(ci);
 		ci->log->AppendKeyWord(thePrefs.GetUserNick(), SENT_TARGET_MSG_COLOR);
 		ci->log->AppendText(_T(": "));
 		ci->log->AppendText(rstrText);
 		ci->log->AppendText(_T("\n"));
-	} else if (ci->client->GetFriend() != NULL) {
+	} else if (pClient->GetFriend() != NULL) {
 		// We are not connected and this client is a friend - friends have additional ways to connect and additional
 		// checks to make sure they are really friends; let the friend class handle it
 		ci->strMessagePending = rstrText;
-		ci->client->SetChatState(MS_CONNECTING);
-		ci->client->GetFriend()->TryToConnect(this);
+		pClient->SetChatState(MS_CONNECTING);
+		pClient->GetFriend()->TryToConnect(this);
 	} else {
 		// this is a normal client, who is not connected right now. just try to connect to the given IP, without any
 		// additional checks or searchings.
@@ -328,11 +384,13 @@ bool CChatSelector::SendText(const CString &rstrText)
 			AddTimeStamp(ci);
 		ci->log->AppendKeyWord(_T("*** ") + GetResString(_T("CONNECTING")), STATUS_MSG_COLOR);
 		ci->strMessagePending = rstrText;
-		ci->client->SetChatState(MS_CONNECTING);
-		ci->client->TryToConnect(true);
+		pClient->SetChatState(MS_CONNECTING);
+		pClient->TryToConnect(true);
 	}
+	pClient->ReleaseRuntimeReference();
 	return true;
 }
+
 
 void CChatSelector::ConnectingResult(CUpDownClient *sender, bool success)
 {
@@ -340,7 +398,7 @@ void CChatSelector::ConnectingResult(CUpDownClient *sender, bool success)
 	if (!ci)
 		return;
 
-	ci->client->SetChatState(MS_CHATTING);
+	sender->SetChatState(MS_CHATTING);
 	if (success)
 		if (ci->strMessagePending.IsEmpty()) {
 			if (thePrefs.GetIRCAddTimeStamp())
@@ -348,7 +406,7 @@ void CChatSelector::ConnectingResult(CUpDownClient *sender, bool success)
 			ci->log->AppendKeyWord(_T("*** Connected\n"), STATUS_MSG_COLOR);
 		} else {
 			ci->log->AppendKeyWord(_T(" ...") + GetResString(_T("TREEOPTIONS_OK")) + _T('\n'), STATUS_MSG_COLOR);
-			ci->client->SendChatMessage(ci->strMessagePending);
+			sender->SendChatMessage(ci->strMessagePending);
 
 			if (thePrefs.GetIRCAddTimeStamp())
 				AddTimeStamp(ci);
@@ -374,9 +432,25 @@ void CChatSelector::DeleteAllItems()
 {
 	TCITEM ti;
 	ti.mask = TCIF_PARAM;
-	for (int i = GetItemCount(); --i >= 0;)
-		if (GetItem(i, &ti))
-			delete reinterpret_cast<CChatItem*>(ti.lParam);
+	for (int i = GetItemCount(); --i >= 0;) {
+		ti.lParam = 0;
+		if (!GetItem(i, &ti) || ti.lParam == 0) {
+			CClosableTabCtrl::DeleteItem(i);
+			continue;
+		}
+
+		CChatItem* ci = reinterpret_cast<CChatItem*>(ti.lParam);
+		TCITEM tiClear;
+		memset(&tiClear, 0, sizeof(tiClear));
+		tiClear.mask = TCIF_PARAM;
+		tiClear.lParam = 0;
+		SetItem(i, &tiClear);
+		CClosableTabCtrl::DeleteItem(i);
+
+		if (ci->log != NULL && ::IsWindow(ci->log->m_hWnd))
+			ci->log->DestroyWindow();
+		delete ci;
+	}
 }
 
 void CChatSelector::OnTimer(UINT_PTR /*nIDEvent*/)
@@ -461,14 +535,14 @@ void CChatSelector::OnTcnSelChangeChatSel(LPNMHDR, LRESULT *pResult)
 int CChatSelector::InsertItem(int nItem, TCITEM *pTabCtrlItem)
 {
 	int iResult = CClosableTabCtrl::InsertItem(nItem, pTabCtrlItem);
-	RedrawWindow();
+	Invalidate(FALSE);
 	return iResult;
 }
 
 BOOL CChatSelector::DeleteItem(int nItem)
 {
 	CClosableTabCtrl::DeleteItem(nItem);
-	RedrawWindow();
+	Invalidate(FALSE);
 	return TRUE;
 }
 
@@ -483,8 +557,12 @@ void CChatSelector::EndSession(CUpDownClient *client)
 	if (!GetItem(iCurSel, &ti) || ti.lParam == 0)
 		return;
 	CChatItem *ci = reinterpret_cast<CChatItem*>(ti.lParam);
-	ci->client->SetChatState(MS_NONE);
-	ci->client->SetChatCaptchaState(CA_NONE);
+	CUpDownClient *pClient = AcquireChatItemClient(ci);
+	if (pClient != NULL) {
+		pClient->SetChatState(MS_NONE);
+		pClient->SetChatCaptchaState(CA_NONE);
+		pClient->ReleaseRuntimeReference();
+	}
 
 	DeleteItem(iCurSel);
 	delete ci;
@@ -497,6 +575,39 @@ void CChatSelector::EndSession(CUpDownClient *client)
 		(void)SetCurSel(iCurSel);	// returns CB_ERR if error or no prev. selection(!)
 		if (GetCurSel() == CB_ERR)	// get the real current selection
 			(void)SetCurSel(0);		// if still error
+		ShowChat();
+	}
+}
+
+void CChatSelector::EndSessionByRuntime(DWORD uRuntimeID, LONG lRuntimeGeneration)
+{
+	const int iCurSel = GetTabByRuntime(uRuntimeID, lRuntimeGeneration);
+	if (iCurSel == -1)
+		return;
+
+	TCITEM ti;
+	ti.mask = TCIF_PARAM;
+	if (!GetItem(iCurSel, &ti) || ti.lParam == 0)
+		return;
+	CChatItem *ci = reinterpret_cast<CChatItem*>(ti.lParam);
+	CUpDownClient *pClient = AcquireChatItemClient(ci);
+	if (pClient != NULL) {
+		pClient->SetChatState(MS_NONE);
+		pClient->SetChatCaptchaState(CA_NONE);
+		pClient->ReleaseRuntimeReference();
+	}
+
+	DeleteItem(iCurSel);
+	delete ci;
+
+	int iTabItems = GetItemCount();
+	if (iTabItems > 0) {
+		int iNextSel = iCurSel;
+		if (iNextSel >= iTabItems)
+			iNextSel = iTabItems - 1;
+		(void)SetCurSel(iNextSel);
+		if (GetCurSel() == CB_ERR)
+			(void)SetCurSel(0);
 		ShowChat();
 	}
 }
@@ -546,37 +657,43 @@ BOOL CChatSelector::OnCommand(WPARAM wParam, LPARAM lParam)
 	case MP_DETAIL:
 		{
 			const CChatItem *ci = GetItemByIndex(m_iContextIndex);
-			if (ci) {
-				CClientDetailDialog dialog(ci->client);
+			CUpDownClient *pClient = AcquireChatItemClient(ci);
+			if (pClient != NULL) {
+				CClientDetailDialog dialog(pClient);
 				dialog.DoModal();
+				pClient->ReleaseRuntimeReference();
 			}
 		}
 		return TRUE;
 	case MP_ADDFRIEND:
 		{
 			const CChatItem *ci = GetItemByIndex(m_iContextIndex);
-			if (ci) {
-				CFriend* fr = theApp.friendlist->SearchFriend(ci->client->GetUserHash(), CAddress(), 0);
+			CUpDownClient *pClient = AcquireChatItemClient(ci);
+			if (pClient != NULL) {
+				CFriend* fr = theApp.friendlist->SearchFriend(pClient->GetUserHash(), CAddress(), 0);
 				if (!fr)
-					theApp.friendlist->AddFriend(ci->client);
+					theApp.friendlist->AddFriend(pClient);
+				pClient->ReleaseRuntimeReference();
 			}
 		}
 		return TRUE;
 	case MP_REMOVEFRIEND:
 		{
 			const CChatItem *ci = GetItemByIndex(m_iContextIndex);
-			if (ci) {
-				CFriend* fr = theApp.friendlist->SearchFriend(ci->client->GetUserHash(), CAddress(), 0);
+			CUpDownClient *pClient = AcquireChatItemClient(ci);
+			if (pClient != NULL) {
+				CFriend* fr = theApp.friendlist->SearchFriend(pClient->GetUserHash(), CAddress(), 0);
 				if (fr)
 					theApp.friendlist->RemoveFriend(fr);
+				pClient->ReleaseRuntimeReference();
 			}
 		}
 		return TRUE;
 	case MP_REMOVE:
 		{
 			const CChatItem *ci = GetItemByIndex(m_iContextIndex);
-			if (ci)
-				EndSession(ci->client);
+			if (ci != NULL)
+				EndSessionByRuntime(ci->runtimeID, ci->runtimeGeneration);
 		}
 		return TRUE;
 	}
@@ -602,7 +719,11 @@ void CChatSelector::OnContextMenu(CWnd*, CPoint point)
 	if (ci == NULL)
 		return;
 
-	CFriend* pFriend = theApp.friendlist->SearchFriend(ci->client->GetUserHash(), CAddress(), 0);
+	CUpDownClient *pClient = AcquireChatItemClient(ci);
+	if (pClient == NULL)
+		return;
+
+	CFriend* pFriend = theApp.friendlist->SearchFriend(pClient->GetUserHash(), CAddress(), 0);
 
 	CMenuXP menu;
 	menu.CreatePopupMenu();
@@ -621,6 +742,7 @@ void CChatSelector::OnContextMenu(CWnd*, CPoint point)
 	m_ptCtxMenu = point;
 	ScreenToClient(&m_ptCtxMenu);
 	menu.TrackPopupMenu(TPM_LEFTALIGN | TPM_RIGHTBUTTON, point.x, point.y, this);
+	pClient->ReleaseRuntimeReference();
 }
 
 void CChatSelector::EnableSmileys(bool bEnable)
@@ -648,6 +770,9 @@ void CChatSelector::ClientObjectChanged(CUpDownClient *pOldClient, CUpDownClient
 	// in order to not close and reopen a new session and lose the prior chat, switch the objects on an existing tab
 	// nothing else changes since the tab is supposed to be still connected to the same friend
 	CChatItem *ci = GetItemByClient(pOldClient);
-	if (ci)
+	if (ci) {
 		ci->client = pNewClient;
+		ci->runtimeID = pNewClient != NULL ? pNewClient->GetRuntimeID() : 0;
+		ci->runtimeGeneration = pNewClient != NULL ? pNewClient->GetRuntimeGeneration() : 0;
+	}
 }

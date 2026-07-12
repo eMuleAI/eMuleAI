@@ -92,8 +92,7 @@ BOOL CPPgServer::OnApply()
 	else if (thePrefs.m_uDeadServerRetries > MAX_SERVERFAILCOUNT)
 		thePrefs.m_uDeadServerRetries = MAX_SERVERFAILCOUNT;
 	if (uCurDeadServerRetries != thePrefs.m_uDeadServerRetries) {
-		theApp.emuledlg->serverwnd->serverlistctrl.Invalidate();
-		theApp.emuledlg->serverwnd->serverlistctrl.UpdateWindow();
+		theApp.emuledlg->serverwnd->serverlistctrl.Invalidate(FALSE);
 	}
 	thePrefs.m_bAutoUpdateServerList = IsDlgButtonChecked(IDC_AUTOSERVER) != 0;
 	thePrefs.m_bAddServersFromServer = IsDlgButtonChecked(IDC_UPDATESERVERCONNECT) != 0;

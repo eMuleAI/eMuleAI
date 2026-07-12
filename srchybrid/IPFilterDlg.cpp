@@ -29,6 +29,9 @@
 #include "GZipFile.h"
 #include "RarFile.h"
 #include "eMuleAI/DarkMode.h"
+#include <algorithm>
+#include <cstring>
+#include <vector>
 
 #ifdef _DEBUG
 #define new DEBUG_NEW
@@ -52,8 +55,8 @@ enum EIPFilterCols
 // Alignment rule: left for text, dates, and status labels; right for sizes, rates, counts, durations, and percentages.
 static LCX_COLUMN_INIT s_aColumns[] =
 {
-	{ IPFILTER_COL_START,	_T("Start"),		_T("IP_START"),	LVCFMT_LEFT,	-1, 0, ASCENDING,  NONE, _T("255.255.255.255") },
-	{ IPFILTER_COL_END,		_T("End"),			_T("IP_END"),		LVCFMT_LEFT,	-1, 1, ASCENDING,  NONE, _T("255.255.255.255")},
+	{ IPFILTER_COL_START,	_T("Start0"),		_T("START_NOUN"),	LVCFMT_LEFT,	-1, 0, ASCENDING,  NONE, _T("255.255.255.255") },
+	{ IPFILTER_COL_END,		_T("End0"),			_T("END_NOUN"),		LVCFMT_LEFT,	-1, 1, ASCENDING,  NONE, _T("255.255.255.255")},
 	{ IPFILTER_COL_LEVEL,	_T("Level"),		_T("IP_LEVEL"),	LVCFMT_RIGHT,	-1, 2, ASCENDING,  NONE, _T("999") },
 	{ IPFILTER_COL_HITS,	_T("Hits"),			_T("IP_HITS"),	LVCFMT_RIGHT,	-1, 3, DESCENDING, NONE, _T("99999") },
 	{ IPFILTER_COL_DESC,	_T("Description"),	_T("IP_DESC"),	LVCFMT_LEFT,	-1, 4, ASCENDING,  NONE, _T("long long long long long long long long text line") },
@@ -110,43 +113,93 @@ void CIPFilterDlg::DoDataExchange(CDataExchange *pDX)
 	DDX_Control(pDX, IDC_IPFILTER, m_ipfilter);
 }
 
-static int s_lParamSort = 0;
-
-int __cdecl CompareIPFilterItems(const void *lParam1, const void *lParam2) noexcept
+namespace
 {
-	int iResult;
+	struct SIPFilterSortRow
+	{
+		const SIPFilter* pFilter;
+		LPCSTR pszDescKey;
+	};
 
-	switch (s_lParamSort) {
-	case IPFILTER_COL_START:
-		iResult = CompareUnsigned((*((SIPFilter**)lParam1))->start, (*((SIPFilter**)lParam2))->start);
-		break;
-	case IPFILTER_COL_END:
-		iResult = CompareUnsigned((*((SIPFilter**)lParam1))->end, (*((SIPFilter**)lParam2))->end);
-		break;
-	case IPFILTER_COL_LEVEL:
-		iResult = CompareUnsigned((*((SIPFilter**)lParam1))->level, (*((SIPFilter**)lParam2))->level);
-		break;
-	case IPFILTER_COL_HITS:
-		iResult = CompareUnsigned((*((SIPFilter**)lParam1))->hits, (*((SIPFilter**)lParam2))->hits);
-		break;
-	case IPFILTER_COL_DESC:
-		iResult = _stricmp((*((SIPFilter**)lParam1))->desc, (*((SIPFilter**)lParam2))->desc);
-		break;
-	default:
-		ASSERT(0);
-		return 0;
+	int CompareIPFilterSortRows(const SIPFilterSortRow& left, const SIPFilterSortRow& right, int iSortColumn, LCX_SORT_ORDER eSortOrder)
+	{
+		const SIPFilter* pLeft = left.pFilter;
+		const SIPFilter* pRight = right.pFilter;
+		if (pLeft == pRight)
+			return 0;
+		if (pLeft == NULL)
+			return 1;
+		if (pRight == NULL)
+			return -1;
+
+		int iResult;
+		switch (iSortColumn) {
+		case IPFILTER_COL_START:
+			iResult = CompareUnsigned(pLeft->start, pRight->start);
+			break;
+		case IPFILTER_COL_END:
+			iResult = CompareUnsigned(pLeft->end, pRight->end);
+			break;
+		case IPFILTER_COL_LEVEL:
+			iResult = CompareUnsigned(pLeft->level, pRight->level);
+			break;
+		case IPFILTER_COL_HITS:
+			iResult = CompareUnsigned(pLeft->hits, pRight->hits);
+			break;
+		case IPFILTER_COL_DESC:
+			iResult = std::strcmp(left.pszDescKey, right.pszDescKey);
+			break;
+		default:
+			ASSERT(0);
+			return 0;
+		}
+
+		if (iResult < 0)
+			iResult = -1;
+		else if (iResult > 0)
+			iResult = 1;
+		return (eSortOrder == DESCENDING) ? -iResult : iResult;
 	}
-
-	return (s_aColumns[s_lParamSort].eSortOrder == DESCENDING) ? -iResult : iResult;
 }
 
 void CIPFilterDlg::SortIPFilterItems()
 {
-	// Update (sort, if needed) the listview items
-	if (m_ipfilter.GetSortColumn() != -1) {
-		s_lParamSort = m_ipfilter.GetSortColumn();
-		qsort((void*)m_ppIPFilterItems, m_uIPFilterItems, sizeof(*m_ppIPFilterItems), CompareIPFilterItems);
+	const int iSortColumn = m_ipfilter.GetSortColumn();
+	if (iSortColumn < 0 || iSortColumn >= static_cast<int>(_countof(s_aColumns)) || m_ppIPFilterItems == NULL || m_uIPFilterItems < 2)
+		return;
+
+	const LCX_SORT_ORDER eSortOrder = s_aColumns[iSortColumn].eSortOrder;
+	std::vector<SIPFilterSortRow> vecRows;
+	std::vector<CStringA> vecDescKeys;
+	try {
+		vecRows.reserve(m_uIPFilterItems);
+		if (iSortColumn == IPFILTER_COL_DESC)
+			vecDescKeys.reserve(m_uIPFilterItems);
+	} catch (...) {
+		return;
 	}
+
+	try {
+		for (UINT i = 0; i < m_uIPFilterItems; ++i) {
+			const SIPFilter* pFilter = m_ppIPFilterItems[i];
+			SIPFilterSortRow row = { pFilter, "" };
+			if (iSortColumn == IPFILTER_COL_DESC && pFilter != NULL) {
+				vecDescKeys.push_back(pFilter->desc);
+				vecDescKeys.back().MakeLower();
+				row.pszDescKey = vecDescKeys.back().GetString();
+			}
+			vecRows.push_back(row);
+		}
+
+		CombinedSort(vecRows.begin(), vecRows.end(), [iSortColumn, eSortOrder](const SIPFilterSortRow& left, const SIPFilterSortRow& right) -> bool {
+			return CompareIPFilterSortRows(left, right, iSortColumn, eSortOrder) < 0;
+		});
+	} catch (...) {
+		return;
+	}
+
+	for (UINT i = 0; i < m_uIPFilterItems; ++i)
+		m_ppIPFilterItems[i] = vecRows[i].pFilter;
 }
 
 void CIPFilterDlg::OnLvnColumnClickIPFilter(LPNMHDR pNMHDR, LRESULT *pResult)
@@ -154,8 +207,7 @@ void CIPFilterDlg::OnLvnColumnClickIPFilter(LPNMHDR pNMHDR, LRESULT *pResult)
 	const LPNMLISTVIEW pNMLV = reinterpret_cast<LPNMLISTVIEW>(pNMHDR);
 	m_ipfilter.UpdateSortOrder(pNMLV, _countof(s_aColumns), s_aColumns);
 	SortIPFilterItems();
-	m_ipfilter.Invalidate();
-	m_ipfilter.UpdateWindow();
+	m_ipfilter.Invalidate(FALSE);
 	*pResult = 0;
 }
 
@@ -284,7 +336,6 @@ void CIPFilterDlg::OnLvnGetDispInfoIPFilter(LPNMHDR pNMHDR, LRESULT *pResult)
 
 void CIPFilterDlg::OnCopyIPFilter()
 {
-	CWaitCursor curWait;
 	int iSelected = 0;
 	CString strData;
 	for (POSITION pos = m_ipfilter.GetFirstSelectedItemPosition(); pos != NULL;) {

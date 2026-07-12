@@ -1,4 +1,4 @@
-//This file is part of eMule AI
+﻿//This file is part of eMule AI
 //Copyright (C)2002-2026 Merkur ( strEmail.Format("%s@%s", "devteam", "emule-project.net") / https://www.emule-project.net )
 //Copyright (C)2026 eMule AI
 //
@@ -36,6 +36,10 @@ public:
 	bool		AddServerMetToList(const CString &strFile, bool bMerge);
 	void		AddServersFromTextFile(const CString &strFilename) const;
 	bool		SaveServermetToFile();
+	LONG		NextServerMetSaveGeneration() { return InterlockedIncrement(&m_lServerMetSaveGeneration); }
+	LONG		GetServerMetSaveGeneration() const { return InterlockedCompareExchange(const_cast<volatile LONG*>(&m_lServerMetSaveGeneration), 0, 0); }
+	LONG		NextStaticServersSaveGeneration() { return InterlockedIncrement(&m_lStaticServersSaveGeneration); }
+	LONG		GetStaticServersSaveGeneration() const { return InterlockedCompareExchange(const_cast<volatile LONG*>(&m_lStaticServersSaveGeneration), 0, 0); }
 	bool		SaveStaticServers();
 
 	bool		AddServer(const CServer *pServer, bool bAddTail = true);
@@ -75,7 +79,7 @@ public:
 
 	void		CheckForExpiredUDPKeys();
 
-	void ResetGeoLite2();
+	void ResetIPGeolocation();
 
 #ifdef _DEBUG
 	void		Dump();
@@ -89,4 +93,6 @@ private:
 	UINT		delservercount;
 	DWORD		m_nLastSaved;
 	uint8		version;
+	volatile LONG	m_lServerMetSaveGeneration;
+	volatile LONG	m_lStaticServersSaveGeneration;
 };

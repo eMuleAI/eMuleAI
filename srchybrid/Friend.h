@@ -44,6 +44,7 @@ enum EFriendConnectReport
 
 #define	FF_NAME		0x01
 #define	FF_KADID	0x02
+#define	FF_FRIENDSLOT	0x03
 
 ///////////////////////////////////////////////////////////////////////////////
 // CFriendConnectionListener

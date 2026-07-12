@@ -292,39 +292,31 @@ void CreateNetworkInfo(CRichEditCtrlX &rCtrl, CHARFORMAT &rcfDef, CHARFORMAT &rc
 			rCtrl << _T("\r\n");
 
 
+			rCtrl << _T("eServer ") << GetResString(_T("SERVING_BUDDY")) << _T(": ");
+			if (!theApp.serverconnect->IsLowID())
+				uid = _T("SERVING_BUDDYNONE");
+			else if (theApp.clientlist->GetEServerBuddyStatus() == Connected)
+				uid = _T("CONNECTED");
+			else if (theApp.clientlist->GetEServerBuddyStatus() == Connecting || theApp.clientlist->IsEServerBuddySearchActive())
+				uid = _T("CONNECTING");
+			else
+				uid = _T("SERVING_BUDDYNONE");
+			rCtrl << GetResString(uid) << _T("\r\n");
+
+			if (theApp.serverconnect->IsLowID() && theApp.clientlist->GetServingEServerBuddy() && theApp.clientlist->GetEServerBuddyStatus() == Connected) {
+				CUpDownClient* pBuddy = theApp.clientlist->GetServingEServerBuddy();
+				CString buddyInfo;
+				buddyInfo.Format(_T("\t%s: %s\r\n"), (LPCTSTR)GetResString(_T("CLIENT")), (LPCTSTR)EscPercent(pBuddy->DbgGetClientInfo()));
+				rCtrl << buddyInfo;
+				buddyInfo.Format(_T("\t%s: %s\r\n"), (LPCTSTR)GetResString(_T("CD_CSOFT")), (LPCTSTR)EscPercent(pBuddy->DbgGetFullClientSoftVer()));
+				rCtrl << buddyInfo;
+			}
+
 			if (bFullInfo) {
 				rCtrl << GetResString(_T("IDLOW")) << _T(":\t") << GetFormatedUInt(srv->GetLowIDUsers()) << _T("\r\n");
 				rCtrl << GetResString(_T("PING")) << _T(":\t") << (UINT)srv->GetPing() << _T(" ms\r\n");
 
-				// eServer Buddy info (right after basic server info, before features)
-				if (theApp.serverconnect->IsLowID()) {
-					// LowID: show our serving buddy status
-					rCtrl << _T("eServer ") << GetResString(_T("SERVING_BUDDY")) << _T(":\t");
-					switch (theApp.clientlist->GetEServerBuddyStatus()) {
-					case Disconnected:
-						uid = _T("SERVING_BUDDYNONE");
-						break;
-					case Connecting:
-						uid = _T("CONNECTING");
-						break;
-					case Connected:
-						uid = _T("CONNECTED");
-						break;
-					default:
-						uid = EMPTY;
-					}
-					if (uid)
-						rCtrl << GetResString(uid);
-					rCtrl << _T("\r\n");
-
-					// Show serving buddy details if connected
-					if (theApp.clientlist->GetServingEServerBuddy() && theApp.clientlist->GetEServerBuddyStatus() == Connected) {
-						CUpDownClient* pBuddy = theApp.clientlist->GetServingEServerBuddy();
-						CString buddyInfo;
-						buddyInfo.Format(_T("\t%s: %s\r\n"), (LPCTSTR)GetResString(_T("CLIENT")), (LPCTSTR)EscPercent(pBuddy->DbgGetClientInfo()));
-						rCtrl << buddyInfo;
-					}
-				} else {
+				if (!theApp.serverconnect->IsLowID()) {
 					// HighID: show how many LowID clients we're serving with numbered list
 					if (theApp.clientlist->GetServedEServerBuddyCount() > 0) {
 						CString servedHeader;
@@ -337,11 +329,13 @@ void CreateNetworkInfo(CRichEditCtrlX &rCtrl, CHARFORMAT &rcfDef, CHARFORMAT &rc
 							if (p != NULL) {
 								CString line;
 								const CAddress& dispIP = !p->GetIP().IsNull() ? p->GetIP() : p->GetConnectIP();
-								line.Format(_T("\t%d) %s: %s:%u\t%s\r\n"), idx, 
-									(LPCTSTR)GetResString(_T("IPPORT")), 
-									(LPCTSTR)ipstr(dispIP), 
+								line.Format(_T("\t%d) %s: %s:%u\t%s\t%s: %s\r\n"), idx,
+									(LPCTSTR)GetResString(_T("IPPORT")),
+									(LPCTSTR)ipstr(dispIP),
 									(unsigned)p->GetUserPort(),
-									(LPCTSTR)EscPercent(p->GetUserName()));
+									(LPCTSTR)EscPercent(p->GetUserName()),
+									(LPCTSTR)GetResString(_T("CD_CSOFT")),
+									(LPCTSTR)EscPercent(p->DbgGetFullClientSoftVer()));
 								rCtrl << line;
 								++idx;
 							}
@@ -434,29 +428,22 @@ void CreateNetworkInfo(CRichEditCtrlX &rCtrl, CHARFORMAT &rcfDef, CHARFORMAT &rc
 			rCtrl << GetResString(_T("EXTERNUDPPORT")) << _T(":\t") << buffer << _T("\r\n");
 		}
 
-#ifndef NATTTESTMODE
-		if (Kademlia::CUDPFirewallTester::IsFirewalledUDP(true)) {
-#endif
-			rCtrl << GetResString(_T("SERVING_BUDDY")) << _T(":\t");
-			switch (theApp.clientlist->GetServingBuddyStatus()) {
-			case Disconnected:
-				uid = _T("SERVING_BUDDYNONE");
-				break;
-			case Connecting:
-				uid = _T("CONNECTING");
-				break;
-			case Connected:
+			rCtrl << GetResString(_T("KADEMLIA")) << _T(" ") << GetResString(_T("SERVING_BUDDY")) << _T(": ");
+			if (theApp.clientlist->GetServingBuddyStatus() == Connected)
 				uid = _T("CONNECTED");
-				break;
-			default:
-				uid = EMPTY;
+			else if (theApp.clientlist->GetServingBuddyStatus() == Connecting || theApp.clientlist->IsKadBuddySearchActive())
+				uid = _T("CONNECTING");
+			else
+				uid = _T("SERVING_BUDDYNONE");
+			rCtrl << GetResString(uid) << _T("\r\n");
+			if (theApp.clientlist->GetServingBuddy() && theApp.clientlist->GetServingBuddyStatus() == Connected) {
+				CUpDownClient* pBuddy = theApp.clientlist->GetServingBuddy();
+				CString buddyInfo;
+				buddyInfo.Format(_T("\t%s: %s\r\n"), (LPCTSTR)GetResString(_T("CLIENT")), (LPCTSTR)EscPercent(pBuddy->DbgGetClientInfo()));
+				rCtrl << buddyInfo;
+				buddyInfo.Format(_T("\t%s: %s\r\n"), (LPCTSTR)GetResString(_T("CD_CSOFT")), (LPCTSTR)EscPercent(pBuddy->DbgGetFullClientSoftVer()));
+				rCtrl << buddyInfo;
 			}
-			if (uid)
-				rCtrl << GetResString(uid);
-			rCtrl << _T("\r\n");
-#ifndef NATTTESTMODE
-		}
-#endif
 
 		if (bFullInfo) {
 			CString sKadID;
@@ -478,7 +465,14 @@ void CreateNetworkInfo(CRichEditCtrlX &rCtrl, CHARFORMAT &rcfDef, CHARFORMAT &rc
 							sPeerKadID = md4str(p->GetServingBuddyID());
 						// Prefer real IP, fallback to connect IP to avoid 0.0.0.0 entries.
 						const CAddress& dispIP = !p->GetIP().IsNull() ? p->GetIP() : p->GetConnectIP();
-						line.Format(_T("\t%d) %s: %s:%u\t%s %s\r\n"), idx, (LPCTSTR)GetResString(_T("IPPORT")), (LPCTSTR)ipstr(dispIP), (unsigned)p->GetKadPort(), (LPCTSTR)GetResString(_T("CD_UHASH")), (LPCTSTR)sPeerKadID);
+						line.Format(_T("\t%d) %s: %s:%u\t%s %s\t%s: %s\r\n"), idx,
+							(LPCTSTR)GetResString(_T("IPPORT")),
+							(LPCTSTR)ipstr(dispIP),
+							(unsigned)p->GetKadPort(),
+							(LPCTSTR)GetResString(_T("CD_UHASH")),
+							(LPCTSTR)sPeerKadID,
+							(LPCTSTR)GetResString(_T("CD_CSOFT")),
+							(LPCTSTR)EscPercent(p->DbgGetFullClientSoftVer()));
 						rCtrl << line;
 						++idx;
 					}
@@ -527,10 +521,10 @@ void CreateNetworkInfo(CRichEditCtrlX &rCtrl, CHARFORMAT &rcfDef, CHARFORMAT &rc
 void CNetworkInfoDlg::OnNattForcePublish()
 {
 	if (thePrefs.GetLogNatTraversalEvents())
-		DebugLog(_T("[NATTTESTMODE: ForcePublish] Publish all shared files\n"));
+		DebugLog(_T("[NatTraversal: ForcePublish] Publish all shared files\n"));
 	if (!Kademlia::CKademlia::IsConnected()) {
 		if (thePrefs.GetLogNatTraversalEvents())
-			DebugLog(_T("[NATTTESTMODE: ForcePublish] Kad not connected\n"));
+			DebugLog(_T("[NatTraversal: ForcePublish] Kad not connected\n"));
 		return;
 	}
 
@@ -540,10 +534,10 @@ void CNetworkInfoDlg::OnNattForcePublish()
 		if (kf != NULL) {
 			if (Kademlia::CSearchManager::PrepareLookup(Kademlia::CSearch::STOREFILE, true, Kademlia::CUInt128(kf->GetFileHash())) == NULL) {
 				if (thePrefs.GetLogNatTraversalEvents())
-					DebugLog(_T("[NATTTESTMODE: ForcePublish] PrepareLookup (keyword/storefile) failed: %s\n"), (LPCTSTR)kf->GetFileName());
+					DebugLog(_T("[NatTraversal: ForcePublish] PrepareLookup (keyword/storefile) failed: %s\n"), (LPCTSTR)kf->GetFileName());
 			} else {
 				if (thePrefs.GetLogNatTraversalEvents())
-					DebugLog(_T("[NATTTESTMODE: ForcePublish] Requested keyword/storefile publish: %s\n"), (LPCTSTR)kf->GetFileName());
+					DebugLog(_T("[NatTraversal: ForcePublish] Requested keyword/storefile publish: %s\n"), (LPCTSTR)kf->GetFileName());
 			}
 		}
 	}
@@ -552,7 +546,7 @@ void CNetworkInfoDlg::OnNattForcePublish()
 	if (theApp.IsFirewalled() && (Kademlia::CUDPFirewallTester::IsFirewalledUDP(true) || !Kademlia::CUDPFirewallTester::IsVerified())) {
 		if (theApp.clientlist->GetServingBuddy() == NULL) {
 			if (thePrefs.GetLogNatTraversalEvents())
-				DebugLog(_T("[NATTTESTMODE: ForcePublish] Skipping source publish: no serving buddy connected.\n"));
+				DebugLog(_T("[NatTraversal: ForcePublish] Skipping source publish: no serving buddy connected.\n"));
 			return;
 		}
 	}
@@ -570,10 +564,10 @@ void CNetworkInfoDlg::OnNattForcePublish()
 		if (kf->PublishSrc()) {
 			if (Kademlia::CSearchManager::PrepareLookup(Kademlia::CSearch::STOREFILE, true, Kademlia::CUInt128(kf->GetFileHash())) == NULL) {
 				if (thePrefs.GetLogNatTraversalEvents())
-					DebugLog(_T("[NATTTESTMODE: ForcePublish] PrepareLookup (source) failed: %s\n"), (LPCTSTR)kf->GetFileName());
+					DebugLog(_T("[NatTraversal: ForcePublish] PrepareLookup (source) failed: %s\n"), (LPCTSTR)kf->GetFileName());
 			} else {
 				if (thePrefs.GetLogNatTraversalEvents())
-					DebugLog(_T("[NATTTESTMODE: ForcePublish] Requested source publish: %s\n"), (LPCTSTR)kf->GetFileName());
+					DebugLog(_T("[NatTraversal: ForcePublish] Requested source publish: %s\n"), (LPCTSTR)kf->GetFileName());
 			}
 		}
 	}

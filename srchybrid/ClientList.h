@@ -17,14 +17,16 @@
 //Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 #pragma once
 #include "DeadSourceList.h"
-#include "eMuleAI/GeoLite2.h"
+#include "eMuleAI/IPGeolocation.h"
 #include "eMuleAI/Address.h"
 #include <list>
 #include <unordered_map>
+#include <vector>
 
 class CClientReqSocket;
 class CUpDownClient;
 class CSafeMemFile;
+class CFileDataIO;
 namespace Kademlia
 {
 	class CContact;
@@ -85,13 +87,17 @@ enum servingBuddyState
 struct EServerRelayRequest
 {
 	CUpDownClient* pRequester;		// Client requesting the relay
+	uchar requesterHash[16];		// Requester user hash when available
 	uchar targetHash[16];			// Target LowID client's user hash (optional, may be null)
 	uint32 dwTargetLowID;			// Target's LowID (primary key for lookup)
+	uint32 dwTargetServerIP;		// Server context for target LowID
+	uint16 nTargetServerPort;		// Server port context for target LowID
 	uint32 dwRequesterIP;			// Requester's IP (validated)
 	uint16 nRequesterKadPort;		// Requester's KAD port
 	uint32 dwTargetPublicIP;		// Target public IP from ACK (optional)
 	uint16 nTargetKadPort;			// Target port from ACK (fallback)
 	bool bAwaitingTargetExtPort;	// Waiting for external port probe before reply
+	DWORD dwTargetExtPortWaitStart;	// Start time for short external UDP probe wait
 	DWORD dwRequestTime;			// Request timestamp for timeout
 	uchar fileHash[16];				// File hash for download context (similar to KAD Rendezvous)
 };
@@ -102,6 +108,10 @@ struct PendingRelayContext
 	uint32 dwIP;
 	uint16 nPort;
 	uchar fileHash[16];
+	uint32 dwTargetLowID;
+	uint32 dwTargetServerIP;
+	uint16 nTargetServerPort;
+	uchar targetHash[16];
 	DWORD dwInserted;
 };
 
@@ -176,9 +186,11 @@ public:
 	CUpDownClient* FindClientByConnIP(const CAddress& clientip, UINT port) const;
 	CUpDownClient* FindClientByIP(const CAddress& clientip, UINT port) const;
 	CUpDownClient* FindClientByUserHash(const uchar* clienthash, const CAddress& clientip = CAddress(), uint16 nTCPPort = 0) const;
+	CUpDownClient* FindClientByUserHashAndKadEndpoint(const uchar* clienthash, const CAddress& clientip, uint16 nKadPort) const;
 	CUpDownClient* FindClientByIP(const CAddress& clientip) const;
 	CUpDownClient* FindUniqueClientByIP(const CAddress& clientip) const;
 	CUpDownClient* FindClientByIP_UDP(const CAddress& clientip, UINT nUDPport) const;
+	bool HasQuicNatTraversalLayerForEndpoint(const CUpDownClient* pExcept, const CAddress& clientip, uint16 nUDPport) const;
 	CUpDownClient* FindClientByServerID(uint32 uServerIP, uint32 uED2KUserID) const;
 	CUpDownClient* FindClientByUserID_KadPort(uint32 clientID, uint16 kadPort) const;
 	CUpDownClient* FindClientByIP_KadPort(const CAddress& clientip, uint16 port) const;
@@ -190,9 +202,9 @@ public:
 	INT_PTR	GetBannedCount() const;
 	void	RemoveAllBannedClients();
 
-	void CClientList::CancelCategoryPunishments(uint8 uBadClientCategory) const; 
-	void CClientList::CancelFriendPunishments() const;
-	uint32 CClientList::BadClientCount();
+	void	CancelCategoryPunishments(uint8 uBadClientCategory) const;
+	void	CancelFriendPunishments() const;
+	uint32	BadClientCount();
 
 	// Tracked clients
 	void AddTrackClient(CUpDownClient* toadd, time_t tInserted = time(NULL));
@@ -235,36 +247,44 @@ public:
 	bool	IsEServerBuddySearchActive() const;
 	CUpDownClient* GetServingEServerBuddy() const		{ return m_pServingEServerBuddy; }
 	uint32	GetEServerBuddyServerIP() const				{ return m_dwEServerBuddyServerIP; }
+	uint16	GetEServerBuddyServerPort() const			{ return m_nEServerBuddyServerPort; }
+	bool	IsServingEServerBuddyRelayReady(const CUpDownClient* pBuddy) const;
 	uint8	GetMaxEServerBuddySlots() const				{ return m_nMaxEServerBuddySlots; }
 	INT_PTR	GetServedEServerBuddyCount() const			{ return m_lstServedEServerBuddies.GetCount(); }
 	POSITION GetServedEServerBuddyStartPosition() const	{ return m_lstServedEServerBuddies.GetHeadPosition(); }
 	CUpDownClient* GetNextServedEServerBuddy(POSITION& pos) const { return m_lstServedEServerBuddies.GetNext(pos); }
 	CUpDownClient* FindEServerBuddy();					// Find suitable HighID buddy for LowID relay
 	CUpDownClient* FindServedEServerBuddyByHash(const uchar* pHash) const;	// Find served buddy by hash
-	CUpDownClient* FindServedEServerBuddyByLowID(uint32 dwServerIP, uint32 dwTargetLowID) const;
+	CUpDownClient* FindServedEServerBuddyByLowID(uint32 dwServerIP, uint16 nServerPort, uint32 dwTargetLowID) const;
 	void	SetServingEServerBuddy(CUpDownClient* pBuddy, uint8 nStatus);
 	void	AddServedEServerBuddy(CUpDownClient* pClient);
 	void	RemoveServedEServerBuddy(CUpDownClient* pClient);
 	bool	IsServedEServerBuddy(const CUpDownClient* pClient) const;
 	bool	HasEServerBuddySlotAvailable() const		{ return GetServedEServerBuddyCount() < m_nMaxEServerBuddySlots; }
 	void	TryRequestEServerBuddy();					// Try to find and request a buddy if we need one
+	bool	TryRequestKadBuddyFromEServerBuddy(bool bForce = false);	// Try our eServer buddy as a Kad serving buddy candidate
+	bool	TryRequestEServerBuddyFromKadBuddy(bool bForce = false);	// Try our Kad buddy as an eServer serving buddy candidate
 	void	ClearAllServedEServerBuddies();				// Clear all served buddies (for server disconnect)
 
 	// eServer Buddy relay request tracking
 	void	AddPendingEServerRelay(CUpDownClient* pRequester, const uchar* targetHash, uint32 dwIP, uint16 nPort);
-	void	AddPendingEServerRelayByLowID(CUpDownClient* pRequester, uint32 dwTargetLowID, uint32 dwIP, uint16 nPort, const uchar* pFileHash = NULL);
+	bool	AddPendingEServerRelayByLowID(CUpDownClient* pRequester, uint32 dwTargetLowID, uint32 dwIP, uint16 nPort, const uchar* pFileHash = NULL);
 	void	UpdatePendingEServerRelayRequesterPort(const CUpDownClient* pRequester, uint16 nPort);
+	void	ProcessPendingEServerRelayExtPortWaits();
 	bool	TrySendPendingEServerRelayResponseForTarget(CUpDownClient* pTarget);
 	EServerRelayRequest* FindPendingEServerRelay(const uchar* targetHash);
 	EServerRelayRequest* FindPendingEServerRelayByLowID(uint32 dwTargetLowID);
+	EServerRelayRequest* FindPendingEServerRelayForTarget(const CUpDownClient* pTarget);
+	CUpDownClient* FindUniqueRecentEServerRelayTargetForBuddy(const CUpDownClient* pBuddy, bool* pbAmbiguous = NULL);
 	void	RemovePendingEServerRelay(const uchar* targetHash);
 	void	RemovePendingEServerRelayByLowID(uint32 dwTargetLowID);
+	void	RemovePendingEServerRelayRequest(const EServerRelayRequest* pReq);
 	void	CleanupExpiredEServerRelays();
 	void	ProcessEServerBuddyPings();					// Periodic ping and cleanup
 	bool	ProcessEServerBuddyMagicSourceAnswer(const uchar* pHash, CSafeMemFile& sources, bool bWithObfuscationAndHash, uint32 dwServerIP, uint16 nServerPort);
 	
 	// Pending relay context (for ConnectionEstablished)
-	void	AddPendingRelayContext(uint32 dwIP, uint16 nPort, const uchar* pFileHash);
+	void	AddPendingRelayContext(uint32 dwIP, uint16 nPort, const uchar* pFileHash, uint32 dwTargetLowID = 0, uint32 dwTargetServerIP = 0, uint16 nTargetServerPort = 0, const uchar* pTargetHash = NULL);
 	bool	ApplyPendingRelayContext(CUpDownClient* pClient);
 	void	CleanupPendingRelayContexts();
 
@@ -291,6 +311,7 @@ public:
 			CUpDownClient* AcquireTrackedClientByPointer(const CUpDownClient* pClient) const;
 			CUpDownClient* AcquireTrackedClientByUserHash(const uchar* clienthash, bool bPreferArchived = false) const;
 			CUpDownClient* AcquireTrackedClientByRuntimeID(DWORD uRuntimeID) const;
+			CUpDownClient* AcquireTrackedClientByRuntimeIDAndGeneration(DWORD uRuntimeID, LONG lRuntimeGeneration) const;
 			CUpDownClient* AcquireArchivedClientByUserHash(const uchar* clienthash) const;
 			CUpDownClient* FindArchivedClientByUserHash(const uchar* clienthash) const;
 	void	Debug_SocketDeleted(CClientReqSocket *deleted) const;
@@ -301,9 +322,10 @@ public:
 	bool GiveClientsForTraceRoute();
 
 	void	ProcessA4AFClients() const; // ZZ:DownloadManager
+	void	HandleNatTraversalProtocolModeChanged();
 	CDeadSourceList	m_globDeadSourceList;
 
-	void	ResetGeoLite2();
+	void	ResetIPGeolocation();
 
 	void	GetModStatistics(CRBMap<uint32, CRBMap<CString, uint32>* >* clientMods);
 	void	ReleaseModStatistics(CRBMap<uint32, CRBMap<CString, uint32>* >* clientMods);
@@ -316,13 +338,147 @@ public:
 			return EMPTY;
 	}
 
+	struct SClientHistoryRecord
+	{
+		SClientHistoryRecord();
+
+		uchar userHash[16];
+		uint64 uLastSeen;
+		uint64 uFirstSeen;
+		CAddress connectIP;
+		CAddress userIP;
+		uint32 dwServerIP;
+		uint32 nUserIDHybrid;
+		uint16 nUserPort;
+		uint16 nServerPort;
+		UINT nClientVersion;
+		uint8 byEmuleVersion;
+		bool bEmuleProtocol;
+		bool bIsHybrid;
+		uint16 nUDPPort;
+		uint16 nKadPort;
+		uint8 byUDPVer;
+		uint8 byCompatibleClient;
+		bool bIsML;
+		bool bGPLEvildoer;
+		CString strUserName;
+		CString strClientSoftware;
+		CString strModVersion;
+		uint8 cMessagesReceived;
+		uint8 cMessagesSent;
+		uint8 byKadVersion;
+		bool bNoViewSharedFiles;
+		uint8 uPunishment;
+		uint8 uBadClientCategory;
+		uint64 uPunishmentStartTime;
+		CString strPunishmentReason;
+		uint8 uSharedFilesStatus;
+		uint64 uSharedFilesLastQueriedTime;
+		UINT uSharedFilesCount;
+		CString strClientNote;
+		bool bAutoQuerySharedFiles;
+	};
+	typedef std::vector<SClientHistoryRecord> CStartupClientHistoryRecords;
+	struct SClientHistorySaveSnapshot
+	{
+		SClientHistorySaveSnapshot();
+
+		LONG lGeneration;
+		volatile LONG* plGeneration;
+		CString strConfigDir;
+		CStartupClientHistoryRecords records;
+	};
+	enum EClientHistorySaveJobStage
+	{
+		ClientHistorySaveJobNone = 0,
+		ClientHistorySaveJobActiveClients,
+		ClientHistorySaveJobArchivedClients,
+		ClientHistorySaveJobQueueWorker
+	};
+	enum EAutoQuerySharedFilesJobStage
+	{
+		AutoQuerySharedFilesJobNone = 0,
+		AutoQuerySharedFilesJobArchivedClients,
+		AutoQuerySharedFilesJobActiveClients,
+		AutoQuerySharedFilesJobQueryCandidates
+	};
+	struct SClientHistorySaveJob
+	{
+		SClientHistorySaveJob();
+		void Reset();
+
+		bool bActive;
+		EClientHistorySaveJobStage eStage;
+		LONG lGeneration;
+		CString strConfigDir;
+		std::vector<CUpDownClient*> activeClients;
+		size_t uNextActiveClient;
+		POSITION posNextArchivedClient;
+		CStartupClientHistoryRecords records;
+		UINT uActiveArchived;
+		UINT uRecordsBuilt;
+	};
+	struct SAutoQuerySharedFilesJob
+	{
+		SAutoQuerySharedFilesJob();
+		void Reset();
+
+		bool bActive;
+		bool bCandidatesSorted;
+		EAutoQuerySharedFilesJobStage eStage;
+		POSITION posNextArchivedClient;
+		std::vector<CUpDownClient*> activeClients;
+		size_t uNextActiveClient;
+		std::vector<CUpDownClient*> candidates;
+		UINT uMaxQueries;
+		UINT uQueried;
+		time_t tNow;
+	};
 	typedef	CMap<CString, LPCTSTR, CUpDownClient*, CUpDownClient*> CArchivedClientsMap;
 	CArchivedClientsMap m_ArchivedClientsMap; // This map is used hold client history
 	void	SaveList();
+	void	SaveListSynchronously();
+	bool	StartClientHistorySaveJob();
+	bool	ProcessClientHistorySaveJob();
+	void	CancelClientHistorySaveJob();
 	bool	LoadList();
+	bool	LoadList(CArchivedClientsMap* pTargetArchivedClients, bool bAssignCredits, bool bRebuildRuntimeMap);
+	bool	LoadStartupClientHistoryRecords(CStartupClientHistoryRecords& records, LONG lGeneration = 0, uint64 uCancellationToken = 0) const;
+	void	QueuePendingClientHistoryRecord(CUpDownClient* pClient);
+	void	ApplyStartupClientHistoryLoad(CStartupClientHistoryRecords* pLoadedRecords);
+	bool	ApplyStartupClientHistoryLoadChunk(CStartupClientHistoryRecords* pLoadedRecords, size_t& uNextRecord, size_t uMaxRecords);
+	bool	ApplyStartupClientHistoryPendingRecordsChunk(size_t& uNextRecord, size_t uMaxRecords, UINT& uApplied, INT_PTR& iRemaining);
+	void	RebuildStartupClientHistoryRuntimeMap();
+	bool	RebuildStartupClientHistoryRuntimeMapChunk(std::vector<CUpDownClient*>& aPendingDeleteClients, size_t& uNextPendingDeleteClient, POSITION& posNextArchivedClient, bool& bStarted, UINT& uApplied, INT_PTR& iRemaining);
+	bool	ApplyStartupClientHistoryActiveLinksChunk(POSITION& posNextClient, size_t uMaxClients, UINT& uApplied, INT_PTR& iRemaining);
+	void	FinalizeStartupClientHistoryLoadApply();
+	void	CompleteStartupClientHistoryLoadApply();
+	static void DeleteStartupClientHistoryRecords(CStartupClientHistoryRecords* pLoadedRecords);
+	static void DeleteArchivedClientMap(CArchivedClientsMap* pArchivedClients);
+	static UINT AFX_CDECL ClientHistorySaveThreadProc(LPVOID pParam);
+	static bool QueueClientHistorySnapshotSave(SClientHistorySaveSnapshot* pSnapshot);
+	static bool SerializeClientHistorySnapshot(const SClientHistorySaveSnapshot& snapshot);
+	static void WriteClientHistoryRecordToFile(CFileDataIO& file, const SClientHistoryRecord& record);
+	bool	BuildClientHistoryRecordFromClient(const CUpDownClient* pClient, SClientHistoryRecord& record, bool bAllowArchived = false) const;
+	void	MergePendingClientHistoryRecord(const SClientHistoryRecord& record);
+	void	ApplyClientHistoryRecordToArchive(const SClientHistoryRecord& record, std::vector<CUpDownClient*>& discardedClients);
+	void	ApplyArchivedClientToArchive(CUpDownClient* pLoadedClient, std::vector<CUpDownClient*>& discardedClients);
+	void	ApplyPendingClientHistoryRecords(std::vector<CUpDownClient*>& discardedClients);
+	CStartupClientHistoryRecords m_PendingClientHistoryRecords;
+	SClientHistorySaveJob m_ClientHistorySaveJob;
+	SAutoQuerySharedFilesJob m_AutoQuerySharedFilesJob;
 	time_t	m_tLastSaved;
+	volatile LONG m_lClientHistorySaveGeneration;
 
 	void AutoQuerySharedFiles();
+	bool	StartAutoQuerySharedFilesJob();
+	bool	ProcessAutoQuerySharedFilesJob();
+	void	CancelAutoQuerySharedFilesJob();
+	void	ClearAutoQuerySharedFilesActiveSnapshot();
+	void	BeginAutoQuerySharedFilesActiveStage();
+	bool	IsAutoQuerySharedFilesThresholdReached(const CUpDownClient* pClient) const;
+	void	AddAutoQuerySharedFilesCandidate(CUpDownClient* pClient);
+	void	RemoveAutoQuerySharedFilesCandidate(CUpDownClient* pClient);
 	const static bool SortFunc(const CUpDownClient* first, const CUpDownClient* second);
 
 	void TrigReask(bool bIPv6Change);
@@ -334,6 +490,11 @@ public:
 protected:
 	void	ProcessConnectingClientsList();
 	void	CollectClientStatsFromClient(CClientStatsSnapshot& snapshot, const CUpDownClient* curClient) const;
+	static bool ReadStartupClientHistoryRecord(CFileDataIO& file, SClientHistoryRecord& record);
+	static uint8 GetStartupClientHistoryRecordBadCategory(const SClientHistoryRecord& record);
+	static void NormalizeStartupClientHistoryRecordPunishment(SClientHistoryRecord& record);
+	static void MergeStartupClientHistoryRecord(SClientHistoryRecord& target, const SClientHistoryRecord& source);
+	static CUpDownClient* CreateArchivedClientFromStartupRecord(const SClientHistoryRecord& record);
 	void	RebuildArchivedRuntimeMap() const;
 	void	RegisterArchivedClient(CUpDownClient* pArchivedClient);
 	void	UnregisterArchivedClient(const CUpDownClient* pArchivedClient);
@@ -363,6 +524,8 @@ private:
 	uint8	m_nEServerBuddyStatus;				// Disconnected/Connecting/Connected
 	CUpDownClient* m_pServingEServerBuddy;		// HighID buddy serving us
 	uint32	m_dwEServerBuddyServerIP;			// Server IP our buddy is connected to
+	uint16	m_nEServerBuddyServerPort;		// Server port our buddy is verified on
+	DWORD	m_dwEServerBuddyConnectStart;		// Time when current eServer buddy state started
 	CTypedPtrList<CPtrList, CUpDownClient*> m_lstServedEServerBuddies;	// LowID clients we serve
 	uint8	m_nMaxEServerBuddySlots;			// Max slots for serving (configurable)
 	std::list<EServerRelayRequest> m_lstPendingEServerRelays;	// Pending relay requests
@@ -371,6 +534,10 @@ private:
 	std::list<EServerBuddyMagicProbe> m_lstEServerBuddyMagicProbes;
 	DWORD	m_dwLastEServerBuddyPing;			// Last ping time
 	DWORD	m_dwLastEServerBuddyKeepAlive;		// Last short keep-alive time
+	DWORD	m_dwLastEServerBuddyKadBridgeRequest;	// Last Kad serving buddy request sent through the eServer buddy shortcut
+	DWORD	m_dwLastKadBuddyEServerBridgeRequest;	// Last eServer buddy request sent through the Kad buddy shortcut
+	DWORD	m_dwLastKadBuddyDemandCheck;	// Last pending NAT-T demand scan
+	DWORD	m_dwLastKadBuddyDemandSearch;	// Last bounded buddy search triggered by a pending NAT-T download
 	DWORD	m_dwLastEServerBuddyMagicSearch;
 	DWORD	m_dwLastEServerBuddyMagicSearchSent;
 	uint32	m_dwLastEServerBuddyMagicSearchServerIP;
@@ -387,4 +554,46 @@ private:
 	bool	TrySendNextEServerBuddyMagicProbe();
 	void	StartEServerBuddyMagicSearch();
 	bool	TryRequestEServerBuddyFromMagicCandidates();
+};
+
+struct SStartupClientHistoryLoadResult
+{
+	SStartupClientHistoryLoadResult()
+		: pRecords(NULL)
+		, uNextRecord(0)
+		, lGeneration(0)
+		, uCancellationToken(0)
+		, bSuccess(false)
+		, bApplyStarted(false)
+		, dwLastError(0)
+		, uCompletionStep(0)
+		, uNextPendingRecord(0)
+		, uNextRuntimeMapPendingDeleteClient(0)
+		, posNextRuntimeMapArchiveClient(NULL)
+		, bRuntimeMapRebuildStarted(false)
+		, posNextActiveClient(NULL)
+		, bActiveClientLinkStarted(false)
+		, posNextArchiveLoadClient(NULL)
+		, bArchiveLoadStarted(false)
+	{
+	}
+
+	CClientList::CStartupClientHistoryRecords* pRecords;
+	size_t uNextRecord;
+	LONG lGeneration;
+	uint64 uCancellationToken;
+	bool bSuccess;
+	bool bApplyStarted;
+	DWORD dwLastError;
+	CString strStage;
+	UINT uCompletionStep;
+	size_t uNextPendingRecord;
+	std::vector<CUpDownClient*> aRuntimeMapPendingDeleteClients;
+	size_t uNextRuntimeMapPendingDeleteClient;
+	POSITION posNextRuntimeMapArchiveClient;
+	bool bRuntimeMapRebuildStarted;
+	POSITION posNextActiveClient;
+	bool bActiveClientLinkStarted;
+	POSITION posNextArchiveLoadClient;
+	bool bArchiveLoadStarted;
 };

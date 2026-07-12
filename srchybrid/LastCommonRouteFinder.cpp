@@ -251,7 +251,6 @@ UINT AFX_CDECL LastCommonRouteFinder::RunProc(LPVOID pParam)
  */
 UINT LastCommonRouteFinder::RunInternal()
 {
-	Pinger pinger;
 	bool hasSucceededAtLeastOnce = false;
 	CString sErr;
 
@@ -260,9 +259,17 @@ UINT LastCommonRouteFinder::RunInternal()
 		m_eventPrefs.Lock();
 
 		bool enabled = m_enabled;
+		if (!theApp.IsRunning() || theApp.IsNetworkActivityBlockedByBind())
+			enabled = false;
+		if (!enabled)
+			continue;
+		Pinger pinger;
 
 		// retry loop. enabled will be set to false in the end of this loop, if too many failures (too many tries)
 		while (m_bRun && enabled) {
+			if (theApp.IsNetworkActivityBlockedByBind())
+				break;
+
 			uint32 lastCommonHost = 0;
 			uint32 lastCommonTTL = 0;
 			uint32 hostToPing = 0;
@@ -356,7 +363,7 @@ UINT LastCommonRouteFinder::RunInternal()
 								sErr.Format(_T("UploadSpeedSense: Failure #%i to ping host! (TTL: %u IP: %s).%s Error: %lu ")
 									, cnt + 1
 									, ttl
-									, cnt ? EMPTY : _T(" Sleeping 1 s before retry.")
+									, cnt ? (LPCTSTR)EMPTY : (LPCTSTR)_T(" Sleeping 1 s before retry.")
 									, (LPCTSTR)ipstr(uAddressToPing)
 									, (pingStatus.bSuccess ? pingStatus.status : pingStatus.error));
 								pinger.PIcmpErr(sErr, pingStatus.bSuccess ? pingStatus.status : pingStatus.error);

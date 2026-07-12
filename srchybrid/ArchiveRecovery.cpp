@@ -130,7 +130,7 @@ bool CArchiveRecovery::performRecovery(CPartFile *partFile, CArray<Gap_Struct> *
 
 				// Open temp file for reading. Prepare long-path safe paths and open accordingly.
 			if (!IsWin32LongPathsEnabled() && tempFileName.GetLength() >= MAX_PATH) {
-				LogWarning(LOG_STATUSBAR, _T("Archive recovery skipped: temp copy path too long (%u): \"%s\""), (UINT)tempFileName.GetLength(), (LPCTSTR)EscPercent(tempFileName));
+					LogWarning(LOG_STATUSBAR, GetResString(_T("ARCHIVE_RECOVERY_TEMP_COPY_PATH_TOO_LONG")), (UINT)tempFileName.GetLength(), (LPCTSTR)EscPercent(tempFileName));
 				return false;
 			}
 
@@ -139,7 +139,7 @@ bool CArchiveRecovery::performRecovery(CPartFile *partFile, CArray<Gap_Struct> *
 				return false;
 		} else {
 			if (!IsWin32LongPathsEnabled() && partFile->GetFilePath().GetLength() >= MAX_PATH) {
-				LogWarning(LOG_STATUSBAR, _T("Archive recovery skipped: source path too long (%u): \"%s\""), (UINT)partFile->GetFilePath().GetLength(), (LPCTSTR)EscPercent(partFile->GetFilePath()));
+					LogWarning(LOG_STATUSBAR, GetResString(_T("ARCHIVE_RECOVERY_SOURCE_PATH_TOO_LONG")), (UINT)partFile->GetFilePath().GetLength(), (LPCTSTR)EscPercent(partFile->GetFilePath()));
 				return false;
 			}
 
@@ -174,7 +174,7 @@ bool CArchiveRecovery::performRecovery(CPartFile *partFile, CArray<Gap_Struct> *
 		ULONGLONG ulTempFileSize = 0;
 
 		if (!IsWin32LongPathsEnabled() && outputFileName.GetLength() >= MAX_PATH) {
-			LogWarning(LOG_STATUSBAR, _T("Archive recovery skipped: output path too long (%u): \"%s\""), (UINT)outputFileName.GetLength(), (LPCTSTR)EscPercent(outputFileName));
+				LogWarning(LOG_STATUSBAR, GetResString(_T("ARCHIVE_RECOVERY_OUTPUT_PATH_TOO_LONG")), (UINT)outputFileName.GetLength(), (LPCTSTR)EscPercent(outputFileName));
 			temp.Close();
 			if (!tempFileName.IsEmpty())
 				::DeleteFile(PreparePathForWin32LongPath(tempFileName));

@@ -60,6 +60,7 @@ public:
 	CUDPSocket& operator=(const CUDPSocket&) = delete;
 
 	bool Create();
+	bool Create(uint16 nServerUDPPort, LPCTSTR pszBindAddr);
 	SocketSentBytes SendControlData(uint32 maxNumberOfBytesToSend, uint32 minFragSize); // ZZ:UploadBandWithThrottler (UDP)
 	void SendPacket(Packet *packet, CServer *pServer, uint16 nSpecialPort = 0, BYTE *pInRawPacket = NULL, uint32 nRawLen = 0);
 	void DnsLookupDone(WPARAM wp, LPARAM lp);

@@ -245,7 +245,10 @@ public:
 	const CAICHHashTree* FindPartHash(uint16 nPart);
 
 	bool			SaveHashSet();
+	bool			SaveHashSetForFileSize(EMFileSize nFileSize);
 	bool			LoadHashSet(); // Loading from known2.met
+	static UINT		FlushDeferredHashSetSaves();
+	static void		ClearDeferredHashSetSaves();
 
 	static CAICHHashAlgo*	GetNewHashAlgo();
 	static void		ClientAICHRequestFailed(CUpDownClient *pClient);
@@ -260,6 +263,9 @@ public:
 	static CList<CAICHRequestedData>	m_liRequestedData;
 	static CMutex						m_mutKnown2File;
 private:
+	bool			QueueDeferredHashSetSave();
+	bool			SaveHashSetToKnown2File();
+	static bool		SaveDeferredHashSetToKnown2File(const CAICHHash &Hash, uint32 nHashCount, const BYTE *pLowestLevelHashes, UINT uLowestLevelHashBytes);
 	static CMap<CAICHHash, const CAICHHash&, ULONGLONG, ULONGLONG>	m_mapAICHHashsStored; // contains all AICH hashes stored in known2*.met
 	CKnownFile		*m_pOwner;
 	EAICHStatus		m_eStatus;

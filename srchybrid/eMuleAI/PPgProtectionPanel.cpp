@@ -31,6 +31,7 @@ BEGIN_MESSAGE_MAP(CPPgProtectionPanel, CPropertyPage)
 	ON_MESSAGE(WM_TREEITEM_HELP, DrawTreeItemHelp)
 	ON_BN_CLICKED(IDC_SHIELD_RELOAD, OnBnClickedShieldReload)
 	ON_WM_CTLCOLOR()
+	ON_WM_SIZE()
 END_MESSAGE_MAP()
 
 CPPgProtectionPanel::CPPgProtectionPanel()
@@ -116,6 +117,13 @@ CPPgProtectionPanel::CPPgProtectionPanel()
 	m_htiFileFakerPunishment = NULL;
 	m_htiDetectUploadFaker = NULL;
 	m_htiUploadFakerPunishment = NULL;
+	m_htiDetectUploadRequestAbuse = NULL;
+	m_htiDetectUploadRequestAbuseNoRequestSlots = NULL;
+	m_htiDetectUploadRequestAbuseQueueDrops = NULL;
+	m_htiUploadRequestAbuseCounterGuard = NULL;
+	m_htiUploadRequestAbuseHashRotationTracking = NULL;
+	m_htiUploadRequestAbusePostHelloDisconnect = NULL;
+	m_htiUploadRequestAbusePunishment = NULL;
 	
 	m_htiDetectAgressive = NULL;
 	m_htiAgressiveTime = NULL;
@@ -587,6 +595,29 @@ void CPPgProtectionPanel::DoDataExchange(CDataExchange* pDX)
 		m_ctrlTreeOptions.Expand(m_htiUploadFakerPunishment, TVE_EXPAND);
 		LocalizeCommonItems();
 
+		m_htiDetectUploadRequestAbuse = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("DETECT_UPLOAD_REQUEST_ABUSE")), TVI_ROOT, m_bDetectUploadRequestAbuse);
+		m_htiDetectUploadRequestAbuseNoRequestSlots = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("UPLOAD_REQUEST_ABUSE_NO_REQUEST_SLOTS")), m_htiDetectUploadRequestAbuse, m_bDetectUploadRequestAbuseNoRequestSlots);
+		m_htiDetectUploadRequestAbuseQueueDrops = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("UPLOAD_REQUEST_ABUSE_QUEUE_DROPS")), m_htiDetectUploadRequestAbuse, m_bDetectUploadRequestAbuseQueueDrops);
+		m_htiUploadRequestAbuseCounterGuard = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("UPLOAD_REQUEST_ABUSE_COUNTER_GUARD")), m_htiDetectUploadRequestAbuse, m_bUploadRequestAbuseCounterGuard);
+		m_htiUploadRequestAbuseHashRotationTracking = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("UPLOAD_REQUEST_ABUSE_HASH_ROTATION")), m_htiDetectUploadRequestAbuse, m_bUploadRequestAbuseHashRotationTracking);
+		m_htiUploadRequestAbusePostHelloDisconnect = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("UPLOAD_REQUEST_ABUSE_POST_HELLO_DISCONNECT")), m_htiDetectUploadRequestAbuse, m_bUploadRequestAbusePostHelloDisconnect);
+		m_htiUploadRequestAbusePunishment = m_ctrlTreeOptions.InsertGroup(GetResString(_T("PUNISHMENT")), iImgPunishment, m_htiDetectUploadRequestAbuse);
+		m_htiIPUserHash = m_ctrlTreeOptions.InsertRadioButton(GetResString(_T("IP_USER_HASH_BAN")), m_htiUploadRequestAbusePunishment, m_iUploadRequestAbusePunishment == 0);
+		m_htiUserHashBan = m_ctrlTreeOptions.InsertRadioButton(GetResString(_T("USER_HASH_BAN")), m_htiUploadRequestAbusePunishment, m_iUploadRequestAbusePunishment == 1);
+		m_htiUploadBan = m_ctrlTreeOptions.InsertRadioButton(GetResString(_T("UPLOAD_BAN")), m_htiUploadRequestAbusePunishment, m_iUploadRequestAbusePunishment == 2);
+		m_htiScore01 = m_ctrlTreeOptions.InsertRadioButton(GetResString(_T("SCORE_01")), m_htiUploadRequestAbusePunishment, m_iUploadRequestAbusePunishment == 3);
+		m_htiScore02 = m_ctrlTreeOptions.InsertRadioButton(GetResString(_T("SCORE_02")), m_htiUploadRequestAbusePunishment, m_iUploadRequestAbusePunishment == 4);
+		m_htiScore03 = m_ctrlTreeOptions.InsertRadioButton(GetResString(_T("SCORE_03")), m_htiUploadRequestAbusePunishment, m_iUploadRequestAbusePunishment == 5);
+		m_htiScore04 = m_ctrlTreeOptions.InsertRadioButton(GetResString(_T("SCORE_04")), m_htiUploadRequestAbusePunishment, m_iUploadRequestAbusePunishment == 6);
+		m_htiScore05 = m_ctrlTreeOptions.InsertRadioButton(GetResString(_T("SCORE_05")), m_htiUploadRequestAbusePunishment, m_iUploadRequestAbusePunishment == 7);
+		m_htiScore06 = m_ctrlTreeOptions.InsertRadioButton(GetResString(_T("SCORE_06")), m_htiUploadRequestAbusePunishment, m_iUploadRequestAbusePunishment == 8);
+		m_htiScore07 = m_ctrlTreeOptions.InsertRadioButton(GetResString(_T("SCORE_07")), m_htiUploadRequestAbusePunishment, m_iUploadRequestAbusePunishment == 9);
+		m_htiScore08 = m_ctrlTreeOptions.InsertRadioButton(GetResString(_T("SCORE_08")), m_htiUploadRequestAbusePunishment, m_iUploadRequestAbusePunishment == 10);
+		m_htiScore09 = m_ctrlTreeOptions.InsertRadioButton(GetResString(_T("SCORE_09")), m_htiUploadRequestAbusePunishment, m_iUploadRequestAbusePunishment == 11);
+		m_htiNoPunishment = m_ctrlTreeOptions.InsertRadioButton(GetResString(_T("NO_PUNISHMENT")), m_htiUploadRequestAbusePunishment, m_iUploadRequestAbusePunishment == 12);
+		m_ctrlTreeOptions.Expand(m_htiUploadRequestAbusePunishment, TVE_EXPAND);
+		LocalizeCommonItems();
+
 		m_htiDetectAgressive = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("DETECT_AGRESSIVE")), TVI_ROOT, m_bDetectAgressive);
 		m_htiAgressiveTime = m_ctrlTreeOptions.InsertItem(GetResString(_T("AGRESSIVE_TIME")), TREEOPTSCTRLIMG_EDIT, TREEOPTSCTRLIMG_EDIT, m_htiDetectAgressive);
 		m_ctrlTreeOptions.AddEditBox(m_htiAgressiveTime, RUNTIME_CLASS(CNumTreeOptionsEdit));
@@ -715,6 +746,13 @@ void CPPgProtectionPanel::DoDataExchange(CDataExchange* pDX)
 	DDX_TreeRadio(pDX, IDC_PROTECTION_PANEL_OPTS, m_htiFileFakerPunishment, m_iFileFakerPunishment);
 	DDX_TreeCheck(pDX, IDC_PROTECTION_PANEL_OPTS, m_htiDetectUploadFaker, m_bDetectUploadFaker);
 	DDX_TreeRadio(pDX, IDC_PROTECTION_PANEL_OPTS, m_htiUploadFakerPunishment, m_iUploadFakerPunishment);
+	DDX_TreeCheck(pDX, IDC_PROTECTION_PANEL_OPTS, m_htiDetectUploadRequestAbuse, m_bDetectUploadRequestAbuse);
+	DDX_TreeCheck(pDX, IDC_PROTECTION_PANEL_OPTS, m_htiDetectUploadRequestAbuseNoRequestSlots, m_bDetectUploadRequestAbuseNoRequestSlots);
+	DDX_TreeCheck(pDX, IDC_PROTECTION_PANEL_OPTS, m_htiDetectUploadRequestAbuseQueueDrops, m_bDetectUploadRequestAbuseQueueDrops);
+	DDX_TreeCheck(pDX, IDC_PROTECTION_PANEL_OPTS, m_htiUploadRequestAbuseCounterGuard, m_bUploadRequestAbuseCounterGuard);
+	DDX_TreeCheck(pDX, IDC_PROTECTION_PANEL_OPTS, m_htiUploadRequestAbuseHashRotationTracking, m_bUploadRequestAbuseHashRotationTracking);
+	DDX_TreeCheck(pDX, IDC_PROTECTION_PANEL_OPTS, m_htiUploadRequestAbusePostHelloDisconnect, m_bUploadRequestAbusePostHelloDisconnect);
+	DDX_TreeRadio(pDX, IDC_PROTECTION_PANEL_OPTS, m_htiUploadRequestAbusePunishment, m_iUploadRequestAbusePunishment);
 
 	DDX_TreeCheck(pDX, IDC_PROTECTION_PANEL_OPTS, m_htiDetectAgressive, m_bDetectAgressive);
 	DDX_TreeEdit(pDX, IDC_PROTECTION_PANEL_OPTS, m_htiAgressiveTime, m_iAgressiveTime);
@@ -831,6 +869,13 @@ BOOL CPPgProtectionPanel::OnInitDialog()
 
 	m_bDetectUploadFaker = thePrefs.IsDetectUploadFaker();
 	m_iUploadFakerPunishment = thePrefs.GetUploadFakerPunishment();
+	m_bDetectUploadRequestAbuse = thePrefs.IsDetectUploadRequestAbuse();
+	m_bDetectUploadRequestAbuseNoRequestSlots = thePrefs.IsDetectUploadRequestAbuseNoRequestSlots();
+	m_bDetectUploadRequestAbuseQueueDrops = thePrefs.IsDetectUploadRequestAbuseQueueDrops();
+	m_bUploadRequestAbuseCounterGuard = thePrefs.IsUploadRequestAbuseCounterGuard();
+	m_bUploadRequestAbuseHashRotationTracking = thePrefs.IsUploadRequestAbuseHashRotationTracking();
+	m_bUploadRequestAbusePostHelloDisconnect = thePrefs.IsUploadRequestAbusePostHelloDisconnect();
+	m_iUploadRequestAbusePunishment = thePrefs.GetUploadRequestAbusePunishment();
 
 	m_bDetectAgressive = thePrefs.IsDetectAgressive();
 	m_iAgressiveTime = (int)(thePrefs.GetAgressiveTime());
@@ -857,8 +902,43 @@ BOOL CPPgProtectionPanel::OnInitDialog()
 	CPropertyPage::OnInitDialog();
 	InitWindowStyles(this);
 	Localize();
+	UpdateLayout();
 
 	return TRUE;  // return TRUE unless you set the focus to the control. EXCEPTION: OCX Property Pages should return FALSE
+}
+
+void CPPgProtectionPanel::UpdateLayout()
+{
+	CWnd* pTree = GetDlgItem(IDC_PROTECTION_PANEL_OPTS);
+	CWnd* pInfo = GetDlgItem(IDC_PROTECTION_PANEL_OPTS_INFO);
+	if (pTree == NULL || pInfo == NULL || !::IsWindow(pTree->GetSafeHwnd()) || !::IsWindow(pInfo->GetSafeHwnd()))
+		return;
+
+	CRect rcClient;
+	GetClientRect(&rcClient);
+
+	CRect rcTree;
+	pTree->GetWindowRect(&rcTree);
+	ScreenToClient(&rcTree);
+
+	CRect rcInfo;
+	pInfo->GetWindowRect(&rcInfo);
+	ScreenToClient(&rcInfo);
+
+	const int iBottomMargin = max(1, rcInfo.left);
+	const int iInfoTop = max(rcTree.top + 1, rcClient.bottom - iBottomMargin - rcInfo.Height());
+	rcInfo.OffsetRect(0, iInfoTop - rcInfo.top);
+	pInfo->MoveWindow(&rcInfo);
+
+	rcTree.bottom = rcInfo.top;
+	if (rcTree.bottom > rcTree.top)
+		pTree->MoveWindow(&rcTree);
+}
+
+void CPPgProtectionPanel::OnSize(UINT nType, int cx, int cy)
+{
+	CPropertyPage::OnSize(nType, cx, cy);
+	UpdateLayout();
 }
 
 BOOL CPPgProtectionPanel::OnKillActive()
@@ -963,6 +1043,9 @@ BOOL CPPgProtectionPanel::OnApply()
 
 	if (thePrefs.m_bDetectUploadFaker && !m_bDetectUploadFaker)
 		theApp.clientlist->CancelCategoryPunishments(PR_UPLOADFAKER);
+
+	if (thePrefs.m_bDetectUploadRequestAbuse && !m_bDetectUploadRequestAbuse)
+		theApp.clientlist->CancelCategoryPunishments(PR_UPLOADREQUESTABUSE);
 
 	if (thePrefs.m_bDetectAgressive && !m_bDetectAgressive)
 		theApp.clientlist->CancelCategoryPunishments(PR_AGGRESSIVE);
@@ -1076,6 +1159,13 @@ BOOL CPPgProtectionPanel::OnApply()
 
 	thePrefs.m_bDetectUploadFaker = m_bDetectUploadFaker;
 	thePrefs.m_uUploadFakerPunishment = m_iUploadFakerPunishment;
+	thePrefs.m_bDetectUploadRequestAbuse = m_bDetectUploadRequestAbuse;
+	thePrefs.m_bDetectUploadRequestAbuseNoRequestSlots = m_bDetectUploadRequestAbuseNoRequestSlots;
+	thePrefs.m_bDetectUploadRequestAbuseQueueDrops = m_bDetectUploadRequestAbuseQueueDrops;
+	thePrefs.m_bUploadRequestAbuseCounterGuard = m_bUploadRequestAbuseCounterGuard;
+	thePrefs.m_bUploadRequestAbuseHashRotationTracking = m_bUploadRequestAbuseHashRotationTracking;
+	thePrefs.m_bUploadRequestAbusePostHelloDisconnect = m_bUploadRequestAbusePostHelloDisconnect;
+	thePrefs.m_uUploadRequestAbusePunishment = m_iUploadRequestAbusePunishment;
 
 	thePrefs.m_bDetectAgressive = m_bDetectAgressive;
 	thePrefs.m_iAgressiveTime = (uint16)m_iAgressiveTime;
@@ -1379,6 +1469,21 @@ void CPPgProtectionPanel::Localize(void)
 		LocalizeItemText(m_htiUploadFakerPunishment, _T("PUNISHMENT"));
 		LocalizeItemInfoText(m_htiUploadFakerPunishment,_T("GENERAL_PUNISHMENT_INFO"));
 
+		LocalizeItemText(m_htiDetectUploadRequestAbuse, _T("DETECT_UPLOAD_REQUEST_ABUSE"));
+		LocalizeItemInfoText(m_htiDetectUploadRequestAbuse,_T("DETECT_UPLOAD_REQUEST_ABUSE_INFO"));
+		LocalizeItemText(m_htiDetectUploadRequestAbuseNoRequestSlots, _T("UPLOAD_REQUEST_ABUSE_NO_REQUEST_SLOTS"));
+		LocalizeItemInfoText(m_htiDetectUploadRequestAbuseNoRequestSlots,_T("UPLOAD_REQUEST_ABUSE_NO_REQUEST_SLOTS_INFO"));
+		LocalizeItemText(m_htiDetectUploadRequestAbuseQueueDrops, _T("UPLOAD_REQUEST_ABUSE_QUEUE_DROPS"));
+		LocalizeItemInfoText(m_htiDetectUploadRequestAbuseQueueDrops,_T("UPLOAD_REQUEST_ABUSE_QUEUE_DROPS_INFO"));
+		LocalizeItemText(m_htiUploadRequestAbuseCounterGuard, _T("UPLOAD_REQUEST_ABUSE_COUNTER_GUARD"));
+		LocalizeItemInfoText(m_htiUploadRequestAbuseCounterGuard,_T("UPLOAD_REQUEST_ABUSE_COUNTER_GUARD_INFO"));
+		LocalizeItemText(m_htiUploadRequestAbuseHashRotationTracking, _T("UPLOAD_REQUEST_ABUSE_HASH_ROTATION"));
+		LocalizeItemInfoText(m_htiUploadRequestAbuseHashRotationTracking,_T("UPLOAD_REQUEST_ABUSE_HASH_ROTATION_INFO"));
+		LocalizeItemText(m_htiUploadRequestAbusePostHelloDisconnect, _T("UPLOAD_REQUEST_ABUSE_POST_HELLO_DISCONNECT"));
+		LocalizeItemInfoText(m_htiUploadRequestAbusePostHelloDisconnect,_T("UPLOAD_REQUEST_ABUSE_POST_HELLO_DISCONNECT_INFO"));
+		LocalizeItemText(m_htiUploadRequestAbusePunishment, _T("PUNISHMENT"));
+		LocalizeItemInfoText(m_htiUploadRequestAbusePunishment,_T("GENERAL_PUNISHMENT_INFO"));
+
 		LocalizeItemText(m_htiDetectAgressive, _T("DETECT_AGRESSIVE"));
 		LocalizeItemInfoText(m_htiDetectAgressive,_T("DETECT_AGRESSIVE_INFO"));
 		
@@ -1573,6 +1678,13 @@ void CPPgProtectionPanel::OnDestroy()
 	m_htiFileFakerPunishment = NULL;
 	m_htiDetectUploadFaker = NULL;
 	m_htiUploadFakerPunishment = NULL;
+	m_htiDetectUploadRequestAbuse = NULL;
+	m_htiDetectUploadRequestAbuseNoRequestSlots = NULL;
+	m_htiDetectUploadRequestAbuseQueueDrops = NULL;
+	m_htiUploadRequestAbuseCounterGuard = NULL;
+	m_htiUploadRequestAbuseHashRotationTracking = NULL;
+	m_htiUploadRequestAbusePostHelloDisconnect = NULL;
+	m_htiUploadRequestAbusePunishment = NULL;
 
 	m_htiDetectAgressive = NULL;
 	m_htiAgressiveTime = NULL;

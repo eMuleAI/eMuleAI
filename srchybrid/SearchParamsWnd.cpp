@@ -482,7 +482,7 @@ void CSearchParamsWnd::Localize()
 	SetDlgItemText(IDC_SEARCH_RESET, GetResString(_T("PW_RESET")));
 	SetDlgItemText(IDC_METH, GetResString(_T("METHOD")));
 
-	m_ctlStart.SetWindowText(GetResString(_T("SW_START")));
+	m_ctlStart.SetWindowText(GetResString(_T("START_VERB")));
 	m_ctlCancel.SetWindowText(GetResString(_T("CANCEL")));
 	m_ctlMore.SetWindowText(GetResString(_T("MORE")));
 

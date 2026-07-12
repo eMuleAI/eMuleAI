@@ -19,6 +19,9 @@
 #include "stdafx.h"
 #include <io.h>
 #include <share.h>
+#include <memory>
+#include <regex>
+#include <vector>
 #include <iphlpapi.h>
 #include "emule.h"
 #include "Preferences.h"
@@ -31,8 +34,10 @@
 #include "UploadQueue.h"
 #include "Statistics.h"
 #include "MD5Sum.h"
+#include "OtherFunctions.h"
 #include "PartFile.h"
 #include "ServerConnect.h"
+#include "Server.h"
 #include "ListenSocket.h"
 #include "ServerList.h"
 #include "SharedFileList.h"
@@ -44,17 +49,29 @@
 #include "VistaDefines.h"
 #include "cryptopp/osrng.h"
 #include "ClientCredits.h"
+#include "StringConversion.h"
 #include "TransferDlg.h"
 #include "ClientList.h"
 #include "kademlia\kademlia\Defines.h"
 #include "PreferencesDlg.h"
 #include "eMuleAI/DarkMode.h"
+#include "PartFileWriteThread.h"
 
 #ifdef _DEBUG
 #define new DEBUG_NEW
 #undef THIS_FILE
 static char THIS_FILE[] = __FILE__;
 #endif
+
+typedef DWORD (WINAPI* GetTcp6TableFunc)(PMIB_TCP6TABLE, PULONG, BOOL);
+
+static GetTcp6TableFunc GetTcp6TableProc()
+{
+	HMODULE hModule = ::GetModuleHandle(_T("iphlpapi.dll"));
+	if (hModule == NULL)
+		hModule = ::LoadLibrary(_T("iphlpapi.dll"));
+	return hModule != NULL ? reinterpret_cast<GetTcp6TableFunc>(::GetProcAddress(hModule, "GetTcp6Table")) : NULL;
+}
 
 #define SHAREDDIRS _T("shareddir.dat")
 LPCTSTR const strPreferencesDat = _T("preferences.dat");
@@ -73,6 +90,356 @@ namespace
 	const int DEFAULT_UPLOAD_CAPACITY_MBIT = 50;
 	const UINT DEFAULT_MIN_FREE_DISK_SPACE = 2000u * 1024u * 1024u;
 	LPCTSTR const MISSING_INI_VALUE = _T("__missing__");
+	volatile LONG g_lPreferencesDatSaveGeneration = 0;
+	volatile LONG g_lPreferencesIniSaveGeneration = 0;
+	volatile LONG g_lStatisticsIniSaveGeneration = 0;
+	volatile LONG g_lStatisticsBackupIniSaveGeneration = 0;
+	volatile LONG g_lStatisticsBackupTempIniSaveGeneration = 0;
+	volatile LONG g_lCategoryIniSaveGeneration = 0;
+	volatile LONG g_lBlacklistSaveGeneration = 0;
+	volatile LONG g_lSharedFoldersSaveGeneration = 0;
+
+	UINT NormalizeUnsignedIniValue(int iValue, UINT uDefault, UINT uMin, UINT uMax)
+	{
+		if (iValue < 0)
+			return min(max(uDefault, uMin), uMax);
+		return min(max(static_cast<UINT>(iValue), uMin), uMax);
+	}
+
+	void AppendRawBytes(std::vector<BYTE>& data, const void* pBytes, size_t nBytes)
+	{
+		if (pBytes == NULL || nBytes == 0)
+			return;
+		const BYTE* pBegin = static_cast<const BYTE*>(pBytes);
+		data.insert(data.end(), pBegin, pBegin + nBytes);
+	}
+
+	void AppendTCharBytes(std::vector<BYTE>& data, LPCTSTR pszText, int nChars)
+	{
+		if (pszText == NULL || nChars <= 0)
+			return;
+		AppendRawBytes(data, pszText, static_cast<size_t>(nChars) * sizeof(TCHAR));
+	}
+
+	void AppendCStringBytes(std::vector<BYTE>& data, const CString& strText)
+	{
+		AppendTCharBytes(data, strText, strText.GetLength());
+	}
+
+	bool IsPreferencesIniFilePath(const CString& strPath)
+	{
+		int iSlash = strPath.ReverseFind(_T('\\'));
+		const int iAltSlash = strPath.ReverseFind(_T('/'));
+		if (iAltSlash > iSlash)
+			iSlash = iAltSlash;
+		const CString strFileName = iSlash >= 0 ? strPath.Mid(iSlash + 1) : strPath;
+		return strFileName.CompareNoCase(_T("preferences.ini")) == 0;
+	}
+
+	bool QueueConfigFileSnapshot(const CString& strFinalPath, LPCTSTR pszLogName, LPCTSTR pszPayloadName, volatile LONG* plGeneration, const std::vector<BYTE>& data, bool bSynchronous = false)
+	{
+		static LPCTSTR const stmp = _T(".tmp");
+		AsyncDiskWriteData* pData = new AsyncDiskWriteData;
+		pData->lGeneration = ::InterlockedIncrement(plGeneration);
+		pData->plGeneration = plGeneration;
+		pData->strTempPath = strFinalPath + stmp;
+		pData->strFinalPath = strFinalPath;
+		pData->strLogName = pszLogName;
+		pData->strPayloadName = pszPayloadName;
+		pData->eConflictPolicy = AsyncDiskWriteConflictLastSnapshotWins;
+		pData->eReplacePolicy = AsyncDiskWriteReplaceFinal;
+		pData->data = data;
+		const bool bWriteSynchronous = bSynchronous || IsPreferencesIniFilePath(strFinalPath);
+		if (!bWriteSynchronous)
+			return CPartFileWriteThread::QueueOrWriteDiskSnapshot(pData);
+		const bool bResult = CPartFileWriteThread::WriteDiskSnapshotNow(*pData);
+		delete pData;
+		return bResult;
+	}
+
+	bool ReadConfigFileSnapshotBytes(const CString& strSourcePath, std::vector<BYTE>& data)
+	{
+		data.clear();
+		CFile file;
+		CFileException fex;
+		if (!file.Open(strSourcePath, CFile::modeRead | CFile::typeBinary | CFile::shareDenyWrite, &fex))
+			return false;
+
+		try {
+			ULONGLONG ullRemaining = file.GetLength();
+			static const UINT uChunkSize = 64 * 1024;
+			while (ullRemaining > 0) {
+				const UINT uChunk = ullRemaining > uChunkSize ? uChunkSize : static_cast<UINT>(ullRemaining);
+				const size_t uOldSize = data.size();
+				data.resize(uOldSize + uChunk);
+				const UINT uRead = file.Read(&data[uOldSize], uChunk);
+				if (uRead != uChunk) {
+					file.Close();
+					data.clear();
+					return false;
+				}
+				ullRemaining -= uRead;
+			}
+			file.Close();
+			return true;
+		} catch (CFileException* ex) {
+			ex->Delete();
+			file.Abort();
+		} catch (...) {
+			file.Abort();
+		}
+		data.clear();
+		return false;
+	}
+
+	bool PromoteConfigFileSnapshot(const CString& strSourcePath, const CString& strFinalPath, LPCTSTR pszLogName, LPCTSTR pszPayloadName, volatile LONG* plGeneration, bool bDeleteSource)
+	{
+		std::vector<BYTE> data;
+		if (!ReadConfigFileSnapshotBytes(strSourcePath, data))
+			return false;
+		if (!QueueConfigFileSnapshot(strFinalPath, pszLogName, pszPayloadName, plGeneration, data, true))
+			return false;
+		if (bDeleteSource)
+			(void)_tremove(strSourcePath);
+		return true;
+	}
+
+	bool HasIniSectionEntries(LPCTSTR pszFileName, LPCTSTR pszSection)
+	{
+		if (pszFileName == NULL || pszSection == NULL)
+			return false;
+		std::vector<TCHAR> entries(4096, _T('\0'));
+		const DWORD cchCopied = GetPrivateProfileSection(pszSection, &entries[0], static_cast<DWORD>(entries.size()), pszFileName);
+		return cchCopied > 0;
+	}
+
+	struct SProfileIniEntry
+	{
+		CStringA strKey;
+		CStringA strValue;
+	};
+
+	struct SProfileIniSection
+	{
+		CStringA strName;
+		std::vector<SProfileIniEntry> entries;
+	};
+
+	class CProfileIniSnapshotBuilder
+	{
+	public:
+		CProfileIniSnapshotBuilder(LPCTSTR pszFileName, LPCTSTR pszSection, LPCTSTR pszLogName = _T("preferences.ini"), LPCTSTR pszPayloadName = _T("preferences-ini"), volatile LONG* plGeneration = &g_lPreferencesIniSaveGeneration, bool bLoadExisting = true)
+			: m_state(new SState(pszFileName != NULL ? pszFileName : _T("")))
+			, m_strSection(pszSection != NULL ? pszSection : _T(""))
+		{
+			m_state->strLogName = pszLogName != NULL ? pszLogName : _T("preferences.ini");
+			m_state->strPayloadName = pszPayloadName != NULL ? pszPayloadName : _T("preferences-ini");
+			m_state->plGeneration = plGeneration != NULL ? plGeneration : &g_lPreferencesIniSaveGeneration;
+			if (bLoadExisting)
+				LoadExisting();
+		}
+
+		CProfileIniSnapshotBuilder(const CProfileIniSnapshotBuilder& source, LPCTSTR pszSection)
+			: m_state(source.m_state)
+			, m_strSection(pszSection != NULL ? pszSection : _T(""))
+		{
+		}
+
+		void SetSection(const CString& rstrSection)
+		{
+			m_strSection = rstrSection;
+		}
+
+		void WriteString(LPCTSTR lpszEntry, LPCTSTR lpsz, LPCTSTR lpszSection = NULL)
+		{
+			SetValue(lpszEntry, CStringA(lpsz != NULL ? lpsz : (LPCTSTR)EMPTY), lpszSection);
+		}
+
+		void WriteStringUTF8(LPCTSTR lpszEntry, LPCTSTR lpsz, LPCTSTR lpszSection = NULL)
+		{
+			SetValue(lpszEntry, StrToUtf8(CString(lpsz != NULL ? lpsz : (LPCTSTR)EMPTY)), lpszSection);
+		}
+
+		void WriteInt(LPCTSTR lpszEntry, int n, LPCTSTR lpszSection = NULL)
+		{
+			TCHAR szBuffer[MAX_PATH];
+			_itot(n, szBuffer, 10);
+			SetValue(lpszEntry, CStringA(szBuffer), lpszSection);
+		}
+
+		void WriteUInt64(LPCTSTR lpszEntry, ULONGLONG n, LPCTSTR lpszSection = NULL)
+		{
+			TCHAR szBuffer[MAX_PATH];
+			_ui64tot(n, szBuffer, 10);
+			SetValue(lpszEntry, CStringA(szBuffer), lpszSection);
+		}
+
+		void WriteFloat(LPCTSTR lpszEntry, float f, LPCTSTR lpszSection = NULL)
+		{
+			TCHAR szBuffer[MAX_PATH];
+			_sntprintf(szBuffer, _countof(szBuffer), _T("%g"), f);
+			szBuffer[_countof(szBuffer) - 1] = _T('\0');
+			SetValue(lpszEntry, CStringA(szBuffer), lpszSection);
+		}
+
+		void WriteBool(LPCTSTR lpszEntry, bool b, LPCTSTR lpszSection = NULL)
+		{
+			SetValue(lpszEntry, b ? "1" : "0", lpszSection);
+		}
+
+		bool WriteBinary(LPCTSTR lpszEntry, LPBYTE pData, size_t nBytes, LPCTSTR lpszSection = NULL)
+		{
+			CStringA strValue;
+			LPSTR pszValue = strValue.GetBuffer(static_cast<int>(nBytes * 2));
+			for (size_t i = 0; i < nBytes; ++i) {
+				*pszValue++ = static_cast<char>((pData[i] & 0x0F) + 'A');
+				*pszValue++ = static_cast<char>(((pData[i] >> 4) & 0x0F) + 'A');
+			}
+			strValue.ReleaseBuffer(static_cast<int>(nBytes * 2));
+			SetValue(lpszEntry, strValue, lpszSection);
+			return true;
+		}
+
+		void DeleteKey(LPCTSTR lpszKey)
+		{
+			if (lpszKey == NULL)
+				return;
+			SProfileIniSection* pSection = FindSection(CStringA(m_strSection));
+			if (pSection == NULL)
+				return;
+			const CStringA strKey(lpszKey);
+			for (std::vector<SProfileIniEntry>::iterator it = pSection->entries.begin(); it != pSection->entries.end(); ++it) {
+				if (it->strKey.CompareNoCase(strKey) == 0) {
+					pSection->entries.erase(it);
+					return;
+				}
+			}
+		}
+
+		bool Commit(bool bSynchronous = false) const
+		{
+			std::vector<BYTE> data;
+			for (std::vector<SProfileIniSection>::const_iterator itSection = m_state->sections.begin(); itSection != m_state->sections.end(); ++itSection) {
+				if (itSection->strName.IsEmpty())
+					continue;
+				CStringA strLine;
+				strLine.Format("[%s]\r\n", (LPCSTR)itSection->strName);
+				AppendRawBytes(data, (LPCSTR)strLine, strLine.GetLength());
+				for (std::vector<SProfileIniEntry>::const_iterator itEntry = itSection->entries.begin(); itEntry != itSection->entries.end(); ++itEntry) {
+					strLine = itEntry->strKey + "=" + itEntry->strValue + "\r\n";
+					AppendRawBytes(data, (LPCSTR)strLine, strLine.GetLength());
+				}
+				AppendRawBytes(data, "\r\n", 2);
+			}
+			return QueueConfigFileSnapshot(m_state->strFileName, m_state->strLogName, m_state->strPayloadName, m_state->plGeneration, data, bSynchronous);
+		}
+
+	private:
+		struct SState
+		{
+			explicit SState(LPCTSTR pszFileName)
+				: strFileName(pszFileName != NULL ? pszFileName : _T(""))
+				, iniWriteLock(&GetIniFileWriteLock(), FALSE)
+				, plGeneration(NULL)
+			{
+				if (IsPreferencesIniFilePath(strFileName))
+					iniWriteLock.Lock();
+			}
+
+			CString strFileName;
+			CString strLogName;
+			CString strPayloadName;
+			CSingleLock iniWriteLock;
+			volatile LONG* plGeneration;
+			std::vector<SProfileIniSection> sections;
+		};
+
+		SProfileIniSection* FindSection(const CStringA& strSection) const
+		{
+			for (std::vector<SProfileIniSection>::iterator it = m_state->sections.begin(); it != m_state->sections.end(); ++it) {
+				if (it->strName.CompareNoCase(strSection) == 0)
+					return &*it;
+			}
+			return NULL;
+		}
+
+		SProfileIniSection& GetOrAddSection(const CStringA& strSection)
+		{
+			SProfileIniSection* pSection = FindSection(strSection);
+			if (pSection != NULL)
+				return *pSection;
+			SProfileIniSection section;
+			section.strName = strSection;
+			m_state->sections.push_back(section);
+			return m_state->sections.back();
+		}
+
+		void SetValue(LPCTSTR lpszEntry, const CStringA& strValue, LPCTSTR lpszSection)
+		{
+			if (lpszSection != NULL)
+				m_strSection = lpszSection;
+			if (lpszEntry == NULL)
+				return;
+			const CStringA strKey(lpszEntry);
+			SProfileIniSection& section = GetOrAddSection(CStringA(m_strSection));
+			for (std::vector<SProfileIniEntry>::iterator it = section.entries.begin(); it != section.entries.end(); ++it) {
+				if (it->strKey.CompareNoCase(strKey) == 0) {
+					it->strValue = strValue;
+					return;
+				}
+			}
+			SProfileIniEntry entry;
+			entry.strKey = strKey;
+			entry.strValue = strValue;
+			section.entries.push_back(entry);
+		}
+
+		void LoadExisting()
+		{
+			const CStringA strFileNameA(m_state->strFileName);
+			DWORD cchBuffer = 4096;
+			std::vector<char> sectionNames;
+			for (;;) {
+				sectionNames.assign(cchBuffer, '\0');
+				const DWORD cchCopied = GetPrivateProfileSectionNamesA(&sectionNames[0], cchBuffer, strFileNameA);
+				if (cchCopied < cchBuffer - 2 || cchBuffer >= 262144)
+					break;
+				cchBuffer *= 2;
+			}
+			for (LPCSTR pszSection = &sectionNames[0]; *pszSection != '\0'; pszSection += lstrlenA(pszSection) + 1) {
+				SProfileIniSection section;
+				section.strName = pszSection;
+				LoadSectionEntries(section, strFileNameA);
+				m_state->sections.push_back(section);
+			}
+		}
+
+		void LoadSectionEntries(SProfileIniSection& section, const CStringA& strFileNameA)
+		{
+			DWORD cchBuffer = 4096;
+			std::vector<char> entries;
+			for (;;) {
+				entries.assign(cchBuffer, '\0');
+				const DWORD cchCopied = GetPrivateProfileSectionA(section.strName, &entries[0], cchBuffer, strFileNameA);
+				if (cchCopied < cchBuffer - 2 || cchBuffer >= 262144)
+					break;
+				cchBuffer *= 2;
+			}
+			for (LPCSTR pszEntry = &entries[0]; *pszEntry != '\0'; pszEntry += lstrlenA(pszEntry) + 1) {
+				const CStringA strLine(pszEntry);
+				const int iEquals = strLine.Find('=');
+				if (iEquals < 0)
+					continue;
+				SProfileIniEntry entry;
+				entry.strKey = strLine.Left(iEquals);
+				entry.strValue = strLine.Mid(iEquals + 1);
+				section.entries.push_back(entry);
+			}
+		}
+
+		std::shared_ptr<SState> m_state;
+		CString m_strSection;
+	};
 
 	uint32 MbitPerSecToKBytesPerSec(uint32 nMbitPerSec)
 	{
@@ -192,14 +559,14 @@ namespace
 	CPreferences* g_pPreferences = NULL;
 }
 
-CPreferences& BB_GetPreferences()
+CPreferences& GetPreferencesStorage()
 {
 	if (g_pPreferences == NULL)
 		g_pPreferences = new CPreferences;
 	return *g_pPreferences;
 }
 
-void BB_FreePreferences() noexcept
+void FreePreferencesStorage() noexcept
 {
 	delete g_pPreferences;
 	g_pPreferences = NULL;
@@ -219,9 +586,36 @@ LPCSTR	CPreferences::m_pszBindAddrA;
 CStringA CPreferences::m_strBindAddrA;
 LPCWSTR	CPreferences::m_pszBindAddrW;
 CStringW CPreferences::m_strBindAddrW;
+LPCSTR	CPreferences::m_pszP2PBindAddrA;
+CStringA CPreferences::m_strP2PBindAddrA;
+LPCWSTR	CPreferences::m_pszP2PBindAddrW;
+CStringW CPreferences::m_strP2PBindAddrW;
+CString	CPreferences::m_strBindInterfaceId;
+CString	CPreferences::m_strBindInterfaceName;
+CString	CPreferences::m_strConfiguredBindAddr;
+CString	CPreferences::m_strActiveBindInterfaceId;
+CString	CPreferences::m_strActiveBindInterfaceName;
+CString	CPreferences::m_strActiveConfiguredBindAddr;
+ENetBindResolveResult CPreferences::m_eActiveBindResolveResult = NBR_Default;
+DWORD	CPreferences::m_dwActiveBindIpv4IfIndex = 0;
+DWORD	CPreferences::m_dwActiveBindIpv6IfIndex = 0;
+CAddress::EAF CPreferences::m_eActiveBindResolvedFamily = CAddress::None;
+EIpGuardMode CPreferences::m_eIpGuardMode = IpGuardModeOff;
+CString	CPreferences::m_strIpGuardAllowedPublicIpRanges;
+bool	CPreferences::m_bVpnGuardEnabled = false;
+CString	CPreferences::m_strVpnGuardCountryCode;
+bool	CPreferences::m_bVpnGuardBlockUnknownCountry = false;
+bool	CPreferences::m_bRandomizePortsOnStartup;
+uint16	CPreferences::m_nRandomPortRangeStart = CPreferences::GetDefaultRandomPortRangeStart();
+uint16	CPreferences::m_nRandomPortRangeEnd = CPreferences::GetDefaultRandomPortRangeEnd();
+bool	CPreferences::m_bOpenListenPortsInWindowsFirewall;
 uint16	CPreferences::port;
+uint16	CPreferences::m_nConfiguredPort;
+bool	CPreferences::m_bConfiguredPortAutoGenerated;
 uint16	CPreferences::m_nStartupTcpPortOverride;
 uint16	CPreferences::udpport;
+uint16	CPreferences::m_nConfiguredUDPPort;
+bool	CPreferences::m_bConfiguredUDPPortAutoGenerated;
 uint16	CPreferences::nServerUDPPort;
 UINT	CPreferences::maxconnections;
 UINT	CPreferences::maxhalfconnections;
@@ -395,6 +789,10 @@ uint8	CPreferences::m_nMaxEServerBuddySlots = ESERVERBUDDY_DEFAULT_SLOTS;
 uint16	CPreferences::m_nEServerDiscoveredExternalUdpPort = 0;
 DWORD	CPreferences::m_dwEServerDiscoveredExternalUdpPortTime = 0;
 uint8	CPreferences::m_uEServerDiscoveredExternalUdpPortSource = 0;
+uint32	CPreferences::m_dwEServerDiscoveredExternalUdpPortPublicIP = 0;
+uint32	CPreferences::m_dwEServerDiscoveredExternalUdpPortServerIP = 0;
+uint16	CPreferences::m_nEServerDiscoveredExternalUdpPortServerPort = 0;
+uint32	CPreferences::m_dwEServerDiscoveredExternalUdpPortBuddyIP = 0;
 DWORD	CPreferences::m_dwServerKeepAliveTimeout;
 UINT	CPreferences::statsMax;
 UINT	CPreferences::statsAverageMinutes;
@@ -405,6 +803,7 @@ bool	CPreferences::notifierOnChat;
 bool	CPreferences::notifierOnLog;
 bool	CPreferences::notifierOnImportantError;
 bool	CPreferences::notifierOnEveryChatMsg;
+ENotifierDisplayMode CPreferences::notifierDisplayMode = ntfdmCustomPopup;
 ENotifierSoundType CPreferences::notifierSoundType = ntfstNoSound;
 CString	CPreferences::notifierSoundFile;
 CString CPreferences::m_strIRCServer;
@@ -611,7 +1010,6 @@ bool	CPreferences::m_bRunAsUser;
 bool	CPreferences::m_bPreferRestrictedOverUser;
 bool	CPreferences::m_bUseOldTimeRemaining;
 
-bool	CPreferences::m_bOpenPortsOnStartUp;
 int		CPreferences::m_byLogLevel;
 bool	CPreferences::m_bTrustEveryHash;
 bool	CPreferences::m_bRememberCancelledFiles;
@@ -639,7 +1037,7 @@ int		CPreferences::m_nLastWorkingImpl;
 
 bool	CPreferences::m_bEnableSearchResultFilter;
 
-BOOL	CPreferences::m_bIsRunningAeroGlass;
+BOOL	CPreferences::m_bIsDwmCompositionEnabled;
 bool	CPreferences::m_bPreventStandby;
 bool	CPreferences::m_bStoreSearches;
 
@@ -649,15 +1047,21 @@ bool	CPreferences::m_bUITweaksSpeedGraph;
 bool	CPreferences::m_bDisableFindAsYouType;
 int		CPreferences::m_iUITweaksListUpdatePeriod;
 
-int		CPreferences::m_iGeoLite2Mode;
-bool	CPreferences::m_bGeoLite2ShowFlag;
+int		CPreferences::m_iIPGeolocationMode;
+bool	CPreferences::m_bIPGeolocationShowFlag;
+bool	CPreferences::m_bAutoIPGeolocationUpdate;
+int		CPreferences::m_nIPGeolocationUpdatePeriodDays;
+time_t	CPreferences::m_tLastIPGeolocationUpdate;
+CString	CPreferences::m_strIPGeolocationUpdateURL;
 
 bool	CPreferences::m_bConnectionChecker;
 CString	CPreferences::m_sConnectionCheckerServer;
 
 bool	CPreferences::m_bEnableNatTraversal;
+int		CPreferences::m_iNatTraversalProtocolMode;
 bool	CPreferences::m_bLogExtendedSXEvents;
 bool	CPreferences::m_bLogNatTraversalEvents;
+bool	CPreferences::m_bLogUiResponsivenessEvents;
 uint16	CPreferences::m_uNatTraversalPortWindow = 512;
 uint16	CPreferences::m_uNatTraversalSweepWindow = 16;
 uint32	CPreferences::m_uNatTraversalJitterMinMs = 50;
@@ -673,25 +1077,34 @@ bool	CPreferences::m_bInformQueuedClientsAfterIPChange;
 
 uint32	CPreferences::m_uReAskTimeDif;
 
-int		CPreferences::m_iDownloadChecker;
-int		CPreferences::m_iDownloadCheckerAcceptPercentage;
-bool	CPreferences::m_bDownloadCheckerRejectCanceled;
-bool	CPreferences::m_bDownloadCheckerRejectSameHash;
-bool	CPreferences::m_bDownloadCheckerRejectBlacklisted;
-bool	CPreferences::m_bDownloadCheckerCaseInsensitive;
-bool	CPreferences::m_bDownloadCheckerIgnoreExtension;
-bool	CPreferences::m_bDownloadCheckerIgnoreTags;
-bool	CPreferences::m_bDownloadCheckerDontIgnoreNumericTags;
-bool	CPreferences::m_bDownloadCheckerIgnoreNonAlphaNumeric;
-int		CPreferences::m_iDownloadCheckerMinimumComparisonLength;
-bool	CPreferences::m_bDownloadCheckerSkipIncompleteFileConfirmation;
-bool	CPreferences::m_bDownloadCheckerMarkAsBlacklisted;
-bool	CPreferences::m_bDownloadCheckerAutoMarkAsBlacklisted;
+int		CPreferences::m_iDownloadValidator;
+int		CPreferences::m_iDownloadValidatorAcceptPercentage;
+bool	CPreferences::m_bDownloadValidatorRejectCanceled;
+bool	CPreferences::m_bDownloadValidatorRejectSameHash;
+bool	CPreferences::m_bDownloadValidatorRejectBlacklisted;
+bool	CPreferences::m_bDownloadValidatorCaseInsensitive;
+bool	CPreferences::m_bDownloadValidatorIgnoreExtension;
+bool	CPreferences::m_bDownloadValidatorIgnoreTags;
+bool	CPreferences::m_bDownloadValidatorDontIgnoreNumericTags;
+bool	CPreferences::m_bDownloadValidatorIgnoreNonAlphaNumeric;
+int		CPreferences::m_iDownloadValidatorMinimumComparisonLength;
+bool	CPreferences::m_bDownloadValidatorSkipIncompleteFileConfirmation;
+bool	CPreferences::m_bDownloadValidatorMarkAsBlacklisted;
+bool	CPreferences::m_bDownloadValidatorAutoMarkAsBlacklisted;
+bool	CPreferences::m_bDownloadValidatorDateTimeMatching;
+bool	CPreferences::m_bDownloadValidatorDateTimeUseYearRange;
+int		CPreferences::m_iDownloadValidatorDateTimeYearStart;
+int		CPreferences::m_iDownloadValidatorDateTimeYearEnd;
+bool	CPreferences::m_bDownloadValidatorDateTimeCheckSeconds;
+bool	CPreferences::m_bDownloadValidatorDateTimeIncludeFollowingNumericValues;
 
 int		CPreferences::m_iDownloadInspector;
 bool	CPreferences::m_bDownloadInspectorFake;
 bool	CPreferences::m_bDownloadInspectorDRM;
 bool	CPreferences::m_bDownloadInspectorAutoRenameToMajorityName;
+bool	CPreferences::m_bDownloadInspectorAutoRenameToMajorityNameForNewDownloadsOnly;
+int		CPreferences::m_iDownloadInspectorAutoRenameToMajorityNameRequiredPercent;
+int		CPreferences::m_iDownloadInspectorAutoRenameToMajorityNameMinimumVotes;
 bool	CPreferences::m_bDownloadInspectorInvalidExt;
 int		CPreferences::m_iDownloadInspectorCheckPeriod;
 int		CPreferences::m_iDownloadInspectorCompletedThreshold;
@@ -715,7 +1128,12 @@ bool	CPreferences::m_bDownloadInspectorAutoDeleteDontMarkAsCanceled;
 
 bool	 CPreferences::m_bGroupKnownAtTheBottom;
 int		 CPreferences::m_iSpamThreshold;
+int		 CPreferences::m_iEd2kSearchMaxResults;
+int		 CPreferences::m_iEd2kSearchMaxMoreRequests;
+int		 CPreferences::m_iKadFileSearchTotal;
 int		 CPreferences::m_iKadSearchKeywordTotal;
+int		 CPreferences::m_iKadFileSearchLifetime;
+int		 CPreferences::m_iKadSearchKeywordLifetime;
 bool	 CPreferences::m_bShowCloseButtonOnSearchTabs;
 
 bool	CPreferences::m_bRepeatServerList;
@@ -729,6 +1147,7 @@ std::atomic_bool CPreferences::m_bAutoShareSubdirs{ false };
 std::atomic_bool CPreferences::m_bDontShareExtensions{ true };
 CCriticalSection CPreferences::m_mutPreferences;
 CCriticalSection CPreferences::m_csSharedDirList;
+CCriticalSection CPreferences::m_csBlacklistList;
 CCriticalSection CPreferences::m_csDontShareExtList;
 CString CPreferences::m_sDontShareExtensionsList;
 bool	CPreferences::m_bAdjustNTFSDaylightFileTime = false; // Official preference: 'true' causes rehashing in XP and above when DST switches on/off
@@ -742,6 +1161,22 @@ bool	CPreferences::m_bPowerShareInternalPrio;
 int		CPreferences::m_iPowerShareLimit;
 int		CPreferences::m_iSharePermissions;
 bool	CPreferences::m_bSharePermissionColorRows;
+uint32	CPreferences::m_uHighBandwidthTargetUploadClients;
+uint32	CPreferences::m_uHighBandwidthUploadSlotElasticPercent;
+bool	CPreferences::m_bHighBandwidthUploadPolicy;
+bool	CPreferences::m_bAutoHighBandwidthDownloadBuffer;
+float	CPreferences::m_fHighBandwidthSlowUploadThresholdFactor;
+UINT	CPreferences::m_uHighBandwidthSlowUploadGraceSeconds;
+UINT	CPreferences::m_uHighBandwidthSlowUploadWarmupSeconds;
+UINT	CPreferences::m_uHighBandwidthZeroUploadGraceSeconds;
+UINT	CPreferences::m_uHighBandwidthSlowUploadCooldownSeconds;
+bool	CPreferences::m_bLowRatioQueueScoreBoost;
+float	CPreferences::m_fLowRatioQueueScoreThreshold;
+UINT	CPreferences::m_uLowRatioQueueScoreBonus;
+ESessionTransferLimitMode CPreferences::m_eUploadSessionTransferLimitMode = ESessionTransferLimitMode::Disabled;
+UINT	CPreferences::m_uUploadSessionTransferLimitPercent;
+UINT	CPreferences::m_uUploadSessionTransferLimitMiB;
+UINT	CPreferences::m_uUploadSessionTimeLimitSeconds;
 
 bool	CPreferences::m_bEmulateMLDonkey;
 bool	CPreferences::m_bEmulateEdonkey;
@@ -872,6 +1307,13 @@ bool	CPreferences::m_bDetectFileFaker;
 uint8	CPreferences::m_uFileFakerPunishment;
 bool	CPreferences::m_bDetectUploadFaker;
 uint8	CPreferences::m_uUploadFakerPunishment;
+bool	CPreferences::m_bDetectUploadRequestAbuse;
+bool	CPreferences::m_bDetectUploadRequestAbuseNoRequestSlots;
+bool	CPreferences::m_bDetectUploadRequestAbuseQueueDrops;
+bool	CPreferences::m_bUploadRequestAbuseCounterGuard;
+bool	CPreferences::m_bUploadRequestAbuseHashRotationTracking;
+bool	CPreferences::m_bUploadRequestAbusePostHelloDisconnect;
+uint8	CPreferences::m_uUploadRequestAbusePunishment;
 bool	CPreferences::m_bDetectAgressive;
 uint16  CPreferences::m_iAgressiveTime;
 uint16  CPreferences::m_iAgressiveCounter;
@@ -897,6 +1339,355 @@ bool	 CPreferences::m_bBlacklistManual;
 bool	 CPreferences::m_bBlacklistAutoRemoveFromManual;
 bool	 CPreferences::m_bBlacklistLog;
 CStringList CPreferences::blacklist_list;
+
+namespace
+{
+	enum ECompiledBlacklistRuleMode
+	{
+		CBRM_Plain,
+		CBRM_ReplaceNonAlphaNumeric,
+		CBRM_RemoveNonAlphaNumeric,
+		CBRM_Extension,
+		CBRM_Regex
+	};
+
+	struct SCompiledBlacklistRule
+	{
+		SCompiledBlacklistRule()
+			: eMode(CBRM_Plain)
+			, bRegexValid(false)
+		{
+		}
+
+		CString strOriginalLine;
+		ECompiledBlacklistRuleMode eMode;
+		CString strExtension;
+		std::vector<CString> astrPositiveTerms;
+		std::vector<CString> astrNegativeTerms;
+		CString strRegexPattern;
+		std::basic_regex<TCHAR> regex;
+		bool bRegexValid;
+	};
+
+	struct SBlacklistFilenameContext
+	{
+		explicit SBlacklistFilenameContext(const CString& strFilename)
+			: strOriginalFilename(strFilename)
+			, bReplacePrepared(false)
+			, bRemovePrepared(false)
+		{
+			strLowerFilename = strFilename;
+			strLowerFilename.MakeLower();
+			strExtension = ::PathFindExtension(strLowerFilename);
+			if (strExtension.GetLength() > 1)
+				strExtension = strExtension.Mid(1);
+			else
+				strExtension.Empty();
+			strPlainTarget = CString(_T(" ")) + strLowerFilename;
+		}
+
+		const CString& GetTarget(ECompiledBlacklistRuleMode eMode)
+		{
+			if (eMode == CBRM_ReplaceNonAlphaNumeric) {
+				if (!bReplacePrepared) {
+					strReplaceTarget = CString(_T(" ")) + ReplaceNonAlphaNumeric(strLowerFilename);
+					bReplacePrepared = true;
+				}
+				return strReplaceTarget;
+			}
+			if (eMode == CBRM_RemoveNonAlphaNumeric) {
+				if (!bRemovePrepared) {
+					strRemoveTarget = CString(_T(" ")) + RemoveNonAlphaNumeric(strLowerFilename);
+					bRemovePrepared = true;
+				}
+				return strRemoveTarget;
+			}
+			return strPlainTarget;
+		}
+
+		CString strOriginalFilename;
+		CString strLowerFilename;
+		CString strPlainTarget;
+		CString strReplaceTarget;
+		CString strRemoveTarget;
+		CString strExtension;
+		bool bReplacePrepared;
+		bool bRemovePrepared;
+	};
+
+	std::vector<SCompiledBlacklistRule> g_compiledBlacklistRules;
+	CCriticalSection g_compiledBlacklistRulesLock;
+	bool g_bCompiledBlacklistRulesDirty = true;
+
+	void TokenizeBlacklistRule(const CString& strLine, CStringArray& astrTokens)
+	{
+		astrTokens.RemoveAll();
+		CString strToken;
+		int iQuoteCount = 0;
+		for (int i = 0; i < strLine.GetLength(); ++i) {
+			const TCHAR ch = strLine[i];
+			if (ch == _T('"'))
+				++iQuoteCount;
+			if (ch == _T(' ') && (iQuoteCount % 2) == 0) {
+				strToken.Trim();
+				if (!strToken.IsEmpty())
+					astrTokens.Add(strToken);
+				strToken.Empty();
+				continue;
+			}
+			strToken.AppendChar(ch);
+		}
+
+		if ((iQuoteCount % 2) != 0) {
+			astrTokens.RemoveAll();
+			return;
+		}
+
+		strToken.Trim();
+		if (!strToken.IsEmpty())
+			astrTokens.Add(strToken);
+	}
+
+	CString NormalizeBlacklistTerm(CString strTerm, ECompiledBlacklistRuleMode eMode)
+	{
+		strTerm.Trim();
+		strTerm.Remove(_T('"'));
+		strTerm.MakeLower();
+		if (eMode == CBRM_ReplaceNonAlphaNumeric)
+			strTerm = ReplaceNonAlphaNumeric(strTerm);
+		else if (eMode == CBRM_RemoveNonAlphaNumeric)
+			strTerm = RemoveNonAlphaNumeric(strTerm);
+		return strTerm;
+	}
+
+	bool CompileBlacklistLine(const CString& strOriginalLine, SCompiledBlacklistRule& rule)
+	{
+		CString strWork(strOriginalLine);
+		strWork.TrimLeft();
+		if (strWork.IsEmpty() || strWork[0] == _T('#'))
+			return false;
+
+		rule.strOriginalLine = strOriginalLine;
+		if (strWork[0] == _T('/')) {
+			rule.eMode = CBRM_ReplaceNonAlphaNumeric;
+			strWork = strWork.Mid(1);
+		} else if (strWork[0] == _T('|')) {
+			rule.eMode = CBRM_RemoveNonAlphaNumeric;
+			strWork = strWork.Mid(1);
+		} else if (strWork[0] == _T('*')) {
+			rule.eMode = CBRM_Extension;
+			strWork = strWork.Mid(1);
+		} else if (strWork[0] == _T('\\')) {
+			rule.eMode = CBRM_Regex;
+			strWork = strWork.Mid(1);
+			rule.strRegexPattern = strWork;
+			if (rule.strRegexPattern.IsEmpty())
+				return false;
+			try {
+				rule.regex = std::basic_regex<TCHAR>((LPCTSTR)rule.strRegexPattern);
+				rule.bRegexValid = true;
+			} catch (const std::regex_error&) {
+				rule.bRegexValid = false;
+			}
+			return rule.bRegexValid;
+		} else
+			rule.eMode = CBRM_Plain;
+
+		strWork.MakeLower();
+		CStringArray astrTokens;
+		TokenizeBlacklistRule(strWork, astrTokens);
+		bool bExpectExtension = (rule.eMode == CBRM_Extension);
+		for (INT_PTR i = 0; i < astrTokens.GetCount(); ++i) {
+			CString strToken(astrTokens[i]);
+			strToken.Trim();
+			if (strToken.IsEmpty())
+				continue;
+
+			bool bNegative = false;
+			if (!bExpectExtension && strToken[0] == _T('-')) {
+				bNegative = true;
+				strToken = strToken.Mid(1);
+			}
+
+			CString strTerm = NormalizeBlacklistTerm(strToken, rule.eMode);
+			if (strTerm.IsEmpty())
+				continue;
+
+			if (bExpectExtension) {
+				rule.strExtension = strTerm;
+				bExpectExtension = false;
+			} else if (bNegative)
+				rule.astrNegativeTerms.push_back(strTerm);
+			else
+				rule.astrPositiveTerms.push_back(strTerm);
+		}
+
+		return !rule.strExtension.IsEmpty() || !rule.astrPositiveTerms.empty();
+	}
+
+	bool DoesCompiledBlacklistRuleMatch(const SCompiledBlacklistRule& rule, SBlacklistFilenameContext& context)
+	{
+		if (rule.eMode == CBRM_Regex) {
+			if (!rule.bRegexValid)
+				return false;
+			try {
+#ifdef UNICODE
+				std::wcmatch match;
+#else
+				std::cmatch match;
+#endif
+				return std::regex_match((LPCTSTR)context.strOriginalFilename, match, rule.regex);
+			} catch (const std::regex_error&) {
+				return false;
+			}
+		}
+
+		bool bIsBlacklisted = false;
+		if (rule.eMode == CBRM_Extension) {
+			if (context.strExtension.IsEmpty() || context.strExtension.CompareNoCase(rule.strExtension) != 0)
+				return false;
+			bIsBlacklisted = true;
+		}
+
+		const CString& strTarget = context.GetTarget(rule.eMode);
+		for (std::vector<CString>::const_iterator it = rule.astrPositiveTerms.begin(); it != rule.astrPositiveTerms.end(); ++it) {
+			if (strTarget.Find(*it) < 0)
+				return false;
+			bIsBlacklisted = true;
+		}
+
+		for (std::vector<CString>::const_iterator it = rule.astrNegativeTerms.begin(); it != rule.astrNegativeTerms.end(); ++it) {
+			if (strTarget.Find(*it) >= 0)
+				return false;
+		}
+
+		return bIsBlacklisted;
+	}
+}
+
+struct SFilenameAutoBlacklistSnapshot
+{
+	SFilenameAutoBlacklistSnapshot()
+		: pCompiledRules(NULL)
+	{
+	}
+
+	void* pCompiledRules;
+};
+
+typedef std::vector<SCompiledBlacklistRule> CCompiledBlacklistRuleArray;
+
+SFilenameAutoBlacklistSnapshot* CPreferences::CreateFilenameAutoBlacklistSnapshot()
+{
+	CStringList blacklistSnapshot;
+	CopyBlacklistList(blacklistSnapshot);
+	SFilenameAutoBlacklistSnapshot* pSnapshot = new SFilenameAutoBlacklistSnapshot();
+	CCompiledBlacklistRuleArray* pRules = new CCompiledBlacklistRuleArray();
+	for (POSITION pos = blacklistSnapshot.GetHeadPosition(); pos != NULL;) {
+		SCompiledBlacklistRule rule;
+		if (CompileBlacklistLine(blacklistSnapshot.GetNext(pos), rule))
+			pRules->push_back(rule);
+	}
+	pSnapshot->pCompiledRules = pRules;
+	return pSnapshot;
+}
+
+void CPreferences::DeleteFilenameAutoBlacklistSnapshot(SFilenameAutoBlacklistSnapshot* pSnapshot)
+{
+	if (pSnapshot != NULL)
+		delete static_cast<CCompiledBlacklistRuleArray*>(pSnapshot->pCompiledRules);
+	delete pSnapshot;
+}
+
+bool CPreferences::IsFilenameAutoBlacklisted(const SFilenameAutoBlacklistSnapshot* pSnapshot, const CString& strFilename, CString* pstrMatchedRule)
+{
+	if (pSnapshot == NULL || pSnapshot->pCompiledRules == NULL || strFilename.IsEmpty())
+		return false;
+
+	const CCompiledBlacklistRuleArray* pRules = static_cast<const CCompiledBlacklistRuleArray*>(pSnapshot->pCompiledRules);
+	SBlacklistFilenameContext context(strFilename);
+	for (CCompiledBlacklistRuleArray::const_iterator it = pRules->begin(); it != pRules->end(); ++it) {
+		if (DoesCompiledBlacklistRuleMatch(*it, context)) {
+			if (pstrMatchedRule != NULL)
+				*pstrMatchedRule = it->strOriginalLine;
+			return true;
+		}
+	}
+	return false;
+}
+
+void CPreferences::CopyBlacklistList(CStringList& out)
+{
+	if (&out == &blacklist_list)
+		return;
+	out.RemoveAll();
+	CSingleLock lock(&m_csBlacklistList, TRUE);
+	for (POSITION pos = blacklist_list.GetHeadPosition(); pos != NULL;)
+		out.AddTail(blacklist_list.GetNext(pos));
+}
+
+void CPreferences::ReplaceBlacklistList(const CStringList& in)
+{
+	if (&in == &blacklist_list)
+		return;
+	{
+		CSingleLock lock(&m_csBlacklistList, TRUE);
+		blacklist_list.RemoveAll();
+		for (POSITION pos = in.GetHeadPosition(); pos != NULL;)
+			blacklist_list.AddTail(in.GetNext(pos));
+	}
+	InvalidateCompiledBlacklistRules();
+}
+
+void CPreferences::InvalidateCompiledBlacklistRules()
+{
+	CSingleLock lock(&g_compiledBlacklistRulesLock, TRUE);
+	g_bCompiledBlacklistRulesDirty = true;
+}
+
+void CPreferences::RebuildCompiledBlacklistRules()
+{
+	CSingleLock lock(&g_compiledBlacklistRulesLock, TRUE);
+	CStringList blacklistSnapshot;
+	CopyBlacklistList(blacklistSnapshot);
+	g_compiledBlacklistRules.clear();
+	for (POSITION pos = blacklistSnapshot.GetHeadPosition(); pos != NULL;) {
+		SCompiledBlacklistRule rule;
+		if (CompileBlacklistLine(blacklistSnapshot.GetNext(pos), rule))
+			g_compiledBlacklistRules.push_back(rule);
+	}
+	g_bCompiledBlacklistRulesDirty = false;
+}
+
+bool CPreferences::IsFilenameAutoBlacklisted(const CString& strFilename, CString* pstrMatchedRule)
+{
+	if (strFilename.IsEmpty())
+		return false;
+
+	CSingleLock lock(&g_compiledBlacklistRulesLock, TRUE);
+	if (g_bCompiledBlacklistRulesDirty) {
+		CStringList blacklistSnapshot;
+		CopyBlacklistList(blacklistSnapshot);
+		g_compiledBlacklistRules.clear();
+		for (POSITION pos = blacklistSnapshot.GetHeadPosition(); pos != NULL;) {
+			SCompiledBlacklistRule rule;
+			if (CompileBlacklistLine(blacklistSnapshot.GetNext(pos), rule))
+				g_compiledBlacklistRules.push_back(rule);
+		}
+		g_bCompiledBlacklistRulesDirty = false;
+	}
+
+	SBlacklistFilenameContext context(strFilename);
+	for (std::vector<SCompiledBlacklistRule>::const_iterator it = g_compiledBlacklistRules.begin(); it != g_compiledBlacklistRules.end(); ++it) {
+		if (DoesCompiledBlacklistRuleMatch(*it, context)) {
+			if (pstrMatchedRule != NULL)
+				*pstrMatchedRule = it->strOriginalLine;
+			return true;
+		}
+	}
+	return false;
+}
+
 
 void CPreferences::CopySharedDirectoryList(CStringList& out)
 {
@@ -964,7 +1755,11 @@ void CPreferences::ReleaseExtStruct() noexcept
 		shareddir_list.RemoveAll();
 	}
 	addresses_list.RemoveAll();
-	blacklist_list.RemoveAll();
+	{
+		CSingleLock lock(&m_csBlacklistList, TRUE);
+		blacklist_list.RemoveAll();
+	}
+	InvalidateCompiledBlacklistRules();
 	tempdir.RemoveAll();
 }
 
@@ -1014,16 +1809,19 @@ void CPreferences::Init()
 	// load preferences.dat or set standard values
 	CString strFullPath(sConfDir + strPreferencesDat);
 	FILE* preffile = _tfsopen(strFullPath, _T("rb"), _SH_DENYWR);
+	bool bLoadedPrefsDat = false;
+	if (preffile != NULL) {
+		bLoadedPrefsDat = (fread(prefsExt, sizeof(Preferences_Ext_Struct), 1, preffile) == 1 && !ferror(preffile));
+		fclose(preffile);
+	}
 
 	LoadPreferences();
 
-	if (!preffile || fread(prefsExt, sizeof(Preferences_Ext_Struct), 1, preffile) != 1 || ferror(preffile))
+	if (!bLoadedPrefsDat)
 		SetStandardValues();
 	else {
 		md4cpy(userhash, prefsExt->userhash);
 		EmuleWindowPlacement = prefsExt->EmuleWindowPlacement;
-
-		fclose(preffile);
 		smartidstate = 0;
 	}
 	CreateUserHash();
@@ -1086,31 +1884,31 @@ void CPreferences::Init()
 	}
 
 	// Explicitly inform the user about errors with incoming/temp folders!
-	if (!::PathFileExists(GetMuleDirectory(EMULE_INCOMINGDIR)) && !::CreateDirectory(GetMuleDirectory(EMULE_INCOMINGDIR), 0)) {
+	if (!DirectoryExistsLongPath(GetMuleDirectory(EMULE_INCOMINGDIR)) && !::CreateDirectory(PrepareDirectoryPathForWin32LongPath(GetMuleDirectory(EMULE_INCOMINGDIR)), 0)) {
 		CString strError;
 		strError.Format(GetResString(_T("ERR_CREATE_DIR")), (LPCTSTR)GetResString(_T("PW_INCOMING")), (LPCTSTR)GetMuleDirectory(EMULE_INCOMINGDIR), (LPCTSTR)GetErrorMessage(::GetLastError()));
 		CDarkMode::MessageBox(strError, MB_ICONERROR);
 
 		m_strIncomingDir = GetDefaultDirectory(EMULE_INCOMINGDIR, true); // will also try to create it if needed
-		if (!::PathFileExists(GetMuleDirectory(EMULE_INCOMINGDIR))) {
+		if (!DirectoryExistsLongPath(GetMuleDirectory(EMULE_INCOMINGDIR))) {
 			strError.Format(GetResString(_T("ERR_CREATE_DIR")), (LPCTSTR)GetResString(_T("PW_INCOMING")), (LPCTSTR)GetMuleDirectory(EMULE_INCOMINGDIR), (LPCTSTR)GetErrorMessage(::GetLastError()));
 			CDarkMode::MessageBox(strError, MB_ICONERROR);
 		}
 	}
-	if (!::PathFileExists(GetTempDir()) && !::CreateDirectory(GetTempDir(), 0)) {
+	if (!DirectoryExistsLongPath(GetTempDir()) && !::CreateDirectory(PrepareDirectoryPathForWin32LongPath(GetTempDir()), 0)) {
 		CString strError;
 		strError.Format(GetResString(_T("ERR_CREATE_DIR")), (LPCTSTR)GetResString(_T("PW_TEMP")), GetTempDir(), (LPCTSTR)GetErrorMessage(::GetLastError()));
 		CDarkMode::MessageBox(strError, MB_ICONERROR);
 
 		tempdir[0] = GetDefaultDirectory(EMULE_TEMPDIR, true); // will also try to create it if needed;
-		if (!::PathFileExists(GetTempDir())) {
+		if (!DirectoryExistsLongPath(GetTempDir())) {
 			strError.Format(GetResString(_T("ERR_CREATE_DIR")), (LPCTSTR)GetResString(_T("PW_TEMP")), GetTempDir(), (LPCTSTR)GetErrorMessage(::GetLastError()));
 			CDarkMode::MessageBox(strError, MB_ICONERROR);
 		}
 	}
 	for (int i = 0; i < tempdir.GetCount(); i++) { // leuk_he: multiple temp dirs for save sources. 
 		CString sSourcesPath = CString(thePrefs.GetTempDir(i));
-		if (GetSaveLoadSources() && !PathFileExists(sSourcesPath.GetBuffer()) && !::CreateDirectory(sSourcesPath.GetBuffer(), 0)) {
+		if (GetSaveLoadSources() && !DirectoryExistsLongPath(sSourcesPath) && !::CreateDirectory(PrepareDirectoryPathForWin32LongPath(sSourcesPath), 0)) {
 			CString strError;
 			strError.Format(_T("Failed to create sources directory \"%s\" - %s"), sSourcesPath, GetErrorMessage(GetLastError()));
 			CDarkMode::MessageBox(strError, MB_ICONERROR);
@@ -1118,22 +1916,24 @@ void CPreferences::Init()
 	}
 
 	// Create 'skins' directory
-	if (!::PathFileExists(GetMuleDirectory(EMULE_SKINDIR)) && !::CreateDirectory(GetMuleDirectory(EMULE_SKINDIR), 0))
+	if (!DirectoryExistsLongPath(GetMuleDirectory(EMULE_SKINDIR)) && !::CreateDirectory(PrepareDirectoryPathForWin32LongPath(GetMuleDirectory(EMULE_SKINDIR)), 0))
 		m_strSkinProfileDir = GetDefaultDirectory(EMULE_SKINDIR, true); // will also try to create it if needed
 
 	// Create 'toolbars' directory
-	if (!::PathFileExists(GetMuleDirectory(EMULE_TOOLBARDIR)) && !::CreateDirectory(GetMuleDirectory(EMULE_TOOLBARDIR), 0))
+	if (!DirectoryExistsLongPath(GetMuleDirectory(EMULE_TOOLBARDIR)) && !::CreateDirectory(PrepareDirectoryPathForWin32LongPath(GetMuleDirectory(EMULE_TOOLBARDIR)), 0))
 		m_sToolbarBitmapFolder = GetDefaultDirectory(EMULE_TOOLBARDIR, true); // will also try to create it if needed;
 }
 
 void CPreferences::LoadBlacklistFile() {
-	blacklist_list.RemoveAll(); // Clean list first since this member function will be called on load of settings screen after init.
+	CStringList loadedBlacklist;
 	const CString& sConfDir(GetMuleDirectory(EMULE_CONFIGDIR));
 	CString strFullPath;
 	strFullPath.Format(_T("%s") BLACKLISTFILE, (LPCTSTR)sConfDir);
 
 	if (!::PathFileExists(strFullPath)) {
+		ReplaceBlacklistList(loadedBlacklist);
 		LogWarning(GetResString(_T("FILE_NOT_FOUND")), (LPCTSTR)BLACKLISTFILE);
+		RebuildCompiledBlacklistRules();
 		return;
 	}
 
@@ -1147,13 +1947,16 @@ void CPreferences::LoadBlacklistFile() {
 			CString m_strCurrentLine = NULL;
 			while (blacklistFile.ReadString(m_strCurrentLine)) {
 				m_strCurrentLine.Trim(_T("\t\r\n"));
-				if (m_strCurrentLine[0] != _T('#') && m_strCurrentLine[0] != _T('\\')) // If this is not a comment or regex definition line, convert it to lower case for case insensitive comparisons.
-					m_strCurrentLine.MakeLower();
-				if (!m_strCurrentLine.IsEmpty()) // need to trim '\r' in binary mode and then make it lower for case insensitive comparisons.
-					blacklist_list.AddTail(m_strCurrentLine);
+				if (!m_strCurrentLine.IsEmpty()) { // Need to trim '\r' in binary mode before using the first character.
+					if (m_strCurrentLine[0] != _T('#') && m_strCurrentLine[0] != _T('\\'))
+						m_strCurrentLine.MakeLower();
+					loadedBlacklist.AddTail(m_strCurrentLine);
+				}
 			}
 
-			Log(GetResString(_T("BLACKLIST_LOADED")), blacklist_list.GetCount());
+			ReplaceBlacklistList(loadedBlacklist);
+			RebuildCompiledBlacklistRules();
+			Log(GetResString(_T("BLACKLIST_LOADED")), loadedBlacklist.GetCount());
 		} catch (CFileException* ex) {
 			ASSERT(0);
 			ex->Delete();
@@ -1168,11 +1971,14 @@ void CPreferences::LoadBlacklistFile() {
 
 void CPreferences::SaveBlacklistFile()
 {
+	RebuildCompiledBlacklistRules();
+	CStringList blacklistSnapshot;
+	CopyBlacklistList(blacklistSnapshot);
 	// Write definitions to the text box
 	CString m_strBlacklistDefinitions;
 	bool m_bFirstLine = true;
-	for (POSITION pos = thePrefs.blacklist_list.GetHeadPosition(); pos != NULL;) {
-		CString m_strBlacklistLine = thePrefs.blacklist_list.GetNext(pos);
+	for (POSITION pos = blacklistSnapshot.GetHeadPosition(); pos != NULL;) {
+		CString m_strBlacklistLine = blacklistSnapshot.GetNext(pos);
 		if (m_strBlacklistLine.IsEmpty())
 			continue;
 		if (m_bFirstLine) {
@@ -1184,34 +1990,22 @@ void CPreferences::SaveBlacklistFile()
 	if (theApp.emuledlg && theApp.emuledlg->preferenceswnd && theApp.emuledlg->preferenceswnd->m_wndBlacklistPanel)
 		theApp.emuledlg->preferenceswnd->m_wndBlacklistPanel.SetDlgItemText(IDC_BLACKLIST_DEFINITIONS_TEXTBOX, m_strBlacklistDefinitions);
 
-	// Write definitions to the conf file
-	static LPCTSTR const stmp = _T(".tmp");
 	const CString& sConfDir(thePrefs.GetMuleDirectory(EMULE_CONFIGDIR));
 	const CString& strFullPath(sConfDir + BLACKLISTFILE);
-	CStdioFile blacklistFile;
-	if (blacklistFile.Open(strFullPath + stmp, CFile::modeCreate | CFile::modeWrite | CFile::shareDenyWrite | CFile::typeBinary)) {
-		try {
-			// write Unicode byte order mark 0xFEFF
-			static const WORD wBOM = u'\xFEFF'; //UTF-16LE
-			blacklistFile.Write(&wBOM, sizeof wBOM);
-			bool m_bFirstLine = true;
-			for (POSITION pos = thePrefs.blacklist_list.GetHeadPosition(); pos != NULL;) {
-				if (!m_bFirstLine)
-					blacklistFile.Write(_T("\r\n"), 2 * sizeof(TCHAR));
-				else
-					m_bFirstLine = false;
-				blacklistFile.WriteString(thePrefs.blacklist_list.GetNext(pos));
-			}
-			blacklistFile.Close();
-			if (MoveFileEx(strFullPath + stmp, strFullPath, MOVEFILE_REPLACE_EXISTING) == 0)
-				AddDebugLogLine(false, _T("Failed to move %s to %s"), (LPCTSTR)EscPercent(strFullPath + stmp), (LPCTSTR)EscPercent(strFullPath));
-		} catch (CFileException* ex) {
-			if (thePrefs.GetVerbose())
-				AddDebugLogLine(true, _T("Failed to move %s to %s: %s"), (LPCTSTR)EscPercent(strFullPath + stmp), (LPCTSTR)EscPercent(strFullPath), (LPCTSTR)EscPercent(CExceptionStrDash(*ex)));
-			ex->Delete();
-		}
-	} else
-		AddDebugLogLine(false, _T("Failed to open %s"), (LPCTSTR)EscPercent(strFullPath + stmp));
+	std::vector<BYTE> data;
+	static const WORD wBOM = u'\xFEFF'; //UTF-16LE
+	AppendRawBytes(data, &wBOM, sizeof wBOM);
+	bool bFirstSavedLine = true;
+	for (POSITION pos = blacklistSnapshot.GetHeadPosition(); pos != NULL;) {
+		if (!bFirstSavedLine)
+			AppendTCharBytes(data, _T("\r\n"), 2);
+		else
+			bFirstSavedLine = false;
+		AppendCStringBytes(data, blacklistSnapshot.GetNext(pos));
+	}
+
+	if (!QueueConfigFileSnapshot(strFullPath, BLACKLISTFILE, _T("blacklist"), &g_lBlacklistSaveGeneration, data))
+		AddDebugLogLine(false, _T("Failed to save %s"), (LPCTSTR)EscPercent(strFullPath));
 }
 
 void CPreferences::Uninit()
@@ -1236,6 +2030,14 @@ void CPreferences::Uninit()
 	strNick.Empty();
 	m_strBindAddrA.Empty();
 	ForceReleaseCString(m_strBindAddrW);
+	m_strP2PBindAddrA.Empty();
+	ForceReleaseCString(m_strP2PBindAddrW);
+	m_strBindInterfaceId.Empty();
+	m_strBindInterfaceName.Empty();
+	m_strConfiguredBindAddr.Empty();
+	m_strActiveBindInterfaceId.Empty();
+	m_strActiveBindInterfaceName.Empty();
+	m_strActiveConfiguredBindAddr.Empty();
 	m_strIncomingDir.Empty();
 	tempdir.RemoveAll();
 	ForceReleaseCString(m_strSkinProfile);
@@ -1278,7 +2080,11 @@ void CPreferences::Uninit()
 		shareddir_list.RemoveAll();
 	}
 	addresses_list.RemoveAll();
-	blacklist_list.RemoveAll();
+	{
+		CSingleLock lock(&m_csBlacklistList, TRUE);
+		blacklist_list.RemoveAll();
+	}
+	InvalidateCompiledBlacklistRules();
 	thePrefs.m_CommunityTagCounterMap.RemoveAll();
 	thePrefs.m_CommunityTagIpHashSet.clear();
 	m_strFileCommentsFilePath.Empty();
@@ -1303,6 +2109,60 @@ void CPreferences::SetStandardValues()
 	EmuleWindowPlacement = defaultWPM;
 	versioncheckLastAutomatic = 0;
 	versioncheckLastKnownVersionOnServer.Empty();
+}
+
+bool CPreferences::RefreshBindResolution()
+{
+	const CString strOldBindAddr(m_strBindAddrW);
+	const CString strOldP2PBindAddr(m_strP2PBindAddrW);
+
+	SNetBindResolution resolution;
+	m_eActiveBindResolveResult = CNetBind::Resolve(m_strBindInterfaceId, m_strBindInterfaceName, m_strConfiguredBindAddr, resolution);
+	m_strActiveBindInterfaceId = resolution.strInterfaceId;
+	m_strActiveBindInterfaceName = resolution.strInterfaceName;
+	m_strActiveConfiguredBindAddr = m_strConfiguredBindAddr;
+	m_dwActiveBindIpv4IfIndex = resolution.dwIpv4IfIndex;
+	m_dwActiveBindIpv6IfIndex = resolution.dwIpv6IfIndex;
+	m_eActiveBindResolvedFamily = resolution.eResolvedFamily;
+
+	CString strActiveAddress;
+	if (m_eActiveBindResolveResult == NBR_Resolved)
+		strActiveAddress = resolution.strResolvedAddress;
+
+	CAddress activeAddress;
+	const bool bHasActiveAddress = !strActiveAddress.IsEmpty() && CNetBind::TryParseAddress(strActiveAddress, activeAddress);
+
+	m_strBindAddrW.Empty();
+	m_strBindAddrA.Empty();
+	m_strP2PBindAddrW.Empty();
+	m_strP2PBindAddrA.Empty();
+	if (bHasActiveAddress) {
+		m_strP2PBindAddrW = strActiveAddress;
+		m_strP2PBindAddrA = m_strP2PBindAddrW;
+		if (activeAddress.GetType() == CAddress::IPv4) {
+			m_strBindAddrW = strActiveAddress;
+			m_strBindAddrA = m_strBindAddrW;
+		}
+	}
+	m_pszBindAddrW = m_strBindAddrW.IsEmpty() ? NULL : (LPCWSTR)m_strBindAddrW;
+	m_pszBindAddrA = m_strBindAddrA.IsEmpty() ? NULL : (LPCSTR)m_strBindAddrA;
+	m_pszP2PBindAddrW = m_strP2PBindAddrW.IsEmpty() ? NULL : (LPCWSTR)m_strP2PBindAddrW;
+	m_pszP2PBindAddrA = m_strP2PBindAddrA.IsEmpty() ? NULL : (LPCSTR)m_strP2PBindAddrA;
+
+	return strOldBindAddr.CompareNoCase(m_strBindAddrW) != 0 || strOldP2PBindAddr.CompareNoCase(m_strP2PBindAddrW) != 0;
+}
+
+void CPreferences::SetBindSelection(const CString& strInterfaceId, const CString& strInterfaceName, const CString& strAddress)
+{
+	m_strBindInterfaceId = strInterfaceId;
+	m_strBindInterfaceId.Trim();
+	m_strBindInterfaceName = strInterfaceName;
+	m_strBindInterfaceName.Trim();
+	m_strConfiguredBindAddr = strAddress;
+	m_strConfiguredBindAddr.Trim();
+	if (!HasExplicitBindSelection())
+		m_eIpGuardMode = IpGuardModeOff;
+	RefreshBindResolution();
 }
 
 bool CPreferences::IsTempFile(const CString& rstrDirectory, const CString& rstrName)
@@ -1384,13 +2244,21 @@ void CPreferences::SaveStats(int bBackUp)
 		p = _T("statistics.ini");
 	const CString& strFullPath(GetMuleDirectory(EMULE_CONFIGDIR) + p);
 
-	CIni ini(strFullPath, _T("Statistics"));
+	volatile LONG* plGeneration = &g_lStatisticsIniSaveGeneration;
+	if (bBackUp == 1)
+		plGeneration = &g_lStatisticsBackupIniSaveGeneration;
+	else if (bBackUp == 2)
+		plGeneration = &g_lStatisticsBackupTempIniSaveGeneration;
+
+	CProfileIniSnapshotBuilder ini(strFullPath, _T("Statistics"), p, _T("statistics-ini"), plGeneration);
 
 	// Save cumulative statistics to statistics.ini, going in the order they appear in CStatisticsDlg::ShowStatistics.
 	// We do NOT SET the values in prefs struct here.
 
 	// Save Cum Down Data
 	ini.WriteUInt64(_T("TotalDownloadedBytes"), theStats.sessionReceivedBytes + GetTotalDownloaded());
+	ini.WriteInt(_T("DownCompletedFiles"), GetDownCompletedFiles());
+	ini.WriteInt(_T("DownSessionCompletedFiles"), GetDownSessionCompletedFiles());
 	ini.WriteInt(_T("DownSuccessfulSessions"), cumDownSuccessfulSessions);
 	ini.WriteInt(_T("DownFailedSessions"), cumDownFailedSessions);
 	ini.WriteInt(_T("DownAvgTime"), GetDownC_AvgTime()); //never needed this
@@ -1569,14 +2437,13 @@ void CPreferences::SaveStats(int bBackUp)
 
 	// If we are saving a back-up or a temporary back-up, return now.
 	//	return;
+	ini.Commit(bBackUp != 0);
 }
 
 bool CPreferences::SaveSharedFolders()
 {
 	const CString& sConfDir(GetMuleDirectory(EMULE_CONFIGDIR));
 	const CString& strSharesPath(sConfDir + SHAREDDIRS);
-	static LPCTSTR const stmp = _T(".tmp");
-	bool bError = false;
 	CStringList sharedDirs;
 
 	CopySharedDirectoryList(sharedDirs);
@@ -1588,27 +2455,15 @@ bool CPreferences::SaveSharedFolders()
 		CollapseSharedDirsToRoots(sharedDirs, excludedSharedDirs.IsEmpty() ? NULL : &excludedSharedDirs);
 	}
 
-	CStdioFile file;
-	if (file.Open(strSharesPath + stmp, CFile::modeCreate | CFile::modeWrite | CFile::shareDenyWrite | CFile::typeBinary)) {
-		try {
-			// write UTF-16LE byte order mark 0xFEFF
-			static const WORD wBOM = u'\xFEFF';
-			file.Write(&wBOM, sizeof wBOM);
-			for (POSITION pos = sharedDirs.GetHeadPosition(); pos != NULL;) {
-				file.WriteString(sharedDirs.GetNext(pos));
-				file.Write(_T("\r\n"), 2 * sizeof(TCHAR));
-			}
-			file.Close();
-			bError = (MoveFileEx(strSharesPath + stmp, strSharesPath, MOVEFILE_REPLACE_EXISTING) == 0);
-		} catch (CFileException *ex) {
-			if (thePrefs.GetVerbose())
-				AddDebugLogLine(true, _T("Failed to save %s%s"), (LPCTSTR)EscPercent(strSharesPath), (LPCTSTR)EscPercent(CExceptionStrDash(*ex)));
-			ex->Delete();
-		}
-	} else
-		bError = true;
+	std::vector<BYTE> data;
+	static const WORD wBOM = u'\xFEFF';
+	AppendRawBytes(data, &wBOM, sizeof wBOM);
+	for (POSITION pos = sharedDirs.GetHeadPosition(); pos != NULL;) {
+		AppendCStringBytes(data, sharedDirs.GetNext(pos));
+		AppendTCharBytes(data, _T("\r\n"), 2);
+	}
 
-	return bError;
+	return !QueueConfigFileSnapshot(strSharesPath, SHAREDDIRS, _T("shared-folders"), &g_lSharedFoldersSaveGeneration, data);
 }
 
 // Build a minimal set of roots by removing entries which are redundant when recursive sharing is enabled.
@@ -1744,13 +2599,10 @@ void CPreferences::SetRecordStructMembers()
 
 void CPreferences::SaveCompletedDownloadsStat()
 {
-	// This function saves the values for the completed
-	// download members to INI.  It is called from
-
-	CIni ini(GetMuleDirectory(EMULE_CONFIGDIR) + _T("statistics.ini"), _T("Statistics"));
-
+	CProfileIniSnapshotBuilder ini(GetMuleDirectory(EMULE_CONFIGDIR) + _T("statistics.ini"), _T("Statistics"), _T("statistics.ini"), _T("statistics-ini"), &g_lStatisticsIniSaveGeneration);
 	ini.WriteInt(_T("DownCompletedFiles"), GetDownCompletedFiles());
 	ini.WriteInt(_T("DownSessionCompletedFiles"), GetDownSessionCompletedFiles());
+	ini.Commit();
 } // SaveCompletedDownloadsStat()
 
 void CPreferences::Add2SessionTransferData(UINT uClientID, UINT uClientPort, BOOL bFromPF,
@@ -1999,6 +2851,10 @@ bool CPreferences::LoadStats(int loadBackUp)
 	}
 
 	BOOL fileex = ::PathFileExists(sINI);
+	if (loadBackUp == 1 && (!fileex || !HasIniSectionEntries(sINI, _T("Statistics")))) {
+		(void)_tremove(sConfDir + _T("statbkuptmp.ini"));
+		return false;
+	}
 	CIni ini(sINI, _T("Statistics"));
 
 	totalDownloadedBytes = ini.GetUInt64(_T("TotalDownloadedBytes"));
@@ -2126,10 +2982,8 @@ bool CPreferences::LoadStats(int loadBackUp)
 		// Check to make sure the backup of the values we just overwrote exists.  If so, rename it to the backup file.
 		// This allows us to undo a restore, so to speak, just in case we don't like the restored values...
 		CString sINIBackUp(sConfDir + _T("statbkuptmp.ini"));
-		if (findBackUp.FindFile(sINIBackUp)) {
-			::DeleteFile(sINI);				// Remove the backup that we just restored from
-			::MoveFile(sINIBackUp, sINI);	// Rename our temporary backup to the normal statbkup.ini filename.
-		}
+		if (findBackUp.FindFile(sINIBackUp) && !PromoteConfigFileSnapshot(sINIBackUp, sINI, _T("statbkup.ini"), _T("statistics-ini"), &g_lStatisticsBackupIniSaveGeneration, true))
+			AddDebugLogLine(DLP_HIGH, false, _T("Failed to promote restored statistics backup snapshot from \"%s\" to \"%s\".\n"), (LPCTSTR)EscPercent(sINIBackUp), (LPCTSTR)EscPercent(sINI));
 
 		// Since we know this is a restore, now we should call ShowStatistics to update the data items to the new ones we just loaded.
 		// Otherwise user is left waiting around for the tick counter to reach the next automatic update (Depending on setting in prefs)
@@ -2213,27 +3067,33 @@ bool CPreferences::Save()
 	static LPCTSTR const stmp = _T(".tmp");
 	const CString& sConfDir(GetMuleDirectory(EMULE_CONFIGDIR));
 	const CString &strPrefPath(sConfDir + strPreferencesDat);
-	bool error;
 
-	FILE* preffile = _tfsopen(strPrefPath + stmp, _T("wb"), _SH_DENYWR); //keep contents
-	if (preffile) {
-		prefsExt->version = PREFFILE_VERSION;
-		md4cpy(prefsExt->userhash, userhash);
-		prefsExt->EmuleWindowPlacement = EmuleWindowPlacement;
-		error = (fwrite(prefsExt, sizeof(Preferences_Ext_Struct), 1, preffile) != 1);
-		error |= (fclose(preffile) != 0);
-		if (!error)
-			error = !MoveFileEx(strPrefPath + stmp, strPrefPath, MOVEFILE_REPLACE_EXISTING);
-	} else
+	prefsExt->version = PREFFILE_VERSION;
+	md4cpy(prefsExt->userhash, userhash);
+	prefsExt->EmuleWindowPlacement = EmuleWindowPlacement;
+
+	AsyncDiskWriteData* pData = new AsyncDiskWriteData;
+	pData->lGeneration = ::InterlockedIncrement(&g_lPreferencesDatSaveGeneration);
+	pData->plGeneration = &g_lPreferencesDatSaveGeneration;
+	pData->strTempPath = strPrefPath + stmp;
+	pData->strFinalPath = strPrefPath;
+	pData->strLogName = strPreferencesDat;
+	pData->strPayloadName = _T("preferences");
+	pData->eConflictPolicy = AsyncDiskWriteConflictLastSnapshotWins;
+	pData->eReplacePolicy = AsyncDiskWriteReplaceFinal;
+	const BYTE* pBytes = reinterpret_cast<const BYTE*>(prefsExt);
+	pData->data.assign(pBytes, pBytes + sizeof(Preferences_Ext_Struct));
+	bool error = !CPartFileWriteThread::QueueOrWriteDiskSnapshot(pData);
+
+	if (!SavePreferences())
 		error = true;
-
-	SavePreferences();
 	SaveStats();
 
-	error = SaveSharedFolders();
+	if (SaveSharedFolders())
+		error = true;
 
-	::CreateDirectory(GetMuleDirectory(EMULE_INCOMINGDIR), 0);
-	::CreateDirectory(GetTempDir(), 0);
+	::CreateDirectory(PrepareDirectoryPathForWin32LongPath(GetMuleDirectory(EMULE_INCOMINGDIR)), 0);
+	::CreateDirectory(PrepareDirectoryPathForWin32LongPath(GetTempDir()), 0);
 	return error;
 }
 
@@ -2252,16 +3112,16 @@ void CPreferences::SetMigrationWizardHandled(bool bHandled)
 {
 	m_bMigrationWizardHandled = bHandled;
 
-	CIni ini(GetConfigFile(), _T("eMule"));
-	ini.WriteBool(_T("MigrationWizardHandled"), m_bMigrationWizardHandled);
+	if (!SavePreferences())
+		AddDebugLogLine(false, _T("Failed to save MigrationWizardHandled preference"));
 }
 
 void CPreferences::SetMigrationWizardRunOnNextStart(bool bRunOnNextStart)
 {
 	m_bMigrationWizardRunOnNextStart = bRunOnNextStart;
 
-	CIni ini(GetConfigFile(), _T("eMule"));
-	ini.WriteBool(_T("MigrationWizardRunOnNextStart"), m_bMigrationWizardRunOnNextStart);
+	if (!SavePreferences())
+		AddDebugLogLine(false, _T("Failed to save MigrationWizardRunOnNextStart preference"));
 }
 
 void CPreferences::ReloadStartupStateAfterMigration()
@@ -2350,7 +3210,7 @@ void CPreferences::ImportLegacyPreferencesIniForMigration(LPCTSTR pszLegacyConfi
 	MakeFoldername(strLegacyConfigDir);
 
 	const CString strLegacyIniPath(strLegacyConfigDir + _T("preferences.ini"));
-	if (!::PathFileExists(strLegacyIniPath))
+	if (!PathFileExistsLongPath(strLegacyIniPath))
 		return;
 
 	CIni ini(strLegacyIniPath, _T("eMule"));
@@ -2360,7 +3220,7 @@ void CPreferences::ImportLegacyPreferencesIniForMigration(LPCTSTR pszLegacyConfi
 	CString incomingDir(ini.GetString(_T("IncomingDir"), kMissingStringSentinel));
 	if (incomingDir != kMissingStringSentinel && !incomingDir.IsEmpty()) {
 		MakeFoldername(incomingDir);
-		if (::PathFileExists(incomingDir) || ::CreateDirectory(incomingDir, NULL))
+		if (DirectoryExistsLongPath(incomingDir) || ::CreateDirectory(PrepareDirectoryPathForWin32LongPath(incomingDir), NULL))
 			m_strIncomingDir = incomingDir;
 	}
 
@@ -2391,7 +3251,7 @@ void CPreferences::ImportLegacyPreferencesIniForMigration(LPCTSTR pszLegacyConfi
 				}
 			}
 
-			if (!bDup && (::PathFileExists(tempPath) || ::CreateDirectory(tempPath, NULL)))
+			if (!bDup && (DirectoryExistsLongPath(tempPath) || ::CreateDirectory(PrepareDirectoryPathForWin32LongPath(tempPath), NULL)))
 				importedTempDirs.Add(tempPath);
 		}
 
@@ -2427,9 +3287,33 @@ UINT CPreferences::GetRecommendedMaxConnections()
 	return 1000;
 }
 
-void CPreferences::SavePreferences()
+bool CPreferences::IsValidRandomPortRange(UINT nStart, UINT nEnd)
 {
-	CIni ini(GetConfigFile(), _T("eMule"));
+	return nStart >= 1 && nStart <= USHRT_MAX && nEnd >= 1 && nEnd <= USHRT_MAX && nStart <= nEnd;
+}
+
+void CPreferences::NormalizeRandomPortRange()
+{
+	if (!IsValidRandomPortRange(m_nRandomPortRangeStart, m_nRandomPortRangeEnd)) {
+		m_nRandomPortRangeStart = GetDefaultRandomPortRangeStart();
+		m_nRandomPortRangeEnd = GetDefaultRandomPortRangeEnd();
+	}
+}
+
+void CPreferences::SetRandomPortRange(UINT nStart, UINT nEnd)
+{
+	if (!IsValidRandomPortRange(nStart, nEnd)) {
+		m_nRandomPortRangeStart = GetDefaultRandomPortRangeStart();
+		m_nRandomPortRangeEnd = GetDefaultRandomPortRangeEnd();
+		return;
+	}
+	m_nRandomPortRangeStart = static_cast<uint16>(nStart);
+	m_nRandomPortRangeEnd = static_cast<uint16>(nEnd);
+}
+
+bool CPreferences::SavePreferences()
+{
+	CProfileIniSnapshotBuilder ini(GetConfigFile(), _T("eMule"));
 	//---
 	ini.WriteString(_T("AppVersion"), theApp.GetAppVersion());
 	//---
@@ -2461,8 +3345,21 @@ void CPreferences::SavePreferences()
 	ini.WriteInt(_T("MaxConnections"), maxconnections);
 	ini.WriteInt(_T("MaxHalfConnections"), maxhalfconnections);
 	ini.WriteBool(_T("ConditionalTCPAccept"), m_bConditionalTCPAccept);
-	ini.WriteInt(_T("Port"), port);
-	ini.WriteInt(_T("UDPPort"), udpport);
+	ini.WriteString(_T("BindInterface"), m_strBindInterfaceId);
+	ini.WriteString(_T("BindInterfaceName"), m_strBindInterfaceName);
+	ini.WriteString(_T("BindAddr"), m_strConfiguredBindAddr);
+	ini.WriteString(_T("IpGuardMode"), CIpGuard::GetModePreferenceText(m_eIpGuardMode));
+	ini.WriteString(_T("IpGuardAllowedPublicIpRanges"), m_strIpGuardAllowedPublicIpRanges);
+	ini.WriteBool(_T("VpnGuardEnabled"), m_bVpnGuardEnabled);
+	ini.WriteString(_T("VpnGuardCountryCode"), m_strVpnGuardCountryCode);
+	ini.WriteBool(_T("VpnGuardBlockUnknownCountry"), m_bVpnGuardBlockUnknownCountry);
+	ini.WriteBool(_T("RandomizePortsOnStartup"), m_bRandomizePortsOnStartup);
+	NormalizeRandomPortRange();
+	ini.WriteInt(_T("RandomPortRangeStart"), m_nRandomPortRangeStart);
+	ini.WriteInt(_T("RandomPortRangeEnd"), m_nRandomPortRangeEnd);
+	ini.WriteBool(_T("OpenListenPortsInWindowsFirewall"), m_bOpenListenPortsInWindowsFirewall);
+	ini.WriteInt(_T("Port"), m_nConfiguredPort);
+	ini.WriteInt(_T("UDPPort"), m_nConfiguredUDPPort);
 	ini.WriteInt(_T("ServerUDPPort"), nServerUDPPort);
 	ini.WriteInt(_T("MaxSourcesPerFile"), maxsourceperfile);
 	ini.WriteString(_T("Ui.Language"), m_strUiLanguage.IsEmpty() ? _T("system") : (LPCTSTR)m_strUiLanguage);
@@ -2497,8 +3394,8 @@ void CPreferences::SavePreferences()
 	ini.WriteBool(_T("Reconnect"), reconnect);
 	ini.WriteBool(_T("Scoresystem"), m_bUseServerPriorities);
 	ini.WriteBool(_T("Serverlist"), m_bAutoUpdateServerList);
-	if (IsRunningAeroGlassTheme())
-		ini.WriteBool(_T("MinToTray_Aero"), mintotray);
+	if (IsDwmCompositionEnabled())
+		ini.WriteBool(_T("MinToTray_DwmComposition"), mintotray);
 	else
 		ini.WriteBool(_T("MinToTray"), mintotray);
 	ini.WriteBool(_T("PreventStandby"), m_bPreventStandby);
@@ -2546,6 +3443,7 @@ void CPreferences::SavePreferences()
 	ini.WriteBool(_T("NotifyOnLog"), notifierOnLog);
 	ini.WriteBool(_T("NotifyOnImportantError"), notifierOnImportantError);
 	ini.WriteBool(_T("NotifierPopEveryChatMessage"), notifierOnEveryChatMsg);
+	ini.WriteInt(_T("NotifierDisplayMode"), static_cast<int>(notifierDisplayMode));
 	ini.WriteInt(_T("NotifierUseSound"), (int)notifierSoundType);
 	ini.WriteString(_T("NotifierSoundPath"), notifierSoundFile);
 
@@ -2683,7 +3581,6 @@ void CPreferences::SavePreferences()
 	ini.WriteBool(_T("HighresTimer"), m_bHighresTimer);
 	ini.WriteInt(_T("WebMirrorAlertLevel"), m_nWebMirrorAlertLevel);
 	ini.WriteBool(_T("RunAsUnprivilegedUser"), m_bRunAsUser);
-	ini.WriteBool(_T("OpenPortsOnStartUp"), m_bOpenPortsOnStartUp);
 	ini.WriteInt(_T("DebugLogLevel"), m_byLogLevel);
 	ini.WriteInt(_T("WinXPSP2OrHigher"), static_cast<int>(IsRunningXPSP2OrHigher()));
 	ini.WriteBool(_T("RememberCancelledFiles"), m_bRememberCancelledFiles);
@@ -2765,7 +3662,7 @@ void CPreferences::SavePreferences()
 	///////////////////////////////////////////////////////////////////////////
 	// Section: "eMuleAI"
 	//
-	CIni iniAI(GetConfigFile(), _T("eMuleAI"));
+	CProfileIniSnapshotBuilder iniAI(ini, _T("eMuleAI"));
 	uint32 m_uTemp = 0;
 	uint32 m_uTemp2 = 0;
 	iniAI.WriteInt(_T("MaxEServerBuddySlots"), m_nMaxEServerBuddySlots);
@@ -2774,13 +3671,19 @@ void CPreferences::SavePreferences()
 	ini.WriteBool(_T("UITweaksSpeedGraph"), m_bUITweaksSpeedGraph);
 	ini.WriteBool(L"DisableFindAsYouType", m_bDisableFindAsYouType);
 	ini.WriteInt(L"UITweaksListUpdatePeriod", m_iUITweaksListUpdatePeriod);
-	ini.WriteInt(_T("GeoLite2Mode"), m_iGeoLite2Mode, _T("eMuleAI"));
-	ini.WriteBool(_T("GeoLite2ShowFlag"), m_bGeoLite2ShowFlag);
+	ini.WriteInt(_T("IPGeolocationMode"), m_iIPGeolocationMode, _T("eMuleAI"));
+	ini.WriteBool(_T("IPGeolocationShowFlag"), m_bIPGeolocationShowFlag);
+	ini.WriteBool(_T("IPGeolocationAutoUpdate"), m_bAutoIPGeolocationUpdate, _T("eMuleAI"));
+	ini.WriteInt(_T("IPGeolocationUpdatePeriodDays"), m_nIPGeolocationUpdatePeriodDays, _T("eMuleAI"));
+	ini.WriteInt(_T("IPGeolocationLastUpdate"), (int)m_tLastIPGeolocationUpdate, _T("eMuleAI"));
+	ini.WriteString(_T("IPGeolocationUpdateURL"), m_strIPGeolocationUpdateURL, _T("eMuleAI"));
 	ini.WriteBool(L"ConnectionChecker", m_bConnectionChecker);
 	ini.WriteString(L"ConnectionCheckerServer", m_sConnectionCheckerServer);
 	ini.WriteBool(L"EnableNatTraversal", m_bEnableNatTraversal);
+	ini.WriteInt(L"NatTraversalProtocolMode", m_iNatTraversalProtocolMode);
 	ini.WriteBool(L"LogExtendedSXEvents", m_bLogExtendedSXEvents);
 	ini.WriteBool(L"LogNatTraversalEvents", m_bLogNatTraversalEvents);
+	ini.WriteBool(L"LogUiResponsivenessEvents", m_bLogUiResponsivenessEvents);
 	ini.WriteInt(L"NatTraversalPortWindow", (int)m_uNatTraversalPortWindow);
 	ini.WriteInt(L"NatTraversalSweepWindow", (int)m_uNatTraversalSweepWindow);
 	ini.WriteInt(L"NatTraversalJitterMinMs", (int)m_uNatTraversalJitterMinMs);
@@ -2794,24 +3697,33 @@ void CPreferences::SavePreferences()
 	m_uTemp2 = MS2MIN(FILEREASKTIME);
 	m_uTemp = (m_uTemp >= m_uTemp2 && m_uTemp <= 55) ? m_uTemp : m_uTemp2;
 	ini.WriteInt(L"ReAskTime", m_uTemp);
-	ini.WriteInt(L"DownloadChecker", m_iDownloadChecker);
-	ini.WriteInt(L"DownloadCheckerAcceptPercentage", m_iDownloadCheckerAcceptPercentage);
-	ini.WriteBool(L"DownloadCheckerRejectCanceled", m_bDownloadCheckerRejectCanceled);
-	ini.WriteBool(L"DownloadCheckerRejectSameHash", m_bDownloadCheckerRejectSameHash);
-	ini.WriteBool(L"DownloadCheckerRejectBlacklisted", m_bDownloadCheckerRejectBlacklisted);
-	ini.WriteBool(L"DownloadCheckerCaseInsensitive", m_bDownloadCheckerCaseInsensitive);
-	ini.WriteBool(L"DownloadCheckerIgnoreExtension", m_bDownloadCheckerIgnoreExtension);
-	ini.WriteBool(L"DownloadCheckerIgnoreTags", m_bDownloadCheckerIgnoreTags);
-	ini.WriteBool(L"DownloadCheckerDontIgnoreNumericTags", m_bDownloadCheckerDontIgnoreNumericTags);
-	ini.WriteBool(L"DownloadCheckerIgnoreNonAlphaNumeric", m_bDownloadCheckerIgnoreNonAlphaNumeric);
-	ini.WriteInt(L"DownloadCheckerMinimumComparisonLength", m_iDownloadCheckerMinimumComparisonLength);
-	ini.WriteBool(L"DownloadCheckerSkipIncompleteFileConfirmation", m_bDownloadCheckerSkipIncompleteFileConfirmation);
-	ini.WriteBool(L"DownloadCheckerMarkAsBlacklisted", m_bDownloadCheckerMarkAsBlacklisted);
-	ini.WriteBool(L"DownloadCheckerAutoMarkAsBlacklisted", m_bDownloadCheckerAutoMarkAsBlacklisted);
+	ini.WriteInt(L"DownloadValidator", m_iDownloadValidator);
+	ini.WriteInt(L"DownloadValidatorAcceptPercentage", m_iDownloadValidatorAcceptPercentage);
+	ini.WriteBool(L"DownloadValidatorRejectCanceled", m_bDownloadValidatorRejectCanceled);
+	ini.WriteBool(L"DownloadValidatorRejectSameHash", m_bDownloadValidatorRejectSameHash);
+	ini.WriteBool(L"DownloadValidatorRejectBlacklisted", m_bDownloadValidatorRejectBlacklisted);
+	ini.WriteBool(L"DownloadValidatorCaseInsensitive", m_bDownloadValidatorCaseInsensitive);
+	ini.WriteBool(L"DownloadValidatorIgnoreExtension", m_bDownloadValidatorIgnoreExtension);
+	ini.WriteBool(L"DownloadValidatorIgnoreTags", m_bDownloadValidatorIgnoreTags);
+	ini.WriteBool(L"DownloadValidatorDontIgnoreNumericTags", m_bDownloadValidatorDontIgnoreNumericTags);
+	ini.WriteBool(L"DownloadValidatorIgnoreNonAlphaNumeric", m_bDownloadValidatorIgnoreNonAlphaNumeric);
+	ini.WriteInt(L"DownloadValidatorMinimumComparisonLength", m_iDownloadValidatorMinimumComparisonLength);
+	ini.WriteBool(L"DownloadValidatorSkipIncompleteFileConfirmation", m_bDownloadValidatorSkipIncompleteFileConfirmation);
+	ini.WriteBool(L"DownloadValidatorMarkAsBlacklisted", m_bDownloadValidatorMarkAsBlacklisted);
+	ini.WriteBool(L"DownloadValidatorAutoMarkAsBlacklisted", m_bDownloadValidatorAutoMarkAsBlacklisted);
+	ini.WriteBool(L"DownloadValidatorDateTimeMatching", m_bDownloadValidatorDateTimeMatching);
+	ini.WriteBool(L"DownloadValidatorDateTimeUseYearRange", m_bDownloadValidatorDateTimeUseYearRange);
+	ini.WriteInt(L"DownloadValidatorDateTimeYearStart", m_iDownloadValidatorDateTimeYearStart);
+	ini.WriteInt(L"DownloadValidatorDateTimeYearEnd", m_iDownloadValidatorDateTimeYearEnd);
+	ini.WriteBool(L"DownloadValidatorDateTimeCheckSeconds", m_bDownloadValidatorDateTimeCheckSeconds);
+	ini.WriteBool(L"DownloadValidatorDateTimeIncludeFollowingNumericValues", m_bDownloadValidatorDateTimeIncludeFollowingNumericValues);
 	ini.WriteInt(L"DownloadInspector", m_iDownloadInspector);
 	ini.WriteBool(L"DownloadInspectorFake", m_bDownloadInspectorFake);
 	ini.WriteBool(L"DownloadInspectorDRM", m_bDownloadInspectorDRM);
 	ini.WriteBool(L"DownloadInspectorAutoRenameToMajorityName", m_bDownloadInspectorAutoRenameToMajorityName);
+	ini.WriteBool(L"DownloadInspectorAutoRenameToMajorityNameForNewDownloadsOnly", m_bDownloadInspectorAutoRenameToMajorityNameForNewDownloadsOnly);
+	ini.WriteInt(L"DownloadInspectorAutoRenameToMajorityNameRequiredPercent", m_iDownloadInspectorAutoRenameToMajorityNameRequiredPercent);
+	ini.WriteInt(L"DownloadInspectorAutoRenameToMajorityNameMinimumVotes", m_iDownloadInspectorAutoRenameToMajorityNameMinimumVotes);
 	ini.WriteBool(L"DownloadInspectorInvalidExt", m_bDownloadInspectorInvalidExt);
 	ini.WriteInt(L"DownloadInspectorCheckPeriod", m_iDownloadInspectorCheckPeriod);
 	ini.WriteInt(L"DownloadInspectorCompletedThreshold", m_iDownloadInspectorCompletedThreshold);
@@ -2834,7 +3746,12 @@ void CPreferences::SavePreferences()
 	ini.WriteBool(L"DownloadInspectorAutoDeleteDontMarkAsCanceled", m_bDownloadInspectorAutoDeleteDontMarkAsCanceled);
 	ini.WriteBool(L"GroupKnownAtTheBottom", m_bGroupKnownAtTheBottom);
 	ini.WriteInt(L"SpamThreshold", m_iSpamThreshold);
+	ini.WriteInt(L"Ed2kSearchMaxResults", m_iEd2kSearchMaxResults);
+	ini.WriteInt(L"Ed2kSearchMaxMoreRequests", m_iEd2kSearchMaxMoreRequests);
+	ini.WriteInt(L"KadFileSearchTotal", m_iKadFileSearchTotal);
 	ini.WriteInt(L"KadSearchKeywordTotal", m_iKadSearchKeywordTotal);
+	ini.WriteInt(L"KadFileSearchLifetime", m_iKadFileSearchLifetime);
+	ini.WriteInt(L"KadSearchKeywordLifetime", m_iKadSearchKeywordLifetime);
 	ini.WriteBool(L"ShowCloseButtonOnSearchTabs", m_bShowCloseButtonOnSearchTabs);
 	ini.WriteBool(L"RepeatServerList", m_bRepeatServerList);
 	ini.WriteBool(L"DontRemoveStaticServers", m_bDontRemoveStaticServers);
@@ -2856,6 +3773,28 @@ void CPreferences::SavePreferences()
 	ini.WriteInt(L"PowerShareLimit", m_iPowerShareLimit);
 	ini.WriteInt(L"SharePermissions", m_iSharePermissions);
 	ini.WriteBool(L"SharePermissionColorRows", m_bSharePermissionColorRows);
+	ini.WriteBool(L"HighBandwidthUploadPolicy", m_bHighBandwidthUploadPolicy);
+	ini.WriteInt(L"HighBandwidthTargetUploadClients", static_cast<int>(m_uHighBandwidthTargetUploadClients));
+	ini.DeleteKey(L"HighBandwidthUploadClientLimit");
+	iniAI.DeleteKey(L"HighBandwidthUploadClientLimit");
+	ini.WriteInt(L"HighBandwidthUploadSlotElasticPercent", static_cast<int>(m_uHighBandwidthUploadSlotElasticPercent));
+	ini.DeleteKey(L"ManualUploadClientLimit");
+	ini.DeleteKey(L"ManualUploadClientLimitValue");
+	iniAI.DeleteKey(L"ManualUploadClientLimit");
+	iniAI.DeleteKey(L"ManualUploadClientLimitValue");
+	ini.WriteBool(L"AutoHighBandwidthDownloadBuffer", m_bAutoHighBandwidthDownloadBuffer);
+	ini.WriteFloat(L"HighBandwidthSlowUploadThresholdFactor", m_fHighBandwidthSlowUploadThresholdFactor);
+	ini.WriteInt(L"HighBandwidthSlowUploadGraceSeconds", static_cast<int>(m_uHighBandwidthSlowUploadGraceSeconds));
+	ini.WriteInt(L"HighBandwidthSlowUploadWarmupSeconds", static_cast<int>(m_uHighBandwidthSlowUploadWarmupSeconds));
+	ini.WriteInt(L"HighBandwidthZeroUploadGraceSeconds", static_cast<int>(m_uHighBandwidthZeroUploadGraceSeconds));
+	ini.WriteInt(L"HighBandwidthSlowUploadCooldownSeconds", static_cast<int>(m_uHighBandwidthSlowUploadCooldownSeconds));
+	ini.WriteBool(L"LowRatioQueueScoreBoost", m_bLowRatioQueueScoreBoost);
+	ini.WriteFloat(L"LowRatioQueueScoreThreshold", m_fLowRatioQueueScoreThreshold);
+	ini.WriteInt(L"LowRatioQueueScoreBonus", static_cast<int>(m_uLowRatioQueueScoreBonus));
+	ini.WriteInt(L"UploadSessionTransferLimitMode", static_cast<int>(m_eUploadSessionTransferLimitMode));
+	ini.WriteInt(L"UploadSessionTransferLimitPercent", static_cast<int>(m_uUploadSessionTransferLimitPercent));
+	ini.WriteInt(L"UploadSessionTransferLimitMiB", static_cast<int>(m_uUploadSessionTransferLimitMiB));
+	ini.WriteInt(L"UploadSessionTimeLimitSeconds", static_cast<int>(m_uUploadSessionTimeLimitSeconds));
 	ini.WriteBool(L"EmulateMLDonkey", m_bEmulateMLDonkey);
 	ini.WriteBool(L"EmulateEdonkey", m_bEmulateEdonkey);
 	ini.WriteBool(L"EmulateEdonkeyHybrid", m_bEmulateEdonkeyHybrid);
@@ -2977,7 +3916,7 @@ void CPreferences::SavePreferences()
 	// 
 	ini.WriteInt(L"PunishmentCancelationScanPeriod", MS2MIN(m_iPunishmentCancelationScanPeriod), _T("ProtectionPanel")); //Miliseconds to minutes
 	ini.WriteInt(L"ClientBanTime", (uint32)(m_tClientBanTime / 3600)); //Seconds to hours // <== adjust ClientBanTime - Stulle
-	ini.WriteInt(L"ClientScoreReducingTime", (uint32)(m_tClientBanTime / 3600)); //Seconds to hours
+	ini.WriteInt(L"ClientScoreReducingTime", (uint32)(m_tClientScoreReducingTime / 3600)); //Seconds to hours
 	ini.WriteBool(L"InformBadClients", m_bInformBadClients);
 	ini.WriteString(L"InformBadClientsText", m_strInformBadClientsText);
 	ini.WriteBool(L"DontPunishFriends", m_bDontPunishFriends);
@@ -3038,6 +3977,13 @@ void CPreferences::SavePreferences()
 	ini.WriteInt(L"FileFakerPunishment", m_uFileFakerPunishment);
 	ini.WriteBool(L"DetectUploadFaker", m_bDetectUploadFaker);
 	ini.WriteInt(L"UploadFakerPunishment", m_uUploadFakerPunishment);
+	ini.WriteBool(L"DetectUploadRequestAbuse", m_bDetectUploadRequestAbuse);
+	ini.WriteBool(L"DetectUploadRequestAbuseNoRequestSlots", m_bDetectUploadRequestAbuseNoRequestSlots);
+	ini.WriteBool(L"DetectUploadRequestAbuseQueueDrops", m_bDetectUploadRequestAbuseQueueDrops);
+	ini.WriteBool(L"UploadRequestAbuseCounterGuard", m_bUploadRequestAbuseCounterGuard);
+	ini.WriteBool(L"UploadRequestAbuseHashRotationTracking", m_bUploadRequestAbuseHashRotationTracking);
+	ini.WriteBool(L"UploadRequestAbusePostHelloDisconnect", m_bUploadRequestAbusePostHelloDisconnect);
+	ini.WriteInt(L"UploadRequestAbusePunishment", m_uUploadRequestAbusePunishment);
 	ini.WriteBool(L"DetectAgressive", m_bDetectAgressive);
 	ini.WriteInt(L"AgressiveTime", m_iAgressiveTime);
 	ini.WriteInt(L"AgressiveCounter", m_iAgressiveCounter);
@@ -3065,6 +4011,7 @@ void CPreferences::SavePreferences()
 	ini.WriteBool(L"BlacklistManual", m_bBlacklistManual);
 	ini.WriteBool(L"BlacklistAutoRemoveFromManual", m_bBlacklistAutoRemoveFromManual);
 	ini.WriteBool(L"BlacklistLog", m_bBlacklistLog);
+	return ini.Commit();
 }
 
 void CPreferences::ResetStatsColor(int index)
@@ -3107,12 +4054,15 @@ bool CPreferences::SetAllStatsColors(int iCount, const LPDWORD pdwColors)
 
 void CPreferences::IniCopy(const CString& si, const CString& di)
 {
-	CIni ini(GetConfigFile(), _T("eMule"));
-	const CString& sValue(ini.GetString(si));
+	CIni iniReader(GetConfigFile(), _T("eMule"));
+	const CString& sValue(iniReader.GetString(si));
 	// Do NOT write empty settings, this will mess up reading of default settings in case
 	// there were no settings available at all (fresh emule install)!
-	if (!sValue.IsEmpty())
+	if (!sValue.IsEmpty()) {
+		CProfileIniSnapshotBuilder ini(GetConfigFile(), _T("eMule"));
 		ini.WriteString(di, sValue, _T("ListControlSetup"));
+		ini.Commit();
+	}
 }
 
 void CPreferences::LoadPreferences()
@@ -3124,6 +4074,9 @@ void CPreferences::LoadPreferences()
 
 	CIni ini(GetConfigFile(), _T("eMule"));
 	ini.SetSection(_T("eMule"));
+	CProfileIniSnapshotBuilder loadMigrationIni(GetConfigFile(), _T("eMule"));
+	CProfileIniSnapshotBuilder loadMigrationIniAI(loadMigrationIni, _T("eMuleAI"));
+	bool bLoadMigrationIniDirty = false;
 
 	m_bFirstStart = ini.GetString(_T("AppVersion")).IsEmpty();
 
@@ -3170,21 +4123,23 @@ void CPreferences::LoadPreferences()
 				break;
 			}
 
-		if (!bDup && (::PathFileExists(sTmp) || ::CreateDirectory(sTmp, NULL)) || tempdir.IsEmpty())
+		if (!bDup && (DirectoryExistsLongPath(sTmp) || ::CreateDirectory(PrepareDirectoryPathForWin32LongPath(sTmp), NULL)) || tempdir.IsEmpty())
 			tempdir.Add(sTmp);
 	}
 
 	const CString strDownloadCapacityMbit(ini.GetString(_T("DownloadCapacityMbit"), MISSING_INI_VALUE));
 	if (strDownloadCapacityMbit != MISSING_INI_VALUE) {
 		SetMaxGraphDownloadRate(MbitPerSecToKBytesPerSec((uint32)_tstoi(strDownloadCapacityMbit)));
-		ini.DeleteKey(_T("DownloadCapacity"));
+		loadMigrationIni.DeleteKey(_T("DownloadCapacity"));
+		bLoadMigrationIniDirty = true;
 	}
 	else {
 		const CString strLegacyDownloadCapacity(ini.GetString(_T("DownloadCapacity"), MISSING_INI_VALUE));
 		if (strLegacyDownloadCapacity != MISSING_INI_VALUE) {
 			SetMaxGraphDownloadRate((uint32)_tstoi(strLegacyDownloadCapacity));
-			ini.WriteInt(_T("DownloadCapacityMbit"), KBytesPerSecToRoundedMbitPerSec(maxGraphDownloadRate));
-			ini.DeleteKey(_T("DownloadCapacity"));
+			loadMigrationIni.WriteInt(_T("DownloadCapacityMbit"), KBytesPerSecToRoundedMbitPerSec(maxGraphDownloadRate));
+			loadMigrationIni.DeleteKey(_T("DownloadCapacity"));
+			bLoadMigrationIniDirty = true;
 		}
 		else {
 			SetMaxGraphDownloadRate(MbitPerSecToKBytesPerSec(DEFAULT_DOWNLOAD_CAPACITY_MBIT));
@@ -3194,15 +4149,17 @@ void CPreferences::LoadPreferences()
 	const CString strUploadCapacityMbit(ini.GetString(_T("UploadCapacityMbit"), MISSING_INI_VALUE));
 	if (strUploadCapacityMbit != MISSING_INI_VALUE) {
 		SetMaxGraphUploadRate(MbitPerSecToKBytesPerSec((uint32)_tstoi(strUploadCapacityMbit)));
-		ini.DeleteKey(_T("UploadCapacityNew"));
-		ini.DeleteKey(_T("UploadCapacity"));
+		loadMigrationIni.DeleteKey(_T("UploadCapacityNew"));
+		loadMigrationIni.DeleteKey(_T("UploadCapacity"));
+		bLoadMigrationIniDirty = true;
 	}
 	else {
 		const CString strLegacyUploadCapacityNew(ini.GetString(_T("UploadCapacityNew"), MISSING_INI_VALUE));
 		if (strLegacyUploadCapacityNew != MISSING_INI_VALUE) {
 			SetMaxGraphUploadRate((uint32)_tstoi(strLegacyUploadCapacityNew));
-			ini.WriteInt(_T("UploadCapacityMbit"), maxGraphUploadRate == UNLIMITED ? 0 : KBytesPerSecToRoundedMbitPerSec(maxGraphUploadRate));
-			ini.DeleteKey(_T("UploadCapacityNew"));
+			loadMigrationIni.WriteInt(_T("UploadCapacityMbit"), maxGraphUploadRate == UNLIMITED ? 0 : KBytesPerSecToRoundedMbitPerSec(maxGraphUploadRate));
+			loadMigrationIni.DeleteKey(_T("UploadCapacityNew"));
+			bLoadMigrationIniDirty = true;
 		}
 		else {
 			const CString strLegacyUploadCapacity(ini.GetString(_T("UploadCapacity"), MISSING_INI_VALUE));
@@ -3211,13 +4168,15 @@ void CPreferences::LoadPreferences()
 				if (nOldUploadCapacity == 16 && ini.GetInt(_T("MaxUpload"), 12) == 12) {
 					// Preserve the old migration path for legacy default profiles.
 					SetMaxGraphUploadRate(0);
-					ini.WriteInt(_T("MaxUpload"), 100, _T("eMule"));
+					loadMigrationIni.WriteInt(_T("MaxUpload"), 100, _T("eMule"));
+					bLoadMigrationIniDirty = true;
 				}
 				else {
 					SetMaxGraphUploadRate((uint32)nOldUploadCapacity);
 				}
-				ini.WriteInt(_T("UploadCapacityMbit"), maxGraphUploadRate == UNLIMITED ? 0 : KBytesPerSecToRoundedMbitPerSec(maxGraphUploadRate));
-				ini.DeleteKey(_T("UploadCapacity"));
+				loadMigrationIni.WriteInt(_T("UploadCapacityMbit"), maxGraphUploadRate == UNLIMITED ? 0 : KBytesPerSecToRoundedMbitPerSec(maxGraphUploadRate));
+				loadMigrationIni.DeleteKey(_T("UploadCapacity"));
+				bLoadMigrationIniDirty = true;
 			}
 			else {
 				SetMaxGraphUploadRate(MbitPerSecToKBytesPerSec(DEFAULT_UPLOAD_CAPACITY_MBIT));
@@ -3249,20 +4208,62 @@ void CPreferences::LoadPreferences()
 	maxhalfconnections = ini.GetInt(_T("MaxHalfConnections"), 50);
 	m_bConditionalTCPAccept = ini.GetBool(_T("ConditionalTCPAccept"), false);
 
-	m_strBindAddrW = ini.GetString(_T("BindAddr")).Trim();
-	m_pszBindAddrW = m_strBindAddrW.IsEmpty() ? NULL : (LPCWSTR)m_strBindAddrW;
-	m_strBindAddrA = m_strBindAddrW;
-	m_pszBindAddrA = m_strBindAddrA.IsEmpty() ? NULL : (LPCSTR)m_strBindAddrA;
+	m_strBindInterfaceId = ini.GetString(_T("BindInterface"));
+	m_strBindInterfaceId.Trim();
+	m_strBindInterfaceName = ini.GetString(_T("BindInterfaceName"));
+	m_strBindInterfaceName.Trim();
+	m_strConfiguredBindAddr = ini.GetString(_T("BindAddr"));
+	m_strConfiguredBindAddr.Trim();
+	const bool bLegacyIpGuardEnabled = ini.GetBool(_T("Bind") _T("StartupBlock"), false) || ini.GetBool(_T("Bind") _T("RuntimeLossExit"), false);
+	m_eIpGuardMode = CIpGuard::ParseModePreferenceText(ini.GetString(_T("IpGuardMode"), CIpGuard::GetModePreferenceText(bLegacyIpGuardEnabled ? IpGuardModeBlock : IpGuardModeOff)));
+	m_strIpGuardAllowedPublicIpRanges = ini.GetString(_T("IpGuardAllowedPublicIpRanges"));
+	m_strIpGuardAllowedPublicIpRanges.Trim();
+	if (!HasExplicitBindSelection())
+		m_eIpGuardMode = IpGuardModeOff;
+	m_bVpnGuardEnabled = ini.GetBool(_T("VpnGuardEnabled"), false);
+	m_strVpnGuardCountryCode = ini.GetString(_T("VpnGuardCountryCode"));
+	m_strVpnGuardCountryCode.Trim();
+	m_strVpnGuardCountryCode.MakeUpper();
+	if (m_strVpnGuardCountryCode.GetLength() != 2)
+		m_bVpnGuardEnabled = false;
+	m_bVpnGuardBlockUnknownCountry = ini.GetBool(_T("VpnGuardBlockUnknownCountry"), false);
+	m_bRandomizePortsOnStartup = ini.GetBool(_T("RandomizePortsOnStartup"), false);
+	{
+		const int iRandomPortRangeStart = ini.GetInt(_T("RandomPortRangeStart"), GetDefaultRandomPortRangeStart());
+		const int iRandomPortRangeEnd = ini.GetInt(_T("RandomPortRangeEnd"), GetDefaultRandomPortRangeEnd());
+		if (iRandomPortRangeStart >= 0 && iRandomPortRangeEnd >= 0)
+			SetRandomPortRange(static_cast<UINT>(iRandomPortRangeStart), static_cast<UINT>(iRandomPortRangeEnd));
+		else
+			SetRandomPortRange(0, 0);
+	}
+	m_bOpenListenPortsInWindowsFirewall = ini.GetBool(_T("OpenListenPortsInWindowsFirewall"), false);
+	RefreshBindResolution();
 
-	port = (uint16)ini.GetInt(_T("Port"), 0);
-	if (port == 0) {
+	const int iConfiguredTcpPort = ini.GetInt(_T("Port"), 0);
+	m_nConfiguredPort = static_cast<uint16>(iConfiguredTcpPort);
+	m_bConfiguredPortAutoGenerated = iConfiguredTcpPort == 0 && !m_bRandomizePortsOnStartup;
+	port = m_nConfiguredPort;
+	if (port == 0 || m_bRandomizePortsOnStartup) {
 		port = (m_nStartupTcpPortOverride != 0) ? m_nStartupTcpPortOverride : thePrefs.GetRandomTCPPort();
 		m_nStartupTcpPortOverride = 0;
+		if (m_bConfiguredPortAutoGenerated)
+			m_nConfiguredPort = port;
 	}
 
 	// 0 is a valid value for the UDP port setting, as it is used for disabling it.
 	int iPort = ini.GetInt(_T("UDPPort"), INT_MAX/*invalid port value*/);
-	udpport = (iPort == INT_MAX) ? thePrefs.GetRandomUDPPort() : (uint16)iPort;
+	m_bConfiguredUDPPortAutoGenerated = iPort == INT_MAX && !m_bRandomizePortsOnStartup;
+	m_nConfiguredUDPPort = (iPort == INT_MAX) ? thePrefs.GetRandomUDPPort() : static_cast<uint16>(iPort);
+	udpport = m_nConfiguredUDPPort;
+	if (m_bRandomizePortsOnStartup && udpport != 0) {
+		for (int i = 0; i < 8; ++i) {
+			udpport = thePrefs.GetRandomUDPPort();
+			if (udpport != port)
+				break;
+		}
+		if (udpport == port && m_nRandomPortRangeStart < m_nRandomPortRangeEnd)
+			udpport = static_cast<uint16>((port > m_nRandomPortRangeStart) ? port - 1 : port + 1);
+	}
 
 	nServerUDPPort = (uint16)ini.GetInt(_T("ServerUDPPort"), -1); // 0 = Don't use UDP port for servers, -1 = use a random port (for backward compatibility)
 	maxsourceperfile = ini.GetInt(_T("MaxSourcesPerFile"), 400);
@@ -3286,20 +4287,29 @@ void CPreferences::LoadPreferences()
 	if (m_uDeadServerRetries > MAX_SERVERFAILCOUNT)
 		m_uDeadServerRetries = MAX_SERVERFAILCOUNT;
 	CIni iniAI(GetConfigFile(), _T("eMuleAI"));
+	const CString strLegacyMaxEServerBuddySlots(ini.GetString(_T("MaxEServerBuddySlots"), MISSING_INI_VALUE));
 	const CString strMaxEServerBuddySlotsAI(iniAI.GetString(_T("MaxEServerBuddySlots"), MISSING_INI_VALUE));
+	bool bMigrateEServerBuddySlotsToAI = false;
+	bool bRemoveLegacyEServerBuddySlots = false;
 	if (strMaxEServerBuddySlotsAI != MISSING_INI_VALUE) {
 		m_nMaxEServerBuddySlots = (uint8)_tstoi(strMaxEServerBuddySlotsAI);
-		ini.DeleteKey(_T("MaxEServerBuddySlots"));
+		bRemoveLegacyEServerBuddySlots = (strLegacyMaxEServerBuddySlots != MISSING_INI_VALUE);
 	}
 	else {
-		const CString strLegacyMaxEServerBuddySlots(ini.GetString(_T("MaxEServerBuddySlots"), MISSING_INI_VALUE));
 		if (strLegacyMaxEServerBuddySlots != MISSING_INI_VALUE) {
 			m_nMaxEServerBuddySlots = (uint8)_tstoi(strLegacyMaxEServerBuddySlots);
-			iniAI.WriteInt(_T("MaxEServerBuddySlots"), m_nMaxEServerBuddySlots);
-			ini.DeleteKey(_T("MaxEServerBuddySlots"));
+			bMigrateEServerBuddySlotsToAI = true;
+			bRemoveLegacyEServerBuddySlots = true;
 		}
 		else
 			m_nMaxEServerBuddySlots = ESERVERBUDDY_DEFAULT_SLOTS;
+	}
+	if (bMigrateEServerBuddySlotsToAI || bRemoveLegacyEServerBuddySlots) {
+		if (bMigrateEServerBuddySlotsToAI)
+			loadMigrationIniAI.WriteInt(_T("MaxEServerBuddySlots"), m_nMaxEServerBuddySlots);
+		if (bRemoveLegacyEServerBuddySlots)
+			loadMigrationIni.DeleteKey(_T("MaxEServerBuddySlots"));
+		bLoadMigrationIniDirty = true;
 	}
 	if (m_nMaxEServerBuddySlots < ESERVERBUDDY_MIN_SLOTS) m_nMaxEServerBuddySlots = ESERVERBUDDY_MIN_SLOTS;
 	if (m_nMaxEServerBuddySlots > ESERVERBUDDY_MAX_SLOTS) m_nMaxEServerBuddySlots = ESERVERBUDDY_MAX_SLOTS;
@@ -3336,10 +4346,10 @@ void CPreferences::LoadPreferences()
 	ICH = ini.GetBool(_T("ICH"), true);
 	m_bAutoUpdateServerList = ini.GetBool(_T("Serverlist"), false);
 
-	// since the minimize to tray button is not working under Aero (at least not at this point),
-	// we enable map the minimize to tray on the minimize button by default if Aero is running
-	if (IsRunningAeroGlassTheme())
-		mintotray = ini.GetBool(_T("MinToTray_Aero"), true);
+	// since the minimize to tray button is not working with Dwm Composition (at least not at this point),
+	// we enable map the minimize to tray on the minimize button by default if Dwm Composition is enabled
+	if (IsDwmCompositionEnabled())
+		mintotray = ini.GetBool(_T("MinToTray_DwmComposition"), true);
 	else
 		mintotray = ini.GetBool(_T("MinToTray"), false);
 
@@ -3401,6 +4411,9 @@ void CPreferences::LoadPreferences()
 	notifierOnLog = ini.GetBool(_T("NotifyOnLog"));
 	notifierOnImportantError = ini.GetBool(_T("NotifyOnImportantError"));
 	notifierOnEveryChatMsg = ini.GetBool(_T("NotifierPopEveryChatMessage"));
+	notifierDisplayMode = static_cast<ENotifierDisplayMode>(ini.GetInt(_T("NotifierDisplayMode"), ntfdmCustomPopup));
+	if (notifierDisplayMode < ntfdmCustomPopup || notifierDisplayMode > ntfdmTrayBalloon)
+		notifierDisplayMode = ntfdmCustomPopup;
 	notifierSoundType = (ENotifierSoundType)ini.GetInt(_T("NotifierUseSound"), ntfstNoSound);
 	notifierSoundFile = ini.GetString(_T("NotifierSoundPath"));
 
@@ -3441,23 +4454,35 @@ void CPreferences::LoadPreferences()
 	iMaxLogBuff = ini.GetInt(_T("MaxLogBuff"), 64) * 1024;
 	m_iLogFileFormat = (ELogFileFormat)ini.GetInt(_T("LogFileFormat"), Unicode);
 	m_bEnableVerboseOptions = ini.GetBool(_T("VerboseOptions"), true);
-    if (m_bEnableVerboseOptions) {
-		m_bVerbose = ini.GetBool(_T("Verbose"), false);
-		m_bFullVerbose = ini.GetBool(_T("FullVerbose"), false);
-		debug2disk = ini.GetBool(_T("SaveDebugToDisk"), false);
-		m_bDebugSourceExchange = ini.GetBool(_T("DebugSourceExchange"), false);
-		m_bLogBannedClients = ini.GetBool(_T("LogBannedClients"), true);
-		m_bLogRatingDescReceived = ini.GetBool(_T("LogRatingDescReceived"), true);
-		m_bLogSecureIdent = ini.GetBool(_T("LogSecureIdent"), true);
-		m_bLogFilteredIPs = ini.GetBool(_T("LogFilteredIPs"), true);
-		m_bLogFileSaving = ini.GetBool(_T("LogFileSaving"), false);
-		m_bLogA4AF = ini.GetBool(_T("LogA4AF"), false); // ZZ:DownloadManager
-		m_bLogUlDlEvents = ini.GetBool(_T("LogUlDlEvents"), true);
-		m_bLogSpamRating = ini.GetBool(_T("LogSpamRating"), false);
-		m_bLogRetryFailedTcp = ini.GetBool(_T("LogRetryFailedTcp"), false);
-        m_bLogExtendedSXEvents = ini.GetBool(_T("LogExtendedSXEvents"), false);
-        m_bLogNatTraversalEvents = ini.GetBool(_T("LogNatTraversalEvents"), false);
-    } else {
+	m_bVerbose = ini.GetBool(_T("Verbose"), false);
+	m_bFullVerbose = ini.GetBool(_T("FullVerbose"), false);
+	debug2disk = ini.GetBool(_T("SaveDebugToDisk"), false);
+	m_bDebugSourceExchange = ini.GetBool(_T("DebugSourceExchange"), false);
+	m_bLogBannedClients = ini.GetBool(_T("LogBannedClients"), true);
+	m_bLogRatingDescReceived = ini.GetBool(_T("LogRatingDescReceived"), true);
+	m_bLogSecureIdent = ini.GetBool(_T("LogSecureIdent"), true);
+	m_bLogFilteredIPs = ini.GetBool(_T("LogFilteredIPs"), true);
+	m_bLogFileSaving = ini.GetBool(_T("LogFileSaving"), false);
+	m_bLogA4AF = ini.GetBool(_T("LogA4AF"), false); // ZZ:DownloadManager
+	m_bLogUlDlEvents = ini.GetBool(_T("LogUlDlEvents"), true);
+	m_bLogSpamRating = ini.GetBool(_T("LogSpamRating"), false);
+	m_bLogRetryFailedTcp = ini.GetBool(_T("LogRetryFailedTcp"), false);
+	const CString strLogExtendedSXEventsAI(iniAI.GetString(_T("LogExtendedSXEvents"), MISSING_INI_VALUE));
+	if (strLogExtendedSXEventsAI != MISSING_INI_VALUE)
+		m_bLogExtendedSXEvents = (_tstoi(strLogExtendedSXEventsAI) != 0);
+	else
+		m_bLogExtendedSXEvents = ini.GetBool(_T("LogExtendedSXEvents"), false);
+	const CString strLogNatTraversalEventsAI(iniAI.GetString(_T("LogNatTraversalEvents"), MISSING_INI_VALUE));
+	if (strLogNatTraversalEventsAI != MISSING_INI_VALUE)
+		m_bLogNatTraversalEvents = (_tstoi(strLogNatTraversalEventsAI) != 0);
+	else
+		m_bLogNatTraversalEvents = ini.GetBool(_T("LogNatTraversalEvents"), false);
+	const CString strLogUiResponsivenessEventsAI(iniAI.GetString(_T("LogUiResponsivenessEvents"), MISSING_INI_VALUE));
+	if (strLogUiResponsivenessEventsAI != MISSING_INI_VALUE)
+		m_bLogUiResponsivenessEvents = (_tstoi(strLogUiResponsivenessEventsAI) != 0);
+	else
+		m_bLogUiResponsivenessEvents = ini.GetBool(_T("LogUiResponsivenessEvents"), false);
+	if (!m_bEnableVerboseOptions) {
 		if (m_bRestoreLastLogPane && m_iLastLogPaneID >= 2)
 			m_iLastLogPaneID = 1;
 	}
@@ -3620,21 +4645,6 @@ void CPreferences::LoadPreferences()
 	m_crLogError = ini.GetColRef(_T("LogErrorColor"), m_crLogError);
 	m_crLogWarning = ini.GetColRef(_T("LogWarningColor"), m_crLogWarning);
 	m_crLogSuccess = ini.GetColRef(_T("LogSuccessColor"), m_crLogSuccess);
-	if (IsDarkModeEnabled()) {
-		if (m_crLogError == RGB(255, 0, 0))
-			m_crLogError = RGB(255, 102, 102);	// Light Red
-		if (m_crLogWarning == RGB(128, 0, 128))
-			m_crLogWarning = RGB(186, 85, 211);	// Light Purple (Orchid)
-		if (m_crLogSuccess == RGB(0, 0, 255))
-			m_crLogSuccess = RGB(173, 216, 255); // Very Light Blue
-	} else {
-		if (thePrefs.m_crLogError == RGB(255, 102, 102))	// Light Red
-			thePrefs.m_crLogError = RGB(255, 0, 0);
-		if (thePrefs.m_crLogWarning == RGB(186, 85, 211))	// Light Purple (Orchid)
-			thePrefs.m_crLogWarning = RGB(128, 0, 128);
-		if (thePrefs.m_crLogSuccess == RGB(173, 216, 255))	// Very Light Blue
-			thePrefs.m_crLogSuccess = RGB(0, 0, 255);
-	}
 
 	if (statsAverageMinutes < 1)
 		statsAverageMinutes = 5;
@@ -3651,7 +4661,6 @@ void CPreferences::LoadPreferences()
 	m_bHighresTimer = ini.GetBool(_T("HighresTimer"), true);
 	m_bRunAsUser = ini.GetBool(_T("RunAsUnprivilegedUser"), false);
 	m_bPreferRestrictedOverUser = ini.GetBool(_T("PreferRestrictedOverUser"), false);
-	m_bOpenPortsOnStartUp = ini.GetBool(_T("OpenPortsOnStartUp"), false);
 	m_byLogLevel = ini.GetInt(_T("DebugLogLevel"), DLP_VERYLOW);
 	m_bTrustEveryHash = ini.GetBool(_T("AICHTrustEveryHash"), false);
 	m_bRememberCancelledFiles = ini.GetBool(_T("RememberCancelledFiles"), true);
@@ -3759,11 +4768,16 @@ void CPreferences::LoadPreferences()
 	m_bUITweaksSpeedGraph = ini.GetBool(L"UITweaksSpeedGraph", true);
 	m_bDisableFindAsYouType = ini.GetBool(L"DisableFindAsYouType", false);
 	m_iUITweaksListUpdatePeriod = max(ini.GetInt(L"UITweaksListUpdatePeriod", 500), 100); // Minimum 100ms to prevent performance issues
-	m_iGeoLite2Mode = ini.GetInt(_T("GeoLite2Mode"), 3, _T("eMuleAI"));
-	m_bGeoLite2ShowFlag = ini.GetInt(_T("GeoLite2ShowFlag", 1));
+	m_iIPGeolocationMode = ini.GetInt(_T("IPGeolocationMode"), 3, _T("eMuleAI"));
+	m_bIPGeolocationShowFlag = ini.GetBool(_T("IPGeolocationShowFlag"), true);
+	m_bAutoIPGeolocationUpdate = ini.GetBool(_T("IPGeolocationAutoUpdate"), false, _T("eMuleAI"));
+	m_nIPGeolocationUpdatePeriodDays = max(1, min(ini.GetInt(_T("IPGeolocationUpdatePeriodDays"), 30, _T("eMuleAI")), 365));
+	m_tLastIPGeolocationUpdate = (time_t)ini.GetInt(_T("IPGeolocationLastUpdate"), 0, _T("eMuleAI"));
+	m_strIPGeolocationUpdateURL = ini.GetString(_T("IPGeolocationUpdateURL"), _T("https://download.db-ip.com/free/dbip-city-lite-%Y-%m.mmdb.gz"), _T("eMuleAI"));
 	m_bConnectionChecker = ini.GetBool(_T("ConnectionChecker"), true);
 	m_sConnectionCheckerServer = ini.GetString(_T("ConnectionCheckerServer"), _T("https://www.google.com"));
 	m_bEnableNatTraversal = ini.GetBool(L"EnableNatTraversal", true);
+	SetNatTraversalProtocolMode(ini.GetInt(L"NatTraversalProtocolMode", NAT_TRAVERSAL_PROTOCOL_PREFER_QUIC));
 	int iNatTraversalPortWindow = ini.GetInt(L"NatTraversalPortWindow", 512);
 	if (iNatTraversalPortWindow < 0 || iNatTraversalPortWindow > 65535)
 		iNatTraversalPortWindow = 512;
@@ -3788,25 +4802,43 @@ void CPreferences::LoadPreferences()
 	m_uTemp2 = MS2MIN(FILEREASKTIME);
 	m_uTemp = (m_uTemp >= m_uTemp2 && m_uTemp <= 55) ? m_uTemp : m_uTemp2;
 	m_uReAskTimeDif = MIN2MS((m_uTemp - m_uTemp2));
-	m_iDownloadChecker = ini.GetInt(L"DownloadChecker", 0);
-	m_iDownloadCheckerAcceptPercentage = ini.GetInt(L"DownloadCheckerAcceptPercentage", 10);
-	m_bDownloadCheckerRejectCanceled = ini.GetBool(L"DownloadCheckerRejectCanceled", true);
-	m_bDownloadCheckerRejectSameHash = ini.GetBool(L"DownloadCheckerRejectSameHash", true);
-	m_bDownloadCheckerRejectBlacklisted = ini.GetBool(L"DownloadCheckerRejectBlacklisted", true);
-	m_bDownloadCheckerCaseInsensitive = ini.GetBool(L"DownloadCheckerCaseInsensitive", true);
-	m_bDownloadCheckerIgnoreExtension = ini.GetBool(L"DownloadCheckerIgnoreExtension", true);
-	m_bDownloadCheckerIgnoreTags = ini.GetBool(L"DownloadCheckerIgnoreTags", true);
-	m_bDownloadCheckerDontIgnoreNumericTags = ini.GetBool(L"DownloadCheckerDontIgnoreNumericTags", true);
-	m_bDownloadCheckerIgnoreNonAlphaNumeric = ini.GetBool(L"DownloadCheckerIgnoreNonAlphaNumeric", true);
-	m_iDownloadCheckerMinimumComparisonLength = ini.GetInt(L"DownloadCheckerMinimumComparisonLength", 8);
-	if (m_iDownloadCheckerMinimumComparisonLength < 4)
-		m_iDownloadCheckerMinimumComparisonLength = 8;
-	m_bDownloadCheckerSkipIncompleteFileConfirmation = ini.GetBool(L"DownloadCheckerSkipIncompleteFileConfirmation", false);
-	m_bDownloadCheckerMarkAsBlacklisted = ini.GetBool(L"DownloadCheckerMarkAsBlacklisted", true);
-	m_bDownloadCheckerAutoMarkAsBlacklisted = ini.GetBool(L"DownloadCheckerAutoMarkAsBlacklisted", true);
+	m_iDownloadValidator = ini.GetInt(L"DownloadValidator", 0);
+	m_iDownloadValidatorAcceptPercentage = ini.GetInt(L"DownloadValidatorAcceptPercentage", 10);
+	m_bDownloadValidatorRejectCanceled = ini.GetBool(L"DownloadValidatorRejectCanceled", true);
+	m_bDownloadValidatorRejectSameHash = ini.GetBool(L"DownloadValidatorRejectSameHash", true);
+	m_bDownloadValidatorRejectBlacklisted = ini.GetBool(L"DownloadValidatorRejectBlacklisted", true);
+	m_bDownloadValidatorCaseInsensitive = ini.GetBool(L"DownloadValidatorCaseInsensitive", true);
+	m_bDownloadValidatorIgnoreExtension = ini.GetBool(L"DownloadValidatorIgnoreExtension", true);
+	m_bDownloadValidatorIgnoreTags = ini.GetBool(L"DownloadValidatorIgnoreTags", true);
+	m_bDownloadValidatorDontIgnoreNumericTags = ini.GetBool(L"DownloadValidatorDontIgnoreNumericTags", true);
+	m_bDownloadValidatorIgnoreNonAlphaNumeric = ini.GetBool(L"DownloadValidatorIgnoreNonAlphaNumeric", true);
+	m_iDownloadValidatorMinimumComparisonLength = ini.GetInt(L"DownloadValidatorMinimumComparisonLength", 8);
+	if (m_iDownloadValidatorMinimumComparisonLength < 4)
+		m_iDownloadValidatorMinimumComparisonLength = 8;
+	m_bDownloadValidatorSkipIncompleteFileConfirmation = ini.GetBool(L"DownloadValidatorSkipIncompleteFileConfirmation", false);
+	m_bDownloadValidatorMarkAsBlacklisted = ini.GetBool(L"DownloadValidatorMarkAsBlacklisted", true);
+	m_bDownloadValidatorAutoMarkAsBlacklisted = ini.GetBool(L"DownloadValidatorAutoMarkAsBlacklisted", true);
+	m_bDownloadValidatorDateTimeMatching = ini.GetBool(L"DownloadValidatorDateTimeMatching", false);
+	m_bDownloadValidatorDateTimeUseYearRange = ini.GetBool(L"DownloadValidatorDateTimeUseYearRange", false);
+	m_iDownloadValidatorDateTimeYearStart = ini.GetInt(L"DownloadValidatorDateTimeYearStart", 1900);
+	m_iDownloadValidatorDateTimeYearEnd = ini.GetInt(L"DownloadValidatorDateTimeYearEnd", 2040);
+	if (m_iDownloadValidatorDateTimeYearStart < 1000 || m_iDownloadValidatorDateTimeYearStart > 9999)
+		m_iDownloadValidatorDateTimeYearStart = 1900;
+	if (m_iDownloadValidatorDateTimeYearEnd < 1000 || m_iDownloadValidatorDateTimeYearEnd > 9999)
+		m_iDownloadValidatorDateTimeYearEnd = 2040;
+	if (m_iDownloadValidatorDateTimeYearStart > m_iDownloadValidatorDateTimeYearEnd) {
+		const int iTemp = m_iDownloadValidatorDateTimeYearStart;
+		m_iDownloadValidatorDateTimeYearStart = m_iDownloadValidatorDateTimeYearEnd;
+		m_iDownloadValidatorDateTimeYearEnd = iTemp;
+	}
+	m_bDownloadValidatorDateTimeCheckSeconds = ini.GetBool(L"DownloadValidatorDateTimeCheckSeconds", true);
+	m_bDownloadValidatorDateTimeIncludeFollowingNumericValues = ini.GetBool(L"DownloadValidatorDateTimeIncludeFollowingNumericValues", false);
 	m_bDownloadInspectorFake = ini.GetBool(L"DownloadInspectorFake", ini.GetBool(L"DownloadInspectorFake", true));
 	m_bDownloadInspectorDRM = ini.GetBool(L"DownloadInspectorDRM", ini.GetBool(L"DownloadInspectorDRM", true));
 	m_bDownloadInspectorAutoRenameToMajorityName = ini.GetBool(L"DownloadInspectorAutoRenameToMajorityName", true);
+	m_bDownloadInspectorAutoRenameToMajorityNameForNewDownloadsOnly = ini.GetBool(L"DownloadInspectorAutoRenameToMajorityNameForNewDownloadsOnly", false);
+	SetDownloadInspectorAutoRenameToMajorityNameRequiredPercent(ini.GetInt(L"DownloadInspectorAutoRenameToMajorityNameRequiredPercent", GetDefaultDownloadInspectorAutoRenameToMajorityNameRequiredPercent()));
+	SetDownloadInspectorAutoRenameToMajorityNameMinimumVotes(ini.GetInt(L"DownloadInspectorAutoRenameToMajorityNameMinimumVotes", GetDefaultDownloadInspectorAutoRenameToMajorityNameMinimumVotes()));
 	m_bDownloadInspectorInvalidExt = ini.GetBool(L"DownloadInspectorInvalidExt", ini.GetBool(L"DownloadInspectorInvalidExt", true));
 	m_iDownloadInspector = ini.GetInt(L"DownloadInspector", ini.GetInt(L"DownloadInspector", 2));
 	m_iDownloadInspectorCheckPeriod = ini.GetInt(L"DownloadInspectorCheckPeriod", ini.GetInt(L"DownloadInspectorCheckPeriod", 30));
@@ -3828,15 +4860,15 @@ void CPreferences::LoadPreferences()
 	m_bDownloadInspectorAutoDeleteEnabled = ini.GetBool(L"DownloadInspectorAutoDeleteEnabled", false);
 	m_bDownloadInspectorAutoDeleteAddedBeforeEnabled = ini.GetBool(L"DownloadInspectorAutoDeleteAddedBeforeEnabled", true);
 	m_iDownloadInspectorAutoDeleteAddedBeforeDays = ini.GetInt(L"DownloadInspectorAutoDeleteAddedBeforeDays", 180);
-	if (m_iDownloadInspectorAutoDeleteAddedBeforeDays < 0)
+		if (m_iDownloadInspectorAutoDeleteAddedBeforeDays <= 0)
 		m_iDownloadInspectorAutoDeleteAddedBeforeDays = 180;
 	m_bDownloadInspectorAutoDeleteLastSeenCompleteBeforeEnabled = ini.GetBool(L"DownloadInspectorAutoDeleteLastSeenCompleteBeforeEnabled", true);
 	m_iDownloadInspectorAutoDeleteLastSeenCompleteBeforeDays = ini.GetInt(L"DownloadInspectorAutoDeleteLastSeenCompleteBeforeDays", 180);
-	if (m_iDownloadInspectorAutoDeleteLastSeenCompleteBeforeDays < 0)
+		if (m_iDownloadInspectorAutoDeleteLastSeenCompleteBeforeDays <= 0)
 		m_iDownloadInspectorAutoDeleteLastSeenCompleteBeforeDays = 180;
 	m_bDownloadInspectorAutoDeleteLastReceivedBeforeEnabled = ini.GetBool(L"DownloadInspectorAutoDeleteLastReceivedBeforeEnabled", true);
 	m_iDownloadInspectorAutoDeleteLastReceivedBeforeDays = ini.GetInt(L"DownloadInspectorAutoDeleteLastReceivedBeforeDays", 180);
-	if (m_iDownloadInspectorAutoDeleteLastReceivedBeforeDays < 0)
+		if (m_iDownloadInspectorAutoDeleteLastReceivedBeforeDays <= 0)
 		m_iDownloadInspectorAutoDeleteLastReceivedBeforeDays = 180;
 	m_bDownloadInspectorAutoDeleteDownloadedLessThanPercentEnabled = ini.GetBool(L"DownloadInspectorAutoDeleteDownloadedLessThanPercentEnabled", true);
 	m_iDownloadInspectorAutoDeleteDownloadedLessThanPercent = ini.GetInt(L"DownloadInspectorAutoDeleteDownloadedLessThanPercent", 5);
@@ -3850,7 +4882,24 @@ void CPreferences::LoadPreferences()
 	m_bDownloadInspectorAutoDeleteDontMarkAsCanceled = ini.GetBool(L"DownloadInspectorAutoDeleteDontMarkAsCanceled", true);
 	m_bGroupKnownAtTheBottom = ini.GetBool(_T("GroupKnownAtTheBottom"), true);
 	m_iSpamThreshold = ini.GetInt(L"SpamThreshold ", SEARCH_SPAM_THRESHOLD);
-	m_iKadSearchKeywordTotal = ini.GetInt(L"KadSearchKeywordTotal ", SEARCHKEYWORD_TOTAL);
+	m_iEd2kSearchMaxResults = ini.GetInt(L"Ed2kSearchMaxResults", GetDefaultEd2kSearchMaxResults());
+	if (m_iEd2kSearchMaxResults < 0)
+		m_iEd2kSearchMaxResults = GetDefaultEd2kSearchMaxResults();
+	m_iEd2kSearchMaxMoreRequests = ini.GetInt(L"Ed2kSearchMaxMoreRequests", GetDefaultEd2kSearchMaxMoreRequests());
+	if (m_iEd2kSearchMaxMoreRequests < 0)
+		m_iEd2kSearchMaxMoreRequests = GetDefaultEd2kSearchMaxMoreRequests();
+	m_iKadFileSearchTotal = ini.GetInt(L"KadFileSearchTotal", GetDefaultKadFileSearchTotal());
+	if (m_iKadFileSearchTotal < GetMinKadSearchTotal() || m_iKadFileSearchTotal > GetMaxKadSearchTotal())
+		m_iKadFileSearchTotal = GetDefaultKadFileSearchTotal();
+	m_iKadSearchKeywordTotal = ini.GetInt(L"KadSearchKeywordTotal", ini.GetInt(L"KadSearchKeywordTotal ", GetDefaultKadSearchKeywordTotal()));
+	if (m_iKadSearchKeywordTotal < GetMinKadSearchTotal() || m_iKadSearchKeywordTotal > GetMaxKadSearchTotal())
+		m_iKadSearchKeywordTotal = GetDefaultKadSearchKeywordTotal();
+	m_iKadFileSearchLifetime = ini.GetInt(L"KadFileSearchLifetime", GetDefaultKadFileSearchLifetime());
+	if (m_iKadFileSearchLifetime < GetMinKadSearchLifetime() || m_iKadFileSearchLifetime > GetMaxKadSearchLifetime())
+		m_iKadFileSearchLifetime = GetDefaultKadFileSearchLifetime();
+	m_iKadSearchKeywordLifetime = ini.GetInt(L"KadSearchKeywordLifetime", GetDefaultKadSearchKeywordLifetime());
+	if (m_iKadSearchKeywordLifetime < GetMinKadSearchLifetime() || m_iKadSearchKeywordLifetime > GetMaxKadSearchLifetime())
+		m_iKadSearchKeywordLifetime = GetDefaultKadSearchKeywordLifetime();
 	m_bShowCloseButtonOnSearchTabs = ini.GetBool(_T("ShowCloseButtonOnSearchTabs"), true);
 	m_bRepeatServerList = ini.GetBool(_T("RepeatServerList"), true);
 	m_bDontRemoveStaticServers = ini.GetBool(_T("DontRemoveStaticServers"), true);
@@ -3880,6 +4929,22 @@ void CPreferences::LoadPreferences()
 	if (m_iSharePermissions < 0 || m_iSharePermissions > 2)
 		m_iSharePermissions = 0;
 	m_bSharePermissionColorRows = ini.GetBool(L"SharePermissionColorRows", false);
+	m_bHighBandwidthUploadPolicy = ini.GetBool(L"HighBandwidthUploadPolicy", false);
+	m_uHighBandwidthTargetUploadClients = NormalizeUnsignedIniValue(ini.GetInt(L"HighBandwidthTargetUploadClients", ini.GetInt(L"HighBandwidthUploadClientLimit", ini.GetInt(L"ManualUploadClientLimitValue", 12))), 12u, GetMinHighBandwidthTargetUploadClients(), GetMaxHighBandwidthTargetUploadClients());
+	m_uHighBandwidthUploadSlotElasticPercent = NormalizeUnsignedIniValue(ini.GetInt(L"HighBandwidthUploadSlotElasticPercent", 80), 80u, GetMinHighBandwidthUploadSlotElasticPercent(), GetMaxHighBandwidthUploadSlotElasticPercent());
+	m_bAutoHighBandwidthDownloadBuffer = ini.GetBool(L"AutoHighBandwidthDownloadBuffer", false);
+	m_fHighBandwidthSlowUploadThresholdFactor = NormalizeHighBandwidthSlowUploadThresholdFactor(ini.GetFloat(L"HighBandwidthSlowUploadThresholdFactor", 0.75f));
+	m_uHighBandwidthSlowUploadGraceSeconds = NormalizeUnsignedIniValue(ini.GetInt(L"HighBandwidthSlowUploadGraceSeconds", 30), 30u, GetMinHighBandwidthSlowUploadGraceSeconds(), GetMaxHighBandwidthSlowUploadGraceSeconds());
+	m_uHighBandwidthSlowUploadWarmupSeconds = NormalizeUnsignedIniValue(ini.GetInt(L"HighBandwidthSlowUploadWarmupSeconds", 30), 30u, GetMinHighBandwidthSlowUploadWarmupSeconds(), GetMaxHighBandwidthSlowUploadWarmupSeconds());
+	m_uHighBandwidthZeroUploadGraceSeconds = NormalizeUnsignedIniValue(ini.GetInt(L"HighBandwidthZeroUploadGraceSeconds", 5), 5u, GetMinHighBandwidthZeroUploadGraceSeconds(), GetMaxHighBandwidthZeroUploadGraceSeconds());
+	m_uHighBandwidthSlowUploadCooldownSeconds = NormalizeUnsignedIniValue(ini.GetInt(L"HighBandwidthSlowUploadCooldownSeconds", 30), 30u, GetMinHighBandwidthSlowUploadCooldownSeconds(), GetMaxHighBandwidthSlowUploadCooldownSeconds());
+	m_bLowRatioQueueScoreBoost = ini.GetBool(L"LowRatioQueueScoreBoost", false);
+	m_fLowRatioQueueScoreThreshold = NormalizeLowRatioQueueScoreThreshold(ini.GetFloat(L"LowRatioQueueScoreThreshold", 0.50f));
+	m_uLowRatioQueueScoreBonus = NormalizeUnsignedIniValue(ini.GetInt(L"LowRatioQueueScoreBonus", 50), 50u, GetMinLowRatioQueueScoreBonus(), GetMaxLowRatioQueueScoreBonus());
+	m_eUploadSessionTransferLimitMode = NormalizeUploadSessionTransferLimitMode(static_cast<ESessionTransferLimitMode>(ini.GetInt(L"UploadSessionTransferLimitMode", static_cast<int>(ESessionTransferLimitMode::Disabled))));
+	m_uUploadSessionTransferLimitPercent = NormalizeUnsignedIniValue(ini.GetInt(L"UploadSessionTransferLimitPercent", 55), 55u, GetMinUploadSessionTransferLimitPercent(), GetMaxUploadSessionTransferLimitPercent());
+	m_uUploadSessionTransferLimitMiB = NormalizeUnsignedIniValue(ini.GetInt(L"UploadSessionTransferLimitMiB", 1), 1u, GetMinUploadSessionTransferLimitMiB(), GetMaxUploadSessionTransferLimitMiB());
+	m_uUploadSessionTimeLimitSeconds = NormalizeUnsignedIniValue(ini.GetInt(L"UploadSessionTimeLimitSeconds", 0), 0u, GetMinUploadSessionTimeLimitSeconds(), GetMaxUploadSessionTimeLimitSeconds());
 	m_bEmulateMLDonkey = ini.GetBool(L"EmulateMLDonkey", true);
 	m_bEmulateEdonkey = ini.GetBool(L"EmulateEdonkey", true);
 	m_bEmulateEdonkeyHybrid = ini.GetBool(L"EmulateEdonkeyHybrid", true);
@@ -4032,7 +5097,7 @@ void CPreferences::LoadPreferences()
 	m_bAntiUploadProtection = ini.GetBool(L"AntiUploadProtection", true);
 	m_iAntiUploadProtectionLimit = (uint16)ini.GetInt(L"AntiUploadProtectionLimit", 1800);
 	m_iAntiUploadProtectionLimit = (m_iAntiUploadProtectionLimit >= 1000 && m_iAntiUploadProtectionLimit <= 2800) ? m_iAntiUploadProtectionLimit : 1800;
-	m_bUploaderPunishmentPrevention = ini.GetBool(L"UploaderPunishmentPreventionBool", true);
+	m_bUploaderPunishmentPrevention = ini.GetBool(L"UploaderPunishmentPrevention", true);
 	m_iUploaderPunishmentPreventionLimit = (uint16)ini.GetInt(L"UploaderPunishmentPreventionLimit", 1000);
 	m_iUploaderPunishmentPreventionLimit = m_iUploaderPunishmentPreventionLimit >= 1 ? m_iUploaderPunishmentPreventionLimit : 1;
 	m_iUploaderPunishmentPreventionCase = (uint8)ini.GetInt(L"UploaderPunishmentPreventionCase", 0);
@@ -4090,6 +5155,13 @@ void CPreferences::LoadPreferences()
 	m_uFileFakerPunishment = ini.GetInt(L"FileFakerPunishment", 1);
 	m_bDetectUploadFaker = ini.GetBool(L"DetectUploadFaker", true);
 	m_uUploadFakerPunishment = ini.GetInt(L"UploadFakerPunishment", 1);
+	m_bDetectUploadRequestAbuse = ini.GetBool(L"DetectUploadRequestAbuse", true);
+	m_bDetectUploadRequestAbuseNoRequestSlots = ini.GetBool(L"DetectUploadRequestAbuseNoRequestSlots", true);
+	m_bDetectUploadRequestAbuseQueueDrops = ini.GetBool(L"DetectUploadRequestAbuseQueueDrops", true);
+	m_bUploadRequestAbuseCounterGuard = ini.GetBool(L"UploadRequestAbuseCounterGuard", true);
+	m_bUploadRequestAbuseHashRotationTracking = ini.GetBool(L"UploadRequestAbuseHashRotationTracking", true);
+	m_bUploadRequestAbusePostHelloDisconnect = ini.GetBool(L"UploadRequestAbusePostHelloDisconnect", true);
+	m_uUploadRequestAbusePunishment = static_cast<uint8>(max(0, min(12, ini.GetInt(L"UploadRequestAbusePunishment", 0))));
 	m_bDetectAgressive = ini.GetBool(L"DetectAgressive", true);
 	m_iAgressiveTime = (uint16)ini.GetInt(L"AgressiveTime", 10);
 	m_iAgressiveCounter = (uint16)ini.GetInt(L"AgressiveCounter", 5);
@@ -4117,6 +5189,9 @@ void CPreferences::LoadPreferences()
 	m_bBlacklistManual = ini.GetBool(_T("BlacklistManual"), true);
 	m_bBlacklistAutoRemoveFromManual = ini.GetBool(_T("BlacklistAutoRemoveFromManual"), true);
 	m_bBlacklistLog = ini.GetBool(_T("BlacklistLog"), false);
+
+	if (bLoadMigrationIniDirty)
+		loadMigrationIni.Commit();
 
 	LoadCats();
 	SetLanguage();
@@ -4153,8 +5228,7 @@ void CPreferences::SaveCats()
 {
 	CString strCatIniFilePath;
 	strCatIniFilePath.Format(_T("%s") _T("Category.ini"), (LPCTSTR)GetMuleDirectory(EMULE_CONFIGDIR));
-	(void)_tremove(strCatIniFilePath);
-	CIni ini(strCatIniFilePath);
+	CProfileIniSnapshotBuilder ini(strCatIniFilePath, _T("General"), _T("Category.ini"), _T("category-ini"), &g_lCategoryIniSaveGeneration, false);
 	ini.WriteInt(_T("Count"), (int)catArr.GetCount() - 1, _T("General"));
 	for (INT_PTR i = 0; i < catArr.GetCount(); ++i) {
 		CString strSection;
@@ -4176,6 +5250,7 @@ void CPreferences::SaveCats()
 		ini.WriteBool(_T("downloadInAlphabeticalOrder"), cmap->downloadInAlphabeticalOrder != FALSE);
 		ini.WriteBool(_T("Care4All"), cmap->care4all);
 	}
+	ini.Commit();
 }
 
 void CPreferences::ReloadCats()
@@ -4207,7 +5282,7 @@ void CPreferences::LoadCats()
 			newcat->strIncomingPath = ini.GetStringUTF8(_T("Incoming"));
 			MakeFoldername(newcat->strIncomingPath);
 			if (!IsShareableDirectory(newcat->strIncomingPath)
-				|| (!::PathFileExists(newcat->strIncomingPath) && !::CreateDirectory(newcat->strIncomingPath, 0)))
+				|| (!DirectoryExistsLongPath(newcat->strIncomingPath) && !::CreateDirectory(PrepareDirectoryPathForWin32LongPath(newcat->strIncomingPath), 0)))
 			{
 				newcat->strIncomingPath = GetMuleDirectory(EMULE_INCOMINGDIR);
 			}
@@ -4382,6 +5457,262 @@ void CPreferences::SetWSLowPass(const CString& strNewPass)
 	m_strWebLowPassword = MD5Sum(strNewPass).GetHashString();
 }
 
+uint32 CPreferences::GetMinHighBandwidthTargetUploadClients()
+{
+	return max(static_cast<uint32>(MIN_UP_CLIENTS_ALLOWED), 4u);
+}
+
+uint32 CPreferences::GetMaxHighBandwidthTargetUploadClients()
+{
+	return static_cast<uint32>(MAX_UP_CLIENTS_ALLOWED);
+}
+
+uint32 CPreferences::NormalizeHighBandwidthTargetUploadClients(uint32 value)
+{
+	return min(max(value, GetMinHighBandwidthTargetUploadClients()), GetMaxHighBandwidthTargetUploadClients());
+}
+
+void CPreferences::SetHighBandwidthTargetUploadClients(uint32 value)
+{
+	m_uHighBandwidthTargetUploadClients = NormalizeHighBandwidthTargetUploadClients(value);
+}
+
+uint32 CPreferences::GetMinHighBandwidthUploadSlotElasticPercent()
+{
+	return 0;
+}
+
+uint32 CPreferences::GetMaxHighBandwidthUploadSlotElasticPercent()
+{
+	return 100;
+}
+
+uint32 CPreferences::NormalizeHighBandwidthUploadSlotElasticPercent(uint32 value)
+{
+	return min(max(value, GetMinHighBandwidthUploadSlotElasticPercent()), GetMaxHighBandwidthUploadSlotElasticPercent());
+}
+
+void CPreferences::SetHighBandwidthUploadSlotElasticPercent(uint32 value)
+{
+	m_uHighBandwidthUploadSlotElasticPercent = NormalizeHighBandwidthUploadSlotElasticPercent(value);
+}
+
+float CPreferences::GetMinHighBandwidthSlowUploadThresholdFactor()
+{
+	return 0.10f;
+}
+
+float CPreferences::GetMaxHighBandwidthSlowUploadThresholdFactor()
+{
+	return 1.00f;
+}
+
+float CPreferences::NormalizeHighBandwidthSlowUploadThresholdFactor(float value)
+{
+	return min(max(value, GetMinHighBandwidthSlowUploadThresholdFactor()), GetMaxHighBandwidthSlowUploadThresholdFactor());
+}
+
+void CPreferences::SetHighBandwidthSlowUploadThresholdFactor(float value)
+{
+	m_fHighBandwidthSlowUploadThresholdFactor = NormalizeHighBandwidthSlowUploadThresholdFactor(value);
+}
+
+UINT CPreferences::GetMinHighBandwidthSlowUploadGraceSeconds()
+{
+	return 5;
+}
+
+UINT CPreferences::GetMaxHighBandwidthSlowUploadGraceSeconds()
+{
+	return 300;
+}
+
+UINT CPreferences::NormalizeHighBandwidthSlowUploadGraceSeconds(UINT value)
+{
+	return min(max(value, GetMinHighBandwidthSlowUploadGraceSeconds()), GetMaxHighBandwidthSlowUploadGraceSeconds());
+}
+
+void CPreferences::SetHighBandwidthSlowUploadGraceSeconds(UINT value)
+{
+	m_uHighBandwidthSlowUploadGraceSeconds = NormalizeHighBandwidthSlowUploadGraceSeconds(value);
+}
+
+UINT CPreferences::GetMinHighBandwidthSlowUploadWarmupSeconds()
+{
+	return 0;
+}
+
+UINT CPreferences::GetMaxHighBandwidthSlowUploadWarmupSeconds()
+{
+	return 3600;
+}
+
+UINT CPreferences::NormalizeHighBandwidthSlowUploadWarmupSeconds(UINT value)
+{
+	return min(max(value, GetMinHighBandwidthSlowUploadWarmupSeconds()), GetMaxHighBandwidthSlowUploadWarmupSeconds());
+}
+
+void CPreferences::SetHighBandwidthSlowUploadWarmupSeconds(UINT value)
+{
+	m_uHighBandwidthSlowUploadWarmupSeconds = NormalizeHighBandwidthSlowUploadWarmupSeconds(value);
+}
+
+UINT CPreferences::GetMinHighBandwidthZeroUploadGraceSeconds()
+{
+	return 3;
+}
+
+UINT CPreferences::GetMaxHighBandwidthZeroUploadGraceSeconds()
+{
+	return 120;
+}
+
+UINT CPreferences::NormalizeHighBandwidthZeroUploadGraceSeconds(UINT value)
+{
+	return min(max(value, GetMinHighBandwidthZeroUploadGraceSeconds()), GetMaxHighBandwidthZeroUploadGraceSeconds());
+}
+
+void CPreferences::SetHighBandwidthZeroUploadGraceSeconds(UINT value)
+{
+	m_uHighBandwidthZeroUploadGraceSeconds = NormalizeHighBandwidthZeroUploadGraceSeconds(value);
+}
+
+UINT CPreferences::GetMinHighBandwidthSlowUploadCooldownSeconds()
+{
+	return 10;
+}
+
+UINT CPreferences::GetMaxHighBandwidthSlowUploadCooldownSeconds()
+{
+	return 3600;
+}
+
+UINT CPreferences::NormalizeHighBandwidthSlowUploadCooldownSeconds(UINT value)
+{
+	return min(max(value, GetMinHighBandwidthSlowUploadCooldownSeconds()), GetMaxHighBandwidthSlowUploadCooldownSeconds());
+}
+
+void CPreferences::SetHighBandwidthSlowUploadCooldownSeconds(UINT value)
+{
+	m_uHighBandwidthSlowUploadCooldownSeconds = NormalizeHighBandwidthSlowUploadCooldownSeconds(value);
+}
+
+float CPreferences::GetMinLowRatioQueueScoreThreshold()
+{
+	return 0.0f;
+}
+
+float CPreferences::GetMaxLowRatioQueueScoreThreshold()
+{
+	return 2.0f;
+}
+
+float CPreferences::NormalizeLowRatioQueueScoreThreshold(float value)
+{
+	return min(max(value, GetMinLowRatioQueueScoreThreshold()), GetMaxLowRatioQueueScoreThreshold());
+}
+
+void CPreferences::SetLowRatioQueueScoreThreshold(float value)
+{
+	m_fLowRatioQueueScoreThreshold = NormalizeLowRatioQueueScoreThreshold(value);
+}
+
+UINT CPreferences::GetMinLowRatioQueueScoreBonus()
+{
+	return 0;
+}
+
+UINT CPreferences::GetMaxLowRatioQueueScoreBonus()
+{
+	return 500;
+}
+
+UINT CPreferences::NormalizeLowRatioQueueScoreBonus(UINT value)
+{
+	return min(max(value, GetMinLowRatioQueueScoreBonus()), GetMaxLowRatioQueueScoreBonus());
+}
+
+void CPreferences::SetLowRatioQueueScoreBonus(UINT value)
+{
+	m_uLowRatioQueueScoreBonus = NormalizeLowRatioQueueScoreBonus(value);
+}
+
+ESessionTransferLimitMode CPreferences::NormalizeUploadSessionTransferLimitMode(ESessionTransferLimitMode mode)
+{
+	switch (mode) {
+	case ESessionTransferLimitMode::PercentOfFile:
+	case ESessionTransferLimitMode::AbsoluteMiB:
+		return mode;
+	default:
+		return ESessionTransferLimitMode::Disabled;
+	}
+}
+
+void CPreferences::SetUploadSessionTransferLimitMode(ESessionTransferLimitMode mode)
+{
+	m_eUploadSessionTransferLimitMode = NormalizeUploadSessionTransferLimitMode(mode);
+}
+
+UINT CPreferences::GetMinUploadSessionTransferLimitPercent()
+{
+	return 1;
+}
+
+UINT CPreferences::GetMaxUploadSessionTransferLimitPercent()
+{
+	return 100;
+}
+
+UINT CPreferences::NormalizeUploadSessionTransferLimitPercent(UINT value)
+{
+	return min(max(value, GetMinUploadSessionTransferLimitPercent()), GetMaxUploadSessionTransferLimitPercent());
+}
+
+void CPreferences::SetUploadSessionTransferLimitPercent(UINT value)
+{
+	m_uUploadSessionTransferLimitPercent = NormalizeUploadSessionTransferLimitPercent(value);
+}
+
+UINT CPreferences::GetMinUploadSessionTransferLimitMiB()
+{
+	return 1;
+}
+
+UINT CPreferences::GetMaxUploadSessionTransferLimitMiB()
+{
+	return 4096;
+}
+
+UINT CPreferences::NormalizeUploadSessionTransferLimitMiB(UINT value)
+{
+	return min(max(value, GetMinUploadSessionTransferLimitMiB()), GetMaxUploadSessionTransferLimitMiB());
+}
+
+void CPreferences::SetUploadSessionTransferLimitMiB(UINT value)
+{
+	m_uUploadSessionTransferLimitMiB = NormalizeUploadSessionTransferLimitMiB(value);
+}
+
+UINT CPreferences::GetMinUploadSessionTimeLimitSeconds()
+{
+	return 0;
+}
+
+UINT CPreferences::GetMaxUploadSessionTimeLimitSeconds()
+{
+	return 86400;
+}
+
+UINT CPreferences::NormalizeUploadSessionTimeLimitSeconds(UINT value)
+{
+	return min(max(value, GetMinUploadSessionTimeLimitSeconds()), GetMaxUploadSessionTimeLimitSeconds());
+}
+
+void CPreferences::SetUploadSessionTimeLimitSeconds(UINT value)
+{
+	m_uUploadSessionTimeLimitSeconds = NormalizeUploadSessionTimeLimitSeconds(value);
+}
+
 void CPreferences::SetMaxUpload(uint32 val)
 {
 	m_maxupload = val ? val : UNLIMITED;
@@ -4539,7 +5870,7 @@ bool CPreferences::CanFSHandleLargeFiles(int nForCat)
 	return false;
 }
 
-void CPreferences::SetEServerDiscoveredExternalUdpPort(uint16 port, uint8 source)
+void CPreferences::SetEServerDiscoveredExternalUdpPort(uint16 port, uint8 source, uint32 publicIP, uint32 serverIP, uint16 serverPort, uint32 buddyIP)
 {
 	if (port == 0) {
 		ClearEServerDiscoveredExternalUdpPort();
@@ -4549,6 +5880,10 @@ void CPreferences::SetEServerDiscoveredExternalUdpPort(uint16 port, uint8 source
 	m_nEServerDiscoveredExternalUdpPort = port;
 	m_dwEServerDiscoveredExternalUdpPortTime = ::GetTickCount();
 	m_uEServerDiscoveredExternalUdpPortSource = source;
+	m_dwEServerDiscoveredExternalUdpPortPublicIP = publicIP;
+	m_dwEServerDiscoveredExternalUdpPortServerIP = serverIP;
+	m_nEServerDiscoveredExternalUdpPortServerPort = serverPort;
+	m_dwEServerDiscoveredExternalUdpPortBuddyIP = buddyIP;
 }
 
 void CPreferences::ClearEServerDiscoveredExternalUdpPort()
@@ -4556,6 +5891,54 @@ void CPreferences::ClearEServerDiscoveredExternalUdpPort()
 	m_nEServerDiscoveredExternalUdpPort = 0;
 	m_dwEServerDiscoveredExternalUdpPortTime = 0;
 	m_uEServerDiscoveredExternalUdpPortSource = 0;
+	m_dwEServerDiscoveredExternalUdpPortPublicIP = 0;
+	m_dwEServerDiscoveredExternalUdpPortServerIP = 0;
+	m_nEServerDiscoveredExternalUdpPortServerPort = 0;
+	m_dwEServerDiscoveredExternalUdpPortBuddyIP = 0;
+}
+
+bool CPreferences::IsEServerDiscoveredExternalUdpPortContextCurrent()
+{
+	if (CPreferences::GetEServerDiscoveredExternalUdpPort() == 0 || CPreferences::GetEServerDiscoveredExternalUdpPortTime() == 0)
+		return false;
+
+	if ((DWORD)(::GetTickCount() - CPreferences::GetEServerDiscoveredExternalUdpPortTime()) > ESERVER_EXT_UDP_PORT_TTL) {
+		thePrefs.ClearEServerDiscoveredExternalUdpPort();
+		return false;
+	}
+
+	if (theApp.serverconnect != NULL && theApp.serverconnect->IsConnected() && theApp.serverconnect->GetCurrentServer() != NULL) {
+		const uint32 dwCurrentServerIP = theApp.serverconnect->GetCurrentServer()->GetIP();
+		const uint16 nCurrentServerPort = theApp.serverconnect->GetCurrentServer()->GetPort();
+		if (CPreferences::m_dwEServerDiscoveredExternalUdpPortServerIP != 0
+			&& (CPreferences::m_dwEServerDiscoveredExternalUdpPortServerIP != dwCurrentServerIP
+				|| CPreferences::m_nEServerDiscoveredExternalUdpPortServerPort != nCurrentServerPort)) {
+			thePrefs.ClearEServerDiscoveredExternalUdpPort();
+			return false;
+		}
+	} else if (CPreferences::m_dwEServerDiscoveredExternalUdpPortServerIP != 0) {
+		thePrefs.ClearEServerDiscoveredExternalUdpPort();
+		return false;
+	}
+
+	if (CPreferences::m_dwEServerDiscoveredExternalUdpPortPublicIP != 0) {
+		CAddress publicIP = theApp.GetPublicIP();
+		if (!publicIP.IsNull() && publicIP.GetType() == CAddress::IPv4 && publicIP.IsPublicIP()
+			&& publicIP.ToUInt32(false) != CPreferences::m_dwEServerDiscoveredExternalUdpPortPublicIP) {
+			thePrefs.ClearEServerDiscoveredExternalUdpPort();
+			return false;
+		}
+	}
+
+	if (CPreferences::m_dwEServerDiscoveredExternalUdpPortBuddyIP != 0 && theApp.clientlist != NULL) {
+		const CUpDownClient* pBuddy = theApp.clientlist->GetServingEServerBuddy();
+		if (pBuddy == NULL || pBuddy->GetIP().IsNull() || pBuddy->GetIP().ToUInt32(false) != CPreferences::m_dwEServerDiscoveredExternalUdpPortBuddyIP) {
+			thePrefs.ClearEServerDiscoveredExternalUdpPort();
+			return false;
+		}
+	}
+
+	return true;
 }
 
 bool CPreferences::HasValidExternalUdpPort()
@@ -4565,15 +5948,7 @@ bool CPreferences::HasValidExternalUdpPort()
 		&& Kademlia::CKademlia::GetPrefs()->GetExternalKadPort() != 0)
 		return true;
 
-	if (m_nEServerDiscoveredExternalUdpPort == 0 || m_dwEServerDiscoveredExternalUdpPortTime == 0)
-		return false;
-
-	if ((DWORD)(::GetTickCount() - m_dwEServerDiscoveredExternalUdpPortTime) > ESERVER_EXT_UDP_PORT_TTL) {
-		ClearEServerDiscoveredExternalUdpPort();
-		return false;
-	}
-
-	return true;
+	return IsEServerDiscoveredExternalUdpPortContextCurrent();
 }
 
 uint16 CPreferences::GetBestExternalUdpPort()
@@ -4583,23 +5958,20 @@ uint16 CPreferences::GetBestExternalUdpPort()
 		&& Kademlia::CKademlia::GetPrefs()->GetExternalKadPort() != 0)
 		return Kademlia::CKademlia::GetPrefs()->GetExternalKadPort();
 
-	if (m_nEServerDiscoveredExternalUdpPort == 0 || m_dwEServerDiscoveredExternalUdpPortTime == 0)
+	if (!IsEServerDiscoveredExternalUdpPortContextCurrent())
 		return 0;
-
-	if ((DWORD)(::GetTickCount() - m_dwEServerDiscoveredExternalUdpPortTime) > ESERVER_EXT_UDP_PORT_TTL) {
-		ClearEServerDiscoveredExternalUdpPort();
-		return 0;
-	}
 
 	return m_nEServerDiscoveredExternalUdpPort;
 }
 
 uint16 CPreferences::GetRandomTCPPort()
 {
-	// Get table of currently used TCP ports.
+	NormalizeRandomPortRange();
+
+	// Get tables of currently used TCP ports.
 	PMIB_TCPTABLE pTCPTab = NULL;
 	ULONG dwSize = 0;
-	if (GetTcpTable(pTCPTab, &dwSize, FALSE) == ERROR_INSUFFICIENT_BUFFER) {
+	if (GetTcpTable(NULL, &dwSize, FALSE) == ERROR_INSUFFICIENT_BUFFER) {
 		// Allocate more memory in case the number of TCP entries increased
 		// between the function calls.
 		dwSize += sizeof(MIB_TCPROW) * 50;
@@ -4610,19 +5982,31 @@ uint16 CPreferences::GetRandomTCPPort()
 		}
 	}
 
-	static const UINT uValidPortRange = 61000;
+	PMIB_TCP6TABLE pTCP6Tab = NULL;
+	ULONG dwSize6 = 0;
+	const GetTcp6TableFunc pfnGetTcp6Table = GetTcp6TableProc();
+	if (pfnGetTcp6Table != NULL && pfnGetTcp6Table(NULL, &dwSize6, FALSE) == ERROR_INSUFFICIENT_BUFFER) {
+		dwSize6 += sizeof(MIB_TCP6ROW) * 50;
+		pTCP6Tab = (PMIB_TCP6TABLE)malloc(dwSize6);
+		if (pTCP6Tab && pfnGetTcp6Table(pTCP6Tab, &dwSize6, TRUE) != ERROR_SUCCESS) {
+			free(pTCP6Tab);
+			pTCP6Tab = NULL;
+		}
+	}
+
+	const UINT uValidPortRange = static_cast<UINT>(m_nRandomPortRangeEnd - m_nRandomPortRangeStart) + 1;
 	int iMaxTests = uValidPortRange; // just in case, avoid endless loop
 	uint16 nPort;
 	bool bPortIsFree;
 	do {
 		// Get random port
-		nPort = 4096 + (GetRandomUInt16() % uValidPortRange);
+		nPort = static_cast<uint16>(m_nRandomPortRangeStart + (GetRandomUInt16() % uValidPortRange));
+		const uint16 nPortBE = htons(nPort);
 
-		// The port is assumed to be available by default. If we got a table of currently
-		// used TCP ports, verify that the port is not in this table.
+		// The port is assumed to be available by default. If we got tables of currently
+		// used TCP ports, verify that the port is not in those tables.
 		bPortIsFree = true;
 		if (pTCPTab) {
-			uint16 nPortBE = htons(nPort);
 			for (DWORD e = pTCPTab->dwNumEntries; e-- > 0;) {
 				// If there is a TCP entry in the table (regardless of its state), the port
 				// is treated as unavailable.
@@ -4632,14 +6016,25 @@ uint16 CPreferences::GetRandomTCPPort()
 				}
 			}
 		}
+		if (bPortIsFree && pTCP6Tab) {
+			for (DWORD e = pTCP6Tab->dwNumEntries; e-- > 0;) {
+				if (pTCP6Tab->table[e].dwLocalPort == nPortBE) {
+					bPortIsFree = false;
+					break;
+				}
+			}
+		}
 	} while (!bPortIsFree && --iMaxTests > 0);
 	free(pTCPTab);
+	free(pTCP6Tab);
 	return nPort;
 }
 
 uint16 CPreferences::GetRandomUDPPort()
 {
-	// Get table of currently used UDP ports.
+	NormalizeRandomPortRange();
+
+	// Get tables of currently used UDP ports.
 	PMIB_UDPTABLE pUDPTab = NULL;
 	ULONG dwSize = 0;
 	if (GetUdpTable(NULL, &dwSize, FALSE) == ERROR_INSUFFICIENT_BUFFER) {
@@ -4653,19 +6048,30 @@ uint16 CPreferences::GetRandomUDPPort()
 		}
 	}
 
-	static const UINT uValidPortRange = 61000;
+	PMIB_UDP6TABLE pUDP6Tab = NULL;
+	ULONG dwSize6 = 0;
+	if (GetUdp6Table(NULL, &dwSize6, FALSE) == ERROR_INSUFFICIENT_BUFFER) {
+		dwSize6 += sizeof(MIB_UDP6ROW) * 50;
+		pUDP6Tab = (PMIB_UDP6TABLE)malloc(dwSize6);
+		if (pUDP6Tab && GetUdp6Table(pUDP6Tab, &dwSize6, TRUE) != ERROR_SUCCESS) {
+			free(pUDP6Tab);
+			pUDP6Tab = NULL;
+		}
+	}
+
+	const UINT uValidPortRange = static_cast<UINT>(m_nRandomPortRangeEnd - m_nRandomPortRangeStart) + 1;
 	int iMaxTests = uValidPortRange; // just in case, avoid endless loop
 	uint16 nPort;
 	bool bPortIsFree;
 	do {
 		// Get random port
-		nPort = 4096 + (GetRandomUInt16() % uValidPortRange);
+		nPort = static_cast<uint16>(m_nRandomPortRangeStart + (GetRandomUInt16() % uValidPortRange));
+		const uint16 nPortBE = htons(nPort);
 
-		// The port is assumed to be available by default. If we got a table of currently
-		// used UDP ports, verify that the port is not in this table.
+		// The port is assumed to be available by default. If we got tables of currently
+		// used UDP ports, verify that the port is not in those tables.
 		bPortIsFree = true;
 		if (pUDPTab) {
-			uint16 nPortBE = htons(nPort);
 			for (DWORD e = pUDPTab->dwNumEntries; e-- > 0;) {
 				if (pUDPTab->table[e].dwLocalPort == nPortBE) {
 					bPortIsFree = false;
@@ -4673,8 +6079,17 @@ uint16 CPreferences::GetRandomUDPPort()
 				}
 			}
 		}
+		if (bPortIsFree && pUDP6Tab) {
+			for (DWORD e = pUDP6Tab->dwNumEntries; e-- > 0;) {
+				if (pUDP6Tab->table[e].dwLocalPort == nPortBE) {
+					bPortIsFree = false;
+					break;
+				}
+			}
+		}
 	} while (!bPortIsFree && --iMaxTests > 0);
 	free(pUDPTab);
+	free(pUDP6Tab);
 	return nPort;
 }
 
@@ -4712,17 +6127,17 @@ CString CPreferences::GetDefaultDirectory(EDefaultDirectory eDirectory, bool bCr
 		switch (eDirectory) { // create the underlying directory first - be sure to adjust this if changing default directories
 		case EMULE_CONFIGDIR:
 		case EMULE_LOGDIR:
-			::CreateDirectory(m_astrDefaultDirs[EMULE_CONFIGBASEDIR], NULL);
+			::CreateDirectory(PrepareDirectoryPathForWin32LongPath(m_astrDefaultDirs[EMULE_CONFIGBASEDIR]), NULL);
 			break;
 		case EMULE_TEMPDIR:
 		case EMULE_INCOMINGDIR:
-			::CreateDirectory(m_astrDefaultDirs[EMULE_DATABASEDIR], NULL);
+			::CreateDirectory(PrepareDirectoryPathForWin32LongPath(m_astrDefaultDirs[EMULE_DATABASEDIR]), NULL);
 			break;
 		case EMULE_SKINDIR:
 		case EMULE_TOOLBARDIR:
-			::CreateDirectory(m_astrDefaultDirs[EMULE_EXPANSIONDIR], NULL);
+			::CreateDirectory(PrepareDirectoryPathForWin32LongPath(m_astrDefaultDirs[EMULE_EXPANSIONDIR]), NULL);
 		}
-		::CreateDirectory(m_astrDefaultDirs[eDirectory], NULL);
+		::CreateDirectory(PrepareDirectoryPathForWin32LongPath(m_astrDefaultDirs[eDirectory]), NULL);
 		m_abDefaultDirsCreated[eDirectory] = true;
 	}
 	return m_astrDefaultDirs[eDirectory];
@@ -4779,28 +6194,28 @@ bool CPreferences::GetSparsePartFiles()
 	return m_bSparsePartFiles && (GetWindowsVersion() != _WINVER_VISTA_);
 }
 
-bool CPreferences::IsRunningAeroGlassTheme()
+bool CPreferences::IsDwmCompositionEnabled()
 {
 	// This is important for all functions which need to draw in the NC-Area (glass style)
-	// Aero by default does not allow this, any drawing will not be visible. This can be turned off,
+	// Dwm Composition by default does not allow this, any drawing will not be visible. This can be turned off,
 	// but Vista will not deliver the Glass style then as background when calling the default draw
 	// function. In other words, draw all or nothing yourself - eMule chooses currently nothing
-	static bool bAeroAlreadyDetected = false;
-	if (!bAeroAlreadyDetected) {
-		bAeroAlreadyDetected = true;
-		m_bIsRunningAeroGlass = FALSE;
+	static bool bDwmCompositionAlreadyDetected = false;
+	if (!bDwmCompositionAlreadyDetected) {
+		bDwmCompositionAlreadyDetected = true;
+		m_bIsDwmCompositionEnabled = FALSE;
 		if (GetWindowsVersion() >= _WINVER_VISTA_) {
 			HMODULE hDWMAPI = LoadLibrary(_T("dwmapi.dll"));
 			if (hDWMAPI) {
 				HRESULT(WINAPI * pfnDwmIsCompositionEnabled)(BOOL*);
 				(FARPROC&)pfnDwmIsCompositionEnabled = GetProcAddress(hDWMAPI, "DwmIsCompositionEnabled");
 				if (pfnDwmIsCompositionEnabled != NULL)
-					pfnDwmIsCompositionEnabled(&m_bIsRunningAeroGlass);
+					pfnDwmIsCompositionEnabled(&m_bIsDwmCompositionEnabled);
 				FreeLibrary(hDWMAPI);
 			}
 		}
 	}
-	return (m_bIsRunningAeroGlass != FALSE);
+	return (m_bIsDwmCompositionEnabled != FALSE);
 }
 
 void CPreferences::SetClientHistory(bool bClientHistory)

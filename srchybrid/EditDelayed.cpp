@@ -278,7 +278,7 @@ void CEditDelayed::PreSubclassWindow()
 {
 	CWnd::PreSubclassWindow();
 	SetProp(m_hWnd, _T("IsEditDelayed"), reinterpret_cast<HANDLE>(1)); // mark for DarkMode
-	ModifyStyle(0, SS_NOTIFY);
+	ModifyStyle(0, WS_CLIPCHILDREN | SS_NOTIFY);
 }
 
 HBRUSH CEditDelayed::CtlColor(CDC* pDC, UINT)

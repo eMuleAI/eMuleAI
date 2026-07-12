@@ -99,9 +99,9 @@ void CIrcMain::ProcessLink(const CString &sED2KLink)
 		switch (pLink->GetKind()) {
 		case CED2KLink::kFile:
 			{
-				CED2KFileLink *pFileLink = pLink->GetFileLink();
-				ASSERT(pFileLink);
-				theApp.downloadqueue->AddFileLinkToDownload(*pFileLink);
+				CStringArray astrLinks;
+				astrLinks.Add(sLink);
+				theApp.AddEd2kLinkArrayToDownload(astrLinks, 0);
 			}
 			break;
 		case CED2KLink::kServerList:
@@ -616,7 +616,7 @@ void CIrcMain::ParseMessage(const CString &sRawMessage)
 			case 306:
 				if (sRawMessage.GetLength() < iIndex && sRawMessage[iIndex] == _T(':'))
 					++iIndex;
-				m_pwndIRC->AddStatus((uCommand == 303 ? _T("ison: ") : EMPTY) + sRawMessage.Mid(iIndex));
+				m_pwndIRC->AddStatus((uCommand == 303 ? CString(_T("ison: ")) : EMPTY) + sRawMessage.Mid(iIndex));
 				return;
 
 				//- Replies 311 - 313, 317 - 319 are all replies

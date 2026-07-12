@@ -203,6 +203,7 @@ void CSpeedGraph::Init_Graph(CString s_type,UINT i_maxvalue)
 BOOL CSpeedGraph::OnInitDialog()
 {
 	CDialog::OnInitDialog();
+	ModifyStyle(0, WS_CLIPSIBLINGS);
 
 	SetWindowPos(NULL,m_rect.left,m_rect.top,m_rect.right-m_rect.left,m_rect.bottom-m_rect.top,SWP_SHOWWINDOW);
 

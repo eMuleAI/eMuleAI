@@ -1,4 +1,4 @@
-//This file is part of eMule AI
+﻿//This file is part of eMule AI
 //Copyright (C)2002-2026 Merkur ( strEmail.Format("%s@%s", "devteam", "emule-project.net") / https://www.emule-project.net )
 //Copyright (C)2026 eMule AI
 //
@@ -36,12 +36,17 @@
 #include "ListViewSearchDlg.h"
 #include <atlimage.h>
 #include "Opcodes.h"
+#include "UserMsgs.h"
+#include "Log.h"
+#include <limits.h>
 
 #ifdef _DEBUG
 #define new DEBUG_NEW
 #undef THIS_FILE
 static char THIS_FILE[] = __FILE__;
 #endif
+
+extern UINT g_uMainThreadId;
 
 #define MAX_SORTORDERHISTORY 4
 #define MLC_BLEND(A, B, X) (((A) + (B) * ((X)-1) + (((X)+1)/2)) / (X))
@@ -54,6 +59,9 @@ static char THIS_FILE[] = __FILE__;
 
 #define MLC_IDC_MENU	4875
 #define MLC_IDC_UPDATE	(MLC_IDC_MENU - 1)
+#ifndef IDC_HAND
+#define IDC_HAND MAKEINTRESOURCE(32649)
+#endif
 
 //used for very slow assertions
 #define MLC_ASSERT(f)	((void)0)
@@ -70,15 +78,261 @@ const int CMuleListCtrl::sm_iSubItemInset = 4;	// Offset from left and right col
 
 IMPLEMENT_DYNAMIC(CMuleListCtrl, CListCtrl)
 
+void CMuleListCtrl::SAsyncRedrawRange::Merge(int iFirst, int iLast)
+{
+	if (iFirst < 0 || iLast < iFirst) {
+		MarkFull();
+		return;
+	}
+	if (m_bFull)
+		return;
+	if (m_iFirst < 0 || iFirst < m_iFirst)
+		m_iFirst = iFirst;
+	if (iLast > m_iLast)
+		m_iLast = iLast;
+}
+
+void CMuleListCtrl::BeginListModelGeneration(LONG lModelGeneration, bool /*bClearRows*/)
+{
+	const LONG lCurrentGeneration = InterlockedCompareExchange(&m_lListModelGeneration, 0, 0);
+	if (lModelGeneration != 0) {
+		if (lCurrentGeneration != 0 && lModelGeneration < lCurrentGeneration)
+			return;
+		InterlockedExchange(&m_lListModelGeneration, lModelGeneration);
+		return;
+	}
+
+	LONG lNewGeneration = InterlockedIncrement(&m_lListModelGeneration);
+	if (lNewGeneration <= 0)
+		InterlockedExchange(&m_lListModelGeneration, 1);
+}
+
+
 namespace
 {
-constexpr int MULELISTCTRL_PERSISTENT_INFOTIP_OFFSET_X = 16;
-constexpr int MULELISTCTRL_PERSISTENT_INFOTIP_OFFSET_Y = 24;
+constexpr int MULELISTCTRL_PERSISTENT_INFOTIP_OFFSET_X = 0;
+constexpr int MULELISTCTRL_PERSISTENT_INFOTIP_OFFSET_Y = 2;
 constexpr UINT_PTR MULELISTCTRL_PERSISTENT_INFOTIP_TOOL_ID = 1;
 constexpr DWORD MULELISTCTRL_PERSISTENT_INFOTIP_MIN_VISIBLE_MS = 350;
 constexpr UINT_PTR MULELISTCTRL_PERSISTENT_INFOTIP_LEAVE_TIMER_ID = 0x4D4C4950;
 constexpr UINT MULELISTCTRL_PERSISTENT_INFOTIP_LEAVE_RECHECK_MS = 75;
+constexpr int MULELISTCTRL_OPERATION_OVERLAY_MAX_WIDTH = 680;
+constexpr int MULELISTCTRL_OPERATION_OVERLAY_MIN_WIDTH = 420;
+constexpr int MULELISTCTRL_OPERATION_OVERLAY_HEIGHT = 76;
+constexpr int MULELISTCTRL_OPERATION_OVERLAY_BOTTOM_MARGIN = 18;
+constexpr UINT MULELISTCTRL_OPERATION_OVERLAY_IMMEDIATE_MIN_ITEMS = 3;
+constexpr DWORD MULELISTCTRL_OPERATION_OVERLAY_DELAY_MS = 1200;
+constexpr UINT_PTR MULELISTCTRL_OPERATION_OVERLAY_TIMER_ID = 0x4D4C4F50;
+constexpr UINT MULELISTCTRL_OPERATION_OVERLAY_ANIMATION_MS = 250;
 }
+
+class COperationOverlayWnd : public CWnd
+{
+public:
+	COperationOverlayWnd()
+		: m_pOwner(NULL)
+		, m_bAnimationTimerActive(false)
+		, m_sizeWindowRgn(0, 0)
+	{
+	}
+
+	bool CreateOverlay(CMuleListCtrl* pOwner)
+	{
+		if (pOwner == NULL)
+			return false;
+
+		m_pOwner = pOwner;
+		if (::IsWindow(m_hWnd))
+			return true;
+
+		CString strClassName = AfxRegisterWndClass(CS_DBLCLKS, ::LoadCursor(NULL, IDC_ARROW), NULL, NULL);
+		return CreateEx(0, strClassName, NULL, WS_CHILD | WS_CLIPSIBLINGS, CRect(0, 0, 0, 0), pOwner, 0) != FALSE;
+	}
+
+	void UpdateFromOwner()
+	{
+		if (m_pOwner == NULL || !::IsWindow(m_hWnd))
+			return;
+
+		CRect rcOverlay;
+		if (!m_pOwner->GetOperationOverlayRect(rcOverlay)) {
+			ShowWindow(SW_HIDE);
+			return;
+		}
+
+		CRect rcCurrent;
+		GetWindowRect(&rcCurrent);
+		m_pOwner->ScreenToClient(&rcCurrent);
+		const bool bNeedsMove = !IsWindowVisible() || rcCurrent.left != rcOverlay.left || rcCurrent.top != rcOverlay.top || rcCurrent.right != rcOverlay.right || rcCurrent.bottom != rcOverlay.bottom;
+		const CSize sizeOverlay(rcOverlay.Width(), rcOverlay.Height());
+		const bool bNeedsRgn = m_sizeWindowRgn.cx != sizeOverlay.cx || m_sizeWindowRgn.cy != sizeOverlay.cy;
+		if (bNeedsMove)
+			SetWindowPos(&CWnd::wndTop, rcOverlay.left, rcOverlay.top, rcOverlay.Width(), rcOverlay.Height(), SWP_NOACTIVATE | SWP_SHOWWINDOW);
+		if (bNeedsRgn) {
+			CRgn rgnPanel;
+			if (rgnPanel.CreateRoundRectRgn(0, 0, rcOverlay.Width() + 1, rcOverlay.Height() + 1, 14, 14)) {
+				SetWindowRgn((HRGN)rgnPanel.Detach(), TRUE);
+				m_sizeWindowRgn = sizeOverlay;
+			}
+		}
+		if (bNeedsMove || bNeedsRgn)
+			Invalidate(FALSE);
+	}
+
+	void EnsureAnimationTimer()
+	{
+		if (!::IsWindow(m_hWnd) || m_bAnimationTimerActive)
+			return;
+
+		SetTimer(MULELISTCTRL_OPERATION_OVERLAY_TIMER_ID, MULELISTCTRL_OPERATION_OVERLAY_ANIMATION_MS, NULL);
+		m_bAnimationTimerActive = true;
+	}
+
+protected:
+	DECLARE_MESSAGE_MAP()
+
+	afx_msg void OnPaint()
+	{
+		CPaintDC dc(this);
+		CRect rcClient;
+		GetClientRect(rcClient);
+		CMemoryDC dcMem(&dc, rcClient);
+		if (m_pOwner != NULL) {
+			CRect rcOverlay;
+			if (m_pOwner->GetOperationOverlayRect(rcOverlay)) {
+				dcMem.SetWindowOrg(rcOverlay.left, rcOverlay.top);
+				m_pOwner->DrawOperationOverlay(&dcMem);
+				dcMem.SetWindowOrg(0, 0);
+			}
+		}
+		dcMem.Flush();
+	}
+
+	afx_msg BOOL OnEraseBkgnd(CDC*)
+	{
+		return TRUE;
+	}
+
+	afx_msg void OnTimer(UINT_PTR nIDEvent)
+	{
+		if (nIDEvent == MULELISTCTRL_OPERATION_OVERLAY_TIMER_ID && m_pOwner != NULL) {
+			if (!m_pOwner->m_operationOverlay.bVisible || m_pOwner->m_operationOverlay.bSuppressed) {
+				StopAnimationTimer();
+				return;
+			}
+			m_pOwner->m_operationOverlay.uAnimationPhase = (m_pOwner->m_operationOverlay.uAnimationPhase + 24) % 1536;
+			Invalidate(FALSE);
+			return;
+		}
+
+		CWnd::OnTimer(nIDEvent);
+	}
+
+	afx_msg void OnDestroy()
+	{
+		StopAnimationTimer();
+		CWnd::OnDestroy();
+	}
+
+	afx_msg void OnMouseMove(UINT nFlags, CPoint point)
+	{
+		UpdateCancelHot(point);
+		CWnd::OnMouseMove(nFlags, point);
+	}
+
+	afx_msg LRESULT OnMouseLeave(WPARAM, LPARAM)
+	{
+		if (m_pOwner != NULL && m_pOwner->m_operationOverlay.bCancelHot) {
+			m_pOwner->m_operationOverlay.bCancelHot = false;
+			Invalidate(FALSE);
+		}
+		return 0;
+	}
+
+	afx_msg void OnLButtonDown(UINT nFlags, CPoint point)
+	{
+		if (m_pOwner != NULL) {
+			CRect rcCancel;
+			CRect rcOverlay;
+			if (m_pOwner->GetOperationOverlayRect(rcOverlay)) {
+				CPoint ptOwner(point.x + rcOverlay.left, point.y + rcOverlay.top);
+				if (m_pOwner->GetOperationOverlayCancelRect(rcCancel) && rcCancel.PtInRect(ptOwner)) {
+					m_pOwner->OnOperationOverlayCancel();
+					return;
+				}
+			}
+		}
+
+		CWnd::OnLButtonDown(nFlags, point);
+	}
+
+	afx_msg BOOL OnSetCursor(CWnd* pWnd, UINT nHitTest, UINT message)
+	{
+		CPoint point;
+		::GetCursorPos(&point);
+		ScreenToClient(&point);
+		if (IsCancelHot(point)) {
+			::SetCursor(::LoadCursor(NULL, IDC_HAND));
+			return TRUE;
+		}
+
+		return CWnd::OnSetCursor(pWnd, nHitTest, message);
+	}
+
+private:
+	bool IsCancelHot(CPoint point) const
+	{
+		if (m_pOwner == NULL || !m_pOwner->m_operationOverlay.bVisible || !m_pOwner->m_operationOverlay.bCanCancel)
+			return false;
+
+		CRect rcOverlay;
+		CRect rcCancel;
+		if (!m_pOwner->GetOperationOverlayRect(rcOverlay) || !m_pOwner->GetOperationOverlayCancelRect(rcCancel))
+			return false;
+
+		CPoint ptOwner(point.x + rcOverlay.left, point.y + rcOverlay.top);
+		return rcCancel.PtInRect(ptOwner) != FALSE;
+	}
+
+	void UpdateCancelHot(CPoint point)
+	{
+		if (m_pOwner == NULL || !m_pOwner->m_operationOverlay.bCanCancel)
+			return;
+
+		TRACKMOUSEEVENT tme = { sizeof(tme), TME_LEAVE, m_hWnd, 0 };
+		_TrackMouseEvent(&tme);
+
+		const bool bCancelHot = IsCancelHot(point);
+		if (m_pOwner->m_operationOverlay.bCancelHot != bCancelHot) {
+			m_pOwner->m_operationOverlay.bCancelHot = bCancelHot;
+			Invalidate(FALSE);
+		}
+	}
+
+	void StopAnimationTimer()
+	{
+		if (!m_bAnimationTimerActive)
+			return;
+
+		KillTimer(MULELISTCTRL_OPERATION_OVERLAY_TIMER_ID);
+		m_bAnimationTimerActive = false;
+	}
+
+	CMuleListCtrl* m_pOwner;
+	bool m_bAnimationTimerActive;
+	CSize m_sizeWindowRgn;
+};
+
+BEGIN_MESSAGE_MAP(COperationOverlayWnd, CWnd)
+	ON_WM_PAINT()
+	ON_WM_ERASEBKGND()
+	ON_WM_TIMER()
+	ON_WM_DESTROY()
+	ON_WM_MOUSEMOVE()
+	ON_MESSAGE(WM_MOUSELEAVE, OnMouseLeave)
+	ON_WM_LBUTTONDOWN()
+	ON_WM_SETCURSOR()
+END_MESSAGE_MAP()
 
 BEGIN_MESSAGE_MAP(CMuleListCtrl, CListCtrl)
 	ON_NOTIFY_REFLECT(LVN_GETINFOTIP, OnLvnGetInfoTip)
@@ -87,13 +341,17 @@ BEGIN_MESSAGE_MAP(CMuleListCtrl, CListCtrl)
 	ON_WM_KEYDOWN()
 	ON_WM_MEASUREITEM_REFLECT()
 	ON_WM_MOUSEMOVE()
+	ON_WM_LBUTTONDOWN()
+	ON_WM_SETCURSOR()
+	ON_WM_PAINT()
+	ON_WM_SIZE()
+	ON_WM_SHOWWINDOW()
 	ON_WM_SYSCOLORCHANGE()
 	ON_WM_DESTROY()
 	ON_WM_TIMER()
 	ON_MESSAGE(WM_MOUSEHOVER, OnMouseHover)
 	ON_MESSAGE(WM_MOUSELEAVE, OnMouseLeave)
 	ON_MESSAGE(WM_MULELISTCTRL_INVALIDATE, OnAsyncInvalidate)
-	ON_MESSAGE(WM_MULELISTCTRL_UPDATE_ITEM, OnAsyncUpdateItem)
 END_MESSAGE_MAP()
 
 CMuleListCtrl::CMuleListCtrl(PFNLVCOMPARE pfnCompare, LPARAM iParamSort)
@@ -124,6 +382,7 @@ CMuleListCtrl::CMuleListCtrl(PFNLVCOMPARE pfnCompare, LPARAM iParamSort)
 	, m_iCurrentSortItem(-1)
 	, m_atSortArrow()
 	, m_iRedrawCount()
+	, m_uBulkInsertDepth()
 	, m_Params()
 	, m_wndInfoTip()
 	, m_wndPersistentInfoTip()
@@ -133,23 +392,26 @@ CMuleListCtrl::CMuleListCtrl(PFNLVCOMPARE pfnCompare, LPARAM iParamSort)
 	, m_bPersistentInfoTipVisible()
 	, m_bTrackingMouseHover()
 	, m_bTrackingMouseLeave()
+	, m_operationOverlay()
+	, m_pOperationOverlayWnd()
 	, m_liDefaultHiddenColumns()
 	, m_iMaxSortHistory()
+	, m_asyncRedrawRange()
+	, m_bAsyncRedrawMessagePending(false)
+	, m_lListModelGeneration(0)
 	, m_dwLastAsyncSortTick(0)
 
 {
-	m_updatethread = (CUpdateItemThread*)AfxBeginThread(RUNTIME_CLASS(CUpdateItemThread), THREAD_PRIORITY_NORMAL, 0, CREATE_SUSPENDED);
-	if (m_updatethread != NULL) {
-		m_updatethread->SetListCtrl(this);
-		m_updatethread->ResumeThread();
-	}
 }
 
 CMuleListCtrl::~CMuleListCtrl()
 {
+	BeginListModelGeneration(0, true);
 	ShutdownUpdateThread();
 	m_wndInfoTip.CleanupWindow();
 	HidePersistentInfoTip(true);
+	CancelOperationOverlayDelayTimer();
+	DestroyOperationOverlayWindow();
 	delete[] m_aColumns;
 	if (m_imlHeaderCtrl.m_hImageList != NULL)
 		m_imlHeaderCtrl.DeleteImageList();
@@ -157,9 +419,12 @@ CMuleListCtrl::~CMuleListCtrl()
 
 void CMuleListCtrl::OnDestroy()
 {
+	BeginListModelGeneration(0, true);
 	ShutdownUpdateThread();
 	m_wndInfoTip.CleanupWindow();
 	HidePersistentInfoTip(true);
+	CancelOperationOverlayDelayTimer();
+	DestroyOperationOverlayWindow();
 
 	// Disassociate and destroy header imagelist to avoid GDI leaks and stale handles
 	if (m_imlHeaderCtrl.m_hImageList != NULL) {
@@ -171,35 +436,24 @@ void CMuleListCtrl::OnDestroy()
 	CListCtrl::OnDestroy();
 }
 
+void CMuleListCtrl::OnShowWindow(BOOL bShow, UINT nStatus)
+{
+	CListCtrl::OnShowWindow(bShow, nStatus);
+	if (!bShow) {
+		BeginListModelGeneration(0, true);
+		DestroyOperationOverlayWindow();
+	} else
+		UpdateOperationOverlayWindow();
+}
+
+
 void CMuleListCtrl::ShutdownUpdateThread()
 {
-	CUpdateItemThread* pThread = NULL;
-	HANDLE hWaitHandle = NULL;
-	{
-		CSingleLock lock(&m_updatethreadlocker, TRUE);
-		pThread = m_updatethread;
-		if (pThread != NULL) {
-			// Detach the owner pointer before control teardown so the worker can no longer
-			// call back into a partially destroyed list control.
-			pThread->SetListCtrl(NULL);
-			m_updatethread = NULL;
-			if (pThread->m_hThread != NULL)
-				::DuplicateHandle(::GetCurrentProcess(), pThread->m_hThread, ::GetCurrentProcess(), &hWaitHandle, 0, FALSE, DUPLICATE_SAME_ACCESS);
-		}
-	}
-
-	if (pThread == NULL)
-		return;
-
-	pThread->EndThread();
-
-	if (hWaitHandle != NULL) {
-		const DWORD dwWaitResult = ::WaitForSingleObject(hWaitHandle, SEC2MS(5));
-		::CloseHandle(hWaitHandle);
-		if (dwWaitResult != WAIT_OBJECT_0)
-			TRACE(_T("CMuleListCtrl::ShutdownUpdateThread, timed out waiting for CUpdateItemThread to exit.\n"));
-	}
+	CSingleLock lock(&m_asyncRedrawLock, TRUE);
+	m_bAsyncRedrawMessagePending = false;
+	m_asyncRedrawRange.Clear();
 }
+
 
 // Post to self to guarantee UI-thread execution
 void CMuleListCtrl::RequestInvalidateAsync() const
@@ -208,56 +462,311 @@ void CMuleListCtrl::RequestInvalidateAsync() const
 		::PostMessage(m_hWnd, WM_MULELISTCTRL_INVALIDATE, 0, 0);
 }
 
-void CMuleListCtrl::RequestItemUpdateAsync(LPARAM item) const
+
+CString CMuleListCtrl::MakeListSortKey(const CString& strSortText, bool bUndefined)
 {
-	if (::IsWindow(m_hWnd))
-		::PostMessage(m_hWnd, WM_MULELISTCTRL_UPDATE_ITEM, 0, static_cast<LPARAM>(item));
+	CString strKey;
+	strKey.Format(_T("%c:%s"), bUndefined ? _T('1') : _T('0'), static_cast<LPCTSTR>(strSortText));
+	return strKey;
 }
 
-void CMuleListCtrl::QueueItemUpdate(LPARAM item) const
+
+int CMuleListCtrl::CompareListSortKeys(const CString& strSortKey1, const CString& strSortKey2)
 {
-	CSingleLock lock(&m_updatethreadlocker, TRUE);
-	if (m_updatethread != NULL)
-		m_updatethread->AddItemToUpdate(item);
+	const bool bUndefined1 = strSortKey1.GetLength() >= 2 && strSortKey1[0] == _T('1') && strSortKey1[1] == _T(':');
+	const bool bUndefined2 = strSortKey2.GetLength() >= 2 && strSortKey2[0] == _T('1') && strSortKey2[1] == _T(':');
+	if (bUndefined1 || bUndefined2) {
+		if (bUndefined1 && bUndefined2)
+			return 5;
+		return bUndefined1 ? 6 : 4;
+	}
+	CString strValue1(strSortKey1);
+	CString strValue2(strSortKey2);
+	if (strValue1.GetLength() >= 2 && strValue1[1] == _T(':'))
+		strValue1 = strValue1.Mid(2);
+	if (strValue2.GetLength() >= 2 && strValue2[1] == _T(':'))
+		strValue2 = strValue2.Mid(2);
+	return sgn(strValue1.CompareNoCase(strValue2));
 }
 
-void CMuleListCtrl::QueueItemUpdated(LPARAM item) const
+int CMuleListCtrl::ApplyListSortDirection(int iSortResult, bool bDescending)
 {
-	CSingleLock lock(&m_updatethreadlocker, TRUE);
-	if (m_updatethread != NULL)
-		m_updatethread->AddItemUpdated(item);
+	if (iSortResult > 3)
+		return iSortResult - 5;
+	return bDescending ? -iSortResult : iSortResult;
+}
+
+
+CMuleListCtrl::SVisibleItemRange CMuleListCtrl::GetVisibleItemRange() const
+{
+	if (!::IsWindow(m_hWnd))
+		return SVisibleItemRange();
+	const int iCount = const_cast<CMuleListCtrl*>(this)->GetItemCount();
+	if (iCount <= 0)
+		return SVisibleItemRange();
+	int iFirst = const_cast<CMuleListCtrl*>(this)->GetTopIndex();
+	if (iFirst < 0)
+		iFirst = 0;
+	int iPerPage = const_cast<CMuleListCtrl*>(this)->GetCountPerPage();
+	if (iPerPage <= 0)
+		iPerPage = iCount;
+	int iLast = min(iCount - 1, iFirst + iPerPage);
+	return SVisibleItemRange(iFirst, iLast);
+}
+
+bool CMuleListCtrl::IsAtBottom() const
+{
+	if (!::IsWindow(m_hWnd))
+		return false;
+
+	const int iItemCount = GetItemCount();
+	if (iItemCount <= 0)
+		return false;
+
+	const int iTopIndex = const_cast<CMuleListCtrl*>(this)->GetTopIndex();
+	if (iTopIndex < 0)
+		return false;
+
+	const int iRowsPerPage = const_cast<CMuleListCtrl*>(this)->GetCountPerPage();
+	if (iRowsPerPage <= 0 || iItemCount <= iRowsPerPage)
+		return false;
+
+	CRect rcClient;
+	CRect rcLastItem;
+	const_cast<CMuleListCtrl*>(this)->GetClientRect(&rcClient);
+	return const_cast<CMuleListCtrl*>(this)->GetItemRect(iItemCount - 1, &rcLastItem, LVIR_BOUNDS)
+		&& rcLastItem.bottom > rcClient.top
+		&& rcLastItem.top < rcClient.bottom;
+}
+
+void CMuleListCtrl::ScrollToTopIndex(int iTopIndex)
+{
+	const int iItemCount = GetItemCount();
+	if (iItemCount <= 0 || !::IsWindow(m_hWnd))
+		return;
+
+	iTopIndex = max(0, min(iTopIndex, iItemCount - 1));
+	const int iRowsPerPage = max(1, GetCountPerPage());
+	const int iBottomIndex = min(iItemCount - 1, iTopIndex + iRowsPerPage - 1);
+	EnsureVisible(iBottomIndex, FALSE);
+
+	int iCurrentTop = GetTopIndex();
+	if (iCurrentTop == iTopIndex)
+		return;
+
+	int iRowHeight = 0;
+	CRect rcFirst;
+	CRect rcSecond;
+	if (iItemCount > 1 && GetItemRect(0, &rcFirst, LVIR_BOUNDS) && GetItemRect(1, &rcSecond, LVIR_BOUNDS))
+		iRowHeight = rcSecond.top - rcFirst.top;
+	if (iRowHeight <= 0) {
+		CClientDC dc(this);
+		CFont *pOldFont = GetFont() != NULL ? dc.SelectObject(GetFont()) : NULL;
+		TEXTMETRIC tm = {};
+		dc.GetTextMetrics(&tm);
+		if (pOldFont != NULL)
+			dc.SelectObject(pOldFont);
+		iRowHeight = max(1, tm.tmHeight + 2);
+	}
+
+	if (iCurrentTop < 0)
+		iCurrentTop = 0;
+	if (iCurrentTop != iTopIndex)
+		Scroll(CSize(0, (iTopIndex - iCurrentTop) * iRowHeight));
+
+	if (GetTopIndex() != iTopIndex) {
+		SCROLLINFO si = { sizeof(si) };
+		if (GetScrollInfo(SB_VERT, &si, SIF_RANGE | SIF_PAGE | SIF_POS)) {
+			int iMaxPos = si.nMax;
+			if (si.nPage > 0)
+				iMaxPos = max(si.nMin, si.nMax - static_cast<int>(si.nPage) + 1);
+			const int iPos = max(si.nMin, min(iTopIndex, iMaxPos));
+			SendMessage(WM_VSCROLL, MAKEWPARAM(SB_THUMBPOSITION, iPos), 0);
+		}
+	}
+}
+
+
+void CMuleListCtrl::SetItemCountAndKeepPageFilled(size_t itemCount, DWORD dwFlags)
+{
+	if (!::IsWindow(m_hWnd))
+		return;
+
+	const size_t uClampedCount = itemCount > static_cast<size_t>(INT_MAX) ? static_cast<size_t>(INT_MAX) : itemCount;
+	const int iNewItemCount = static_cast<int>(uClampedCount);
+	const int iOldItemCount = GetItemCount();
+	const int iRowsPerPage = max(1, GetCountPerPage());
+	int iDesiredTop = GetTopIndex();
+	if (iDesiredTop < 0)
+		iDesiredTop = 0;
+
+	if (iNewItemCount <= 0) {
+		SetItemCountEx(0, dwFlags);
+		return;
+	}
+
+	const bool bWasAtBottom = iOldItemCount > 0 && iDesiredTop + iRowsPerPage >= iOldItemCount;
+	if (bWasAtBottom || iDesiredTop + iRowsPerPage > iNewItemCount)
+		iDesiredTop = max(0, iNewItemCount - iRowsPerPage);
+	else if (iDesiredTop >= iNewItemCount)
+		iDesiredTop = iNewItemCount - 1;
+
+	SetItemCountEx(iNewItemCount, dwFlags);
+	ScrollToTopIndex(iDesiredTop);
+}
+
+bool CMuleListCtrl::IsItemIndexVisible(int iIndex) const
+{
+	const SVisibleItemRange visibleRange = GetVisibleItemRange();
+	return visibleRange.IsValid() && iIndex >= visibleRange.m_iFirst && iIndex <= visibleRange.m_iLast;
+}
+
+bool CMuleListCtrl::GetNextBackgroundItemRange(int& iNextIndex, int iMaxIndex, int iRowsPerSlice, int& iFirst, int& iLast) const
+{
+	iFirst = -1;
+	iLast = -1;
+	if (iRowsPerSlice <= 0 || iNextIndex < 0 || iNextIndex > iMaxIndex)
+		return false;
+
+	const SVisibleItemRange visibleRange = GetVisibleItemRange();
+	if (visibleRange.IsValid()) {
+		const int iVisibleFirst = max(0, min(visibleRange.m_iFirst, iMaxIndex));
+		const int iVisibleLast = max(iVisibleFirst, min(visibleRange.m_iLast, iMaxIndex));
+		if (iNextIndex >= iVisibleFirst && iNextIndex <= iVisibleLast)
+			iNextIndex = iVisibleLast + 1;
+		if (iNextIndex > iMaxIndex)
+			return false;
+
+		iFirst = iNextIndex;
+		iLast = min(iMaxIndex, iFirst + iRowsPerSlice - 1);
+		if (iFirst < iVisibleFirst && iLast >= iVisibleFirst)
+			iLast = iVisibleFirst - 1;
+	} else {
+		iFirst = iNextIndex;
+		iLast = min(iMaxIndex, iFirst + iRowsPerSlice - 1);
+	}
+
+	return iFirst >= 0 && iLast >= iFirst;
+}
+
+void CMuleListCtrl::RequestRowRedrawAsync(int iStart, int iEnd)
+{
+	if (theApp.GetBackendLifecycleState() >= CemuleApp::BackendLifecycleStoppingUiUpdates)
+		return;
+	if (!::IsWindow(m_hWnd))
+		return;
+	if (iStart < 0 || iEnd < iStart) {
+		RequestFullRedrawAsync();
+		return;
+	}
+
+	const SVisibleItemRange visibleRange = GetVisibleItemRange();
+	if (visibleRange.IsValid()) {
+		iStart = max(iStart, visibleRange.m_iFirst);
+		iEnd = min(iEnd, visibleRange.m_iLast);
+		if (iStart > iEnd)
+			return;
+	}
+
+	bool bPostMessage = false;
+	{
+		CSingleLock lock(&m_asyncRedrawLock, TRUE);
+		m_asyncRedrawRange.Merge(iStart, iEnd);
+		if (!m_bAsyncRedrawMessagePending) {
+			m_bAsyncRedrawMessagePending = true;
+			bPostMessage = true;
+		}
+	}
+	if (bPostMessage && ::PostMessage(m_hWnd, WM_MULELISTCTRL_INVALIDATE, 0, 0) == FALSE) {
+		CSingleLock lock(&m_asyncRedrawLock, TRUE);
+		m_bAsyncRedrawMessagePending = false;
+	}
+}
+
+void CMuleListCtrl::RequestFullRedrawAsync()
+{
+	if (theApp.GetBackendLifecycleState() >= CemuleApp::BackendLifecycleStoppingUiUpdates)
+		return;
+	if (!::IsWindow(m_hWnd))
+		return;
+	bool bPostMessage = false;
+	{
+		CSingleLock lock(&m_asyncRedrawLock, TRUE);
+		m_asyncRedrawRange.MarkFull();
+		if (!m_bAsyncRedrawMessagePending) {
+			m_bAsyncRedrawMessagePending = true;
+			bPostMessage = true;
+		}
+	}
+	if (bPostMessage && ::PostMessage(m_hWnd, WM_MULELISTCTRL_INVALIDATE, 0, 0) == FALSE) {
+		CSingleLock lock(&m_asyncRedrawLock, TRUE);
+		m_bAsyncRedrawMessagePending = false;
+	}
+}
+
+void CMuleListCtrl::MaintainSortOrderAfterUpdate()
+{
+	if (!::IsWindow(m_hWnd) || GetSortItem() == -1 || m_SortProc == NULL || (GetStyle() & LVS_OWNERDATA) != 0)
+		return;
+
+	SortItems(static_cast<DWORD>(m_dwParamSort));
+}
+
+void CMuleListCtrl::MaintainSortOrderAfterThrottledUpdate()
+{
+	if (!ShouldMaintainSortOrderOnUpdate())
+		return;
+
+	const DWORD dwCurrentTime = GetTickCount();
+	if (dwCurrentTime - m_dwLastAsyncSortTick <= static_cast<DWORD>(thePrefs.GetUITweaksListUpdatePeriod()))
+		return;
+
+	m_dwLastAsyncSortTick = dwCurrentTime;
+	MaintainSortOrderAfterUpdate();
 }
 
 // Post a message to UI thread to invalidate safely
 LRESULT CMuleListCtrl::OnAsyncInvalidate(WPARAM, LPARAM)
 {
-	if (!::IsWindow(m_hWnd))
+	if (theApp.GetBackendLifecycleState() >= CemuleApp::BackendLifecycleStoppingUiUpdates) {
+		CSingleLock lock(&m_asyncRedrawLock, TRUE);
+		m_bAsyncRedrawMessagePending = false;
+		m_asyncRedrawRange.Clear();
 		return 0;
-
-	Invalidate(FALSE);
-	return 0;
-}
-
-LRESULT CMuleListCtrl::OnAsyncUpdateItem(WPARAM, LPARAM lParam)
-{
-	if (!::IsWindow(m_hWnd) || theApp.m_app_state == APP_STATE_SHUTTINGDOWN)
+	}
+	if (!::IsWindow(m_hWnd)) {
+		CSingleLock lock(&m_asyncRedrawLock, TRUE);
+		m_bAsyncRedrawMessagePending = false;
+		m_asyncRedrawRange.Clear();
 		return 0;
+	}
 
-	LVFINDINFO find = {};
-	find.flags = LVFI_PARAM;
-	find.lParam = lParam;
-	const int iFound = FindItem(&find);
-	if (iFound < 0)
-		return 0;
+	bool bFullRedraw = false;
+	int iStart = -1;
+	int iEnd = -1;
+	{
+		CSingleLock lock(&m_asyncRedrawLock, TRUE);
+		m_bAsyncRedrawMessagePending = false;
+		bFullRedraw = m_asyncRedrawRange.m_bFull;
+		iStart = m_asyncRedrawRange.m_iFirst;
+		iEnd = m_asyncRedrawRange.m_iLast;
+		m_asyncRedrawRange.Clear();
+	}
 
-	Update(iFound);
-	if (ShouldMaintainSortOrderOnUpdate()) {
-		const DWORD dwCurrentTime = GetTickCount();
-		if (dwCurrentTime - m_dwLastAsyncSortTick > static_cast<DWORD>(thePrefs.GetUITweaksListUpdatePeriod())) {
-			MaintainSortOrderAfterUpdate();
-			m_dwLastAsyncSortTick = dwCurrentTime;
+	if (!bFullRedraw && iStart >= 0 && iEnd >= iStart) {
+		const int iItemCount = GetItemCount();
+		if (iItemCount > 0) {
+			iEnd = min(iEnd, iItemCount - 1);
+			if (iStart <= iEnd) {
+				RedrawItems(iStart, iEnd);
+				MaintainSortOrderAfterThrottledUpdate();
+				return 0;
+			}
 		}
 	}
+
+	Invalidate(FALSE);
+	MaintainSortOrderAfterThrottledUpdate();
 	return 0;
 }
 
@@ -290,7 +799,7 @@ bool CMuleListCtrl::GetDefaultPersistentInfoTipText(const SPersistentInfoTipCont
 bool CMuleListCtrl::TryGetExplicitPersistentInfoTipText(const SPersistentInfoTipContext& context, CString& strText)
 {
 	strText.Empty();
-	if (!UsePersistentInfoTips() || !ShouldShowPersistentInfoTip(context))
+	if (!UsePersistentInfoTips() || !ShouldShowPersistentInfoTip(context) || !IsPersistentInfoTipContextCurrent(context))
 		return false;
 
 	return GetPersistentInfoTipText(context, strText) && !strText.IsEmpty();
@@ -298,8 +807,11 @@ bool CMuleListCtrl::TryGetExplicitPersistentInfoTipText(const SPersistentInfoTip
 
 bool CMuleListCtrl::TryGetPersistentInfoTipForContext(const SPersistentInfoTipContext& context, CString& strText, bool* pbExplicitTip)
 {
+	strText.Empty();
 	if (pbExplicitTip != NULL)
 		*pbExplicitTip = false;
+	if (!IsPersistentInfoTipContextCurrent(context))
+		return false;
 
 	if (TryGetExplicitPersistentInfoTipText(context, strText)) {
 		if (pbExplicitTip != NULL)
@@ -358,9 +870,13 @@ bool CMuleListCtrl::IsDefaultPersistentInfoTipTruncated(const SPersistentInfoTip
 
 bool CMuleListCtrl::TryGetPersistentInfoTipContext(CPoint point, SPersistentInfoTipContext& context)
 {
+	context = SPersistentInfoTipContext();
+
 	LVHITTESTINFO hti = {};
 	hti.pt = point;
 	if (SubItemHitTest(&hti) < 0 || hti.iItem < 0)
+		return false;
+	if (hti.iItem >= GetItemCount())
 		return false;
 
 	if (!GetItemRect(hti.iItem, &context.rcItem, LVIR_BOUNDS))
@@ -466,12 +982,9 @@ void CMuleListCtrl::EnsurePersistentInfoTipMouseLeaveTracking()
 
 CPoint CMuleListCtrl::GetPersistentInfoTipScreenPosition(const SPersistentInfoTipContext& context) const
 {
-	CPoint ptScreen;
-	if (!::GetCursorPos(&ptScreen)) {
-		ptScreen = CPoint(context.rcItem.left, context.rcItem.bottom);
-		ClientToScreen(&ptScreen);
-	}
-
+	CRect rcAnchor = !context.rcHotArea.IsRectEmpty() ? context.rcHotArea : context.rcItem;
+	CPoint ptScreen(rcAnchor.left, rcAnchor.bottom);
+	ClientToScreen(&ptScreen);
 	ptScreen.Offset(MULELISTCTRL_PERSISTENT_INFOTIP_OFFSET_X, MULELISTCTRL_PERSISTENT_INFOTIP_OFFSET_Y);
 	return ptScreen;
 }
@@ -488,6 +1001,22 @@ bool CMuleListCtrl::IsSamePersistentInfoTipTarget(const SPersistentInfoTipContex
 		return true;
 
 	return left.iSubItem == right.iSubItem;
+}
+
+bool CMuleListCtrl::IsPersistentInfoTipContextCurrent(const SPersistentInfoTipContext& context) const
+{
+	if (!::IsWindow(m_hWnd) || context.iItem < 0 || context.iSubItem < 0)
+		return false;
+
+	CMuleListCtrl* pThis = const_cast<CMuleListCtrl*>(this);
+	if (context.iItem >= pThis->GetItemCount())
+		return false;
+
+	const DWORD_PTR dwCurrentItemKey = reinterpret_cast<DWORD_PTR>(pThis->GetItemObject(context.iItem));
+	if (context.dwItemKey != 0 || dwCurrentItemKey != 0)
+		return context.dwItemKey == dwCurrentItemKey;
+
+	return true;
 }
 
 bool CMuleListCtrl::ResolvePersistentInfoTipHotArea(SPersistentInfoTipContext& context) const
@@ -546,6 +1075,9 @@ bool CMuleListCtrl::ShouldKeepPersistentInfoTipVisibleOnMouseLeave()
 
 void CMuleListCtrl::ShowPersistentInfoTip(const SPersistentInfoTipContext& context, const CString& strText)
 {
+	if (!IsPersistentInfoTipContextCurrent(context))
+		return;
+
 	EnsurePersistentInfoTipCtrl();
 	if (m_wndPersistentInfoTip.GetSafeHwnd() == NULL)
 		return;
@@ -616,6 +1148,8 @@ bool CMuleListCtrl::HandleNativeInfoTipShow(HWND hWndInfoTip, LRESULT* pResult)
 
 	SPersistentInfoTipContext context;
 	if (!TryGetPersistentInfoTipContext(ptCursor, context))
+		return false;
+	if (!IsPersistentInfoTipContextCurrent(context))
 		return false;
 
 	CString strText;
@@ -711,6 +1245,10 @@ void CMuleListCtrl::UpdatePersistentInfoTipTracking(CPoint point)
 		return;
 	}
 	context.bExplicitTip = bExplicitTip;
+	if (!bExplicitTip && !IsPointWithinPersistentInfoTipHotArea(point, context)) {
+		ResetPendingPersistentInfoTip();
+		return;
+	}
 
 	TRACKMOUSEEVENT track = {};
 	track.cbSize = sizeof(track);
@@ -918,22 +1456,40 @@ void CMuleListCtrl::SaveSettings(const bool bCalledBySaveAppState)
 	for (i = 0; i < m_iColumnsTracked; ++i) {
 		piColWidths[i] = GetColumnWidth(i);
 		piColHidden[i] = IsColumnHidden(i);
-		ShowColumn(i);
+		if (!bCalledBySaveAppState)
+			ShowColumn(i);
 	}
 
 	int *piColOrders = new int[m_iColumnsTracked];
-	GetHeaderCtrl()->GetOrderArray(piColOrders, m_iColumnsTracked);
+	if (bCalledBySaveAppState) {
+		std::vector<bool> abUsedColumns(static_cast<size_t>(m_iColumnsTracked), false);
+		int iNextFallbackLocation = 0;
+		for (i = 0; i < m_iColumnsTracked; ++i)
+			piColOrders[i] = i;
+		for (i = 0; i < m_iColumnsTracked; ++i) {
+			int iLocation = m_aColumns[i].iLocation;
+			if (iLocation < 0 || iLocation >= m_iColumnsTracked || abUsedColumns[static_cast<size_t>(iLocation)]) {
+				while (iNextFallbackLocation < m_iColumnsTracked && abUsedColumns[static_cast<size_t>(iNextFallbackLocation)])
+					++iNextFallbackLocation;
+				iLocation = iNextFallbackLocation < m_iColumnsTracked ? iNextFallbackLocation : i;
+			}
+			piColOrders[iLocation] = i;
+			abUsedColumns[static_cast<size_t>(iLocation)] = true;
+		}
+	} else
+		GetHeaderCtrl()->GetOrderArray(piColOrders, m_iColumnsTracked);
 
 	ini.SerGet(false, piColWidths, m_iColumnsTracked, m_Name + _T("ColumnWidths"));
 	ini.SerGet(false, piColHidden, m_iColumnsTracked, m_Name + _T("ColumnHidden"));
 	ini.SerGet(false, piColOrders, m_iColumnsTracked, m_Name + _T("ColumnOrders"));
 
-	for (i = 0; i < m_iColumnsTracked; ++i)
-		if (piColHidden[i])
-			HideColumn(i);
+	if (!bCalledBySaveAppState) {
+		for (i = 0; i < m_iColumnsTracked; ++i)
+			if (piColHidden[i])
+				HideColumn(i);
 
-	if (!bCalledBySaveAppState)
 		ShowWindow(SW_SHOW);
+	}
 
 	delete[] piColOrders;
 	delete[] piColWidths;
@@ -1221,7 +1777,7 @@ void CMuleListCtrl::SetColors()
 	CString strBkImage;
 	const CString &sSkinProfile(thePrefs.GetSkinProfile());
 	if (!sSkinProfile.IsEmpty()) {
-		const CString strKey(m_strSkinKey.IsEmpty() ? _T("DefLv") : m_strSkinKey);
+		const CString strKey(m_strSkinKey.IsEmpty() ? CString(_T("DefLv")) : m_strSkinKey);
 
 		if (theApp.LoadSkinColorAlt(strKey + _T("Bk"), _T("DefLvBk"), m_crWindow))
 			m_crWindowTextBk = m_crWindow;
@@ -1229,9 +1785,9 @@ void CMuleListCtrl::SetColors()
 		theApp.LoadSkinColorAlt(strKey + _T("Hl"), _T("DefLvHl"), crHighlight);
 
 		TCHAR szColor[MAX_PATH];
-		GetPrivateProfileString(_T("Colors"), strKey + _T("BkImg"), NULL, szColor, _countof(szColor), sSkinProfile);
+		GetPrivateProfileString(_T("Colors"), strKey + _T("BkImg"), (LPCTSTR)NULL, szColor, _countof(szColor), sSkinProfile);
 		if (*szColor == _T('\0'))
-			GetPrivateProfileString(_T("Colors"), _T("DefLvBkImg"), NULL, szColor, _countof(szColor), sSkinProfile);
+			GetPrivateProfileString(_T("Colors"), _T("DefLvBkImg"), (LPCTSTR)NULL, szColor, _countof(szColor), sSkinProfile);
 		if (*szColor != _T('\0'))
 			strBkImage = szColor;
 	}
@@ -1734,10 +2290,12 @@ BOOL CMuleListCtrl::OnWndMsg(UINT message, WPARAM wParam, LPARAM lParam, LRESULT
 			m_Params.SetAt(pos, MLC_MAGIC);
 		break;
 	case LVM_DELETEALLITEMS:
+		BeginListModelGeneration(0, true);
 		if (!CListCtrl::OnWndMsg(message, wParam, lParam, pResult) && DefWindowProc(message, wParam, lParam))
 			m_Params.RemoveAll();
 		return (BOOL)(*pResult = TRUE);
 	case LVM_DELETEITEM:
+		BeginListModelGeneration(0, true);
 		MLC_ASSERT(m_Params.GetAt(m_Params.FindIndex(wParam)) == CListCtrl::GetItemData(wParam));
 		if (!CListCtrl::OnWndMsg(message, wParam, lParam, pResult) && DefWindowProc(message, wParam, lParam))
 			m_Params.RemoveAt(m_Params.FindIndex(wParam));
@@ -1747,6 +2305,27 @@ BOOL CMuleListCtrl::OnWndMsg(UINT message, WPARAM wParam, LPARAM lParam, LRESULT
 		//try to fix position of inserted items
 		{
 			LPLVITEM pItem = reinterpret_cast<LPLVITEM>(lParam);
+			if (m_uBulkInsertDepth > 0) {
+				LRESULT lResult = DefWindowProc(message, wParam, lParam);
+				if (lResult != -1) {
+					if (lResult <= 0)
+						m_Params.AddHead(pItem->lParam);
+					else if (lResult >= static_cast<LRESULT>(m_Params.GetCount()))
+						m_Params.AddTail(pItem->lParam);
+					else {
+						POSITION posPrev = m_Params.FindIndex(static_cast<int>(lResult) - 1);
+						if (posPrev != NULL)
+							m_Params.InsertAfter(posPrev, pItem->lParam);
+						else {
+							ASSERT(0);
+							m_Params.AddTail(pItem->lParam);
+						}
+					}
+				}
+				*pResult = lResult;
+				return TRUE;
+			}
+
 			int iItem = pItem->iItem;
 			int iItemCount = GetItemCount();
 			BOOL notLast = iItem < iItemCount;
@@ -1984,16 +2563,391 @@ void CMuleListCtrl::LocaliseHeaderCtrl(const LPCTSTR*const uids, size_t cnt)
 		}
 }
 
+void CMuleListCtrl::ShowOperationOverlay(const CString& strTitle, const CString& strDetail, UINT uDone, UINT uTotal, bool bCanCancel, const CString& strCancelText)
+{
+	const DWORD dwNow = ::GetTickCount();
+	const bool bOverlayContentUnchanged = m_operationOverlay.strTitle == strTitle
+		&& m_operationOverlay.strDetail == strDetail
+		&& m_operationOverlay.strCancelText == strCancelText
+		&& m_operationOverlay.uDone == uDone
+		&& m_operationOverlay.uTotal == uTotal
+		&& m_operationOverlay.bCanCancel == bCanCancel;
+	if (m_operationOverlay.bVisible && bOverlayContentUnchanged)
+		return;
+	if (m_operationOverlay.bDelayedShow && bOverlayContentUnchanged && !IsOperationOverlayDelayElapsed(dwNow))
+		return;
+
+	const bool bWasVisible = m_operationOverlay.bVisible;
+	if (!bWasVisible && !m_operationOverlay.bDelayedShow)
+		m_operationOverlay.dwFirstUpdateTick = dwNow;
+	else if (m_operationOverlay.dwFirstUpdateTick == 0)
+		m_operationOverlay.dwFirstUpdateTick = dwNow;
+
+	m_operationOverlay.strTitle = strTitle;
+	m_operationOverlay.strDetail = strDetail;
+	m_operationOverlay.strCancelText = strCancelText;
+	m_operationOverlay.uDone = uDone;
+	m_operationOverlay.uTotal = uTotal;
+	m_operationOverlay.bCanCancel = bCanCancel;
+	ApplyOperationOverlayVisibilityPolicy(bWasVisible, dwNow);
+	if (!bWasVisible && m_operationOverlay.bVisible)
+		m_operationOverlay.uAnimationPhase = 0;
+
+	UpdateOperationOverlayWindow();
+	InvalidateOperationOverlay();
+}
+
+void CMuleListCtrl::UpdateOperationOverlay(const CString& strTitle, const CString& strDetail, UINT uDone, UINT uTotal, bool bCanCancel)
+{
+	if (!m_operationOverlay.bVisible) {
+		ShowOperationOverlay(strTitle, strDetail, uDone, uTotal, bCanCancel, GetResString(_T("BULKOP_CANCEL_REMAINING")));
+		return;
+	}
+
+	if (m_operationOverlay.strTitle == strTitle && m_operationOverlay.strDetail == strDetail && m_operationOverlay.uDone == uDone && m_operationOverlay.uTotal == uTotal && m_operationOverlay.bCanCancel == bCanCancel)
+		return;
+
+	const DWORD dwNow = ::GetTickCount();
+	const bool bWasVisible = m_operationOverlay.bVisible;
+	m_operationOverlay.strTitle = strTitle;
+	m_operationOverlay.strDetail = strDetail;
+	m_operationOverlay.uDone = uDone;
+	m_operationOverlay.uTotal = uTotal;
+	m_operationOverlay.bCanCancel = bCanCancel;
+	ApplyOperationOverlayVisibilityPolicy(bWasVisible, dwNow);
+	UpdateOperationOverlayWindow();
+	InvalidateOperationOverlay();
+}
+
+void CMuleListCtrl::HideOperationOverlay()
+{
+	CancelOperationOverlayDelayTimer();
+	if (!m_operationOverlay.bVisible && !m_operationOverlay.bDelayedShow) {
+		DestroyOperationOverlayWindow();
+		return;
+	}
+
+	CRect rcInvalidate = m_operationOverlay.rcLastOverlay;
+	CRect rcOverlay;
+	if (GetOperationOverlayRect(rcOverlay))
+		rcInvalidate = rcOverlay;
+
+	m_operationOverlay = SOperationOverlayState();
+	DestroyOperationOverlayWindow();
+	if (!rcInvalidate.IsRectEmpty()) {
+		rcInvalidate.InflateRect(4, 4);
+		RedrawOperationOverlayArea(rcInvalidate, true);
+	}
+}
+
+bool CMuleListCtrl::IsOperationOverlayVisible() const
+{
+	return m_operationOverlay.bVisible && !m_operationOverlay.bSuppressed;
+}
+
+void CMuleListCtrl::SetOperationOverlaySuppressed(bool bSuppressed)
+{
+	if (m_operationOverlay.bSuppressed == bSuppressed)
+		return;
+
+	CRect rcInvalidate = m_operationOverlay.rcLastOverlay;
+	CRect rcOverlay;
+	if (GetOperationOverlayRect(rcOverlay))
+		rcInvalidate = rcOverlay;
+
+	m_operationOverlay.bSuppressed = bSuppressed;
+	UpdateOperationOverlayWindow();
+	if (bSuppressed && !rcInvalidate.IsRectEmpty()) {
+		rcInvalidate.InflateRect(4, 4);
+		RedrawOperationOverlayArea(rcInvalidate, true);
+	} else
+		InvalidateOperationOverlay();
+}
+
+bool CMuleListCtrl::IsOperationOverlaySuppressed() const
+{
+	return m_operationOverlay.bSuppressed;
+}
+
+bool CMuleListCtrl::IsOperationOverlayDelayEligible(UINT uTotal) const
+{
+	return uTotal > 0 && uTotal < MULELISTCTRL_OPERATION_OVERLAY_IMMEDIATE_MIN_ITEMS;
+}
+
+bool CMuleListCtrl::IsOperationOverlayDelayElapsed(DWORD dwNow) const
+{
+	return m_operationOverlay.dwFirstUpdateTick != 0 && static_cast<DWORD>(dwNow - m_operationOverlay.dwFirstUpdateTick) >= MULELISTCTRL_OPERATION_OVERLAY_DELAY_MS;
+}
+
+void CMuleListCtrl::ApplyOperationOverlayVisibilityPolicy(bool bWasVisible, DWORD dwNow)
+{
+	if (bWasVisible || !IsOperationOverlayDelayEligible(m_operationOverlay.uTotal) || IsOperationOverlayDelayElapsed(dwNow)) {
+		m_operationOverlay.bDelayedShow = false;
+		m_operationOverlay.bVisible = true;
+		CancelOperationOverlayDelayTimer();
+		return;
+	}
+
+	m_operationOverlay.bVisible = false;
+	m_operationOverlay.bDelayedShow = true;
+	DestroyOperationOverlayWindow();
+	ScheduleOperationOverlayDelayTimer(dwNow);
+}
+
+void CMuleListCtrl::ScheduleOperationOverlayDelayTimer(DWORD dwNow)
+{
+	if (!::IsWindow(m_hWnd) || !m_operationOverlay.bDelayedShow)
+		return;
+
+	DWORD dwDelay = MULELISTCTRL_OPERATION_OVERLAY_DELAY_MS;
+	if (m_operationOverlay.dwFirstUpdateTick != 0) {
+		const DWORD dwElapsed = static_cast<DWORD>(dwNow - m_operationOverlay.dwFirstUpdateTick);
+		dwDelay = dwElapsed < MULELISTCTRL_OPERATION_OVERLAY_DELAY_MS ? MULELISTCTRL_OPERATION_OVERLAY_DELAY_MS - dwElapsed : 1;
+	}
+	SetTimer(MULELISTCTRL_OPERATION_OVERLAY_TIMER_ID, dwDelay != 0 ? static_cast<UINT>(dwDelay) : 1, NULL);
+}
+
+void CMuleListCtrl::CancelOperationOverlayDelayTimer()
+{
+	if (::IsWindow(m_hWnd))
+		KillTimer(MULELISTCTRL_OPERATION_OVERLAY_TIMER_ID);
+}
+
+void CMuleListCtrl::TryShowDelayedOperationOverlay(DWORD dwNow)
+{
+	if (!m_operationOverlay.bDelayedShow)
+		return;
+
+	if (!IsOperationOverlayDelayElapsed(dwNow)) {
+		ScheduleOperationOverlayDelayTimer(dwNow);
+		return;
+	}
+
+	m_operationOverlay.bDelayedShow = false;
+	m_operationOverlay.bVisible = true;
+	m_operationOverlay.uAnimationPhase = 0;
+	CancelOperationOverlayDelayTimer();
+	UpdateOperationOverlayWindow();
+	InvalidateOperationOverlay();
+}
+
+void CMuleListCtrl::EnsureOperationOverlayWindow()
+{
+	if (!::IsWindow(m_hWnd) || !m_operationOverlay.bVisible || m_operationOverlay.bSuppressed)
+		return;
+
+	ModifyStyle(0, WS_CLIPCHILDREN);
+	if (m_pOperationOverlayWnd == NULL)
+		m_pOperationOverlayWnd = new COperationOverlayWnd();
+
+	if (m_pOperationOverlayWnd != NULL && m_pOperationOverlayWnd->CreateOverlay(this)) {
+		m_pOperationOverlayWnd->EnsureAnimationTimer();
+		m_pOperationOverlayWnd->UpdateFromOwner();
+	}
+}
+
+void CMuleListCtrl::DestroyOperationOverlayWindow()
+{
+	if (m_pOperationOverlayWnd == NULL)
+		return;
+
+	if (::IsWindow(m_pOperationOverlayWnd->GetSafeHwnd()))
+		m_pOperationOverlayWnd->DestroyWindow();
+	delete m_pOperationOverlayWnd;
+	m_pOperationOverlayWnd = NULL;
+}
+
+void CMuleListCtrl::UpdateOperationOverlayWindow()
+{
+	if (!::IsWindow(m_hWnd))
+		return;
+
+	if (!m_operationOverlay.bVisible || m_operationOverlay.bSuppressed) {
+		DestroyOperationOverlayWindow();
+		return;
+	}
+
+	EnsureOperationOverlayWindow();
+}
+
+void CMuleListCtrl::OnOperationOverlayCancel()
+{
+}
+
+bool CMuleListCtrl::GetOperationOverlayRect(CRect& rcOverlay) const
+{
+	if (!m_operationOverlay.bVisible || m_operationOverlay.bSuppressed || !::IsWindow(m_hWnd))
+		return false;
+
+	CRect rcClient;
+	GetClientRect(rcClient);
+	if (rcClient.Width() < 180 || rcClient.Height() < 90)
+		return false;
+
+	const int iWidthByClient = rcClient.Width() - 32;
+	int iWidth = min(MULELISTCTRL_OPERATION_OVERLAY_MAX_WIDTH, max(MULELISTCTRL_OPERATION_OVERLAY_MIN_WIDTH, (rcClient.Width() * 3) / 4));
+	iWidth = min(iWidth, iWidthByClient);
+	const int iHeight = min(MULELISTCTRL_OPERATION_OVERLAY_HEIGHT, rcClient.Height() - 16);
+	const int iLeft = rcClient.left + (rcClient.Width() - iWidth) / 2;
+	const int iBottom = rcClient.bottom - min(MULELISTCTRL_OPERATION_OVERLAY_BOTTOM_MARGIN, max(6, rcClient.Height() / 10));
+	rcOverlay.SetRect(iLeft, iBottom - iHeight, iLeft + iWidth, iBottom);
+	return !rcOverlay.IsRectEmpty();
+}
+
+bool CMuleListCtrl::GetOperationOverlayCancelRect(CRect& rcCancel) const
+{
+	CRect rcOverlay;
+	if (!m_operationOverlay.bVisible || !m_operationOverlay.bCanCancel || !GetOperationOverlayRect(rcOverlay))
+		return false;
+
+	rcCancel = rcOverlay;
+	rcCancel.DeflateRect(14, 12);
+	rcCancel.left = max(rcCancel.left, rcCancel.right - 138);
+	rcCancel.top = rcCancel.bottom - 24;
+	return !rcCancel.IsRectEmpty();
+}
+
+void CMuleListCtrl::InvalidateOperationOverlay()
+{
+	if (!::IsWindow(m_hWnd))
+		return;
+
+	CRect rcOverlay;
+	if (GetOperationOverlayRect(rcOverlay))
+		m_operationOverlay.rcLastOverlay = rcOverlay;
+
+	if (m_pOperationOverlayWnd != NULL && ::IsWindow(m_pOperationOverlayWnd->GetSafeHwnd()) && m_pOperationOverlayWnd->IsWindowVisible()) {
+		m_pOperationOverlayWnd->Invalidate(FALSE);
+		return;
+	}
+
+	CRect rcInvalidate = m_operationOverlay.rcLastOverlay;
+	if (!rcInvalidate.IsRectEmpty()) {
+		rcInvalidate.InflateRect(4, 4);
+		RedrawOperationOverlayArea(rcInvalidate, false);
+	}
+}
+
+void CMuleListCtrl::RedrawOperationOverlayArea(const CRect& rcInvalidate, bool bErase)
+{
+	if (!::IsWindow(m_hWnd) || rcInvalidate.IsRectEmpty())
+		return;
+
+	const UINT uFlags = RDW_INVALIDATE | RDW_NOCHILDREN | (bErase ? RDW_ERASE : 0);
+	RedrawWindow(rcInvalidate, NULL, uFlags);
+}
+
+void CMuleListCtrl::DrawOperationOverlay(CDC *pDC)
+{
+	if (pDC == NULL || !m_operationOverlay.bVisible)
+		return;
+
+	CRect rcOverlay;
+	if (!GetOperationOverlayRect(rcOverlay))
+		return;
+
+	const bool bDark = ((GetRValue(m_crWindow) + GetGValue(m_crWindow) + GetBValue(m_crWindow)) < 384);
+	const COLORREF crPanel = bDark ? RGB(31, 34, 42) : RGB(248, 250, 255);
+	const COLORREF crPanelEdge = bDark ? RGB(68, 73, 88) : RGB(206, 214, 230);
+	const COLORREF crText = bDark ? RGB(224, 231, 250) : RGB(32, 48, 92);
+	const COLORREF crTextSoft = bDark ? RGB(174, 188, 224) : RGB(55, 76, 145);
+	const COLORREF crProgressBack = bDark ? RGB(53, 58, 70) : RGB(228, 233, 244);
+	const COLORREF crProgressFill = RGB(76, 132, 232);
+	const COLORREF crProgressFill2 = bDark ? RGB(111, 159, 255) : RGB(115, 164, 255);
+
+	pDC->SetBkMode(TRANSPARENT);
+
+	CRgn rgnPanel;
+	rgnPanel.CreateRoundRectRgn(rcOverlay.left, rcOverlay.top, rcOverlay.right + 1, rcOverlay.bottom + 1, 14, 14);
+	CBrush brPanel(crPanel);
+	pDC->FillRgn(&rgnPanel, &brPanel);
+
+	CPen penEdge(PS_SOLID, 1, crPanelEdge);
+	CPen *pOldPen = pDC->SelectObject(&penEdge);
+	CGdiObject *pOldBrush = pDC->SelectStockObject(NULL_BRUSH);
+	pDC->RoundRect(rcOverlay, CPoint(14, 14));
+
+	DrawAnimatedRainbowBorder(pDC, rcOverlay, m_operationOverlay.uAnimationPhase, 2, 14);
+
+	CRect rcContent(rcOverlay);
+	rcContent.DeflateRect(14, 10);
+	CRect rcCancel;
+	const bool bHasCancel = GetOperationOverlayCancelRect(rcCancel);
+	CRect rcText(rcContent);
+	if (bHasCancel)
+		rcText.right = rcCancel.left - 12;
+
+	CFont *pOldFont = pDC->SelectObject(GetFont());
+	pDC->SetTextColor(crText);
+	CRect rcTitle(rcText.left, rcText.top, rcText.right, rcText.top + 18);
+	pDC->DrawText(m_operationOverlay.strTitle, rcTitle, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+
+	pDC->SetTextColor(crTextSoft);
+	CRect rcDetail(rcText.left, rcTitle.bottom + 1, rcText.right, rcTitle.bottom + 18);
+	pDC->DrawText(m_operationOverlay.strDetail, rcDetail, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+
+	CRect rcProgress(rcText.left, rcDetail.bottom + 8, rcText.right, rcDetail.bottom + 20);
+	if (rcProgress.Width() > 20) {
+		pDC->FillSolidRect(rcProgress, crProgressBack);
+		CPen penProgressEdge(PS_SOLID, 1, crPanelEdge);
+		pDC->SelectObject(&penProgressEdge);
+		pDC->MoveTo(rcProgress.left, rcProgress.top);
+		pDC->LineTo(rcProgress.right, rcProgress.top);
+		pDC->LineTo(rcProgress.right, rcProgress.bottom);
+		pDC->LineTo(rcProgress.left, rcProgress.bottom);
+		pDC->LineTo(rcProgress.left, rcProgress.top);
+
+		if (m_operationOverlay.uTotal > 0) {
+			const int iFillWidth = min(rcProgress.Width(), max(0, MulDiv(rcProgress.Width(), min(m_operationOverlay.uDone, m_operationOverlay.uTotal), m_operationOverlay.uTotal)));
+			if (iFillWidth > 0) {
+				CRect rcFill(rcProgress);
+				rcFill.DeflateRect(1, 1);
+				rcFill.right = rcFill.left + max(0, iFillWidth - 2);
+				pDC->FillSolidRect(rcFill, crProgressFill);
+				CRect rcFillTop(rcFill.left, rcFill.top, rcFill.right, rcFill.top + max(1, rcFill.Height() / 2));
+				pDC->FillSolidRect(rcFillTop, crProgressFill2);
+			}
+		}
+	}
+
+	if (bHasCancel) {
+		const COLORREF crButton = m_operationOverlay.bCancelHot ? (bDark ? RGB(64, 72, 96) : RGB(232, 238, 252)) : (bDark ? RGB(47, 52, 64) : RGB(242, 246, 255));
+		const COLORREF crButtonEdge = m_operationOverlay.bCancelHot ? RGB(76, 132, 232) : crPanelEdge;
+		CBrush brButton(crButton);
+		CPen penButton(PS_SOLID, 1, crButtonEdge);
+		pDC->SelectObject(&penButton);
+		pDC->SelectObject(&brButton);
+		pDC->RoundRect(rcCancel, CPoint(8, 8));
+		pDC->SetTextColor(crText);
+		pDC->DrawText(m_operationOverlay.strCancelText, rcCancel, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+	}
+
+	pDC->SelectObject(pOldFont);
+	pDC->SelectObject(pOldPen);
+	pDC->SelectObject(pOldBrush);
+}
+
+
 void CMuleListCtrl::DrawItem(LPDRAWITEMSTRUCT lpDrawItemStruct)
 {
 	//set up our flicker free drawing
 	CRect rcItem(lpDrawItemStruct->rcItem);
-	CMemoryDC pDC(CDC::FromHandle(lpDrawItemStruct->hDC), &rcItem, m_crWindow);
+	CRect rcClientFullRow;
+	GetClientRect(&rcClientFullRow);
+	CRect rcPaint(rcClientFullRow.left, rcItem.top, rcClientFullRow.right, rcItem.bottom);
+	CMemoryDC pDC(CDC::FromHandle(lpDrawItemStruct->hDC), &rcPaint, m_crWindow);
 	CFont *pOldFont = pDC->SelectObject(GetFont());
 	RECT rcClient;
 	GetClientRect(&rcClient);
 
 	int iItem = lpDrawItemStruct->itemID;
+	const int iItemCount = GetItemCount();
+	if (iItem < 0 || iItem >= iItemCount) {
+		pDC->FillSolidRect(&rcPaint, m_crWindowTextBk != CLR_NONE ? m_crWindowTextBk : m_crWindow);
+		pDC->Flush();
+		pDC->SelectObject(pOldFont);
+		return;
+	}
 
 	//gets the item image and state info
 	LVITEM lvi;
@@ -2132,67 +3086,87 @@ void CMuleListCtrl::DrawFocusRect(CDC *pDC, LPCRECT rcItem, BOOL bItemFocused, B
 
 BOOL CMuleListCtrl::OnEraseBkgnd(CDC *pDC)
 {
-	int itemCount = GetItemCount();
-	// Empty owner-draw lists need an explicit erase to avoid stale pixels after view switches.
-	if (itemCount <= 0) {
-		CRect rcClient;
-		GetClientRect(&rcClient);
-		if (m_crWindowTextBk != CLR_NONE)
-			pDC->FillSolidRect(&rcClient, GetBkColor());
-		else
-			CListCtrl::OnEraseBkgnd(pDC);
+	if (m_crWindowTextBk != CLR_NONE) {
+		FillUnusedClientArea(pDC);
 		return TRUE;
 	}
 
-	int topIndex = GetTopIndex();
-	int maxItems = GetCountPerPage();
-	RECT rcClient, rcItem = {};
-	//draw top portion
+	return CListCtrl::OnEraseBkgnd(pDC);
+}
+
+void CMuleListCtrl::FillUnusedClientArea(CDC *pDC)
+{
+	if (pDC == NULL || m_crWindowTextBk == CLR_NONE)
+		return;
+
+	CRect rcClient;
 	GetClientRect(&rcClient);
-	RECT rcClip(rcClient);
-	if (!GetItemRect(topIndex, &rcItem, LVIR_BOUNDS))
-		return CListCtrl::OnEraseBkgnd(pDC);
-	rcClient.bottom = rcItem.top;
-	if (m_crWindowTextBk != CLR_NONE)
-		pDC->FillSolidRect(&rcClient, GetBkColor());
-	else
-		rcClip.top = rcItem.top;
+	if (rcClient.IsRectEmpty())
+		return;
 
-	//draw bottom portion if we have to
-	if (topIndex + maxItems >= itemCount) {
-		int drawnItems = itemCount < maxItems ? itemCount : maxItems;
-		GetClientRect(&rcClient);
-		GetItemRect(topIndex + drawnItems - 1, &rcItem, LVIR_BOUNDS);
-		rcClient.top = rcItem.bottom;
-		rcClip.bottom = rcItem.bottom;
-		if (m_crWindowTextBk != CLR_NONE)
-			pDC->FillSolidRect(&rcClient, GetBkColor());
+	const COLORREF crBack = m_crWindowTextBk != CLR_NONE ? m_crWindowTextBk : m_crWindow;
+	const int iItemCount = GetItemCount();
+	if (iItemCount <= 0) {
+		pDC->FillSolidRect(&rcClient, crBack);
+		return;
 	}
 
-	//draw right half if we need to
-	if (rcItem.right < rcClient.right) {
-		GetClientRect(&rcClient);
-		rcClient.left = rcItem.right;
-		rcClip.right = rcItem.right;
-		if (m_crWindowTextBk != CLR_NONE)
-			pDC->FillSolidRect(&rcClient, GetBkColor());
+	const int iTopIndex = GetTopIndex();
+	if (iTopIndex < 0 || iTopIndex >= iItemCount) {
+		pDC->FillSolidRect(&rcClient, crBack);
+		return;
 	}
 
-	if (m_crWindowTextBk == CLR_NONE) {
-		CRect rcClipBox;
-		pDC->GetClipBox(rcClipBox);
-		rcClipBox.SubtractRect(rcClipBox, &rcClip);
-		if (!rcClipBox.IsRectEmpty()) {
-			pDC->ExcludeClipRect(&rcClip);
-			CListCtrl::OnEraseBkgnd(pDC);
-			InvalidateRect(&rcClip, FALSE);
+	int iLastVisibleBottom = rcClient.top;
+	CRect rcFirstItem;
+	if (GetItemRect(iTopIndex, &rcFirstItem, LVIR_BOUNDS) && rcFirstItem.top > rcClient.top) {
+		CRect rcTop(rcClient.left, rcClient.top, rcClient.right, min(rcFirstItem.top, rcClient.bottom));
+		if (!rcTop.IsRectEmpty())
+			pDC->FillSolidRect(&rcTop, crBack);
+	}
+
+	const int iRowsPerPage = max(1, GetCountPerPage());
+	const int iLastCandidate = min(iItemCount - 1, iTopIndex + iRowsPerPage + 2);
+	for (int iItem = iTopIndex; iItem <= iLastCandidate; ++iItem) {
+		CRect rcItem;
+		if (!GetItemRect(iItem, &rcItem, LVIR_BOUNDS))
+			continue;
+		if (rcItem.bottom <= rcClient.top || rcItem.top >= rcClient.bottom)
+			continue;
+		iLastVisibleBottom = max(iLastVisibleBottom, min(rcItem.bottom, rcClient.bottom));
+	}
+
+	if (iLastVisibleBottom < rcClient.bottom) {
+		CRect rcBottom(rcClient.left, max(rcClient.top, iLastVisibleBottom), rcClient.right, rcClient.bottom);
+		if (!rcBottom.IsRectEmpty())
+			pDC->FillSolidRect(&rcBottom, crBack);
+	}
+
+	CHeaderCtrl* pHeader = GetHeaderCtrl();
+	if (pHeader != NULL && ::IsWindow(pHeader->GetSafeHwnd())) {
+		int iColumnsRight = rcClient.left;
+		const int iColumnCount = pHeader->GetItemCount();
+		for (int iColumn = 0; iColumn < iColumnCount; ++iColumn)
+			iColumnsRight += CListCtrl::GetColumnWidth(iColumn);
+		if (iColumnsRight < rcClient.right) {
+			CRect rcRight(max(rcClient.left, iColumnsRight), rcClient.top, rcClient.right, rcClient.bottom);
+			if (!rcRight.IsRectEmpty())
+				pDC->FillSolidRect(&rcRight, crBack);
 		}
 	}
-	return TRUE;
 }
 
 void CMuleListCtrl::OnMouseMove(UINT nFlags, CPoint point)
 {
+	if (m_operationOverlay.bVisible && m_operationOverlay.bCanCancel) {
+		CRect rcCancel;
+		const bool bCancelHot = GetOperationOverlayCancelRect(rcCancel) && rcCancel.PtInRect(point);
+		if (m_operationOverlay.bCancelHot != bCancelHot) {
+			m_operationOverlay.bCancelHot = bCancelHot;
+			InvalidateOperationOverlay();
+		}
+	}
+
 	EnsureThemeAwareInfoTipCtrl();
 	StopPersistentInfoTipLeaveTimer();
 	EnsurePersistentInfoTipMouseLeaveTracking();
@@ -2203,6 +3177,53 @@ void CMuleListCtrl::OnMouseMove(UINT nFlags, CPoint point)
 	UpdatePersistentInfoTipTracking(point);
 
 	CListCtrl::OnMouseMove(nFlags, point);
+}
+
+void CMuleListCtrl::OnLButtonDown(UINT nFlags, CPoint point)
+{
+	if (m_operationOverlay.bVisible) {
+		CRect rcCancel;
+		if (GetOperationOverlayCancelRect(rcCancel) && rcCancel.PtInRect(point)) {
+			OnOperationOverlayCancel();
+			return;
+		}
+
+		CRect rcOverlay;
+		if (GetOperationOverlayRect(rcOverlay) && rcOverlay.PtInRect(point))
+			return;
+	}
+
+	CListCtrl::OnLButtonDown(nFlags, point);
+}
+
+BOOL CMuleListCtrl::OnSetCursor(CWnd* pWnd, UINT nHitTest, UINT message)
+{
+	if (m_operationOverlay.bVisible && m_operationOverlay.bCanCancel) {
+		CPoint point;
+		::GetCursorPos(&point);
+		ScreenToClient(&point);
+		CRect rcCancel;
+		if (GetOperationOverlayCancelRect(rcCancel) && rcCancel.PtInRect(point)) {
+			::SetCursor(::LoadCursor(NULL, IDC_HAND));
+			return TRUE;
+		}
+	}
+
+	return CListCtrl::OnSetCursor(pWnd, nHitTest, message);
+}
+
+void CMuleListCtrl::OnPaint()
+{
+	CPaintDC dc(this);
+	DefWindowProc(WM_PAINT, reinterpret_cast<WPARAM>(dc.GetSafeHdc()), 0);
+	FillUnusedClientArea(&dc);
+	UpdateOperationOverlayWindow();
+}
+
+void CMuleListCtrl::OnSize(UINT nType, int cx, int cy)
+{
+	CListCtrl::OnSize(nType, cx, cy);
+	UpdateOperationOverlayWindow();
 }
 
 void CMuleListCtrl::OnSysColorChange()
@@ -2232,6 +3253,11 @@ void CMuleListCtrl::OnSysColorChange()
 
 LRESULT CMuleListCtrl::OnMouseLeave(WPARAM, LPARAM)
 {
+	if (m_operationOverlay.bCancelHot) {
+		m_operationOverlay.bCancelHot = false;
+		InvalidateOperationOverlay();
+	}
+
 	ResetPendingPersistentInfoTip();
 	m_bTrackingMouseLeave = false;
 
@@ -2256,6 +3282,10 @@ LRESULT CMuleListCtrl::OnMouseHover(WPARAM, LPARAM lParam)
 
 	if (!IsSamePersistentInfoTipTarget(context, m_PendingInfoTipContext))
 		return 0;
+	if (!context.bExplicitTip && !IsPointWithinPersistentInfoTipHotArea(point, context)) {
+		ResetPendingPersistentInfoTip();
+		return 0;
+	}
 
 	ShowPersistentInfoTip(context, strText);
 	ResetPendingPersistentInfoTip();
@@ -2269,6 +3299,11 @@ void CMuleListCtrl::OnTimer(UINT_PTR nIDEvent)
 			HidePersistentInfoTip(true);
 			return;
 		}
+		return;
+	}
+
+	if (nIDEvent == MULELISTCTRL_OPERATION_OVERLAY_TIMER_ID) {
+		TryShowDelayedOperationOverlay(::GetTickCount());
 		return;
 	}
 
@@ -2313,8 +3348,6 @@ void CMuleListCtrl::DoFind(int iStartItem, int iDirection /*1 = down, -1 = up*/,
 		MessageBeep(MB_OK);
 		return;
 	}
-
-	CWaitCursor curHourglass;
 
 	const int iNumItems = (iDirection > 0) ? GetItemCount() : 0;
 	for (int iItem = iStartItem; ((iDirection > 0) ? iItem < iNumItems : iItem >= 0);) {
@@ -2463,6 +3496,19 @@ CMuleListCtrl::EUpdateMode CMuleListCtrl::SetUpdateMode(EUpdateMode eUpdateMode)
 	return eCurUpdateMode;
 }
 
+void CMuleListCtrl::BeginBulkInsert()
+{
+	++m_uBulkInsertDepth;
+}
+
+void CMuleListCtrl::EndBulkInsert()
+{
+	if (m_uBulkInsertDepth > 0)
+		--m_uBulkInsertDepth;
+	else
+		ASSERT(0);
+}
+
 void CMuleListCtrl::OnLvnGetInfoTip(LPNMHDR pNMHDR, LRESULT *pResult)
 {
 	// NOTE: Using 'Info Tips' for owner drawn list view controls (like almost all instances
@@ -2508,141 +3554,4 @@ int CMuleListCtrl::InsertColumn(int nCol, LPCTSTR lpszColumnHeading, int nFormat
 	if (bHiddenByDefault)
 		m_liDefaultHiddenColumns.AddTail(nCol);
 	return CListCtrl::InsertColumn(nCol, lpszColumnHeading, nFormat, nWidth, nSubItem);
-}
-
-///////////////////////////////////////////////////////////////////////////////
-// CUpdateItemThread
-IMPLEMENT_DYNCREATE(CUpdateItemThread, CWinThread)
-
-CUpdateItemThread::CUpdateItemThread()
-	: m_listctrl(NULL)
-{
-	m_bRun = TRUE;
-}
-
-CUpdateItemThread::~CUpdateItemThread()
-{
-}
-
-void CUpdateItemThread::SetListCtrl(CMuleListCtrl* listctrl) {
-	CSingleLock lock(&listitemlocker, TRUE);
-	m_listctrl = listctrl;
-}
-
-bool CUpdateItemThread::IsRunning() const {
-	return ::InterlockedCompareExchange(const_cast<LONG*>(&m_bRun), TRUE, TRUE) != FALSE;
-}
-
-void CUpdateItemThread::AddItemToUpdate(const LPARAM item) {
-	if (!IsRunning())
-		return;
-
-	queueditemlocker.Lock();
-	if (!IsRunning()) {
-		queueditemlocker.Unlock();
-		return;
-	}
-	update_req_struct toadd;
-	toadd.dwRequestTime = GetTickCount();
-	toadd.lpItem = item;
-	queueditem.AddTail(toadd);
-	queueditemlocker.Unlock();
-	newitemEvent.SetEvent();
-}
-
-void CUpdateItemThread::AddItemUpdated(const LPARAM item) {
-	if (!IsRunning())
-		return;
-
-	updateditemlocker.Lock();
-	if (!IsRunning()) {
-		updateditemlocker.Unlock();
-		return;
-	}
-	updateditem.AddTail(item);
-	updateditemlocker.Unlock();
-}
-
-
-void CUpdateItemThread::EndThread() {
-	::InterlockedExchange(&m_bRun, FALSE);
-	newitemEvent.SetEvent();
-}
-
-int CUpdateItemThread::Run() {
-	DbgSetThreadName("CUpdateItemThread");
-
-	newitemEvent.Lock();
-	while (IsRunning()) {
-		queueditemlocker.Lock();
-		while (queueditem.GetCount()) {
-			update_req_struct currecord = queueditem.RemoveHead();
-			update_info_struct* update_info;
-			if (ListItems.Lookup(currecord.lpItem, update_info)) {
-				update_info->bNeedToUpdate = true;
-			} else {
-				update_info = new update_info_struct;
-				update_info->dwUpdate = currecord.dwRequestTime;
-				update_info->bNeedToUpdate = true;
-				ListItems.SetAt(currecord.lpItem, update_info);
-			}
-		}
-		queueditemlocker.Unlock();
-		updateditemlocker.Lock();
-		while (updateditem.GetCount()) {
-			LPARAM item = updateditem.RemoveHead();
-			update_info_struct* update_info;
-			if (!ListItems.Lookup(item, update_info)) {
-				update_info = new update_info_struct;
-				update_info->bNeedToUpdate = false;
-				ListItems.SetAt(item, update_info);
-			}
-			update_info->dwUpdate = GetTickCount() + thePrefs.GetUITweaksListUpdatePeriod() + (uint32)(rand() / (RAND_MAX / 1000));
-		}
-		updateditemlocker.Unlock();
-		DWORD wecanwait = (DWORD)-1;
-		POSITION pos = ListItems.GetStartPosition();
-		LPARAM item;
-		update_info_struct* update_info;
-		while (pos != NULL)	{
-			ListItems.GetNextAssoc(pos, item, update_info);
-			if (update_info->dwUpdate > GetTickCount()) {
-				wecanwait = min(wecanwait, update_info->dwUpdate - GetTickCount());
-			} else if (update_info->dwUpdate <= GetTickCount() && update_info->bNeedToUpdate) {
-				if (update_info->dwUpdate + thePrefs.GetUITweaksListUpdatePeriod() > GetTickCount()) { //check if not too much time occured before to prevent overload
-					{
-						CSingleLock lock(&listitemlocker, TRUE);
-						if (m_listctrl != NULL)
-							m_listctrl->RequestItemUpdateAsync(item);
-					}
-					update_info->dwUpdate = GetTickCount() + thePrefs.GetUITweaksListUpdatePeriod() + (uint32)(rand() / (RAND_MAX / 1000));
-					update_info->bNeedToUpdate = false;
-					wecanwait = min(wecanwait, (DWORD)thePrefs.GetUITweaksListUpdatePeriod());
-				} else { //we couldn't process it before du to cpu load, so delay the update
-					update_info->dwUpdate = GetTickCount() + thePrefs.GetUITweaksListUpdatePeriod();
-				}
-			} else {
-				ListItems.RemoveKey(item);
-				delete update_info;
-			}
-		}
-
-		if (IsRunning()) {
-			if ((ListItems.GetCount() == 0) || (theApp.m_app_state == APP_STATE_SHUTTINGDOWN))
-				newitemEvent.Lock();
-			else
-				newitemEvent.Lock(wecanwait);
-		}
-	}
-
-	POSITION pos = ListItems.GetStartPosition();
-	LPARAM item;
-	update_info_struct* update_info;
-	while (pos != NULL)
-	{
-		ListItems.GetNextAssoc(pos, item, update_info);
-		delete update_info;
-	}
-	ListItems.RemoveAll();
-	return 0;
 }

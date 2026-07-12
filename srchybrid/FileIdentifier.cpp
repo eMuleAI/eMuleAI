@@ -127,18 +127,16 @@ CString CFileIdentifierBase::DbgInfo() const
 // CFileIdentifier
 CFileIdentifier::CFileIdentifier(EMFileSize &rFileSize)
 	: m_rFileSize(rFileSize)
+	, m_pucMD4HashSetStorage(NULL)
 {
 }
 
 CFileIdentifier::CFileIdentifier(const CFileIdentifier &rFileIdentifier, EMFileSize &rFileSize)
 	: CFileIdentifierBase(rFileIdentifier)
 	, m_rFileSize(rFileSize)
+	, m_pucMD4HashSetStorage(NULL)
 {
-	for (INT_PTR i = 0; i < rFileIdentifier.m_aMD4HashSet.GetCount(); ++i) {
-		uchar *pucHashSetPart = new uchar[MDX_DIGEST_SIZE];
-		md4cpy(pucHashSetPart, rFileIdentifier.m_aMD4HashSet[i]);
-		m_aMD4HashSet.Add(pucHashSetPart);
-	}
+	SetMD4HashSet(rFileIdentifier.m_aMD4HashSet);
 	for (INT_PTR i = 0; i < rFileIdentifier.m_aAICHPartHashSet.GetCount(); ++i)
 		m_aAICHPartHashSet.Add(rFileIdentifier.m_aAICHPartHashSet[i]);
 }
@@ -155,11 +153,16 @@ bool CFileIdentifier::CalculateMD4HashByHashSet(bool bVerifyOnly, bool bDeleteOn
 		return false;
 	}
 	const INT_PTR iCnt = m_aMD4HashSet.GetCount();
-	uchar *buffer = new uchar[iCnt * MDX_DIGEST_SIZE];
-	for (INT_PTR i = iCnt; --i >= 0;)
-		md4cpy(&buffer[i * MDX_DIGEST_SIZE], m_aMD4HashSet[i]);
+	const uchar* pucHashData = m_pucMD4HashSetStorage;
+	uchar* buffer = NULL;
+	if (pucHashData == NULL) {
+		buffer = new uchar[iCnt * MDX_DIGEST_SIZE];
+		for (INT_PTR i = iCnt; --i >= 0;)
+			md4cpy(&buffer[i * MDX_DIGEST_SIZE], m_aMD4HashSet[i]);
+		pucHashData = buffer;
+	}
 	uchar aucResult[MDX_DIGEST_SIZE];
-	CKnownFile::CreateHash(buffer, (uint32)(iCnt * MDX_DIGEST_SIZE), aucResult);
+	CKnownFile::CreateHash(pucHashData, (uint32)(iCnt * MDX_DIGEST_SIZE), aucResult);
 	delete[] buffer;
 	if (bVerifyOnly) {
 		if (!md4equ(aucResult, m_abyMD4Hash)) {
@@ -183,10 +186,14 @@ bool CFileIdentifier::LoadMD4HashsetFromFile(CFileDataIO &file, bool bVerifyExis
 	uint16 parts = file.ReadUInt16();
 	if (bVerifyExistingHash && (!md4equ(m_abyMD4Hash, checkid) || parts != GetTheoreticalMD4PartHashCount()))
 		return false;
-	for (UINT i = 0; i < parts; ++i) {
-		uchar *cur_hash = new uchar[MDX_DIGEST_SIZE];
-		file.ReadHash16(cur_hash);
-		m_aMD4HashSet.Add(cur_hash);
+	if (parts > 0) {
+		m_pucMD4HashSetStorage = new uchar[static_cast<size_t>(parts) * MDX_DIGEST_SIZE];
+		m_aMD4HashSet.SetSize(parts);
+		for (UINT i = 0; i < parts; ++i) {
+			uchar* cur_hash = m_pucMD4HashSetStorage + static_cast<size_t>(i) * MDX_DIGEST_SIZE;
+			file.ReadHash16(cur_hash);
+			m_aMD4HashSet[i] = cur_hash;
+		}
 	}
 
 	if (!bVerifyExistingHash)
@@ -202,10 +209,15 @@ bool CFileIdentifier::SetMD4HashSet(const CArray<uchar*, uchar*> &aHashset)
 	DeleteMD4Hashset();
 
 	// set new hash
-	for (INT_PTR i = 0; i < aHashset.GetCount(); ++i) {
-		uchar *pucHash = new uchar[MDX_DIGEST_SIZE];
-		md4cpy(pucHash, aHashset[i]);
-		m_aMD4HashSet.Add(pucHash);
+	const INT_PTR iCount = aHashset.GetCount();
+	if (iCount > 0) {
+		m_pucMD4HashSetStorage = new uchar[static_cast<size_t>(iCount) * MDX_DIGEST_SIZE];
+		m_aMD4HashSet.SetSize(iCount);
+		for (INT_PTR i = 0; i < iCount; ++i) {
+			uchar* pucHash = m_pucMD4HashSetStorage + static_cast<size_t>(i) * MDX_DIGEST_SIZE;
+			md4cpy(pucHash, aHashset[i]);
+			m_aMD4HashSet[i] = pucHash;
+		}
 	}
 
 	// verify new hash
@@ -326,8 +338,13 @@ bool CFileIdentifier::ReadHashSetsFromPacket(CFileDataIO &file, bool &rbMD4, boo
 
 void CFileIdentifier::DeleteMD4Hashset()
 {
-	for (INT_PTR i = m_aMD4HashSet.GetCount(); --i >= 0;)
-		delete[] m_aMD4HashSet[i];
+	if (m_pucMD4HashSetStorage != NULL) {
+		delete[] m_pucMD4HashSetStorage;
+		m_pucMD4HashSetStorage = NULL;
+	} else {
+		for (INT_PTR i = m_aMD4HashSet.GetCount(); --i >= 0;)
+			delete[] m_aMD4HashSet[i];
+	}
 	m_aMD4HashSet.RemoveAll();
 }
 

@@ -1,0 +1,12 @@
+diff --git a/MediaInfoLib/Source/MediaInfo/Audio/File_Aac.cpp b/MediaInfoLib/Source/MediaInfo/Audio/File_Aac.cpp
+index c16d45a92..9d58072a7 100644
+--- a/MediaInfoLib/Source/MediaInfo/Audio/File_Aac.cpp
++++ b/MediaInfoLib/Source/MediaInfo/Audio/File_Aac.cpp
+@@ -97,6 +97,7 @@ File_Aac::File_Aac()
+     audioMuxVersionA=false;
+ 
+     //Temp - General Audio
++    num_window_groups=0;
+     sbr=NULL;
+     ps=NULL;
+     raw_data_block_Pos=0;

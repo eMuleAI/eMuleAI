@@ -23,6 +23,7 @@
 #include "UserMsgs.h"
 #include "eMuleAI/DarkMode.h"
 #include "eMuleAI/MenuXP.h"
+#include "MemDC.h"
 
 #ifdef _DEBUG
 #define new DEBUG_NEW
@@ -284,19 +285,21 @@ void CClosableTabCtrl::OnPaint()
 
 	CatchSpinControl();
 
-	CPaintDC dc(this); // Create a device context for painting
+	CPaintDC paintDC(this);
 	CRect rect;
 	GetClientRect(&rect); // Get the dimensions of the tab control
 
 	const HWND hSpin = (m_pSpinCtrl != NULL) ? m_pSpinCtrl->GetSafeHwnd() : NULL;
 	const bool bHasVisibleSpin = (hSpin != NULL) && ::IsWindow(hSpin) && ::IsWindowVisible(hSpin);
 	CRect rcSpin;
-	const int iSavedDc = dc.SaveDC();
+	const int iSavedDc = paintDC.SaveDC();
 	if (bHasVisibleSpin) {
 		::GetWindowRect(hSpin, &rcSpin);
 		ScreenToClient(&rcSpin);
-		dc.ExcludeClipRect(&rcSpin);
+		paintDC.ExcludeClipRect(&rcSpin);
 	}
+
+	CMemoryDC dc(&paintDC, rect, GetCustomSysColor(COLOR_WINDOW));
 
 	// Fill the background without painting over the tab scroll spin control.
 	dc.FillSolidRect(&rect, GetCustomSysColor(COLOR_WINDOW));
@@ -397,10 +400,11 @@ void CClosableTabCtrl::OnPaint()
 			dc.FillSolidRect(rcItem.left, rcItem.top, rcItem.Width() - 1, 2, GetCustomSysColor(COLOR_TABBORDER)); // Draw 2-pixel medium slate blue line
 	}
 
-	dc.RestoreDC(iSavedDc);
+	dc.Flush();
+	paintDC.RestoreDC(iSavedDc);
 
 	if (bHasVisibleSpin)
-		::RedrawWindow(hSpin, NULL, NULL, RDW_INVALIDATE | RDW_UPDATENOW | RDW_ERASE | RDW_FRAME);
+		::RedrawWindow(hSpin, NULL, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_FRAME);
 }
 
 // DrawItem will be called if the Light Mode is active

@@ -33,7 +33,7 @@
 #include "Log.h"
 #include "IPFilter.h"
 #include "MemDC.h"
-#include "eMuleAI/GeoLite2.h"
+#include "eMuleAI/IPGeolocation.h"
 #include "eMuleAI/DarkMode.h"
 #include "MuleStatusBarCtrl.h"
 
@@ -42,7 +42,6 @@
 #undef THIS_FILE
 static char THIS_FILE[] = __FILE__;
 #endif
-
 
 IMPLEMENT_DYNAMIC(CServerListCtrl, CMuleListCtrl)
 
@@ -114,7 +113,7 @@ bool CServerListCtrl::Init()
 	InsertColumn(12, EMPTY,	LVCFMT_LEFT,	50, -1, true);	//VERSION
 	InsertColumn(13, EMPTY,	LVCFMT_RIGHT,	60);			//IDLOW
 	InsertColumn(14, EMPTY,	LVCFMT_RIGHT,	50);			//OBFUSCATION
-	if (thePrefs.GetGeoLite2Mode() == GL2_DISABLE)
+	if (thePrefs.GetIPGeolocationMode() == IPGEO_DISABLE)
 		InsertColumn(15, EMPTY, LVCFMT_LEFT, 100, -1, true);
 	else
 		InsertColumn(15, EMPTY, LVCFMT_LEFT, 100);
@@ -229,6 +228,101 @@ CString CServerListCtrl::GetItemDisplayText(const CServer *server, int iSubItem)
 	return sText;
 }
 
+
+void CServerListCtrl::QueueServerRowRedrawForRange(int iFirst, int iLast)
+{
+	if (theApp.GetBackendLifecycleState() >= CemuleApp::BackendLifecycleStoppingUiUpdates || !::IsWindow(m_hWnd))
+		return;
+	if (iFirst < 0 || iLast < iFirst || GetItemCount() <= 0)
+		return;
+	iFirst = max(0, iFirst);
+	iLast = min(iLast, GetItemCount() - 1);
+	if (iLast >= iFirst)
+		RequestRowRedrawAsync(iFirst, iLast);
+}
+
+void CServerListCtrl::RequestServerListRowRedraw(const CServer *server, int iItem)
+{
+	if (server != NULL && iItem >= 0)
+		RequestRowRedrawAsync(iItem, iItem);
+}
+
+bool CServerListCtrl::TryGetServerListText(const CServer *server, int iSubItem, CString &strText) const
+{
+	if (server == NULL) {
+		strText.Empty();
+		return false;
+	}
+	strText = GetItemDisplayText(server, iSubItem);
+	return true;
+}
+
+bool CServerListCtrl::TryGetServerListSortKey(const CServer *server, int iSubItem, CString &strSortKey) const
+{
+	if (server == NULL) {
+		strSortKey.Empty();
+		return false;
+	}
+	CString strSortText;
+	switch (iSubItem) {
+	case 1:
+		if (server->HasDynIP())
+			strSortText.Format(_T("0:%s"), (LPCTSTR)server->GetDynIP());
+		else
+			strSortText.Format(_T("1:%010u:%05u"), htonl(server->GetIP()), server->GetPort());
+		strSortKey = MakeListSortKey(strSortText);
+		break;
+	case 3:
+		strSortText.Format(_T("%010u"), server->GetPing());
+		strSortKey = MakeListSortKey(strSortText, server->GetPing() == 0);
+		break;
+	case 4:
+		strSortText.Format(_T("%010u"), server->GetUsers());
+		strSortKey = MakeListSortKey(strSortText, server->GetUsers() == 0);
+		break;
+	case 5:
+		strSortText.Format(_T("%010u"), server->GetMaxUsers());
+		strSortKey = MakeListSortKey(strSortText, server->GetMaxUsers() == 0);
+		break;
+	case 6:
+		strSortText.Format(_T("%010u"), server->GetFiles());
+		strSortKey = MakeListSortKey(strSortText, server->GetFiles() == 0);
+		break;
+	case 7:
+		strSortText.Format(_T("%02d"), server->GetPreference() == SRV_PR_LOW ? 0 : (server->GetPreference() == SRV_PR_HIGH ? 2 : 1));
+		strSortKey = MakeListSortKey(strSortText);
+		break;
+	case 8:
+		strSortText.Format(_T("%010u"), server->GetFailedCount());
+		strSortKey = MakeListSortKey(strSortText);
+		break;
+	case 9:
+		strSortText.Format(_T("%u"), server->IsStaticMember() ? 1 : 0);
+		strSortKey = MakeListSortKey(strSortText);
+		break;
+	case 10:
+		strSortText.Format(_T("%010u"), server->GetSoftFiles());
+		strSortKey = MakeListSortKey(strSortText, server->GetSoftFiles() == 0);
+		break;
+	case 11:
+		strSortText.Format(_T("%010u"), server->GetHardFiles());
+		strSortKey = MakeListSortKey(strSortText, server->GetHardFiles() == 0);
+		break;
+	case 13:
+		strSortText.Format(_T("%010u"), server->GetLowIDUsers());
+		strSortKey = MakeListSortKey(strSortText, server->GetLowIDUsers() == 0);
+		break;
+	case 14:
+		strSortText.Format(_T("%u"), server->SupportsObfuscationTCP() ? 1 : 0);
+		strSortKey = MakeListSortKey(strSortText);
+		break;
+	default:
+		strSortKey = MakeListSortKey(GetItemDisplayText(server, iSubItem), GetItemDisplayText(server, iSubItem).IsEmpty());
+		break;
+	}
+	return true;
+}
+
 void CServerListCtrl::DrawItem(LPDRAWITEMSTRUCT lpDrawItemStruct)
 {
 	const CServer *pServer = reinterpret_cast<CServer*>(lpDrawItemStruct->itemData);
@@ -236,7 +330,10 @@ void CServerListCtrl::DrawItem(LPDRAWITEMSTRUCT lpDrawItemStruct)
 		return;
 
 	CRect rcItem(lpDrawItemStruct->rcItem);
-	CMemoryDC dc(CDC::FromHandle(lpDrawItemStruct->hDC), rcItem);
+	CRect rcClientFullRow;
+	GetClientRect(&rcClientFullRow);
+	CRect rcPaint(rcClientFullRow.left, rcItem.top, rcClientFullRow.right, rcItem.bottom);
+	CMemoryDC dc(CDC::FromHandle(lpDrawItemStruct->hDC), rcPaint);
 	BOOL bCtrlFocused;
 	InitItemMemDC(dc, lpDrawItemStruct, bCtrlFocused);
 	RECT rcServer;
@@ -252,7 +349,7 @@ void CServerListCtrl::DrawItem(LPDRAWITEMSTRUCT lpDrawItemStruct)
 	// Set selected item background color
 	const bool bSelected = (lpDrawItemStruct->itemState & ODS_SELECTED) != 0;
 	if (bSelected)
-		dc.FillSolidRect(rcItem, GetCustomSysColor(COLOR_HIGHLIGHT));
+		dc.FillSolidRect(rcPaint, GetCustomSysColor(COLOR_HIGHLIGHT));
 
 	int nTextColorIndex = bSelected ? COLOR_HIGHLIGHTTEXT : COLOR_WINDOWTEXT;
 	if (bConnectedServer)
@@ -280,13 +377,16 @@ void CServerListCtrl::DrawItem(LPDRAWITEMSTRUCT lpDrawItemStruct)
 		rcItem.left = itemLeft;
 		rcItem.right = itemLeft + iColumnWidth - sm_iSubItemInset;
 		if (rcItem.left < rcItem.right && HaveIntersection(rcServer, rcItem)) {
-			const CString &sItem(GetItemDisplayText(pServer, iColumn));
+			CString sItem;
+			TryGetServerListText(pServer, iColumn, sItem);
 			switch (iColumn) {
 			case 15:
 			{
-					if (theApp.geolite2->ShowCountryFlag()) {
+					if (theApp.ipgeolocation->ShowCountryFlag()) {
 						POINT point2 = { rcItem.left,rcItem.top + 1 };
-						theApp.geolite2->GetFlagImageList()->DrawIndirect(&theApp.geolite2->GetFlagImageDrawParams(dc, pServer->GetCountryFlagIndex(), point2));
+						IMAGELISTDRAWPARAMS flagDrawParams = theApp.ipgeolocation->GetFlagImageDrawParams(dc, pServer->GetCountryFlagIndex(), point2);
+
+						theApp.ipgeolocation->GetFlagImageList()->DrawIndirect(&flagDrawParams);
 						rcItem.left += 22;
 					}
 					rcItem.left += sm_iIconOffset;
@@ -301,10 +401,12 @@ void CServerListCtrl::DrawItem(LPDRAWITEMSTRUCT lpDrawItemStruct)
 					rcItem.left = itemLeft + sm_iIconOffset;
 					const POINT point = { rcItem.left, rcItem.top + iIconY };
 					SafeImageListDraw(m_pImageList, dc, iImage, point, ILD_NORMAL | INDEXTOOVERLAYMASK(uOverlayImage));
-					if (theApp.geolite2->ShowCountryFlag() && IsColumnHidden(15)) {
+					if (theApp.ipgeolocation->ShowCountryFlag() && IsColumnHidden(15)) {
 						rcItem.left += 17;
 						POINT point2 = { rcItem.left,rcItem.top + 1 };
-						theApp.geolite2->GetFlagImageList()->DrawIndirect(&theApp.geolite2->GetFlagImageDrawParams(dc, pServer->GetCountryFlagIndex(), point2));
+						IMAGELISTDRAWPARAMS flagDrawParams = theApp.ipgeolocation->GetFlagImageDrawParams(dc, pServer->GetCountryFlagIndex(), point2);
+
+						theApp.ipgeolocation->GetFlagImageList()->DrawIndirect(&flagDrawParams);
 						rcItem.left += sm_iSubItemInset;
 					}
 					rcItem.left += 17;
@@ -319,7 +421,6 @@ void CServerListCtrl::DrawItem(LPDRAWITEMSTRUCT lpDrawItemStruct)
 
 	DrawFocusRect(dc, &lpDrawItemStruct->rcItem, lpDrawItemStruct->itemState & ODS_FOCUS, bCtrlFocused, lpDrawItemStruct->itemState & ODS_SELECTED);
 
-	QueueItemUpdated((LPARAM)pServer);
 }
 
 void CServerListCtrl::Localize()
@@ -333,6 +434,8 @@ void CServerListCtrl::Localize()
 	};
 
 	LocaliseHeaderCtrl(uids, _countof(uids));
+
+	QueueServerRowRedrawForRange(0, GetItemCount() - 1);
 }
 
 void CServerListCtrl::RemoveServer(const CServer *pServer)
@@ -389,7 +492,8 @@ bool CServerListCtrl::AddServer(const CServer *pServer, bool bAddToList, bool bR
 		return false;
 	if (bAddToList) {
 		int iItem = InsertItem(LVIF_TEXT | LVIF_PARAM, bAddTail ? GetItemCount() : 0, pServer->GetListName(), 0, 0, 0, (LPARAM)pServer);
-		Update(iItem);
+		if (iItem >= 0)
+			RequestServerListRowRedraw(pServer, iItem);
 	}
 	ShowServerCount();
 	return true;
@@ -473,6 +577,10 @@ BOOL CServerListCtrl::OnCommand(WPARAM wParam, LPARAM)
 	switch (wParam) {
 	case MP_CONNECTTO:
 	case IDA_ENTER:
+		if (theApp.emuledlg != NULL && !theApp.emuledlg->CanUseP2PConnectionCommands()) {
+			theApp.emuledlg->LogP2PConnectionCommandBlocked(true);
+			return TRUE;
+		}
 		if (GetSelectedCount() > 1) {
 			theApp.serverconnect->Disconnect();
 			for (POSITION pos = GetFirstSelectedItemPosition(); pos != NULL;) {
@@ -627,6 +735,10 @@ void CServerListCtrl::OnNmDblClk(LPNMHDR, LRESULT*)
 {
 	int iItem = GetNextItem(-1, LVIS_SELECTED | LVIS_FOCUSED);
 	if (iItem >= 0) {
+		if (theApp.emuledlg != NULL && !theApp.emuledlg->CanUseP2PConnectionCommands()) {
+			theApp.emuledlg->LogP2PConnectionCommandBlocked(true);
+			return;
+		}
 		theApp.serverconnect->ConnectToServer(reinterpret_cast<CServer*>(GetItemData(iItem)));
 		theApp.emuledlg->ShowConnectionState();
 	}
@@ -647,7 +759,9 @@ void CServerListCtrl::RefreshServer(const CServer *pServer)
 	if (theApp.IsClosing() || !pServer || theApp.emuledlg->activewnd != theApp.emuledlg->serverwnd || !theApp.emuledlg->serverwnd->serverlistctrl.IsWindowVisible())
 		return;
 
-	QueueItemUpdate((LPARAM)pServer);
+	const int iItem = FindServer(pServer);
+	if (IsItemIndexVisible(iItem))
+		RequestServerListRowRedraw(pServer, iItem);
 }
 
 void CServerListCtrl::RefreshAllServer() {
@@ -656,6 +770,7 @@ void CServerListCtrl::RefreshAllServer() {
 		RefreshServer(theApp.serverlist->list.GetAt(pos));
 		theApp.serverlist->list.GetNext(pos);
 	}
+	QueueServerRowRedrawForRange(0, GetItemCount() - 1);
 
 }
 
@@ -696,6 +811,16 @@ int CALLBACK CServerListCtrl::SortProc(const LPARAM lParam1, const LPARAM lParam
 		return 0;
 	const CServer *item1 = reinterpret_cast<CServer*>(lParam1);
 	const CServer *item2 = reinterpret_cast<CServer*>(lParam2);
+	CServerListCtrl* pServerListCtrl = theApp.emuledlg != NULL && theApp.emuledlg->serverwnd != NULL ? &theApp.emuledlg->serverwnd->serverlistctrl : NULL;
+	CString strSortKey1;
+	CString strSortKey2;
+	if (pServerListCtrl != NULL && pServerListCtrl->TryGetServerListSortKey(item1, LOWORD(lParamSort), strSortKey1) && pServerListCtrl->TryGetServerListSortKey(item2, LOWORD(lParamSort), strSortKey2)) {
+		int iSortResult = CMuleListCtrl::CompareListSortKeys(strSortKey1, strSortKey2);
+		iSortResult = CMuleListCtrl::ApplyListSortDirection(iSortResult, HIWORD(lParamSort) != 0);
+		if (iSortResult != 0)
+			return iSortResult;
+	}
+
 
 	int iResult;
 	switch (LOWORD(lParamSort)) {
@@ -855,7 +980,7 @@ bool CServerListCtrl::GetPersistentInfoTipText(const SPersistentInfoTipContext& 
 
 int CServerListCtrl::GetDefaultPersistentInfoTipExtraLeftPadding(const SPersistentInfoTipContext& context) const
 {
-	return (context.iSubItem == 15 && theApp.geolite2->ShowCountryFlag()) ? 22 + sm_iIconOffset : 0;
+	return (context.iSubItem == 15 && theApp.ipgeolocation->ShowCountryFlag()) ? 22 + sm_iIconOffset : 0;
 }
 
 void CServerListCtrl::OnLvnGetInfoTip(LPNMHDR pNMHDR, LRESULT *pResult)
@@ -906,8 +1031,11 @@ void CServerListCtrl::OnLvnGetDispInfo(NMHDR* pNMHDR, LRESULT* pResult)
 		NMLVDISPINFO* pDispInfo = reinterpret_cast<NMLVDISPINFO*>(pNMHDR);
 		if (pDispInfo->item.mask & LVIF_TEXT) {
 			const CServer* server = reinterpret_cast<CServer*>(pDispInfo->item.lParam);
-			if (server != NULL)
-				_tcsncpy_s(pDispInfo->item.pszText, pDispInfo->item.cchTextMax, GetItemDisplayText(server, pDispInfo->item.iSubItem), _TRUNCATE);
+			if (server != NULL) {
+				CString strText;
+				TryGetServerListText(server, pDispInfo->item.iSubItem, strText);
+				_tcsncpy_s(pDispInfo->item.pszText, pDispInfo->item.cchTextMax, strText, _TRUNCATE);
+			}
 		}
 	}
 	*pResult = 0;

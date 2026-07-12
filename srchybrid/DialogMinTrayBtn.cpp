@@ -283,7 +283,7 @@ TEMPLATE void CDialogMinTrayBtn<BASE>::MinTrayBtnShow()
 		m_nMinTrayBtnTimerId = SetTimer(TIMERMINTRAYBTN_ID, TIMERMINTRAYBTN_PERIOD, NULL);
 	m_bMinTrayBtnVisible = TRUE;
 	if (IsWindowVisible())
-		RedrawWindow(NULL, NULL, RDW_FRAME | RDW_INVALIDATE | RDW_UPDATENOW);
+		RedrawWindow(NULL, NULL, RDW_FRAME | RDW_INVALIDATE);
 }
 
 TEMPLATE void CDialogMinTrayBtn<BASE>::MinTrayBtnHide()
@@ -298,7 +298,7 @@ TEMPLATE void CDialogMinTrayBtn<BASE>::MinTrayBtnHide()
 	}
 
 	if (IsWindowVisible())
-		RedrawWindow(NULL, NULL, RDW_FRAME | RDW_INVALIDATE | RDW_UPDATENOW);
+		RedrawWindow(NULL, NULL, RDW_FRAME | RDW_INVALIDATE);
 }
 
 TEMPLATE void CDialogMinTrayBtn<BASE>::MinTrayBtnEnable()

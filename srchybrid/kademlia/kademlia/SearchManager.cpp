@@ -38,7 +38,6 @@ their client on the eMule forum.
 #include "emuledlg.h"
 #include "kademliawnd.h"
 #include "KadSearchListCtrl.h"
-#include "SearchDlg.h"
 #include "kademlia/kademlia/SearchManager.h"
 #include "kademlia/kademlia/Search.h"
 #include "kademlia/kademlia/Tag.h"
@@ -64,7 +63,7 @@ namespace
 {
 	SearchMap* g_pKadSearchMap = NULL;
 
-	SearchMap& BB_GetKadSearchMap()
+	SearchMap& GetKadSearchMapStorage()
 	{
 		if (g_pKadSearchMap == NULL)
 			g_pKadSearchMap = new SearchMap;
@@ -72,7 +71,7 @@ namespace
 	}
 }
 
-#define m_mapSearches BB_GetKadSearchMap()
+#define m_mapSearches GetKadSearchMapStorage()
 
 uint32 CSearchManager::m_uNextID = 0;
 
@@ -315,18 +314,16 @@ void CSearchManager::JumpStart()
 		bool bStop = false;
 		switch (itSearchMap->second->GetSearchType()) {
 		case CSearch::FILE:
-			if (tNow >= pSearch->m_tCreated + SEARCHFILE_LIFETIME)
+			if (tNow >= pSearch->m_tCreated + pSearch->m_tPolicyLifetime)
 				bDel = true;
-			else if (pSearch->GetAnswers() >= SEARCHFILE_TOTAL || tNow >= pSearch->m_tCreated + SEARCHFILE_LIFETIME - SEC(20))
+			else if (pSearch->GetAnswers() >= pSearch->m_uPolicyTotalLimit || tNow >= pSearch->m_tCreated + pSearch->m_tPolicyLifetime - SEC(20))
 				bStop = true;
 			break;
 		case CSearch::KEYWORD:
-			if (tNow >= pSearch->m_tCreated + SEARCHKEYWORD_LIFETIME) {
+			if (tNow >= pSearch->m_tCreated + pSearch->m_tPolicyLifetime) {
 				bDel = true;
-				// Tell GUI that search ended
-				if (theApp.emuledlg->searchwnd)
-					theApp.emuledlg->searchwnd->CancelKadSearch(pSearch->GetSearchID());
-			} else if (pSearch->GetAnswers() >= thePrefs.GetKadSearchKeywordTotal() || tNow >= pSearch->m_tCreated + SEARCHKEYWORD_LIFETIME - SEC(20))
+				theApp.QueueKadSearchCancelUiEvent(pSearch->GetSearchID(), _T("kad-keyword-timeout"));
+			} else if (pSearch->GetAnswers() >= pSearch->m_uPolicyTotalLimit || tNow >= pSearch->m_tCreated + pSearch->m_tPolicyLifetime - SEC(20))
 				bStop = true;
 			break;
 		case CSearch::NOTES:
@@ -489,6 +486,12 @@ uint8 CSearchManager::GetExpectedResponseContactCount(const CUInt128 &uTarget)
 	SearchMap::const_iterator itSearchMap = m_mapSearches.find(uTarget);
 	// If this search was deleted before this response, delete contacts and abort, otherwise process them.
 	return (itSearchMap == m_mapSearches.end()) ? 0 : itSearchMap->second->GetRequestContactCount();
+}
+
+uint8 CSearchManager::GetExpectedResponseContactCount(const CUInt128 &uTarget, uint32 uFromIP, uint16 uFromPort)
+{
+	SearchMap::const_iterator itSearchMap = m_mapSearches.find(uTarget);
+	return (itSearchMap == m_mapSearches.end()) ? 0 : itSearchMap->second->GetExpectedResponseContactCount(uFromIP, uFromPort);
 }
 
 void CSearchManager::ProcessResult(const CUInt128 &uTarget, const CUInt128 &uAnswer, TagList &rlistInfo, uint32 uFromIP, uint16 uFromPort)

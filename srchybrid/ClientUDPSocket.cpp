@@ -1,4 +1,4 @@
-﻿//This file is part of eMule AI
+//This file is part of eMule AI
 //Copyright (C)2002-2026 Merkur ( strEmail.Format("%s@%s", "devteam", "emule-project.net") / https://www.emule-project.net )
 //Copyright (C)2026 eMule AI
 //
@@ -28,10 +28,12 @@
 #include "Preferences.h"
 #include "ClientList.h"
 #include "EncryptedDatagramSocket.h"
+#include "eMuleAI/NetBind.h"
 #include "IPFilter.h"
 #include "Listensocket.h"
 #include "Log.h"
 #include "OtherFunctions.h"
+#include "ServerConnect.h"
 #include "SafeFile.h"
 #include "kademlia/kademlia/Kademlia.h"
 #include <algorithm>
@@ -103,6 +105,8 @@ CClientUDPSocket::CClientUDPSocket()
 	m_dwLastRebindTick = 0;
 	m_dwLastRebindPublicIPv4 = 0;
 	m_LastRebindPublicIPv6 = CAddress();
+	m_nSocketFamily = AF_UNSPEC;
+	m_bSocketIPv6Only = false;
 	m_dwNextNatExpectCleanup = 0;
 	UnregisterFromGlobalSet(); // This class is the UDP transport/context owner, not a uTP endpoint; exclude from endpoint set.
 
@@ -154,11 +158,15 @@ void CClientUDPSocket::RegisterNatExpectation(CUpDownClient* client, const CAddr
 		if (existing->Client != NULL && !theApp.clientlist->IsValidClient(existing->Client)) {
 			existing = m_aNatExpectations.erase(existing);
 		} else if (existing->HasUserHash) {
-			// Keep hashed expectation to avoid ambiguous endpoint overwrites.
-			if (bNewHasHash && memcmp(existing->UserHash, client->GetUserHash(), 16) == 0)
+			// Keep hashed expectations only while the same identity refreshes them.
+			if (bNewHasHash && memcmp(existing->UserHash, client->GetUserHash(), 16) == 0) {
 				existing->Client = client;
-			existing->Expires = now + NAT_EXPECT_TTL_MS;
-			return;
+				existing->Expires = now + NAT_EXPECT_TTL_MS;
+				return;
+			}
+			if (!bNewHasHash)
+				return;
+			m_aNatExpectations.erase(existing);
 		} else if (!bNewHasHash) {
 			existing->Expires = now + NAT_EXPECT_TTL_MS;
 			return;
@@ -216,7 +224,7 @@ CUpDownClient* CClientUDPSocket::MatchNatExpectation(const CAddress& ip, uint16 
 			if (bExpectHasHash) {
 				if (client->HasValidHash()) {
 					if (memcmp(client->GetUserHash(), entry.UserHash, 16) != 0) {
-						++it;
+						it = m_aNatExpectations.erase(it);
 						return NULL;
 					}
 				} else {
@@ -339,6 +347,29 @@ byte* CClientUDPSocket::GetHashForEncryption(const CAddress& IP, uint16 nPort) {
 	return I->second.UserHash;
 }
 
+bool CClientUDPSocket::BuildUtpPeerEndpoint(const CAddress& IP, uint16 nPort, sockaddr_storage& rSockAddr, int& rnSockAddrLen) const
+{
+	memset(&rSockAddr, 0, sizeof(rSockAddr));
+	rnSockAddrLen = sizeof(rSockAddr);
+	if (IP.IsNull() || nPort == 0 || !IsNatTraversalEndpointReady())
+		return false;
+
+	CAddress endpointIP = IP;
+	if (m_nSocketFamily == AF_INET) {
+		if (!endpointIP.Convert(CAddress::IPv4))
+			return false;
+	}
+	else {
+		if (m_bSocketIPv6Only && endpointIP.GetType() == CAddress::IPv4)
+			return false;
+		if (!endpointIP.Convert(CAddress::IPv6))
+			return false;
+	}
+
+	endpointIP.ToSA(reinterpret_cast<sockaddr*>(&rSockAddr), &rnSockAddrLen, nPort);
+	return true;
+}
+
 void CClientUDPSocket::SendUtpPacket(const byte* data, size_t len, const struct sockaddr* to, socklen_t tolen)
 {
 	if (!thePrefs.IsEnableNatTraversal())
@@ -366,7 +397,7 @@ void CClientUDPSocket::SendUtpPacket(const byte* data, size_t len, const struct 
 			CSafeMemFile data_out(128);
 			data_out.WriteHash16(thePrefs.GetUserHash());
 			Packet* packet = new Packet(data_out, OP_UDPRESERVEDPROT2);
-			packet->opcode = 0xFF; // Key Frame
+			packet->opcode = OP_NATT_FRAME_KEY; // Key frame
 			theStats.AddUpDataOverheadOther(packet->size);
 			// If we do not yet have a target key, send unencrypted
 			SendPacket(packet, IP, nPort, pTargetClientHash != NULL, pTargetClientHash, false, 0);
@@ -377,7 +408,7 @@ void CClientUDPSocket::SendUtpPacket(const byte* data, size_t len, const struct 
 	}
 
 	Packet* frame = new Packet(OP_UDPRESERVEDPROT2);
-	frame->opcode = 0x00; // UTP Frame
+	frame->opcode = OP_NATT_FRAME_UTP; // uTP frame
 	frame->pBuffer = new char[len];
 	memcpy(frame->pBuffer, data, len);
 	frame->size = len;
@@ -386,16 +417,391 @@ void CClientUDPSocket::SendUtpPacket(const byte* data, size_t len, const struct 
 
 }
 
-void CClientUDPSocket::ServiceUtp()
+void CClientUDPSocket::SendQuicNatKeyFrame(const struct sockaddr* to, socklen_t tolen)
 {
-	CSingleLock runtimeLock(&CUtpSocket::GetRuntimeLock(), TRUE);
-	if (m_pUtpContext) {
-		utp_issue_deferred_acks(m_pUtpContext);
-		utp_check_timeouts(m_pUtpContext);
+	if (!thePrefs.IsEnableNatTraversal() || to == NULL)
+		return;
+
+	CAddress IP;
+	uint16 nPort = 0;
+	IP.FromSA(to, tolen, &nPort);
+	if (IP.IsNull() || nPort == 0)
+		return;
+
+	SIpPort key = { nPort, IP };
+	DWORD now = ::GetTickCount();
+	bool sendAllowed = true;
+	{
+		CSingleLock _lkKF(&m_KeyFrameLock, TRUE);
+		auto it = m_KeyFrameSent.find(key);
+		if (it != m_KeyFrameSent.end())
+			sendAllowed = (int)(now - it->second) >= 0;
+		if (sendAllowed)
+			m_KeyFrameSent[key] = now + 10000;
+	}
+	if (!sendAllowed)
+		return;
+
+	byte* pTargetClientHash = GetHashForEncryption(IP, nPort);
+	CSafeMemFile data_out(128);
+	data_out.WriteHash16(thePrefs.GetUserHash());
+	Packet* packet = new Packet(data_out, OP_UDPRESERVEDPROT2);
+	packet->opcode = OP_NATT_FRAME_KEY;
+	theStats.AddUpDataOverheadOther(packet->size);
+	SendPacket(packet, IP, nPort, pTargetClientHash != NULL, pTargetClientHash, false, 0);
+	if (thePrefs.GetLogNatTraversalEvents())
+		AddDebugLogLine(DLP_LOW, false, _T("[NAT-T][QUIC] Sent KeyFrame to %s:%u"), (LPCTSTR)ipstr(IP), (UINT)nPort);
+}
+
+void CClientUDPSocket::SendQuicNatPacket(const byte* data, size_t len, const struct sockaddr* to, socklen_t tolen)
+{
+	if (!thePrefs.IsEnableNatTraversal() || !CQuicNatSocket::IsRuntimeAvailable() || data == NULL || len == 0 || to == NULL)
+		return;
+
+	CAddress IP;
+	uint16 nPort = 0;
+	IP.FromSA(to, tolen, &nPort);
+
+	if ((data[0] & 0x80) != 0)
+		SendQuicNatKeyFrame(to, tolen);
+
+	byte* pTargetClientHash = GetHashForEncryption(IP, nPort);
+	Packet* frame = new Packet(OP_UDPRESERVEDPROT2);
+	frame->opcode = OP_NATT_FRAME_QUIC;
+	frame->pBuffer = new char[len];
+	memcpy(frame->pBuffer, data, len);
+	frame->size = len;
+
+	SendPacket(frame, IP, nPort, pTargetClientHash != NULL, pTargetClientHash, false, 0);
+
+}
+
+
+void CClientUDPSocket::SendNatTraversalCaps(CUpDownClient* client, const CAddress& ip, uint16 port, bool bAck)
+{
+	if (!thePrefs.IsNatTraversalServiceEnabled() || client == NULL || ip.IsNull() || port == 0)
+		return;
+	if (theApp.clientlist == NULL || !theApp.clientlist->IsValidClient(client))
+		return;
+	if (!IsNatTraversalEndpointReady() && !EnsureNatTraversalEndpointReady(bAck ? _T("direct NAT-T caps ack") : _T("direct NAT-T caps")))
+		return;
+
+	uint8 byOptions = GetMyConnectOptions(true, true);
+	if (client->IsNatTraversalQuicTemporarilyDisabledFor(ip, port))
+		byOptions = static_cast<uint8>(byOptions & ~CONNECT_OPT_NAT_TRAVERSAL_QUIC);
+
+	CSafeMemFile data_out(64);
+	data_out.WriteUInt32(0x43514145); // EAQC
+	data_out.WriteUInt8(1);
+	data_out.WriteUInt8(byOptions);
+	data_out.WriteHash16(thePrefs.GetUserHash());
+	if (client->HasValidHash())
+		data_out.WriteHash16(client->GetUserHash());
+	else {
+		uchar nullHash[16];
+		md4clr(nullHash);
+		data_out.WriteHash16(nullHash);
+	}
+	if (client->m_reqfile != NULL && !isnulmd4(client->m_reqfile->GetFileHash()))
+		data_out.WriteHash16(client->m_reqfile->GetFileHash());
+	else if (!isnulmd4(client->GetUploadFileID()))
+		data_out.WriteHash16(client->GetUploadFileID());
+	else {
+		uchar nullFile[16];
+		md4clr(nullFile);
+		data_out.WriteHash16(nullFile);
 	}
 
-	// Process pending writes for all uTP sockets
-	CUtpSocket::Process();
+	Packet* packet = new Packet(data_out, OP_UDPRESERVEDPROT2);
+	packet->opcode = bAck ? OP_NATT_FRAME_CAPS_ACK : OP_NATT_FRAME_CAPS;
+	theStats.AddUpDataOverheadOther(packet->size);
+	SendPacket(packet, ip, port, false, NULL, false, 0);
+	if (thePrefs.GetLogNatTraversalEvents())
+		AddDebugLogLine(DLP_LOW, false, _T("[NAT-T][CAPS] Sent %s to %s:%u options=0x%02X client=%s"), bAck ? _T("ACK") : _T("CAPS"), (LPCTSTR)ipstr(ip), (UINT)port, (UINT)byOptions, (LPCTSTR)EscPercent(client->DbgGetClientInfo()));
+}
+
+void CClientUDPSocket::RequestNatTraversalCaps(CUpDownClient* client, const CAddress& ip, uint16 port)
+{
+	if (client == NULL || ip.IsNull() || port == 0)
+		return;
+
+	const bool bFirstProbeForEndpoint = !client->HasDirectNatTraversalCapsProbeForEndpoint(ip, port);
+	SeedNatTraversalExpectation(client, ip, port);
+	client->MarkDirectNatTraversalCapsProbeSent(ip, port);
+	for (int i = 0; i < 3; ++i)
+		SendNatTraversalCaps(client, ip, port, false);
+
+	if (!bFirstProbeForEndpoint)
+		return;
+
+	const uint16 probeSpan = std::min<uint16>(thePrefs.GetNatTraversalPortWindow(), thePrefs.GetNatTraversalSweepWindow());
+	for (uint16 off = 1; off <= probeSpan; ++off) {
+		if (port > off) {
+			const uint16 sweepPort = (uint16)(port - off);
+			SeedNatTraversalExpectation(client, ip, sweepPort);
+			SendNatTraversalCaps(client, ip, sweepPort, false);
+		}
+		if (port + off <= 65535) {
+			const uint16 sweepPort = (uint16)(port + off);
+			SeedNatTraversalExpectation(client, ip, sweepPort);
+			SendNatTraversalCaps(client, ip, sweepPort, false);
+		}
+	}
+}
+
+bool CClientUDPSocket::StartPassiveQuicNatEndpoint(CUpDownClient* client, const CAddress& ip, uint16 port, bool bTrustedTransportHint)
+{
+	if (client == NULL || theApp.clientlist == NULL || !theApp.clientlist->IsValidClient(client) || ip.IsNull() || port == 0)
+		return false;
+	if (!bTrustedTransportHint && client->GetEffectiveNatTraversalTransportForEndpoint(ip, port) == NATT_TRANSPORT_UTP) {
+		if (thePrefs.GetLogNatTraversalEvents())
+			AddDebugLogLine(false, _T("[NAT-T][CAPS] Passive QUIC endpoint not armed because the current rendezvous selects uTP for %s:%u client=%s"), (LPCTSTR)ipstr(ip), (UINT)port, (LPCTSTR)EscPercent(client->DbgGetClientInfo()));
+		return false;
+	}
+	const bool bPeerSupportsQuic = client->HasDirectNatTraversalCaps() ? client->HasDirectNatTraversalQuicSupport()
+		: (!client->NeedsDirectNatTraversalCapsRefresh() && client->GetNatTraversalQuicSupport());
+	if (!thePrefs.IsNatTraversalQuicAllowed() || (!bTrustedTransportHint && !bPeerSupportsQuic) || !CQuicNatSocket::IsRuntimeAvailable())
+		return false;
+	if (!IsNatTraversalEndpointReady() && !EnsureNatTraversalEndpointReady(_T("direct caps passive QUIC")))
+		return false;
+
+	if (client->socket != NULL && client->socket->HaveQuicNatLayer()) {
+		CQuicNatSocket* quicLayer = client->socket->GetQuicNatLayer();
+		if (quicLayer != NULL && quicLayer->GetState() == closed) {
+			if (thePrefs.GetLogNatTraversalEvents())
+				AddDebugLogLine(false, _T("[NAT-T][CAPS] Closing stale closed passive QUIC socket before accepting new endpoint %s:%u client=%s"), (LPCTSTR)ipstr(ip), (UINT)port, (LPCTSTR)EscPercent(client->DbgGetClientInfo()));
+			client->socket->Safe_Delete();
+		} else {
+			const bool bActiveUploadSlot = theApp.uploadqueue != NULL && theApp.uploadqueue->IsDownloading(client);
+			if (client->socket->IsConnected() && client->m_reqfile == NULL && !bActiveUploadSlot) {
+				if (thePrefs.GetLogNatTraversalEvents())
+					AddDebugLogLine(false, _T("[NAT-T][CAPS] Closing idle connected passive QUIC socket before accepting new endpoint %s:%u client=%s"), (LPCTSTR)ipstr(ip), (UINT)port, (LPCTSTR)EscPercent(client->DbgGetClientInfo()));
+				client->socket->Safe_Delete();
+			} else {
+				sockaddr_storage sa = {};
+				int salen = sizeof(sa);
+				ip.ToSA(reinterpret_cast<sockaddr*>(&sa), &salen, port);
+				client->socket->GetQuicNatLayer()->ExpectPeer(reinterpret_cast<const sockaddr*>(&sa), (socklen_t)salen);
+				client->ArmEServerRelayNatTGuard();
+				return true;
+			}
+		}
+	}
+	if (client->socket != NULL && client->socket->HaveNatTraversalLayer() && !client->socket->HaveQuicNatLayer()) {
+		if (client->socket->IsConnected()) {
+			if (thePrefs.GetLogNatTraversalEvents())
+				AddDebugLogLine(false, _T("[NAT-T][CAPS] Keeping connected non-QUIC NAT-T socket; passive QUIC endpoint not armed for %s:%u client=%s"), (LPCTSTR)ipstr(ip), (UINT)port, (LPCTSTR)EscPercent(client->DbgGetClientInfo()));
+			return false;
+		}
+		if (thePrefs.GetLogNatTraversalEvents())
+			AddDebugLogLine(false, _T("[NAT-T][CAPS] Closing pending non-QUIC NAT-T socket before arming passive QUIC endpoint %s:%u client=%s"), (LPCTSTR)ipstr(ip), (UINT)port, (LPCTSTR)EscPercent(client->DbgGetClientInfo()));
+		client->socket->Safe_Delete();
+		client->ResetUtpFlowControl();
+		client->ClearUtpQueuedPackets();
+	}
+
+	if (client->socket != NULL && client->socket->HaveNatTraversalLayer())
+		return false;
+
+	if (client->socket == NULL) {
+		client->socket = static_cast<CClientReqSocket*>(RUNTIME_CLASS(CClientReqSocket)->CreateObject());
+		client->socket->SetClient(client);
+		client->socket->InitQuicNatSupport();
+		if (!client->socket->Create()) {
+			DWORD dwLastError = ::WSAGetLastError();
+			if (thePrefs.GetLogNatTraversalEvents())
+				AddDebugLogLine(false, _T("[NAT-T][CAPS] passive QUIC socket create failed err=%lu for %s:%u"), dwLastError, (LPCTSTR)ipstr(ip), (UINT)port);
+			client->socket->Safe_Delete();
+			return false;
+		}
+	}
+	if (client->socket == NULL || !client->socket->HaveQuicNatLayer())
+		return false;
+
+	sockaddr_storage sa = {};
+	int salen = sizeof(sa);
+	ip.ToSA(reinterpret_cast<sockaddr*>(&sa), &salen, port);
+	client->socket->GetQuicNatLayer()->ExpectPeer(reinterpret_cast<const sockaddr*>(&sa), (socklen_t)salen);
+	client->SetUtpLocalInitiator(false);
+	client->ResetUtpFlowControl();
+	client->ClearUtpQueuedPackets();
+	client->ArmEServerRelayNatTGuard();
+	if (thePrefs.GetLogNatTraversalEvents())
+		AddDebugLogLine(false, _T("[NAT-T][CAPS] Created passive QUIC endpoint for %s:%u client=%s"), (LPCTSTR)ipstr(ip), (UINT)port, (LPCTSTR)EscPercent(client->DbgGetClientInfo()));
+	return true;
+}
+
+void CClientUDPSocket::TryStartNatTraversalAfterDirectCaps(CUpDownClient* client, const CAddress& ip, uint16 port)
+{
+	if (client == NULL || theApp.clientlist == NULL || !theApp.clientlist->IsValidClient(client) || ip.IsNull() || port == 0 || !client->HasDirectNatTraversalCaps())
+		return;
+	client->RefreshNatObservedEndpoint(ip, port, _T("direct NAT-T caps"));
+	SeedNatTraversalExpectation(client, ip, port);
+	if (thePrefs.GetLogNatTraversalEvents())
+		AddDebugLogLine(false, _T("[NAT-T][CAPS] Direct caps confirmed quic=%u utp=%u for %s:%u client=%s"), client->HasDirectNatTraversalQuicSupport() ? 1u : 0u, client->HasDirectNatTraversalUtpSupport() ? 1u : 0u, (LPCTSTR)ipstr(ip), (UINT)port, (LPCTSTR)EscPercent(client->DbgGetClientInfo()));
+
+	if (client->m_reqfile != NULL) {
+		if (client->socket != NULL && client->socket->HaveNatTraversalLayer()) {
+			const ENatTraversalTransport eDesiredTransport = client->GetEffectiveNatTraversalTransportForEndpoint(ip, port);
+			const bool bCurrentTransportMatches =
+				(eDesiredTransport == NATT_TRANSPORT_QUIC && client->socket->HaveQuicNatLayer())
+				|| (eDesiredTransport == NATT_TRANSPORT_UTP && client->socket->HaveUtpLayer() && !client->socket->HasFailedUtpTransport());
+			if (bCurrentTransportMatches || eDesiredTransport == NATT_TRANSPORT_NONE || client->socket->IsConnected()) {
+				if (thePrefs.GetLogNatTraversalEvents())
+					AddDebugLogLine(false, _T("[NAT-T][CAPS] Active NAT-T layer already exists; not starting duplicate transport for %s:%u desired=%d currentQuic=%d currentUtp=%d connected=%d client=%s"), (LPCTSTR)ipstr(ip), (UINT)port, (int)eDesiredTransport, client->socket->HaveQuicNatLayer() ? 1 : 0, client->socket->HaveUtpLayer() ? 1 : 0, client->socket->IsConnected() ? 1 : 0, (LPCTSTR)EscPercent(client->DbgGetClientInfo()));
+				return;
+			}
+			if (eDesiredTransport == NATT_TRANSPORT_UTP && client->socket->HasFailedUtpTransport()) {
+				client->ResetFailedUtpTransportForRetry(_T("direct caps confirmed uTP after transient failure"));
+			} else {
+				if (thePrefs.GetLogNatTraversalEvents())
+					AddDebugLogLine(false, _T("[NAT-T][CAPS] Resetting pending NAT-T layer after direct caps selected transport=%d for %s:%u client=%s"), (int)eDesiredTransport, (LPCTSTR)ipstr(ip), (UINT)port, (LPCTSTR)EscPercent(client->DbgGetClientInfo()));
+				client->ResetNatTraversalSocketForTransportChange(_T("Direct NAT-T caps selected a different transport"), false);
+			}
+		}
+		if (client->GetConnectingState() != CCS_NONE) {
+			if (client->socket == NULL || !client->socket->HaveNatTraversalLayer()) {
+				if (thePrefs.GetLogNatTraversalEvents())
+					AddDebugLogLine(false, _T("[NAT-T][CAPS] Clearing pending connect state without NAT-T layer before starting transport for %s:%u client=%s"), (LPCTSTR)ipstr(ip), (UINT)port, (LPCTSTR)EscPercent(client->DbgGetClientInfo()));
+				client->ResetConnectingState();
+			} else {
+				if (thePrefs.GetLogNatTraversalEvents())
+					AddDebugLogLine(false, _T("[NAT-T][CAPS] NAT-T connect is already in progress; not starting duplicate transport for %s:%u client=%s"), (LPCTSTR)ipstr(ip), (UINT)port, (LPCTSTR)EscPercent(client->DbgGetClientInfo()));
+				return;
+			}
+		}
+		client->ResetConnectingState();
+		client->MarkNatTRendezvous(2, true);
+		client->QueueDeferredNatConnect(ip, port, thePrefs.GetNatTraversalPortWindow());
+		client->ArmEServerRelayNatTGuard();
+		client->TryToConnect(true, false, NULL, true);
+		return;
+	}
+
+	const ENatTraversalTransport eDesiredTransport = client->GetEffectiveNatTraversalTransportForEndpoint(ip, port);
+	if (!isnulmd4(client->GetUploadFileID()) && eDesiredTransport == NATT_TRANSPORT_QUIC)
+		StartPassiveQuicNatEndpoint(client, ip, port);
+	else if (!isnulmd4(client->GetUploadFileID()) && eDesiredTransport == NATT_TRANSPORT_UTP && thePrefs.GetLogNatTraversalEvents())
+		AddDebugLogLine(false, _T("[NAT-T][CAPS] Passive QUIC skipped because the current NAT-T selection is uTP for %s:%u client=%s"), (LPCTSTR)ipstr(ip), (UINT)port, (LPCTSTR)EscPercent(client->DbgGetClientInfo()));
+}
+
+void CClientUDPSocket::ProcessNatTraversalCapsFrame(const BYTE* packet, int size, const struct sockaddr* from, socklen_t fromlen, bool bAck)
+{
+	if (packet == NULL || size < (int)(sizeof(uint32) + 2 + 16 + 16 + 16) || from == NULL)
+		return;
+	CAddress ip;
+	uint16 port = 0;
+	ip.FromSA(from, fromlen, &port);
+	if (ip.IsNull() || port == 0)
+		return;
+
+	CSafeMemFile data_in(const_cast<BYTE*>(packet), size);
+	uint32 magic = data_in.ReadUInt32();
+	uint8 version = data_in.ReadUInt8();
+	uint8 options = data_in.ReadUInt8();
+	uchar senderHash[16];
+	uchar expectedHash[16];
+	uchar fileHash[16];
+	data_in.ReadHash16(senderHash);
+	data_in.ReadHash16(expectedHash);
+	data_in.ReadHash16(fileHash);
+	if (magic != 0x43514145 || version != 1)
+		return;
+	if (!isnulmd4(expectedHash) && !md4equ(expectedHash, thePrefs.GetUserHash())) {
+		if (thePrefs.GetLogNatTraversalEvents())
+			AddDebugLogLine(false, _T("[NAT-T][CAPS] Ignored %s from %s:%u due to local hash mismatch"), bAck ? _T("ACK") : _T("CAPS"), (LPCTSTR)ipstr(ip), (UINT)port);
+		return;
+	}
+
+	CUpDownClient* client = MatchNatExpectation(ip, port);
+	if (client == NULL && !isnulmd4(senderHash))
+		client = theApp.clientlist->FindClientByUserHash(senderHash, ip, 0);
+	if (client == NULL && !isnulmd4(fileHash)) {
+		client = theApp.downloadqueue->GetDownloadClientByIP_UDP(ip, port, true);
+		if (client == NULL)
+			client = theApp.uploadqueue->GetWaitingClientByIP_UDP(ip, port, true);
+	}
+	if (client == NULL || !theApp.clientlist->IsValidClient(client)) {
+		if (thePrefs.GetLogNatTraversalEvents())
+			AddDebugLogLine(false, _T("[NAT-T][CAPS] Ignored %s from %s:%u; no matching NAT expectation"), bAck ? _T("ACK") : _T("CAPS"), (LPCTSTR)ipstr(ip), (UINT)port);
+		return;
+	}
+
+	if (!isnulmd4(senderHash)) {
+		if (client->HasValidHash()) {
+			if (!md4equ(client->GetUserHash(), senderHash)) {
+				if (thePrefs.GetLogNatTraversalEvents())
+					AddDebugLogLine(false, _T("[NAT-T][CAPS] Ignored %s from %s:%u due to peer hash mismatch"), bAck ? _T("ACK") : _T("CAPS"), (LPCTSTR)ipstr(ip), (UINT)port);
+				return;
+			}
+		} else
+			client->SetUserHash(senderHash, true);
+	}
+
+	const bool bHadDirectCaps = client->HasDirectNatTraversalCaps();
+	const bool bHadDirectQuic = client->HasDirectNatTraversalQuicSupport();
+	const bool bHadDirectUtp = client->HasDirectNatTraversalUtpSupport();
+	client->SetDirectNatTraversalCaps(options);
+	if (!bAck)
+		SendNatTraversalCaps(client, ip, port, true);
+
+	const bool bDirectCapsChanged = !bHadDirectCaps || bHadDirectQuic != client->HasDirectNatTraversalQuicSupport() || bHadDirectUtp != client->HasDirectNatTraversalUtpSupport();
+	if (bDirectCapsChanged && client->socket != NULL && client->socket->HaveNatTraversalLayer() && !client->IsCurrentNatTraversalTransportCompatible()) {
+		const bool bActiveNatTraversalSession = client->socket->IsConnected()
+			&& (client->GetDownloadState() == DS_DOWNLOADING || client->GetUploadState() == US_UPLOADING);
+		if (bActiveNatTraversalSession) {
+			if (thePrefs.GetLogNatTraversalEvents()) {
+				AddDebugLogLine(false, _T("[NAT-T][CAPS] Direct caps changed while transport is connected; preserving current session for %s:%u options=0x%02X currentQuic=%d currentUtp=%d client=%s"),
+					(LPCTSTR)ipstr(ip), (UINT)port, (UINT)options, client->socket->HaveQuicNatLayer() ? 1 : 0, client->socket->HaveUtpLayer() ? 1 : 0, (LPCTSTR)EscPercent(client->DbgGetClientInfo()));
+			}
+			return;
+		}
+
+		if (thePrefs.GetLogNatTraversalEvents())
+			AddDebugLogLine(false, _T("[NAT-T][CAPS] Direct caps changed; resetting incompatible pending NAT-T transport for %s:%u client=%s"), (LPCTSTR)ipstr(ip), (UINT)port, (LPCTSTR)EscPercent(client->DbgGetClientInfo()));
+		const bool bHasRequestFile = client->m_reqfile != NULL;
+		client->ResetNatTraversalSocketForTransportChange(_T("NAT-T direct caps changed"), bHasRequestFile);
+		if (bHasRequestFile) {
+			if (theApp.clientlist != NULL && theApp.clientlist->IsValidClient(client))
+				client->TryToConnect(true, false, NULL, true);
+			return;
+		}
+	}
+	if (!bDirectCapsChanged) {
+		if (client->m_reqfile != NULL && (client->socket == NULL || !client->socket->HaveNatTraversalLayer()) && client->GetConnectingState() != CCS_NONE) {
+			if (thePrefs.GetLogNatTraversalEvents())
+				AddDebugLogLine(false, _T("[NAT-T][CAPS] Duplicate %s found pending connect without NAT-T layer; retrying transport start for %s:%u"), bAck ? _T("ACK") : _T("CAPS"), (LPCTSTR)ipstr(ip), (UINT)port);
+			TryStartNatTraversalAfterDirectCaps(client, ip, port);
+			return;
+		}
+		if (!isnulmd4(client->GetUploadFileID()) && client->socket != NULL && client->socket->HaveQuicNatLayer() && !client->IsNatTraversalQuicTemporarilyDisabledFor(ip, port)) {
+			client->RefreshNatObservedEndpoint(ip, port, _T("duplicate direct NAT-T caps"));
+			SeedNatTraversalExpectation(client, ip, port);
+			sockaddr_storage sa = {};
+			int salen = sizeof(sa);
+			ip.ToSA(reinterpret_cast<sockaddr*>(&sa), &salen, port);
+			client->socket->GetQuicNatLayer()->ExpectPeer(reinterpret_cast<const sockaddr*>(&sa), (socklen_t)salen);
+			if (thePrefs.GetLogNatTraversalEvents())
+				AddDebugLogLine(false, _T("[NAT-T][CAPS] Refreshed passive QUIC endpoint from duplicate %s at %s:%u client=%s"), bAck ? _T("ACK") : _T("CAPS"), (LPCTSTR)ipstr(ip), (UINT)port, (LPCTSTR)EscPercent(client->DbgGetClientInfo()));
+			return;
+		}
+		if (thePrefs.GetLogNatTraversalEvents())
+			AddDebugLogLine(false, _T("[NAT-T][CAPS] Refreshed duplicate %s from %s:%u without restarting transport"), bAck ? _T("ACK") : _T("CAPS"), (LPCTSTR)ipstr(ip), (UINT)port);
+		return;
+	}
+	TryStartNatTraversalAfterDirectCaps(client, ip, port);
+}
+
+void CClientUDPSocket::ServiceUtp()
+{
+	{
+		CSingleLock runtimeLock(&CUtpSocket::GetRuntimeLock(), TRUE);
+		if (m_pUtpContext) {
+			utp_issue_deferred_acks(m_pUtpContext);
+			utp_check_timeouts(m_pUtpContext);
+		}
+	}
+	CQuicNatSocket::ProcessAllQuicTimers();
 
 	// Prune expired Key Frame entries to prevent unbounded growth.
 	if (!m_KeyFrameSent.empty()) {
@@ -433,12 +839,15 @@ void CClientUDPSocket::PumpUtpOnce()
 {
 	if (!thePrefs.IsEnableNatTraversal())
 		return;
-	CSingleLock runtimeLock(&CUtpSocket::GetRuntimeLock(), TRUE);
-	if (m_pUtpContext) {
-		utp_issue_deferred_acks(m_pUtpContext);
-		utp_check_timeouts(m_pUtpContext);
+	{
+		CSingleLock runtimeLock(&CUtpSocket::GetRuntimeLock(), TRUE);
+		if (m_pUtpContext) {
+			utp_issue_deferred_acks(m_pUtpContext);
+			utp_check_timeouts(m_pUtpContext);
+		}
+		CUtpSocket::Process();
 	}
-	CUtpSocket::Process();
+	CQuicNatSocket::ProcessAllQuicTimers();
 }
 
 void CClientUDPSocket::OnReceive(int nErrorCode)
@@ -449,18 +858,26 @@ void CClientUDPSocket::OnReceive(int nErrorCode)
 	}
 
 	BYTE buffer[8192]; //5000 was too low sometimes
-	SOCKADDR_IN6 sockAddr = { 0 };
-	int iSockAddrLen = sizeof sockAddr;
+	sockaddr_storage sockAddr = {};
+	int iSockAddrLen = sizeof(sockAddr);
 	int nRealLen = ReceiveFrom(buffer, sizeof buffer, (SOCKADDR*)&sockAddr, &iSockAddrLen);
 	CAddress IP;
 	uint16 nPort;
 	IP.FromSA((SOCKADDR*)&sockAddr, iSockAddrLen, &nPort);
 	IP.Convert(CAddress::IPv4); // check if its a maped IPv4 address
 
-	// Debug logging for all received UDP packets to diagnose NAT traversal issues
-
-	if (thePrefs.GetLogNatTraversalEvents())
-		DebugLog(_T("[NATTTESTMODE: UDPRecv] from %s:%u len=%d\n"), (LPCTSTR)ipstr(IP), (unsigned)nPort, nRealLen);
+	// Throttle hot path UDP diagnostics. Per packet logging floods debug logs during active uTP transfers.
+	if (thePrefs.GetLogNatTraversalEvents()) {
+		static DWORD s_dwLastUdpRecvLog = 0;
+		static UINT s_uSuppressedUdpRecvLogs = 0;
+		const DWORD dwNow = ::GetTickCount();
+		if (s_dwLastUdpRecvLog == 0 || dwNow - s_dwLastUdpRecvLog >= SEC2MS(2)) {
+			DebugLog(_T("[NatTraversal: UDPRecv] from %s:%u len=%d suppressed=%u"), (LPCTSTR)ipstr(IP), (unsigned)nPort, nRealLen, s_uSuppressedUdpRecvLogs);
+			s_dwLastUdpRecvLog = dwNow;
+			s_uSuppressedUdpRecvLogs = 0;
+		} else
+			++s_uSuppressedUdpRecvLogs;
+	}
 
 	if (nRealLen == SOCKET_ERROR)
 	{
@@ -531,10 +948,9 @@ void CClientUDPSocket::OnReceive(int nErrorCode)
 						unpack[0] = OP_KADEMLIAHEADER;
 						unpack[1] = pBuffer[1];
 						try {
-							Kademlia::CKademlia::ProcessPacket(unpack, unpackedsize + 2
-								, IP.ToUInt32(true), nPort
-								, (Kademlia::CPrefs::GetUDPVerifyKey(IP.ToUInt32(false)) == nReceiverVerifyKey)
-								, Kademlia::CKadUDPKey(nSenderVerifyKey, theApp.GetPublicIPv4()));
+							if (!theApp.QueueKadPacketNetworkCommand(unpack, unpackedsize + 2, IP.ToUInt32(true), nPort,
+								(Kademlia::CPrefs::GetUDPVerifyKey(IP.ToUInt32(false)) == nReceiverVerifyKey), nSenderVerifyKey))
+								theApp.QueueNetworkParserFailureEvent(CemuleApp::NetworkParseKad, _T("kad-packed-queue-failed"), ::GetLastError());
 						} catch (...) {
 							delete[] unpack;
 							throw;
@@ -559,9 +975,9 @@ void CClientUDPSocket::OnReceive(int nErrorCode)
 				if (nPacketLen < 2)
 					strError = _T("Kad packet too short");
 				else
-					Kademlia::CKademlia::ProcessPacket(pBuffer, nPacketLen, IP.ToUInt32(true), nPort
-						, (Kademlia::CPrefs::GetUDPVerifyKey(IP.ToUInt32(false)) == nReceiverVerifyKey)
-						, Kademlia::CKadUDPKey(nSenderVerifyKey, theApp.GetPublicIPv4()));
+					if (!theApp.QueueKadPacketNetworkCommand(pBuffer, nPacketLen, IP.ToUInt32(true), nPort,
+						(Kademlia::CPrefs::GetUDPVerifyKey(IP.ToUInt32(false)) == nReceiverVerifyKey), nSenderVerifyKey))
+						theApp.QueueNetworkParserFailureEvent(CemuleApp::NetworkParseKad, _T("kad-packet-queue-failed"), ::GetLastError());
 				break;
 				case OP_UDPRESERVEDPROT2:
 				{
@@ -569,10 +985,18 @@ void CClientUDPSocket::OnReceive(int nErrorCode)
 						break;
 
 					// Note: here we dont have opcodes, just [uint8 - Prot][n bytes - data]
-					if (nPacketLen >= 2) {
-					if (pBuffer[1] == 0x00) // UTP Frame
-						ProcessUtpPacket(pBuffer+2, nPacketLen-2, (struct sockaddr*)&sockAddr, iSockAddrLen);
-					else if (pBuffer[1] == 0xFF) { // Key Frame
+					if (nPacketLen < 2)
+						throw CString(_T("NAT-T packet too short"));
+
+					if (pBuffer[1] == OP_NATT_FRAME_UTP)
+						ProcessUtpPacket(pBuffer + 2, nPacketLen - 2, (struct sockaddr*)&sockAddr, iSockAddrLen);
+					else if (pBuffer[1] == OP_NATT_FRAME_QUIC)
+						ProcessQuicNatPacket(pBuffer + 2, nPacketLen - 2, (struct sockaddr*)&sockAddr, iSockAddrLen);
+					else if (pBuffer[1] == OP_NATT_FRAME_CAPS)
+						ProcessNatTraversalCapsFrame(pBuffer + 2, nPacketLen - 2, (struct sockaddr*)&sockAddr, iSockAddrLen, false);
+					else if (pBuffer[1] == OP_NATT_FRAME_CAPS_ACK)
+						ProcessNatTraversalCapsFrame(pBuffer + 2, nPacketLen - 2, (struct sockaddr*)&sockAddr, iSockAddrLen, true);
+					else if (pBuffer[1] == OP_NATT_FRAME_KEY) {
 						int size = nPacketLen - 2;
 						const BYTE* packet = pBuffer + 2;
 						if (size < 16)
@@ -580,11 +1004,10 @@ void CClientUDPSocket::OnReceive(int nErrorCode)
 
 						theStats.AddUpDataOverheadOther(size);
 						SetConnectionEncryption(IP, nPort, true, packet);
-					}
-				} else
-					throw CString(_T("Utp packet too short"));
-			}
-			break;
+					} else if (thePrefs.GetLogNatTraversalEvents())
+						DebugLog(_T("[NatTraversal] Ignoring unknown NAT-T frame type 0x%02x"), pBuffer[1]);
+				}
+				break;
 			default:
 				strError.Format(_T("Unknown protocol 0x%02x"), pBuffer[0]);
 			}
@@ -645,11 +1068,11 @@ void CClientUDPSocket::OnReceive(int nErrorCode)
 bool CClientUDPSocket::ProcessPacket(const BYTE *packet, UINT size, uint8 opcode, const CAddress& ip, uint16 port)
 {
 	// Debug logging for HOLEPUNCH and NAT-related packets
-	if (opcode == OP_HOLEPUNCH || opcode == OP_REASKCALLBACKUDP || opcode == OP_REASKFILEPING) {
+	if (opcode == OP_HOLEPUNCH || opcode == OP_REASKCALLBACKUDP || opcode == OP_REASKFILEPING || opcode == OP_NATT_ENDPOINT_HINT) {
 		if (thePrefs.GetLogNatTraversalEvents())
 			DebugLog(_T("[NatTraversal] ProcessPacket: opcode=0x%02X from %s:%u size=%u"), opcode, (LPCTSTR)ipstr(ip), (UINT)port, size);
 		if (thePrefs.GetLogNatTraversalEvents())
-			DebugLog(_T("[NATTTESTMODE: ProcessPacket] opcode=0x%02X from %s:%u size=%u\n"), opcode, (LPCTSTR)ipstr(ip), (unsigned)port, (unsigned)size);
+			DebugLog(_T("[NatTraversal: ProcessPacket] opcode=0x%02X from %s:%u size=%u\n"), opcode, (LPCTSTR)ipstr(ip), (unsigned)port, (unsigned)size);
 	}
 	
 	switch (opcode) {
@@ -661,7 +1084,7 @@ bool CClientUDPSocket::ProcessPacket(const BYTE *packet, UINT size, uint8 opcode
 				DebugLog(_T("[NAT-T][Buddy-Recv] OP_REASKCALLBACKUDP received from %s:%u size=%u"), (LPCTSTR)ipstr(ip), port, size);
 
 			if (thePrefs.GetLogNatTraversalEvents())
-				DebugLog(_T("[NATTTESTMODE: ReaskCB-UDP] from %s:%u size=%u\n"), (LPCTSTR)ipstr(ip), (unsigned)port, (unsigned)size);
+				DebugLog(_T("[NatTraversal: ReaskCB-UDP] from %s:%u size=%u\n"), (LPCTSTR)ipstr(ip), (unsigned)port, (unsigned)size);
 			theStats.AddDownDataOverheadOther(size);
 
 			// Accept UDP reask-callbacks for our own serving buddy or any served buddy and forward via TCP.
@@ -748,66 +1171,55 @@ bool CClientUDPSocket::ProcessPacket(const BYTE *packet, UINT size, uint8 opcode
 			}
 
 				if (thePrefs.GetLogNatTraversalEvents())
-					DebugLog(_T("[NATTTESTMODE: ReaskCB-UDP] forward TCP (compat) to %s\n"), (LPCTSTR)pForwardTarget->DbgGetClientInfo());
+					DebugLog(_T("[NatTraversal: ReaskCB-UDP] forward TCP (compat) to %s\n"), (LPCTSTR)pForwardTarget->DbgGetClientInfo());
 				if (thePrefs.GetLogNatTraversalEvents())
 					DebugLog(_T("[NAT-T][Buddy-Forward] Forwarding via SafeConnectAndSendPacket to %s (socket=%p connected=%d)"),
 						(LPCTSTR)EscPercent(pForwardTarget->DbgGetClientInfo()),
 						pForwardTarget->socket,
 						(pForwardTarget->socket != NULL && pForwardTarget->socket->IsConnected()) ? 1 : 0);
 
-				// Build standard OP_REASKCALLBACKTCP payload: prepend requester endpoint then append custom data.
+				// Build OP_REASKCALLBACKTCP with the UDP source observed by the buddy as the primary endpoint.
 				if (size >= 16) {
 					const UINT kBuddyIdLen = 16;
 					const UINT kNullHashLen = 16;
 					const UINT kUserHashLen = 16;
-					const UINT kCustomMetaLen = kNullHashLen + 1 + kUserHashLen + 1;
-					UINT extOffset = kBuddyIdLen + kCustomMetaLen;
+					const UINT kEmbeddedOpcodeOffset = kBuddyIdLen + kNullHashLen;
+					const UINT kConnectOptionsOffset = kEmbeddedOpcodeOffset + 1 + kUserHashLen;
+					const UINT kFileHashOffset = kConnectOptionsOffset + 1;
+					const UINT kRequesterEndpointOffset = kFileHashOffset + MDX_DIGEST_SIZE;
 
-					bool bCustomMarker = true;
-					if (size >= kBuddyIdLen + kNullHashLen) {
-						for (UINT i = 0; i < kNullHashLen; ++i) {
-							if (*(packet + kBuddyIdLen + i) != 0) {
-								bCustomMarker = false;
-								break;
-							}
-						}
-					} else
-						bCustomMarker = false;
-					if (bCustomMarker && size >= extOffset + MDX_DIGEST_SIZE + 6)
-						extOffset += MDX_DIGEST_SIZE;
+					bool bCustomMarker = size >= kBuddyIdLen + kNullHashLen;
+					for (UINT i = 0; bCustomMarker && i < kNullHashLen; ++i) {
+						if (packet[kBuddyIdLen + i] != 0)
+							bCustomMarker = false;
+					}
 
-					// Buddy-observed endpoint (used for backward compatibility as primary endpoint)
-					CAddress buddyObservedIP = ip;
-					uint16 buddyObservedPort = port;
-
-					// Requester self-reported endpoint (preferred for NAT-T/uTP)
 					CAddress requesterIP;
 					uint16 requesterPort = 0;
-					if (size >= extOffset + 6) {
-						uint32 extIPv4 = PeekUInt32(packet + extOffset);
-						uint16 extPort = PeekUInt16(packet + extOffset + 4);
-						CAddress extAddr(CAddress(extIPv4, false));
+					if (bCustomMarker && size >= kRequesterEndpointOffset + 6) {
+						const uint32 extIPv4 = PeekUInt32(packet + kRequesterEndpointOffset);
+						const uint16 extPort = PeekUInt16(packet + kRequesterEndpointOffset + 4);
+						CAddress extAddr(extIPv4, false);
 						if (!extAddr.IsNull() && extAddr.IsPublicIP() && extPort != 0) {
 							requesterIP = extAddr;
 							requesterPort = extPort;
 						}
 					}
 
-					// Use requester self-reported endpoint if available, otherwise buddy-observed
-					CAddress forwardIP = !requesterIP.IsNull() ? requesterIP : buddyObservedIP;
-					uint16 forwardPort = requesterPort != 0 ? requesterPort : buddyObservedPort;
-					if (forwardPort == 0)
-						forwardPort = port;
+					CAddress forwardIP = ip;
+					uint16 forwardPort = port;
+					if (forwardIP.IsNull() || !forwardIP.IsPublicIP() || forwardPort == 0) {
+						forwardIP = requesterIP;
+						forwardPort = requesterPort;
+					}
 					if (!forwardIP.IsNull())
 						pForwardTarget->SetLastCallbackRequesterIP(forwardIP);
 
-					bool bUseIPv6 = (forwardIP.GetType() == CAddress::IPv6);
-					UINT headerLen = bUseIPv6 ? (4 + 16 + 2) : 6;
-					// Add 6 bytes for requester self-reported endpoint hint
-					UINT hintLen = (!requesterIP.IsNull() && requesterPort != 0 && !(requesterIP == forwardIP && requesterPort == forwardPort)) ? 6 : 0;
+					const bool bUseIPv6 = forwardIP.GetType() == CAddress::IPv6;
+					const UINT headerLen = bUseIPv6 ? (4 + 16 + 2) : 6;
 					Packet* response = new Packet(OP_EMULEPROT);
 					response->opcode = OP_REASKCALLBACKTCP;
-					response->size = (size - kBuddyIdLen) + headerLen + hintLen;
+					response->size = (size - kBuddyIdLen) + headerLen;
 					response->pBuffer = new char[response->size];
 					uchar* out = reinterpret_cast<uchar*>(response->pBuffer);
 					if (bUseIPv6) {
@@ -815,31 +1227,21 @@ bool CClientUDPSocket::ProcessPacket(const BYTE *packet, UINT size, uint8 opcode
 						memcpy(out + 4, forwardIP.Data(), 16);
 						PokeUInt16(out + 20, forwardPort);
 						memcpy(out + 22, packet + kBuddyIdLen, size - kBuddyIdLen);
-						if (hintLen > 0) {
-							// Add hint at the end
-							PokeUInt32(out + 22 + (size - kBuddyIdLen), requesterIP.ToUInt32(false));
-							PokeUInt16(out + 22 + (size - kBuddyIdLen) + 4, requesterPort);
-						}
 					} else {
 						PokeUInt32(out, forwardIP.IsNull() ? 0u : forwardIP.ToUInt32(false));
 						PokeUInt16(out + 4, forwardPort);
 						memcpy(out + 6, packet + kBuddyIdLen, size - kBuddyIdLen);
-						if (hintLen > 0) {
-							// Add hint at the end
-							PokeUInt32(out + 6 + (size - kBuddyIdLen), requesterIP.ToUInt32(false));
-							PokeUInt16(out + 6 + (size - kBuddyIdLen) + 4, requesterPort);
-						}
 					}
 
 					CString strForwardTarget = pForwardTarget->DbgGetClientInfo();
 					if (thePrefs.GetLogNatTraversalEvents()) {
-						if (hintLen > 0)
-							DebugLog(_T("[NatTraversal] OP_ReaskCallbackUDP: forward to %s:%u (hint: %s:%u) via buddy %s"), (LPCTSTR)ipstr(forwardIP), forwardPort, (LPCTSTR)ipstr(requesterIP), requesterPort, (LPCTSTR)EscPercent(strForwardTarget));
+						if (!requesterIP.IsNull() && requesterPort != 0 && !(requesterIP == forwardIP && requesterPort == forwardPort))
+							DebugLog(_T("[NatTraversal] OP_ReaskCallbackUDP: forwarding buddy-observed requester %s:%u (self-reported secondary %s:%u) via buddy %s"), (LPCTSTR)ipstr(forwardIP), forwardPort, (LPCTSTR)ipstr(requesterIP), requesterPort, (LPCTSTR)EscPercent(strForwardTarget));
 						else
-							DebugLog(_T("[NatTraversal] OP_ReaskCallbackUDP: forward to %s:%u via buddy %s"), (LPCTSTR)ipstr(forwardIP), forwardPort, (LPCTSTR)EscPercent(strForwardTarget));
+							DebugLog(_T("[NatTraversal] OP_ReaskCallbackUDP: forwarding requester %s:%u via buddy %s"), (LPCTSTR)ipstr(forwardIP), forwardPort, (LPCTSTR)EscPercent(strForwardTarget));
 					}
 					if (thePrefs.GetLogNatTraversalEvents())
-						DebugLog(_T("[NATTTESTMODE: ReaskCB-UDP] forward dest %s:%u\n"), (LPCTSTR)ipstr(forwardIP), (unsigned)forwardPort);
+						DebugLog(_T("[NatTraversal: ReaskCB-UDP] forward dest %s:%u\n"), (LPCTSTR)ipstr(forwardIP), (unsigned)forwardPort);
 					if (thePrefs.GetDebugClientTCPLevel() > 0)
 						DebugSend("OP_ReaskCallbackTCP", pForwardTarget);
 
@@ -851,6 +1253,36 @@ bool CClientUDPSocket::ProcessPacket(const BYTE *packet, UINT size, uint8 opcode
 							DebugLog(_T("[NatTraversal] OP_REASKCALLBACKTCP forwarded/queued successfully (size=%u) to %s"), uForwardPacketSize, (LPCTSTR)EscPercent(strForwardTarget));
 						else
 							DebugLogWarning(_T("[NAT-T][Buddy-Forward] FAILED: SafeConnectAndSendPacket rejected callback forward to %s"), (LPCTSTR)EscPercent(strForwardTarget));
+					}
+
+					// A capable requester can use the served peer's current Kad endpoint to replace a stale source endpoint.
+					const UINT kCustomRequestMinSize = kRequesterEndpointOffset;
+					const bool bEndpointHintRequested = bForwardQueued && bCustomMarker && size >= kCustomRequestMinSize
+						&& packet[kEmbeddedOpcodeOffset] == OP_RENDEZVOUS
+						&& (packet[kConnectOptionsOffset] & CONNECT_OPT_NATT_ENDPOINT_HINT) != 0;
+					if (bEndpointHintRequested && pForwardTarget->HasValidHash() && !ip.IsNull() && port != 0) {
+						CAddress targetIP = pForwardTarget->GetConnectIP();
+						if (targetIP.GetType() != CAddress::IPv4 || !targetIP.IsPublicIP())
+							targetIP = pForwardTarget->GetIPv4();
+						uint16 targetPort = pForwardTarget->HasFreshObservedExternalUdpPort() ? pForwardTarget->GetObservedExternalUdpPort() : pForwardTarget->GetKadPort();
+						if (targetPort == 0)
+							targetPort = pForwardTarget->GetUDPPort();
+						if (!targetIP.IsNull() && targetIP.IsPublicIP() && targetPort != 0) {
+							CSafeMemFile hintData(64);
+							hintData.WriteUInt8(1);
+							hintData.WriteHash16(pForwardTarget->GetUserHash());
+							hintData.WriteHash16(packet);
+							hintData.WriteHash16(packet + kFileHashOffset);
+							hintData.WriteUInt32(targetIP.ToUInt32(false));
+							hintData.WriteUInt16(targetPort);
+							hintData.WriteUInt8(pForwardTarget->GetConnectOptions(true, true, true));
+							Packet* endpointHint = new Packet(hintData, OP_EMULEPROT);
+							endpointHint->opcode = OP_NATT_ENDPOINT_HINT;
+							theStats.AddUpDataOverheadOther(endpointHint->size);
+							SendPacket(endpointHint, ip, port, false, NULL, false, 0);
+							if (thePrefs.GetLogNatTraversalEvents())
+								DebugLog(_T("[NAT-T][EndpointHint] Sent live target endpoint %s:%u to requester %s:%u target=%s"), (LPCTSTR)ipstr(targetIP), (UINT)targetPort, (LPCTSTR)ipstr(ip), (UINT)port, (LPCTSTR)EscPercent(strForwardTarget));
+						}
 					}
 
 					// Also send UDP HOLEPUNCH to requester for NAT hole opening (critical for low-to-low transfers).
@@ -865,6 +1297,71 @@ bool CClientUDPSocket::ProcessPacket(const BYTE *packet, UINT size, uint8 opcode
 					DebugLogWarning(_T("[NAT-T][Buddy-Forward] OP_REASKCALLBACKUDP payload too small for forward: size=%u"), size);
 				}
 			}
+		break;
+	case OP_NATT_ENDPOINT_HINT:
+		{
+			static const UINT kEndpointHintSize = 1 + MDX_DIGEST_SIZE + MDX_DIGEST_SIZE + MDX_DIGEST_SIZE + 4 + 2 + 1;
+			theStats.AddDownDataOverheadOther(size);
+			if (size != kEndpointHintSize || theApp.clientlist == NULL)
+				break;
+
+			CSafeMemFile hintData(packet, size);
+			if (hintData.ReadUInt8() != 1)
+				break;
+			uchar targetHash[MDX_DIGEST_SIZE];
+			uchar servingBuddyID[MDX_DIGEST_SIZE];
+			uchar fileHash[MDX_DIGEST_SIZE];
+			hintData.ReadHash16(targetHash);
+			hintData.ReadHash16(servingBuddyID);
+			hintData.ReadHash16(fileHash);
+			CAddress targetIP(hintData.ReadUInt32(), false);
+			uint16 targetPort = hintData.ReadUInt16();
+			uint8 targetOptions = hintData.ReadUInt8();
+			if (isnulmd4(targetHash) || isnulmd4(servingBuddyID) || isnulmd4(fileHash) || targetIP.IsNull() || !targetIP.IsPublicIP() || targetPort == 0)
+				break;
+
+			CUpDownClient* target = theApp.clientlist->FindClientByUserHash(targetHash);
+			if (target == NULL || !theApp.clientlist->IsValidClient(target) || !target->HasValidServingBuddyID())
+				break;
+			if (!md4equ(target->GetServingBuddyID(), servingBuddyID) || target->GetServingBuddyIP() != ip || target->GetServingBuddyPort() != port) {
+				if (thePrefs.GetLogNatTraversalEvents())
+					DebugLogWarning(_T("[NAT-T][EndpointHint] Rejected untrusted endpoint hint from %s:%u target=%s"), (LPCTSTR)ipstr(ip), (UINT)port, (LPCTSTR)EscPercent(target->DbgGetClientInfo()));
+				break;
+			}
+			CPartFile* requestFile = target->GetRequestFile();
+			if (requestFile == NULL || !md4equ(requestFile->GetFileHash(), fileHash))
+				break;
+			if (target->socket != NULL && (target->socket->IsConnected() || !target->socket->HaveNatTraversalLayer()))
+				break;
+
+			const CAddress oldIP = target->GetConnectIP().IsNull() ? target->GetIP() : target->GetConnectIP();
+			const uint16 oldPort = target->GetKadPort() != 0 ? target->GetKadPort() : target->GetUDPPort();
+			if (oldIP == targetIP && oldPort == targetPort)
+				break;
+
+			if ((targetOptions & CONNECT_OPT_NAT_TRAVERSAL_UTP) != 0)
+				target->SetNatTraversalSupport(true);
+			if ((targetOptions & CONNECT_OPT_NAT_TRAVERSAL_QUIC) != 0)
+				target->SetNatTraversalQuicSupport(true);
+			if (!target->RefreshNatObservedEndpoint(targetIP, targetPort, _T("serving buddy endpoint hint")))
+				break;
+
+			const CString targetInfo = EscPercent(target->DbgGetClientInfo());
+			target->ClearDirectNatTraversalCaps();
+			target->ResetPendingNatTraversalForEndpointChange(_T("serving buddy endpoint hint"));
+			SeedNatTraversalExpectation(target, targetIP, targetPort);
+			target->MarkNatTRendezvous(2, true);
+			target->QueueDeferredNatConnect(targetIP, targetPort, thePrefs.GetNatTraversalPortWindow());
+			target->ArmEServerRelayNatTGuard();
+			RequestNatTraversalCaps(target, targetIP, targetPort);
+			target->SetLastTriedToConnectTime();
+			const bool bClientAlive = target->TryToConnect(true, false, NULL, true);
+			if (thePrefs.GetLogNatTraversalEvents()) {
+				DebugLog(_T("[NAT-T][EndpointHint] Applied live target endpoint old=%s:%u new=%s:%u from buddy=%s:%u target=%s alive=%u"),
+					(LPCTSTR)ipstr(oldIP), (UINT)oldPort, (LPCTSTR)ipstr(targetIP), (UINT)targetPort,
+					(LPCTSTR)ipstr(ip), (UINT)port, (LPCTSTR)targetInfo, bClientAlive ? 1u : 0u);
+			}
+		}
 		break;
 	case OP_ESERVER_UDP_PROBE:
 		{
@@ -936,7 +1433,7 @@ bool CClientUDPSocket::ProcessPacket(const BYTE *packet, UINT size, uint8 opcode
 				if (targetFile == NULL)
 					sharedFile = theApp.sharedfiles->GetFileByID(reqFileHash);
 				if (thePrefs.GetLogNatTraversalEvents())
-					DebugLog(_T("[NATTTESTMODE: OP_RENDEZVOUS] Received file hash %s, targetFile=%p sharedFile=%p\n"), (LPCTSTR)md4str(reqFileHash), targetFile, sharedFile);
+					DebugLog(_T("[NatTraversal: OP_RENDEZVOUS] Received file hash %s, targetFile=%p sharedFile=%p\n"), (LPCTSTR)md4str(reqFileHash), targetFile, sharedFile);
 				if (thePrefs.GetLogNatTraversalEvents()) {
 					if (targetFile)
 						DebugLog(_T("[NatTraversal] Rendezvous: Received file context for %s (download queue)"), (LPCTSTR)EscPercent(targetFile->GetFileName()));
@@ -949,12 +1446,18 @@ bool CClientUDPSocket::ProcessPacket(const BYTE *packet, UINT size, uint8 opcode
 		}
 		CAddress hintedIP;
 		uint16 hintedPort = 0;
+		ENatTraversalTransport eRequesterTransportHint = NATT_TRANSPORT_NONE;
 		if (data.GetLength() > data.GetPosition() && (data.GetLength() - data.GetPosition()) >= 6) {
 			uint32 extIPv4 = data.ReadUInt32();
 			uint16 extPort = data.ReadUInt16();
 			if (extIPv4 != 0 && extPort != 0) {
 				hintedIP = CAddress(extIPv4, false);
 				hintedPort = extPort;
+			}
+			if (data.GetLength() > data.GetPosition()) {
+				uint8 byTransportHint = data.ReadUInt8();
+				if (byTransportHint == NATT_TRANSPORT_QUIC || byTransportHint == NATT_TRANSPORT_UTP)
+					eRequesterTransportHint = (ENatTraversalTransport)byTransportHint;
 			}
 		}
 		auto IsBuddyRelation = [&](CUpDownClient* cand) -> bool
@@ -1065,7 +1568,7 @@ CUpDownClient* pUploadCtx = NULL;
 		if (bHasFileContext && targetFile != NULL && target->GetRequestFile() == NULL) {
 			target->SetRequestFile(targetFile);
 			if (thePrefs.GetLogNatTraversalEvents())
-				DebugLog(_T("[NATTTESTMODE: OP_RENDEZVOUS] Set request file: %s for client %s\n"), (LPCTSTR)EscPercent(targetFile->GetFileName()), (LPCTSTR)EscPercent(target->DbgGetClientInfo()));
+				DebugLog(_T("[NatTraversal: OP_RENDEZVOUS] Set request file: %s for client %s\n"), (LPCTSTR)EscPercent(targetFile->GetFileName()), (LPCTSTR)EscPercent(target->DbgGetClientInfo()));
 			if (thePrefs.GetLogNatTraversalEvents())
 				DebugLog(_T("[NatTraversal] Rendezvous: Set request file %s for source"), (LPCTSTR)EscPercent(targetFile->GetFileName()));
 		}
@@ -1084,7 +1587,7 @@ CUpDownClient* pUploadCtx = NULL;
 			}
 			if (!bSourceInList) {
 				if (thePrefs.GetLogNatTraversalEvents())
-					DebugLog(_T("[NATTTESTMODE: OP_RENDEZVOUS] Source not in partfile srclist, calling CheckAndAddSource\n"));
+					DebugLog(_T("[NatTraversal: OP_RENDEZVOUS] Source not in partfile srclist, calling CheckAndAddSource\n"));
 				if (thePrefs.GetLogNatTraversalEvents())
 					DebugLog(_T("[NatTraversal] Rendezvous: Adding source to partfile %s"), (LPCTSTR)EscPercent(targetFile->GetFileName()));
 				// Create a copy of the client for CheckAndAddSource (it may delete the pointer)
@@ -1109,17 +1612,17 @@ CUpDownClient* pUploadCtx = NULL;
 					if (thePrefs.GetLogNatTraversalEvents())
 						DebugLog(_T("[NatTraversal] Rendezvous: Successfully added source to %s"), (LPCTSTR)EscPercent(targetFile->GetFileName()));
 					if (thePrefs.GetLogNatTraversalEvents())
-						DebugLog(_T("[NATTTESTMODE: OP_RENDEZVOUS] CheckAndAddSource SUCCESS\n"));
+						DebugLog(_T("[NatTraversal: OP_RENDEZVOUS] CheckAndAddSource SUCCESS\n"));
 				} else if (pResolvedSource != NULL) {
 					if (thePrefs.GetLogNatTraversalEvents())
-						DebugLog(_T("[NATTTESTMODE: OP_RENDEZVOUS] CheckAndAddSource merged with existing source\n"));
+						DebugLog(_T("[NatTraversal: OP_RENDEZVOUS] CheckAndAddSource merged with existing source\n"));
 				} else {
 					if (thePrefs.GetLogNatTraversalEvents())
-						DebugLog(_T("[NATTTESTMODE: OP_RENDEZVOUS] CheckAndAddSource FAILED\n"));
+						DebugLog(_T("[NatTraversal: OP_RENDEZVOUS] CheckAndAddSource FAILED\n"));
 				}
 			} else {
 				if (thePrefs.GetLogNatTraversalEvents())
-					DebugLog(_T("[NATTTESTMODE: OP_RENDEZVOUS] Source already in partfile srclist\n"));
+					DebugLog(_T("[NatTraversal: OP_RENDEZVOUS] Source already in partfile srclist\n"));
 			}
 		}
 		if (sharedFile != NULL) {
@@ -1132,34 +1635,59 @@ CUpDownClient* pUploadCtx = NULL;
 					target->SetUploadFileID(upFile);
 			}
 		}
-		if (haveHint) {
-			if (target->GetConnectIP().IsNull() || !target->GetConnectIP().IsPublicIP())
-				target->SetConnectIP(hintedIP);
+		const bool bObservedPrimary = !ip.IsNull() && ip.IsPublicIP() && port != 0;
+		const bool bCanRefreshEndpoint = target->socket == NULL || !target->socket->IsConnected();
+		const CAddress currentEndpointIP = target->GetConnectIP().IsNull() ? target->GetIP() : target->GetConnectIP();
+		const uint16 currentEndpointPort = target->GetKadPort() != 0 ? target->GetKadPort() : target->GetUDPPort();
+		const CAddress selectedEndpointIP = bObservedPrimary ? ip : hintedIP;
+		const uint16 selectedEndpointPort = bObservedPrimary ? port : hintedPort;
+		const bool bEndpointChanged = !selectedEndpointIP.IsNull() && selectedEndpointPort != 0
+			&& (!(currentEndpointIP == selectedEndpointIP) || currentEndpointPort != selectedEndpointPort);
+		if (bCanRefreshEndpoint && bEndpointChanged && target->socket != NULL && target->socket->HaveNatTraversalLayer())
+			target->ResetPendingNatTraversalForEndpointChange(_T("buddy-observed rendezvous endpoint"));
+		if (bCanRefreshEndpoint && bObservedPrimary) {
+			target->SetConnectIP(ip);
+			if (target->GetIP().IsNull() || !target->GetIP().IsPublicIP()) {
+				CAddress observedCopy = ip;
+				target->SetIP(observedCopy);
+			}
+			if (target->GetKadPort() != port)
+				target->SetKadPort(port);
+			if (target->GetUDPPort() != port)
+				target->SetUDPPort(port);
+		} else if (bCanRefreshEndpoint && haveHint) {
+			target->SetConnectIP(hintedIP);
 			if (target->GetIP().IsNull() || !target->GetIP().IsPublicIP()) {
 				CAddress hintCopy = hintedIP;
 				target->SetIP(hintCopy);
 			}
-		}
-		if (target->GetConnectIP().IsNull())
-			target->SetConnectIP(ip);
-		if (target->GetIP().IsNull()) {
-			CAddress tmp = ip; // SetIP expects non-const lvalue
-			target->SetIP(tmp);
-		}
-		uint16 effectivePort = hintedPort != 0 ? hintedPort : port;
-		if (effectivePort != 0) {
-			if (target->GetKadPort() != effectivePort)
-				target->SetKadPort(effectivePort);
-			if (target->GetUDPPort() != effectivePort)
-				target->SetUDPPort(effectivePort);
+			if (hintedPort != 0) {
+				if (target->GetKadPort() != hintedPort)
+					target->SetKadPort(hintedPort);
+				if (target->GetUDPPort() != hintedPort)
+					target->SetUDPPort(hintedPort);
+			}
 		}
 		CString targetInfo = EscPercent(target->DbgGetClientInfo());
-		bool bHasActiveUtp = (target->socket != NULL) && target->socket->HaveUtpLayer();
-		CUtpSocket* activeUtp = bHasActiveUtp ? target->socket->GetUtpLayer() : NULL;
-		if (bHasActiveUtp) {
-			AsyncSocketExState utpState = activeUtp != NULL ? activeUtp->GetState() : unconnected;
+		if (target->socket != NULL && target->socket->HaveNatTraversalLayer() && !target->socket->IsConnected()) {
+			const bool bHintQuicAllowed = eRequesterTransportHint == NATT_TRANSPORT_QUIC && thePrefs.IsNatTraversalQuicAllowed() && CQuicNatSocket::IsRuntimeAvailable();
+			const bool bHintUtpAllowed = eRequesterTransportHint == NATT_TRANSPORT_UTP && thePrefs.IsNatTraversalUtpAllowed();
+			const bool bTransportMatches = (bHintQuicAllowed && target->socket->HaveQuicNatLayer()) || (bHintUtpAllowed && target->socket->HaveUtpLayer());
+			if ((bHintQuicAllowed || bHintUtpAllowed) && !bTransportMatches) {
+				if (thePrefs.GetLogNatTraversalEvents())
+					DebugLog(_T("[NatTraversal][OP_RENDEZVOUS] Resetting pending transport before handshake guard, requested=%u, %s"), (UINT)eRequesterTransportHint, (LPCTSTR)targetInfo);
+				target->ResetPendingNatTraversalForEndpointChange(_T("requester rendezvous transport switch"));
+			}
+		}
+		bool bHasActiveNatLayer = (target->socket != NULL) && target->socket->HaveNatTraversalLayer();
+		if (bHasActiveNatLayer) {
+			AsyncSocketExState natState = unconnected;
+			if (target->socket->HaveQuicNatLayer())
+				natState = target->socket->GetQuicNatLayer()->GetState();
+			else if (target->socket->HaveUtpLayer())
+				natState = target->socket->GetUtpLayer()->GetState();
 			bool handshakeGuard = false;
-			if (utpState == connecting || utpState == connected)
+			if (natState == connecting || natState == connected)
 				handshakeGuard = true;
 			DWORD handshakeStart = target->GetUtpConnectionStartTick();
 			if (!handshakeGuard && handshakeStart != 0 && !target->IsUtpWritable()) {
@@ -1169,13 +1697,13 @@ CUpDownClient* pUploadCtx = NULL;
 			}
 			if (handshakeGuard) {
 				if (thePrefs.GetLogNatTraversalEvents())
-					DebugLog(_T("[NatTraversal][OP_RENDEZVOUS] Skipping rendezvous for %s (uTP handshake in progress)"), (LPCTSTR)targetInfo);
+					DebugLog(_T("[NatTraversal][OP_RENDEZVOUS] Skipping rendezvous for %s (NAT-T handshake in progress)"), (LPCTSTR)targetInfo);
 				return true;
 			}
 			if (target->socket->IsConnected()) {
-				if (utpState == connected || target->IsUtpWritable()) {
+				if (natState == connected || target->IsUtpWritable()) {
 					if (thePrefs.GetLogNatTraversalEvents())
-						DebugLog(_T("[NatTraversal][OP_RENDEZVOUS] Skipping duplicate rendezvous for %s (uTP already active)"), (LPCTSTR)targetInfo);
+						DebugLog(_T("[NatTraversal][OP_RENDEZVOUS] Skipping duplicate rendezvous for %s (NAT-T already active)"), (LPCTSTR)targetInfo);
 					return true;
 				}
 			}
@@ -1192,8 +1720,8 @@ CUpDownClient* pUploadCtx = NULL;
 				upName = _T("<none>");
 			const CAddress& diagHint = haveHint ? hintedIP : ip;
 			uint16 diagPort = haveHint && hintedPort != 0 ? hintedPort : port;
-			DebugLog(_T("[NatTraversal][OP_RENDEZVOUS][Diag] target=%s socket=%p reqFile=%s upFile=%s hint=%s:%u"),
-				(LPCTSTR)targetInfo, target->socket, (LPCTSTR)reqName, (LPCTSTR)upName, (LPCTSTR)ipstr(diagHint), diagPort);
+			DebugLog(_T("[NatTraversal][OP_RENDEZVOUS][Diag] target=%s socket=%p reqFile=%s upFile=%s hint=%s:%u transportHint=%u"),
+				(LPCTSTR)targetInfo, target->socket, (LPCTSTR)reqName, (LPCTSTR)upName, (LPCTSTR)ipstr(diagHint), diagPort, (UINT)eRequesterTransportHint);
 		}
 
 		auto MakeStageError = [&](LPCTSTR stage, const CString& detail) -> CString
@@ -1254,13 +1782,21 @@ CUpDownClient* pUploadCtx = NULL;
 			}
 		});
 
-	StageGuard(_T("MarkNatTRendezvous"), [&]()
-	{
-		target->MarkNatTRendezvous(6);
-	});
+		CAddress directCapsIP = bObservedPrimary ? ip : hintedIP;
+		uint16 directCapsPort = bObservedPrimary ? port : hintedPort;
+		if (theApp.clientudp != NULL && !directCapsIP.IsNull() && directCapsPort != 0)
+			theApp.clientudp->RequestNatTraversalCaps(target, directCapsIP, directCapsPort);
 
 	// If we are the uploader (sharedFile context), wait for incoming connection - DO NOT initiate outgoing!
 	bool bWeAreUploader = (sharedFile != NULL);
+	if (!bWeAreUploader) {
+		StageGuard(_T("MarkNatTRendezvous"), [&]()
+		{
+			target->MarkNatTRendezvous(6);
+		});
+	} else if (thePrefs.GetLogNatTraversalEvents())
+		DebugLog(_T("[NatTraversal][OP_RENDEZVOUS] Uploader side: passive NAT-T endpoint will not arm active retry for %s"), (LPCTSTR)targetInfo);
+
 	if (!bWeAreUploader) {
 		try {
 			StageGuard(_T("TryToConnect"), [&]()
@@ -1279,67 +1815,131 @@ CUpDownClient* pUploadCtx = NULL;
 			}
 		}
 	} else {
-		// Uploader side: We received OP_RENDEZVOUS from buddy forwarding downloader's request
-		// Do NOT initiate outgoing connection - wait for downloader to connect to us via uTP
-		if (thePrefs.GetLogNatTraversalEvents())
-			DebugLog(_T("[NatTraversal][OP_RENDEZVOUS] Uploader side: creating passive socket, awaiting incoming uTP connection from %s"), (LPCTSTR)targetInfo);
-		
-		// Create passive socket with uTP layer without initiating outgoing connection
-		StageGuard(_T("CreatePassiveSocket"), [&]()
-		{
-			if (!target->socket) {
-				// Create socket using same logic as TryToConnect but without Connect() call
-				target->socket = static_cast<CClientReqSocket*>(RUNTIME_CLASS(CClientReqSocket)->CreateObject());
-				target->socket->SetClient(target);
-				if (!target->socket->Create()) {
-					DWORD dwLastError = ::WSAGetLastError();
-					if (thePrefs.GetLogNatTraversalEvents())
-						DebugLogError(_T("[NatTraversal][OP_RENDEZVOUS] Uploader: Failed to create passive socket, err=%lu, %s"), dwLastError, (LPCTSTR)EscPercent(target->DbgGetClientInfo()));
-					target->socket->Safe_Delete();
-					throw MakeStageError(_T("CreatePassiveSocket"), CString(_T("socket creation failed")));
-				}
-				// Initialize uTP layer for incoming connection
-				target->socket->InitUtpSupport();
-				if (!target->socket->HaveUtpLayer()) {
-					if (thePrefs.GetLogNatTraversalEvents())
-						DebugLogWarning(_T("[NatTraversal][OP_RENDEZVOUS] Uploader: uTP layer not attached, %s"), (LPCTSTR)EscPercent(target->DbgGetClientInfo()));
-				} else {
-					target->SetUtpLocalInitiator(false); // Uploader is passive/receiver
-					target->ResetUtpFlowControl();
-					target->ClearUtpQueuedPackets();
-					if (thePrefs.GetLogNatTraversalEvents())
-						DebugLog(_T("[NatTraversal][OP_RENDEZVOUS] Uploader: Passive socket created with uTP layer, %s"), (LPCTSTR)EscPercent(target->DbgGetClientInfo()));
-				}
-			}
-		});
-	}		if (!theApp.clientlist->IsValidClient(target))
-			throw MakeStageError(_T("ValidateClient"), CString(_T("client pointer invalid after TryToConnect")));
+		// Uploader side: We received OP_RENDEZVOUS from buddy forwarding downloader's request.
+		// The explicit transport hint belongs to this rendezvous and takes precedence over later capability refreshes.
+		if (eRequesterTransportHint == NATT_TRANSPORT_QUIC)
+			target->ClearNatRendezvousTransportPin();
+		const bool bCanUseDirectCapsForQuic = thePrefs.IsNatTraversalQuicAllowed() && CQuicNatSocket::IsRuntimeAvailable();
+		const bool bIgnoreCachedLegacyForCapsRefresh = bCanUseDirectCapsForQuic && target->NeedsDirectNatTraversalCapsRefresh();
+		const bool bPeerSupportsQuic = target->HasDirectNatTraversalCaps() ? target->HasDirectNatTraversalQuicSupport()
+			: (!target->NeedsDirectNatTraversalCapsRefresh() && target->GetNatTraversalQuicSupport());
+		const bool bKnownLegacyWithoutQuic = (!bIgnoreCachedLegacyForCapsRefresh && target->HasReceivedHelloInfo() && !target->GetNatTraversalQuicSupport()) || target->CanUseLegacyUtpAfterDirectCapsTimeout(DIRECT_NATT_CAPS_LEGACY_TIMEOUT_MS);
+		ENatTraversalTransport ePassiveTransport = NATT_TRANSPORT_NONE;
+		const CAddress transportHintIP = bObservedPrimary ? ip : hintedIP;
+		const uint16 transportHintPort = bObservedPrimary ? port : hintedPort;
+		const bool bQuicTemporarilyDisabled = target->IsNatTraversalQuicTemporarilyDisabledFor(transportHintIP, transportHintPort);
+		if (eRequesterTransportHint == NATT_TRANSPORT_UTP && thePrefs.IsNatTraversalUtpAllowed() && (target->HasDirectNatTraversalUtpSupport() || target->GetNatTraversalSupport() || bKnownLegacyWithoutQuic)) {
+			ePassiveTransport = NATT_TRANSPORT_UTP;
+			target->PinNatRendezvousUtpTransport();
+			if (thePrefs.GetLogNatTraversalEvents())
+				DebugLog(_T("[NatTraversal][OP_RENDEZVOUS] Requester requested uTP fallback for this rendezvous only from %s:%u"), (LPCTSTR)ipstr(transportHintIP), (UINT)transportHintPort);
+		} else if (bCanUseDirectCapsForQuic && !bQuicTemporarilyDisabled && bPeerSupportsQuic)
+			ePassiveTransport = NATT_TRANSPORT_QUIC;
+		else if (thePrefs.IsNatTraversalUtpAllowed() && (!bCanUseDirectCapsForQuic || target->HasDirectNatTraversalUtpSupport() || bKnownLegacyWithoutQuic || bQuicTemporarilyDisabled))
+			ePassiveTransport = NATT_TRANSPORT_UTP;
+		if (ePassiveTransport == NATT_TRANSPORT_NONE) {
+			if (thePrefs.GetLogNatTraversalEvents())
+				DebugLog(_T("[NatTraversal][OP_RENDEZVOUS] Uploader side: waiting for direct NAT-T CAPS before passive transport selection for %s"), (LPCTSTR)targetInfo);
+		} else {
+			if (thePrefs.GetLogNatTraversalEvents())
+				DebugLog(_T("[NatTraversal][OP_RENDEZVOUS] Uploader side: creating passive socket, awaiting incoming NAT-T transport=%d connection from %s"), (int)ePassiveTransport, (LPCTSTR)targetInfo);
 
-		StageGuard(_T("ExpectPeer"), [&]()
+			bool bSkipPassiveTransport = false;
+			// Create passive socket with selected NAT-T layer without initiating outgoing connection.
+			StageGuard(_T("CreatePassiveSocket"), [&]()
+			{
+				if (target->socket != NULL && target->socket->HaveNatTraversalLayer()) {
+					const bool bCurrentTransportMatches = (ePassiveTransport == NATT_TRANSPORT_QUIC && target->socket->HaveQuicNatLayer()) || (ePassiveTransport == NATT_TRANSPORT_UTP && target->socket->HaveUtpLayer());
+					if (!bCurrentTransportMatches) {
+						if (target->socket->IsConnected()) {
+							bSkipPassiveTransport = true;
+							if (thePrefs.GetLogNatTraversalEvents())
+								DebugLog(_T("[NatTraversal][OP_RENDEZVOUS] Keeping connected passive NAT-T layer despite requested transport=%d for %s"), (int)ePassiveTransport, (LPCTSTR)targetInfo);
+							return;
+						}
+						if (thePrefs.GetLogNatTraversalEvents())
+							DebugLog(_T("[NatTraversal][OP_RENDEZVOUS] Resetting pending passive NAT-T layer for transport switch to %d, %s"), (int)ePassiveTransport, (LPCTSTR)targetInfo);
+						target->socket->Safe_Delete();
+						target->ResetUtpFlowControl();
+						target->ClearUtpQueuedPackets();
+					}
+				}
+				if (!target->socket) {
+					target->socket = static_cast<CClientReqSocket*>(RUNTIME_CLASS(CClientReqSocket)->CreateObject());
+					target->socket->SetClient(target);
+					if (ePassiveTransport == NATT_TRANSPORT_QUIC)
+						target->socket->InitQuicNatSupport();
+					if (!target->socket->Create()) {
+						DWORD dwLastError = ::WSAGetLastError();
+						if (thePrefs.GetLogNatTraversalEvents())
+							DebugLogError(_T("[NatTraversal][OP_RENDEZVOUS] Uploader: Failed to create passive socket, err=%lu, %s"), dwLastError, (LPCTSTR)EscPercent(target->DbgGetClientInfo()));
+						target->socket->Safe_Delete();
+						throw MakeStageError(_T("CreatePassiveSocket"), CString(_T("socket creation failed")));
+					}
+					if (ePassiveTransport == NATT_TRANSPORT_UTP)
+						target->socket->InitUtpSupport();
+					if (!target->socket->HaveNatTraversalLayer()) {
+						if (thePrefs.GetLogNatTraversalEvents())
+							DebugLogWarning(_T("[NatTraversal][OP_RENDEZVOUS] Uploader: NAT-T layer not attached, transport=%d, %s"), (int)ePassiveTransport, (LPCTSTR)EscPercent(target->DbgGetClientInfo()));
+					} else {
+						target->SetUtpLocalInitiator(false);
+						target->ResetUtpFlowControl();
+						target->ClearUtpQueuedPackets();
+						if (thePrefs.GetLogNatTraversalEvents())
+							DebugLog(_T("[NatTraversal][OP_RENDEZVOUS] Uploader: Passive socket created with NAT-T transport=%d layer, %s"), (int)ePassiveTransport, (LPCTSTR)EscPercent(target->DbgGetClientInfo()));
+					}
+				}
+			});
+			if (bSkipPassiveTransport)
+				return true;
+		}
+	}
+
+	if (!theApp.clientlist->IsValidClient(target))
+		throw MakeStageError(_T("ValidateClient"), CString(_T("client pointer invalid after TryToConnect")));
+
+	StageGuard(_T("ExpectPeer"), [&]()
 		{
-			if (target->socket && target->socket->HaveUtpLayer()) {
-				CUtpSocket* utp = target->socket->GetUtpLayer();
+			if (target->socket && target->socket->HaveNatTraversalLayer()) {
 				auto ExpectEndpoint = [&](const CAddress& expIP, uint16 expPort)
 				{
-					if (expPort == 0 || expIP.IsNull())
-						return;
-					SOCKADDR_IN6 sa = { 0 }; int salen = sizeof(sa);
-					CAddress exp = expIP;
-					exp.Convert(CAddress::IPv6);
-					exp.ToSA((SOCKADDR*)&sa, &salen, expPort);
-					utp->ExpectPeer((SOCKADDR*)&sa, salen);
+					sockaddr_storage sa = {};
+					int salen = 0;
+					if (BuildUtpPeerEndpoint(expIP, expPort, sa, salen)) {
+						if (target->socket->HaveQuicNatLayer())
+							target->socket->GetQuicNatLayer()->ExpectPeer(reinterpret_cast<const sockaddr*>(&sa), salen);
+						else if (target->socket->HaveUtpLayer())
+							target->socket->GetUtpLayer()->ExpectPeer(reinterpret_cast<const sockaddr*>(&sa), salen);
+					}
 				};
-				ExpectEndpoint(ip, port);
-				if (haveHint)
-					ExpectEndpoint(hintedIP, hintedPort);
-				else {
-					CAddress fallbackIP = !target->GetConnectIP().IsNull() ? target->GetConnectIP() : target->GetIP();
-					uint16 fallbackPort = target->GetKadPort() ? target->GetKadPort() : target->GetUDPPort();
-					if (!(fallbackIP == ip && fallbackPort == port))
-						ExpectEndpoint(fallbackIP, fallbackPort);
+
+				CAddress primaryIP;
+				uint16 primaryPort = 0;
+				if (bObservedPrimary) {
+					primaryIP = ip;
+					primaryPort = port;
+				} else if (haveHint) {
+					primaryIP = hintedIP;
+					primaryPort = hintedPort;
+				} else {
+					primaryIP = !target->GetConnectIP().IsNull() ? target->GetConnectIP() : target->GetIP();
+					primaryPort = target->GetKadPort() ? target->GetKadPort() : target->GetUDPPort();
+				}
+				ExpectEndpoint(primaryIP, primaryPort);
+
+				// QUIC has one authoritative expected peer. Keep the buddy-observed endpoint primary.
+				if (target->socket->HaveUtpLayer()) {
+					if (bObservedPrimary && haveHint && (!(hintedIP == primaryIP) || hintedPort != primaryPort))
+						ExpectEndpoint(hintedIP, hintedPort);
+					else if (!haveHint) {
+						CAddress fallbackIP = !target->GetConnectIP().IsNull() ? target->GetConnectIP() : target->GetIP();
+						uint16 fallbackPort = target->GetKadPort() ? target->GetKadPort() : target->GetUDPPort();
+						if (!(fallbackIP == primaryIP && fallbackPort == primaryPort))
+							ExpectEndpoint(fallbackIP, fallbackPort);
+					}
 				}
 			} else if (thePrefs.GetLogNatTraversalEvents()) {
-				DebugLogWarning(_T("[NatTraversal] Rendezvous: Missing uTP layer for %s (socket=%p)"), (LPCTSTR)targetInfo, target->socket);
+				DebugLogWarning(_T("[NatTraversal] Rendezvous: Missing NAT-T layer for %s (socket=%p)"), (LPCTSTR)targetInfo, target->socket);
 			}
 		});
 
@@ -1347,10 +1947,10 @@ CUpDownClient* pUploadCtx = NULL;
 		if (!bWeAreUploader) {
 			StageGuard(_T("QueueDeferred"), [&]()
 			{
-				if (haveHint)
-					target->QueueDeferredNatConnect(hintedIP, hintedPort);
-				else
+				if (bObservedPrimary)
 					target->QueueDeferredNatConnect(ip, port);
+				else if (haveHint)
+					target->QueueDeferredNatConnect(hintedIP, hintedPort);
 			});
 		}
 
@@ -1385,9 +1985,9 @@ CUpDownClient* pUploadCtx = NULL;
 
 		StageGuard(_T("HolePunchSecondary"), [&]()
 		{
-			CAddress hpIP = !target->GetConnectIP().IsNull() ? target->GetConnectIP() : target->GetIP();
-			uint16 hpPort = target->GetKadPort() ? target->GetKadPort() : target->GetUDPPort();
-			if (!hpIP.IsNull() && hpPort != 0) {
+			CAddress hpIP = hintedIP;
+			uint16 hpPort = hintedPort;
+			if (haveHint && !hpIP.IsNull() && hpPort != 0 && !(hpIP == ip && hpPort == port)) {
 				for (int i = 0; i < 12; ++i) {
 					Packet* hp2 = new Packet(OP_EMULEPROT);
 					hp2->opcode = OP_HOLEPUNCH;
@@ -1426,7 +2026,7 @@ CUpDownClient* pUploadCtx = NULL;
 		if (thePrefs.GetLogNatTraversalEvents())
 			DebugLog(_T("[NatTraversal] HOLEPUNCH received from %s:%u (size=%u)"), (LPCTSTR)ipstr(ip), (UINT)port, size);
 		if (thePrefs.GetLogNatTraversalEvents())
-			DebugLog(_T("[NATTTESTMODE: HOLEPUNCH] Received from %s:%u size=%u\n"), (LPCTSTR)ipstr(ip), (unsigned)port, (unsigned)size);
+			DebugLog(_T("[NatTraversal: HOLEPUNCH] Received from %s:%u size=%u\n"), (LPCTSTR)ipstr(ip), (unsigned)port, (unsigned)size);
 		if (!thePrefs.IsNatTraversalServiceEnabled()) {
 			if (thePrefs.GetLogNatTraversalEvents())
 				DebugLog(_T("[NatTraversal] HOLEPUNCH ignored: NAT traversal service disabled"));
@@ -1475,6 +2075,17 @@ CUpDownClient* pUploadCtx = NULL;
 					DebugLogWarning(_T("[NatTraversal] HOLEPUNCH: no client match for %s:%u"), (LPCTSTR)ipstr(ip), (UINT)port);
 			}
 			if (pCand) {
+				const bool bFromTargetServingBuddy = !bMatchedExpectation
+					&& pCand->HasValidServingBuddyID()
+					&& pCand->GetServingBuddyIP() == ip
+					&& pCand->GetServingBuddyPort() == port;
+				if (bFromTargetServingBuddy) {
+					// Buddy generated hole punch only opens the requester NAT mapping.
+					if (thePrefs.GetLogNatTraversalEvents())
+						DebugLog(_T("[NatTraversal] HOLEPUNCH: Ignoring target serving buddy endpoint %s:%u for direct peer routing, client=%s"), (LPCTSTR)ipstr(ip), (UINT)port, (LPCTSTR)EscPercent(pCand->DbgGetClientInfo()));
+					break;
+				}
+
 				// Keep NAT expectation fresh for this observed endpoint so incoming uTP ACCEPT can adopt the right owner.
 				RegisterNatExpectation(pCand, ip, port);
 
@@ -1492,47 +2103,68 @@ CUpDownClient* pUploadCtx = NULL;
 				// Check if client is already in connecting state or connected
 				const EConnectingState eConnState = pCand->GetConnectingState();
 				bool bAlreadyConnecting = (eConnState != CCS_NONE);
-				bool bAlreadyHaveUtp = (pCand->socket != NULL && pCand->socket->HaveUtpLayer());
+				bool bAlreadyHaveNatLayer = (pCand->socket != NULL && pCand->socket->HaveNatTraversalLayer());
 				bool bSocketConnected = (pCand->socket != NULL && pCand->socket->IsConnected());
+				auto ExpectNatEndpoint = [&](CClientReqSocket* sock, const CAddress& expIP, uint16 expPort)
+				{
+					if (sock == NULL || !sock->HaveNatTraversalLayer())
+						return;
+					sockaddr_storage sa = {};
+					int salen = 0;
+					if (!BuildUtpPeerEndpoint(expIP, expPort, sa, salen))
+						return;
+					if (sock->HaveQuicNatLayer())
+						sock->GetQuicNatLayer()->ExpectPeer(reinterpret_cast<const sockaddr*>(&sa), salen);
+					else if (sock->HaveUtpLayer())
+						sock->GetUtpLayer()->ExpectPeer(reinterpret_cast<const sockaddr*>(&sa), salen);
+				};
 				if (thePrefs.GetLogNatTraversalEvents()) {
-					DebugLog(_T("[NatTraversal] HOLEPUNCH from %s:%u for %s, state=%u, hasSocket=%d, hasUtp=%d, sockConnected=%d"),
+					DebugLog(_T("[NatTraversal] HOLEPUNCH from %s:%u for %s, state=%u, hasSocket=%d, hasNATT=%d, sockConnected=%d"),
 						(LPCTSTR)ipstr(ip), (UINT)port, (LPCTSTR)EscPercent(pCand->DbgGetClientInfo()),
-						(UINT)eConnState, pCand->socket != NULL ? 1 : 0, bAlreadyHaveUtp ? 1 : 0, bSocketConnected ? 1 : 0);
+						(UINT)eConnState, pCand->socket != NULL ? 1 : 0, bAlreadyHaveNatLayer ? 1 : 0, bSocketConnected ? 1 : 0);
 				}
 				// If socket is already connected (uTP or TCP), skip redundant connection attempts
 				if (bSocketConnected) {
 					if (thePrefs.GetLogNatTraversalEvents())
 						DebugLog(_T("[NatTraversal] HOLEPUNCH: Socket already connected, skipping redundant connect for %s"), (LPCTSTR)EscPercent(pCand->DbgGetClientInfo()));
-					// Still register peer expectation if uTP to help with simultaneous connect scenarios
-					if (bAlreadyHaveUtp) {
-						CUtpSocket* utp = pCand->socket->GetUtpLayer();
-						SOCKADDR_IN6 sa = { 0 }; int salen = sizeof(sa);
-						CAddress a = ip; a.Convert(CAddress::IPv6);
-						a.ToSA((SOCKADDR*)&sa, &salen, port);
-						utp->ExpectPeer((SOCKADDR*)&sa, salen);
-					}
+					// Still register peer expectation for NAT-T to help with simultaneous connect scenarios
+					if (bAlreadyHaveNatLayer)
+						ExpectNatEndpoint(pCand->socket, ip, port);
 				} else {
 					// Determine role FIRST: if we have no RequestFile, we're likely the uploader awaiting incoming connection
 					bool bWeAreUploader = (pCand->GetRequestFile() == NULL);
 
-					// For uploader side in relay scenario, update ConnectIP from observed hole punch source
-					// The IP in relay packet may be wrong; only reliable source is incoming UDP packets
+					// For uploader side in relay scenario, update ConnectIP from observed hole punch source.
+					// The IP in relay packet may be wrong; only reliable source is incoming UDP packets.
 					if (bWeAreUploader) {
-						// Uploader: always trust the observed hole punch source IP
+						// Uploader: always trust the observed hole punch source IP.
 						if (pCand->GetConnectIP() != ip) {
 							if (thePrefs.GetLogNatTraversalEvents())
 								DebugLog(_T("[NatTraversal] HOLEPUNCH: Uploader side - updating ConnectIP from %s to observed %s"),
 									(LPCTSTR)ipstr(pCand->GetConnectIP()), (LPCTSTR)ipstr(ip));
 							pCand->SetConnectIP(ip);
 						}
+						if (pCand->GetKadPort() == 0 && pCand->GetUDPPort() == 0)
+							pCand->SetKadPort(port);
+						pCand->SetNatTraversalSupport(true);
 					} else {
-						// Downloader: seed connect endpoint if needed (original behavior)
-						if (pCand->GetConnectIP().IsNull())
-							pCand->SetConnectIP(ip);
+						const bool bMayRefreshNatEndpoint = bMatchedExpectation || bAlreadyConnecting
+							|| pCand->IsEServerRelayNatTGuardActive() || pCand->HasPendingNatTRetry();
+						if (!bMayRefreshNatEndpoint || !pCand->RefreshNatObservedEndpoint(ip, port, _T("HOLEPUNCH"))) {
+							// Downloader: seed connect endpoint if needed (original behavior).
+							if (pCand->GetConnectIP().IsNull())
+								pCand->SetConnectIP(ip);
+							if (pCand->GetKadPort() == 0 && pCand->GetUDPPort() == 0)
+								pCand->SetKadPort(port);
+							pCand->SetNatTraversalSupport(true);
+						}
 					}
-					if (pCand->GetKadPort() == 0 && pCand->GetUDPPort() == 0)
-						pCand->SetKadPort(port);
-					pCand->SetNatTraversalSupport(true);
+
+					if (!bWeAreUploader && pCand->socket != NULL && pCand->socket->HasFailedUtpTransport()) {
+						pCand->ResetFailedUtpTransportForRetry(_T("HOLEPUNCH received after transient uTP failure"));
+						bAlreadyConnecting = false;
+						bAlreadyHaveNatLayer = false;
+					}
 
 					// Recover from stale connecting state left behind by a dead socket.
 					const bool bStaleDirectConnectState = (eConnState == CCS_DIRECTTCP || eConnState == CCS_PRECONDITIONS);
@@ -1544,50 +2176,37 @@ CUpDownClient* pUploadCtx = NULL;
 						bAlreadyConnecting = false;
 					}
 
-					// If already connecting with uTP socket, only register peer expectation - don't restart connection
-					if (bAlreadyConnecting && bAlreadyHaveUtp) {
+					// If already connecting with NAT-T socket, only register peer expectation. Do not restart connection.
+					if (bAlreadyConnecting && bAlreadyHaveNatLayer) {
 						if (thePrefs.GetLogNatTraversalEvents())
-							DebugLog(_T("[NatTraversal] HOLEPUNCH: Client already connecting with uTP, adding peer expectation only for %s"), (LPCTSTR)EscPercent(pCand->DbgGetClientInfo()));
-						CUtpSocket* utp = pCand->socket->GetUtpLayer();
-						SOCKADDR_IN6 sa = { 0 }; int salen = sizeof(sa);
-						CAddress a = ip; a.Convert(CAddress::IPv6);
-						a.ToSA((SOCKADDR*)&sa, &salen, port);
-						utp->ExpectPeer((SOCKADDR*)&sa, salen);
+							DebugLog(_T("[NatTraversal] HOLEPUNCH: Client already connecting with NAT-T, adding peer expectation only for %s"), (LPCTSTR)EscPercent(pCand->DbgGetClientInfo()));
+						ExpectNatEndpoint(pCand->socket, ip, port);
 						// Queue deferred attempt in case current one fails
 						pCand->QueueDeferredNatConnect(ip, port);
 					} else if (bWeAreUploader) {
 						// Uploader side: DON'T initiate outgoing connection, only register peer expectation if socket exists
 						if (thePrefs.GetLogNatTraversalEvents())
-							DebugLog(_T("[NatTraversal] HOLEPUNCH: Uploader side, awaiting incoming uTP connection from %s"), (LPCTSTR)EscPercent(pCand->DbgGetClientInfo()));
+							DebugLog(_T("[NatTraversal] HOLEPUNCH: Uploader side, awaiting incoming NAT-T connection from %s"), (LPCTSTR)EscPercent(pCand->DbgGetClientInfo()));
 						// DO NOT call MarkNatTRendezvous for uploader
 						// It triggers DoNatTRetry timer which calls TryToConnect, causing race conditions
 						// Register peer expectation if socket already exists (from Rendezvous processing)
-						if (pCand->socket && pCand->socket->HaveUtpLayer()) {
-							CUtpSocket* utp = pCand->socket->GetUtpLayer();
-							SOCKADDR_IN6 sa = { 0 }; int salen = sizeof(sa);
-							CAddress a = ip; a.Convert(CAddress::IPv6);
-							a.ToSA((SOCKADDR*)&sa, &salen, port);
-							utp->ExpectPeer((SOCKADDR*)&sa, salen);
-						}
+						if (pCand->socket && pCand->socket->HaveNatTraversalLayer())
+							ExpectNatEndpoint(pCand->socket, ip, port);
 						// DON'T call QueueDeferredNatConnect for uploader - it would trigger TryToConnect in DoNatTRetry
 					} else {
 						// Downloader side: initiate outgoing connection
 						if (thePrefs.GetLogNatTraversalEvents())
-							DebugLog(_T("[NatTraversal] HOLEPUNCH: Downloader side, initiating uTP connection for %s"), (LPCTSTR)EscPercent(pCand->DbgGetClientInfo()));
+							DebugLog(_T("[NatTraversal] HOLEPUNCH: Downloader side, initiating NAT-T connection for %s"), (LPCTSTR)EscPercent(pCand->DbgGetClientInfo()));
 						pCand->MarkNatTRendezvous(4);
+						pCand->QueueDeferredNatConnect(ip, port);
 						pCand->SetLastTriedToConnectTime();
 						pCand->TryToConnect(true, false, NULL, true);
-						// If uTP owner exists after connect attempt, add current sender as expected peer
-						if (pCand->socket && pCand->socket->HaveUtpLayer()) {
-							CUtpSocket* utp = pCand->socket->GetUtpLayer();
-							SOCKADDR_IN6 sa = { 0 }; int salen = sizeof(sa);
-							CAddress a = ip; a.Convert(CAddress::IPv6);
-							a.ToSA((SOCKADDR*)&sa, &salen, port);
-							utp->ExpectPeer((SOCKADDR*)&sa, salen);
-						} else if (thePrefs.GetLogNatTraversalEvents()) {
-							DebugLogWarning(_T("[NatTraversal] HOLEPUNCH: Missing uTP layer after connect for %s (socket=%p)"), (LPCTSTR)EscPercent(pCand->DbgGetClientInfo()), pCand->socket);
+						// If NAT-T owner exists after connect attempt, add current sender as expected peer
+						if (pCand->socket && pCand->socket->HaveNatTraversalLayer())
+							ExpectNatEndpoint(pCand->socket, ip, port);
+						else if (thePrefs.GetLogNatTraversalEvents()) {
+							DebugLogWarning(_T("[NatTraversal] HOLEPUNCH: Missing NAT-T layer after connect for %s (socket=%p)"), (LPCTSTR)EscPercent(pCand->DbgGetClientInfo()), pCand->socket);
 						}
-						pCand->QueueDeferredNatConnect(ip, port);
 					}
 				}
 		}
@@ -1791,7 +2410,7 @@ CUpDownClient* pUploadCtx = NULL;
 					theStats.AddUpDataOverheadFileRequest(response->size);
 					SendPacket(response, ip, port, sender->ShouldReceiveCryptUDPPackets(), sender->GetUserHash(), false, 0);
 				} else
-					DebugLogError(_T("Client UDP socket; ReaskFilePing; reqfile does not match.\nm_reqfile:         %s\nsender->GetRequestFile(): %s\n"), (LPCTSTR)DbgGetFileInfo(reqfile->GetFileHash()), sender->GetRequestFile() ? (LPCTSTR)DbgGetFileInfo(sender->GetRequestFile()->GetFileHash()) : _T("(null)"));
+					DebugLogError(_T("Client UDP socket; ReaskFilePing; reqfile does not match.\nm_reqfile:         %s\nsender->GetRequestFile(): %s\n"), (LPCTSTR)DbgGetFileInfo(reqfile->GetFileHash()), sender->GetRequestFile() ? (LPCTSTR)DbgGetFileInfo(sender->GetRequestFile()->GetFileHash()) : (LPCTSTR)_T("(null)"));
 			} else {
 				if (thePrefs.GetDebugClientUDPLevel() > 0)
 					DebugRecv("OP_ReaskFilePing", NULL, reqfilehash, ip);
@@ -1900,7 +2519,7 @@ CUpDownClient* pUploadCtx = NULL;
 							sender->SetUDPPort(port);
 							sender->SetKadPort(port);
 							
-							// Set IP and ConnectIP for uTP connection
+							// Set IP and ConnectIP for NAT-T connection
 							sender->SetIP(addr);
 							sender->SetConnectIP(addr);
 							
@@ -1952,8 +2571,28 @@ CUpDownClient* pUploadCtx = NULL;
 			
 			if (sender && (sender->UDPPacketPending() || bEphemeral)) {
 				CSafeMemFile data_in(packet, size);
-				if (sender->GetUDPVersion() > 3)
-					sender->ProcessFileStatus(true, data_in, sender->GetRequestFile());
+				if (sender->GetUDPVersion() > 3) {
+					CPartFile *pReqFile = sender->GetRequestFile();
+					const ULONGLONG uFileStatusPosition = data_in.GetPosition();
+					uint16 nED2KPartCount = 0;
+					if (data_in.GetLength() - data_in.GetPosition() >= sizeof(uint16)) {
+						nED2KPartCount = data_in.ReadUInt16();
+						data_in.Seek(static_cast<LONGLONG>(uFileStatusPosition), CFile::begin);
+
+						const bool bQueueFileStatus = pReqFile != NULL && pReqFile->GetStatus() != PS_COMPLETE && pReqFile->GetStatus() != PS_COMPLETING && (nED2KPartCount == 0 || pReqFile->GetED2KPartCount() == nED2KPartCount);
+						if (bQueueFileStatus && !theApp.QueueDownloadFileStatusNetworkCommand(sender, pReqFile, packet, size, uFileStatusPosition, true))
+							theApp.QueueNetworkParserFailureEvent(CemuleApp::NetworkParseClientUdp, _T("udp-file-status-queue-failed"), ::GetLastError());
+
+						data_in.Seek(static_cast<LONGLONG>(uFileStatusPosition + sizeof(uint16)), CFile::begin);
+						if (nED2KPartCount > 0)
+							data_in.Seek(static_cast<LONGLONG>((static_cast<ULONGLONG>(nED2KPartCount) + 7ull) / 8ull), CFile::current);
+					}
+				}
+
+				if (data_in.GetLength() - data_in.GetPosition() < sizeof(uint16)) {
+					theApp.QueueNetworkParserFailureEvent(CemuleApp::NetworkParseClientUdp, _T("udp-reaskack-rank-truncated"), ERROR_INVALID_DATA);
+					break;
+				}
 
 				uint16 nRank = data_in.ReadUInt16();
 				
@@ -1965,23 +2604,23 @@ CUpDownClient* pUploadCtx = NULL;
 				sender->IncrementAskedCountDown();
 				
 				// For ephemeral REASKACK in NAT-T rendezvous scenario
-				// The hole punch/rendezvous is complete - now ensure uTP connection is initiated
+				// The hole punch/rendezvous is complete - now ensure NAT-T connection is initiated
 				if (bEphemeral && sender->GetDownloadState() != DS_DOWNLOADING && sender->GetDownloadState() != DS_CONNECTED) {
-					// Check if client is already connecting with uTP socket
-					// The HOLEPUNCH exchange has already initiated the uTP connection and added peer expectation
+					// Check if client is already connecting with NAT-T socket
+					// The HOLEPUNCH exchange has already initiated the NAT-T connection and added peer expectation
 					// We should NOT call TryToConnect again as it will delete the existing socket and break the connection
-					if (sender->socket && sender->socket->HaveUtpLayer()) {
-						// Already connecting with uTP - rendezvous complete, just wait for handshake
+					if (sender->socket && sender->socket->HaveNatTraversalLayer()) {
+						// Already connecting with NAT-T, just wait for handshake
 						if (thePrefs.GetLogNatTraversalEvents())
-							DebugLog(_T("[NatTraversal] Ephemeral REASKACK: Already connecting with uTP socket, rendezvous complete for %s"), (LPCTSTR)sender->DbgGetClientInfo());
-						// Do NOT call TryToConnect - it would delete the existing uTP socket!
+							DebugLog(_T("[NatTraversal] Ephemeral REASKACK: Already connecting with NAT-T socket, rendezvous complete for %s"), (LPCTSTR)sender->DbgGetClientInfo());
+						// Do NOT call TryToConnect - it would delete the existing NAT-T socket!
 					} else {
-						// No uTP socket yet - initiate fresh uTP connection
+						// No NAT-T socket yet - initiate fresh NAT-T connection
 						if (thePrefs.GetLogNatTraversalEvents())
-							DebugLog(_T("[NatTraversal] Ephemeral REASKACK: Rendezvous complete, calling TryToConnect with uTP for %s"), (LPCTSTR)sender->DbgGetClientInfo());
+							DebugLog(_T("[NatTraversal] Ephemeral REASKACK: Rendezvous complete, calling TryToConnect with NAT-T for %s"), (LPCTSTR)sender->DbgGetClientInfo());
 						
-						// Call TryToConnect with bUseUTP=true to initiate uTP connection directly
-						// TryToConnect handles all socket management, uTP initialization, etc.
+						// Call TryToConnect with bUseUTP=true to initiate NAT-T connection directly
+						// TryToConnect handles all socket management, NAT-T initialization, etc.
 						if (!sender->TryToConnect(false, false, NULL, true)) {
 							// Client was deleted by TryToConnect
 							if (thePrefs.GetLogNatTraversalEvents())
@@ -2054,7 +2693,7 @@ default:
 		theStats.AddDownDataOverheadOther(size);
 		if (thePrefs.GetDebugClientUDPLevel() > 0) {
 			CUpDownClient *sender = theApp.downloadqueue->GetDownloadClientByIP_UDP(ip, port, true);
-			Debug(_T("Unknown client UDP packet: host=%s:%u (%s) opcode=0x%02x  size=%u\n"), (LPCTSTR)ipstr(ip), port, sender ? (LPCTSTR)sender->DbgGetClientInfo() : EMPTY, opcode, size);
+			Debug(_T("Unknown client UDP packet: host=%s:%u (%s) opcode=0x%02x  size=%u\n"), (LPCTSTR)ipstr(ip), port, sender ? (LPCTSTR)sender->DbgGetClientInfo() : (LPCTSTR)EMPTY, opcode, size);
 		}
 		return false;
 	}
@@ -2081,6 +2720,7 @@ SocketSentBytes CClientUDPSocket::SendControlData(uint32 maxNumberOfBytesToSend,
 {
 // NOTE: *** This function is invoked from a *different* thread!
 	uint32 sentBytes = 0;
+	uint32 sentBytesForDatarate = 0;
 	DWORD curTick;
 
 	sendLocker.Lock();
@@ -2088,6 +2728,7 @@ SocketSentBytes CClientUDPSocket::SendControlData(uint32 maxNumberOfBytesToSend,
 	while (!controlpacket_queue.IsEmpty() && !IsBusy() && sentBytes < maxNumberOfBytesToSend) { // ZZ:UploadBandWithThrottler (UDP)
 		UDPPack *cur_packet = controlpacket_queue.RemoveHead();
 		if (curTick < cur_packet->dwTime + UDPMAXQUEUETIME) {
+			const uint8 uPacketOpcode = cur_packet->packet->opcode;
 			int nLen = (int)cur_packet->packet->size + 2;
 			int iLen = cur_packet->bEncrypt && ((cur_packet->IP.GetType() == CAddress::IPv6 ? !theApp.GetPublicIPv6().IsNull() : theApp.GetPublicIPv4() != 0) || cur_packet->bKad)
 				? EncryptOverheadSize(cur_packet->bKad) : 0;
@@ -2101,6 +2742,8 @@ SocketSentBytes CClientUDPSocket::SendControlData(uint32 maxNumberOfBytesToSend,
 			iLen = SendTo(sendbuffer, nLen, cur_packet->IP, cur_packet->nPort);
 			if (iLen >= 0) {
 				sentBytes += iLen; // ZZ:UploadBandWithThrottler (UDP)
+				if (cur_packet->packet->prot != OP_UDPRESERVEDPROT2 || (uPacketOpcode != OP_NATT_FRAME_UTP && uPacketOpcode != OP_NATT_FRAME_QUIC))
+					sentBytesForDatarate += static_cast<uint32>(iLen);
 				delete cur_packet->packet;
 				delete cur_packet;
 			} else {
@@ -2120,19 +2763,48 @@ SocketSentBytes CClientUDPSocket::SendControlData(uint32 maxNumberOfBytesToSend,
 
 	sendLocker.Unlock();
 
-	return SocketSentBytes{ 0, sentBytes, true };
+	SocketSentBytes returnStatus = { 0, sentBytes, true };
+	returnStatus.SetSentBytesForDatarate(sentBytesForDatarate);
+	return returnStatus;
 }
 
 int CClientUDPSocket::SendTo(uchar *lpBuf, int nBufLen, CAddress IP, uint16 nPort)
 {
 	// NOTE: *** This function is invoked from a *different* thread!
 	//Currently called only locally; sendLocker must be locked by the caller
-	CAddress dwIP = IP;
-	dwIP.Convert(CAddress::IPv6);
-	SOCKADDR_IN6 sockAddr = { 0 };
+	if (theApp.IsNetworkActivityBlockedByBind())
+		return 0;
+
+	if (m_hSocket == INVALID_SOCKET || m_nSocketFamily == AF_UNSPEC) {
+		if (thePrefs.GetVerbose())
+			DebugLogError(_T("Error: Client UDP socket, cannot send data to %s:%u because the socket is not open"), (LPCTSTR)ipstr(IP), nPort);
+		return 0;
+	}
+
+	CAddress sendIP = IP;
+	sockaddr_storage sockAddr = {};
 	int iSockAddrLen = sizeof(sockAddr);
-	dwIP.ToSA((SOCKADDR*)&sockAddr, &iSockAddrLen, nPort);
-	int result = CAsyncSocket::SendTo(lpBuf, nBufLen, (SOCKADDR*)&sockAddr, sizeof sockAddr);
+	if (m_nSocketFamily == AF_INET) {
+		if (!sendIP.Convert(CAddress::IPv4)) {
+			if (thePrefs.GetVerbose())
+				DebugLogError(_T("Error: Client UDP socket, cannot send IPv6 data to %s:%u through an IPv4-bound socket"), (LPCTSTR)ipstr(IP), nPort);
+			return 0;
+		}
+	}
+	else {
+		if (m_bSocketIPv6Only && sendIP.GetType() == CAddress::IPv4) {
+			if (thePrefs.GetVerbose())
+				DebugLogError(_T("Error: Client UDP socket, cannot send IPv4 data to %s:%u through an IPv6-only socket"), (LPCTSTR)ipstr(IP), nPort);
+			return 0;
+		}
+		if (!sendIP.Convert(CAddress::IPv6)) {
+			if (thePrefs.GetVerbose())
+				DebugLogError(_T("Error: Client UDP socket, cannot send data to %s:%u because the destination address family is incompatible"), (LPCTSTR)ipstr(IP), nPort);
+			return 0;
+		}
+	}
+	sendIP.ToSA(reinterpret_cast<sockaddr*>(&sockAddr), &iSockAddrLen, nPort);
+	int result = CAsyncSocket::SendTo(lpBuf, nBufLen, reinterpret_cast<sockaddr*>(&sockAddr), iSockAddrLen);
 
 	if (result == SOCKET_ERROR) {
 		DWORD dwError = (DWORD)CAsyncSocket::GetLastError();
@@ -2141,7 +2813,7 @@ int CClientUDPSocket::SendTo(uchar *lpBuf, int nBufLen, CAddress IP, uint16 nPor
 			return -1; //blocked
 		}
 		if (thePrefs.GetVerbose())
-			DebugLogError(_T("Error: Client UDP socket, failed to send data to %s:%u: %s"), (LPCTSTR)ipstr(dwIP), nPort, (LPCTSTR)EscPercent(GetErrorMessage(dwError, 1)));
+			DebugLogError(_T("Error: Client UDP socket, failed to send data to %s:%u: %s"), (LPCTSTR)ipstr(sendIP), nPort, (LPCTSTR)EscPercent(GetErrorMessage(dwError, 1)));
 		return 0; //error
 	}
 	return result; //success
@@ -2149,6 +2821,11 @@ int CClientUDPSocket::SendTo(uchar *lpBuf, int nBufLen, CAddress IP, uint16 nPor
 
 bool CClientUDPSocket::SendPacket(Packet *packet, const CAddress& IP, uint16 nPort, bool bEncrypt, const uchar *pachTargetClientHashORKadID, bool bKad, uint32 nReceiverVerifyKey)
 {
+	if (theApp.IsNetworkActivityBlockedByBind()) {
+		delete packet;
+		return false;
+	}
+
 	UDPPack *newpending = new UDPPack;
 	newpending->IP = IP;
 	newpending->nPort = nPort;
@@ -2175,42 +2852,304 @@ bool CClientUDPSocket::SendPacket(Packet *packet, const CAddress& IP, uint16 nPo
 	return true;
 }
 
-bool CClientUDPSocket::Create()
+static bool GetResolvedClientUDPBindAddr(CStringA& rstrBindAddr)
 {
-	if (thePrefs.GetUDPPort()) {
-		CAsyncSocket::Socket(SOCK_DGRAM, FD_READ | FD_WRITE, 0, PF_INET6);
-
-		int iOptVal = 0; // Enable this socket to accept IPv4 and IPv6 packets at the same time
-		CAsyncSocket::SetSockOpt(IPV6_V6ONLY, &iOptVal, sizeof iOptVal, IPPROTO_IPV6);
-
-		sockaddr_in6 us = { 0 };
-		memset(&us, 0, sizeof(us));
-		us.sin6_family = AF_INET6;
-		us.sin6_port = htons(thePrefs.GetUDPPort());
-		us.sin6_flowinfo = NULL;
-
-		// Convert the IPv6 address to the sin6_addr structure
-		struct sockaddr_storage ss;
-		int sslen = sizeof(ss);
-		if (thePrefs.GetBindAddrA() != NULL && WSAStringToAddressA((char*)thePrefs.GetBindAddrA(), AF_INET6, NULL, (struct sockaddr*)&ss, &sslen) == 0)
-			us.sin6_addr = ((struct sockaddr_in6*)&ss)->sin6_addr;
-		else
-			us.sin6_addr = in6addr_any;
-
-		if (CAsyncSocket::Bind((const SOCKADDR*)&us, sizeof(us)) != FALSE) {
-			m_port = thePrefs.GetUDPPort();
-			// the default socket size seems to be insufficient for this UDP socket
-			// because we tend to drop packets if several arrived at the same time
-			int val = 65536; //64*1024
-			if (!CAsyncSocket::SetSockOpt(SO_RCVBUF, &val, sizeof val))
-				DebugLogError(_T("Failed to increase socket size on UDP socket"));
-		}
-	} else
-		m_port = 0;
+	rstrBindAddr.Empty();
+	if (thePrefs.HasExplicitBindSelection()) {
+		thePrefs.RefreshBindResolution();
+		if (thePrefs.GetActiveBindResolveResult() != NBR_Resolved || thePrefs.GetP2PBindAddrA() == NULL)
+			return false;
+	}
+	if (thePrefs.GetP2PBindAddrA() != NULL)
+		rstrBindAddr = thePrefs.GetP2PBindAddrA();
 	return true;
 }
 
-bool CClientUDPSocket::Rebind()
+struct SClientUDPEndpoint
+{
+	sockaddr_storage m_Address;
+	int m_iAddressLen;
+	ADDRESS_FAMILY m_nFamily;
+	sockaddr_in6 m_NormalizedAddress;
+};
+
+static void BuildMappedIPv4ClientUDPEndpoint(const sockaddr_in& addr4, sockaddr_in6& normalizedEndpoint)
+{
+	memset(&normalizedEndpoint, 0, sizeof(normalizedEndpoint));
+	normalizedEndpoint.sin6_family = AF_INET6;
+	normalizedEndpoint.sin6_port = addr4.sin_port;
+	normalizedEndpoint.sin6_addr.s6_addr[10] = 0xFF;
+	normalizedEndpoint.sin6_addr.s6_addr[11] = 0xFF;
+	memcpy(&normalizedEndpoint.sin6_addr.s6_addr[12], &addr4.sin_addr, sizeof(addr4.sin_addr));
+}
+
+static bool BuildClientUDPEndpoint(const CStringA& rstrBindAddr, uint16 nPort, SClientUDPEndpoint& endpoint)
+{
+	memset(&endpoint, 0, sizeof(endpoint));
+	endpoint.m_nFamily = AF_UNSPEC;
+
+	if (rstrBindAddr.IsEmpty()) {
+		sockaddr_in6 addr6 = {};
+		addr6.sin6_family = AF_INET6;
+		addr6.sin6_port = htons(nPort);
+		addr6.sin6_addr = in6addr_any;
+		memcpy(&endpoint.m_Address, &addr6, sizeof(addr6));
+		endpoint.m_iAddressLen = sizeof(addr6);
+		endpoint.m_nFamily = AF_INET6;
+		endpoint.m_NormalizedAddress = addr6;
+		return true;
+	}
+
+	LPSTR pszBindAddr = const_cast<LPSTR>((LPCSTR)rstrBindAddr);
+	sockaddr_in addr4 = {};
+	int iAddr4Len = sizeof(addr4);
+	if (WSAStringToAddressA(pszBindAddr, AF_INET, NULL, reinterpret_cast<sockaddr*>(&addr4), &iAddr4Len) == 0) {
+		addr4.sin_family = AF_INET;
+		addr4.sin_port = htons(nPort);
+		memcpy(&endpoint.m_Address, &addr4, sizeof(addr4));
+		endpoint.m_iAddressLen = sizeof(addr4);
+		endpoint.m_nFamily = AF_INET;
+		BuildMappedIPv4ClientUDPEndpoint(addr4, endpoint.m_NormalizedAddress);
+		return true;
+	}
+
+	sockaddr_in6 addr6 = {};
+	int iAddr6Len = sizeof(addr6);
+	if (WSAStringToAddressA(pszBindAddr, AF_INET6, NULL, reinterpret_cast<sockaddr*>(&addr6), &iAddr6Len) == 0) {
+		addr6.sin6_family = AF_INET6;
+		addr6.sin6_port = htons(nPort);
+		memcpy(&endpoint.m_Address, &addr6, sizeof(addr6));
+		endpoint.m_iAddressLen = sizeof(addr6);
+		endpoint.m_nFamily = AF_INET6;
+		endpoint.m_NormalizedAddress = addr6;
+		return true;
+	}
+
+	return false;
+}
+
+static bool GetCurrentClientUDPEndpoint(CAsyncSocket& socket, sockaddr_in6& endpoint)
+{
+	sockaddr_storage ss = {};
+	int sslen = sizeof(ss);
+	if (!socket.GetSockName(reinterpret_cast<sockaddr*>(&ss), &sslen))
+		return false;
+
+	memset(&endpoint, 0, sizeof(endpoint));
+	endpoint.sin6_family = AF_INET6;
+	if (ss.ss_family == AF_INET6) {
+		const sockaddr_in6* pAddr6 = reinterpret_cast<const sockaddr_in6*>(&ss);
+		endpoint.sin6_addr = pAddr6->sin6_addr;
+		endpoint.sin6_port = pAddr6->sin6_port;
+		return true;
+	}
+	if (ss.ss_family == AF_INET) {
+		const sockaddr_in* pAddr4 = reinterpret_cast<const sockaddr_in*>(&ss);
+		BuildMappedIPv4ClientUDPEndpoint(*pAddr4, endpoint);
+		return true;
+	}
+	return false;
+}
+
+static bool IsAnyClientUDPEndpointAddress(const sockaddr_in6& endpoint)
+{
+	return memcmp(&endpoint.sin6_addr, &in6addr_any, sizeof(endpoint.sin6_addr)) == 0;
+}
+
+static bool IsSameClientUDPEndpoint(const sockaddr_in6& left, const sockaddr_in6& right)
+{
+	return left.sin6_port == right.sin6_port && memcmp(&left.sin6_addr, &right.sin6_addr, sizeof(left.sin6_addr)) == 0;
+}
+
+static bool CanProbeClientUDPEndpoint(const sockaddr_in6& currentEndpoint, const sockaddr_in6& targetEndpoint)
+{
+	if (currentEndpoint.sin6_port != targetEndpoint.sin6_port)
+		return true;
+	if (IsSameClientUDPEndpoint(currentEndpoint, targetEndpoint))
+		return true;
+	return !IsAnyClientUDPEndpointAddress(currentEndpoint) && !IsAnyClientUDPEndpointAddress(targetEndpoint);
+}
+
+static bool CreateClientUDPSocketHandle(CAsyncSocket& socket, uint16& rnCreatedPort, ADDRESS_FAMILY& rnCreatedFamily, bool& rbCreatedIPv6Only, bool bAllowRandomPortRetry)
+{
+	rnCreatedPort = 0;
+	rnCreatedFamily = AF_UNSPEC;
+	rbCreatedIPv6Only = false;
+	if (theApp.IsNetworkSocketCreationBlockedByBind()) {
+		WSASetLastError(WSAENETDOWN);
+		return false;
+	}
+	if (!thePrefs.GetUDPPort())
+		return true;
+
+	CStringA strBindAddr;
+	if (!GetResolvedClientUDPBindAddr(strBindAddr))
+		return false;
+
+	const uint16 nInitialPort = thePrefs.GetUDPPort();
+	bool bRetriedRandomPort = false;
+	const bool bCanRetryRandomPort = bAllowRandomPortRetry && (thePrefs.IsPortRandomizationOnStartupEnabled() || thePrefs.IsConfiguredUDPPortAutoGenerated());
+	for (int iAttempt = 0; iAttempt < 8; ++iAttempt) {
+		SClientUDPEndpoint endpoint;
+		if (!BuildClientUDPEndpoint(strBindAddr, thePrefs.GetUDPPort(), endpoint)) {
+			thePrefs.udpport = nInitialPort;
+			return false;
+		}
+
+		if (!socket.Socket(SOCK_DGRAM, FD_READ | FD_WRITE, 0, endpoint.m_nFamily)) {
+			const int nSocketError = WSAGetLastError();
+			DebugLogError(_T("Client UDP socket create failed: port=%u, tcpPort=%u, configured=%u, randomize=%u, autoGenerated=%u, bind=\"%hs\", family=%d, blocked=%u, error=%d (%s)"),
+				thePrefs.GetUDPPort(),
+				thePrefs.GetPort(),
+				thePrefs.GetConfiguredUDPPort(),
+				thePrefs.IsPortRandomizationOnStartupEnabled() ? 1 : 0,
+				thePrefs.IsConfiguredUDPPortAutoGenerated() ? 1 : 0,
+				strBindAddr.GetString(),
+				static_cast<int>(endpoint.m_nFamily),
+				theApp.IsNetworkSocketCreationBlockedByBind() ? 1 : 0,
+				nSocketError,
+				(LPCTSTR)EscPercent(GetErrorMessage(nSocketError, 1)));
+			thePrefs.udpport = nInitialPort;
+			return false;
+		}
+
+		if (endpoint.m_nFamily == AF_INET6) {
+			int iOptVal = strBindAddr.IsEmpty() ? 0 : 1; // Keep default bind dual-stack, but do not leak IPv4 traffic from explicit IPv6 binds.
+			if (!socket.SetSockOpt(IPV6_V6ONLY, &iOptVal, sizeof iOptVal, IPPROTO_IPV6)) {
+				socket.Close();
+				thePrefs.udpport = nInitialPort;
+				return false;
+			}
+		}
+
+		if (socket.Bind(reinterpret_cast<const SOCKADDR*>(&endpoint.m_Address), endpoint.m_iAddressLen) != FALSE) {
+			if (thePrefs.IsIpGuardEnabled() && thePrefs.GetActiveBindResolveResult() == NBR_Resolved) {
+				const CAddress::EAF eBindFamily = thePrefs.GetActiveBindResolvedFamily();
+				if ((eBindFamily == CAddress::IPv4 && endpoint.m_nFamily != AF_INET) || (eBindFamily == CAddress::IPv6 && endpoint.m_nFamily != AF_INET6)) {
+					DebugLogError(_T("IP Guard bind enforcement: refusing client UDP socket because bound address family does not match socket family (interface=%s)"), (LPCTSTR)thePrefs.GetActiveBindInterfaceName());
+					socket.Close();
+					thePrefs.udpport = nInitialPort;
+					WSASetLastError(WSAEAFNOSUPPORT);
+					return false;
+				}
+				int nBindInterfaceError = 0;
+				bool bInterfaceApplied = true;
+				if (endpoint.m_nFamily == AF_INET)
+					bInterfaceApplied = CNetBind::ApplyIpv4UnicastInterfaceOption((SOCKET)socket, AF_INET, true, true, thePrefs.GetActiveBindIpv4IfIndex(), &nBindInterfaceError);
+				else if (endpoint.m_nFamily == AF_INET6)
+					bInterfaceApplied = CNetBind::ApplyIpv6UnicastInterfaceOption((SOCKET)socket, AF_INET6, true, true, thePrefs.GetActiveBindIpv6IfIndex(), &nBindInterfaceError);
+				if (!bInterfaceApplied) {
+					DebugLogError(_T("IP Guard bind enforcement failed: unicast interface could not be applied to client UDP socket (interface=%s, family=%d, error=%d)"),
+						(LPCTSTR)thePrefs.GetActiveBindInterfaceName(),
+						static_cast<int>(endpoint.m_nFamily),
+						nBindInterfaceError);
+					socket.Close();
+					thePrefs.udpport = nInitialPort;
+					WSASetLastError(nBindInterfaceError);
+					return false;
+				}
+			}
+			rnCreatedPort = thePrefs.GetUDPPort();
+			rnCreatedFamily = endpoint.m_nFamily;
+			rbCreatedIPv6Only = endpoint.m_nFamily == AF_INET6 && !strBindAddr.IsEmpty();
+			int val = 65536; //64*1024
+			if (!socket.SetSockOpt(SO_RCVBUF, &val, sizeof val))
+				DebugLogError(_T("Failed to increase socket size on UDP socket"));
+			if (!thePrefs.IsPortRandomizationOnStartupEnabled())
+				thePrefs.AcceptAutoGeneratedUDPPort(thePrefs.GetUDPPort());
+			if (bRetriedRandomPort && thePrefs.IsOpenListenPortsInWindowsFirewallEnabled())
+				theApp.EnsureWindowsFirewallListenPortRules(true);
+			return true;
+		}
+
+		const int nBindError = WSAGetLastError();
+		DebugLogError(_T("Client UDP socket bind failed: port=%u, tcpPort=%u, configured=%u, randomize=%u, autoGenerated=%u, bind=\"%hs\", family=%d, blocked=%u, error=%d (%s)"),
+			thePrefs.GetUDPPort(),
+			thePrefs.GetPort(),
+			thePrefs.GetConfiguredUDPPort(),
+			thePrefs.IsPortRandomizationOnStartupEnabled() ? 1 : 0,
+			thePrefs.IsConfiguredUDPPortAutoGenerated() ? 1 : 0,
+			strBindAddr.GetString(),
+			static_cast<int>(endpoint.m_nFamily),
+			theApp.IsNetworkSocketCreationBlockedByBind() ? 1 : 0,
+			nBindError,
+			(LPCTSTR)EscPercent(GetErrorMessage(nBindError, 1)));
+
+		socket.Close();
+		if (!bCanRetryRandomPort)
+			break;
+
+		const uint16 nOldPort = thePrefs.GetUDPPort();
+		uint16 nNewPort = nOldPort;
+		for (int iPortAttempt = 0; iPortAttempt < 8 && (nNewPort == nOldPort || nNewPort == thePrefs.GetPort()); ++iPortAttempt)
+			nNewPort = CPreferences::GetRandomUDPPort();
+		if (nNewPort == 0 || nNewPort == nOldPort || nNewPort == thePrefs.GetPort())
+			break;
+		thePrefs.udpport = nNewPort;
+		bRetriedRandomPort = true;
+	}
+
+	thePrefs.udpport = nInitialPort;
+	return false;
+}
+
+bool CClientUDPSocket::Create()
+{
+	uint16 nCreatedPort = 0;
+	ADDRESS_FAMILY nCreatedFamily = AF_UNSPEC;
+	bool bCreatedIPv6Only = false;
+	const bool bCreated = CreateClientUDPSocketHandle(*this, nCreatedPort, nCreatedFamily, bCreatedIPv6Only, true);
+	m_port = bCreated ? nCreatedPort : 0;
+	m_nSocketFamily = bCreated ? nCreatedFamily : AF_UNSPEC;
+	m_bSocketIPv6Only = bCreated && bCreatedIPv6Only;
+	return bCreated;
+}
+
+bool CClientUDPSocket::EnsureNatTraversalEndpointReady(LPCTSTR pszReason)
+{
+	if (IsNatTraversalEndpointReady())
+		return true;
+
+	if (thePrefs.GetUDPPort() == 0 || theApp.IsClosing() || theApp.IsNetworkSocketCreationBlockedByBind())
+		return false;
+
+	if (thePrefs.GetLogNatTraversalEvents())
+		DebugLogWarning(_T("[NatTraversal] Client UDP endpoint is not ready; attempting recreate before %s"), pszReason != NULL ? pszReason : _T("NAT-T"));
+
+	if (!Recreate()) {
+		if (thePrefs.GetLogNatTraversalEvents())
+			DebugLogWarning(_T("[NatTraversal] Client UDP endpoint recreate failed before %s"), pszReason != NULL ? pszReason : _T("NAT-T"));
+		return false;
+	}
+
+	return IsNatTraversalEndpointReady();
+}
+
+bool CClientUDPSocket::Recreate()
+{
+	CAsyncSocket::Close();
+	m_port = 0;
+	m_nSocketFamily = AF_UNSPEC;
+	m_bSocketIPv6Only = false;
+	uint16 nCreatedPort = 0;
+	ADDRESS_FAMILY nCreatedFamily = AF_UNSPEC;
+	bool bCreatedIPv6Only = false;
+	const bool bCreated = CreateClientUDPSocketHandle(*this, nCreatedPort, nCreatedFamily, bCreatedIPv6Only, false);
+	m_port = bCreated ? nCreatedPort : 0;
+	m_nSocketFamily = bCreated ? nCreatedFamily : AF_UNSPEC;
+	m_bSocketIPv6Only = bCreated && bCreatedIPv6Only;
+	return bCreated;
+}
+
+void CClientUDPSocket::CloseForIpGuardBlock()
+{
+	CAsyncSocket::Close();
+	m_port = 0;
+	m_nSocketFamily = AF_UNSPEC;
+	m_bSocketIPv6Only = false;
+}
+
+CClientUDPSocket::ERebindResult CClientUDPSocket::Rebind(bool bForce)
 {
 	DWORD now = ::GetTickCount();
 	uint32 curV4 = theApp.GetPublicIPv4();
@@ -2218,26 +3157,103 @@ bool CClientUDPSocket::Rebind()
 	bool bIPv4Changed = (curV4 != 0 && curV4 != m_dwLastRebindPublicIPv4);
 	bool bIPv6Changed = (!curV6.IsNull() && curV6 != m_LastRebindPublicIPv6);
 	bool bAnyIpChanged = bIPv4Changed || bIPv6Changed;
+	const bool bPortChanged = thePrefs.GetUDPPort() != m_port;
+	if (!bForce && bPortChanged && m_hSocket != INVALID_SOCKET && !thePrefs.CanApplyRuntimePortRebind())
+		return RebindRequiresRestart;
 
 	// Apply cooldown: only if the port is the same and the IP hasn't changed
-	if (!bAnyIpChanged && thePrefs.GetUDPPort() == m_port && now - m_dwLastRebindTick < UDPSOCKET_REBIND_COOLDOWN_MS)
-		return false; // No need to rebind yet
+	if (!bForce && !bAnyIpChanged && thePrefs.GetUDPPort() == m_port && now - m_dwLastRebindTick < UDPSOCKET_REBIND_COOLDOWN_MS)
+		return RebindNoChange; // No need to rebind yet
 
 	DWORD prevTick = m_dwLastRebindTick; // Keep previous for rollback if needed
 	m_dwLastRebindTick = now; // Tentatively set
 
-	CAsyncSocket::Close();
-	bool bOK = Create();
-	if (!bOK) {
-		// Rollback tick if failed so we can retry soon
-		m_dwLastRebindTick = prevTick;
-		return false;
+	if (!thePrefs.GetUDPPort()) {
+		CAsyncSocket::Close();
+		m_port = 0;
+		m_nSocketFamily = AF_UNSPEC;
+		m_bSocketIPv6Only = false;
+		m_dwLastRebindTick = now;
+		if (curV4 != 0)
+			m_dwLastRebindPublicIPv4 = curV4;
+		if (!curV6.IsNull())
+			m_LastRebindPublicIPv6 = curV6;
+		return RebindSucceeded;
 	}
 
-	// Update last successful IP snapshot (only on success)
+	CStringA strBindAddr;
+	if (!GetResolvedClientUDPBindAddr(strBindAddr)) {
+		m_dwLastRebindTick = prevTick;
+		return RebindFailedKeptOldSocket;
+	}
+
+	sockaddr_in6 currentEndpoint = {};
+	SClientUDPEndpoint targetEndpoint;
+	const bool bHaveCurrentEndpoint = m_hSocket != INVALID_SOCKET && GetCurrentClientUDPEndpoint(*this, currentEndpoint);
+	if (!BuildClientUDPEndpoint(strBindAddr, thePrefs.GetUDPPort(), targetEndpoint)) {
+		m_dwLastRebindTick = prevTick;
+		return RebindFailedKeptOldSocket;
+	}
+
+	if (theApp.serverconnect != NULL) {
+		const CServerConnect::EServerUDPRebindResult eServerUDPRebind = theApp.serverconnect->RebindServerUDPSocketIfRandomPortConflicts(thePrefs.GetUDPPort());
+		if (eServerUDPRebind == CServerConnect::ServerUDPRebindRequiresRestart || eServerUDPRebind == CServerConnect::ServerUDPRebindFailedKeptOldSocket) {
+			m_dwLastRebindTick = prevTick;
+			return RebindFailedKeptOldSocket;
+		}
+	}
+
+	if (bHaveCurrentEndpoint) {
+		if (IsSameClientUDPEndpoint(currentEndpoint, targetEndpoint.m_NormalizedAddress) && m_nSocketFamily == targetEndpoint.m_nFamily && m_bSocketIPv6Only == (targetEndpoint.m_nFamily == AF_INET6 && !strBindAddr.IsEmpty())) {
+			m_dwLastRebindTick = now;
+			if (curV4 != 0)
+				m_dwLastRebindPublicIPv4 = curV4;
+			if (!curV6.IsNull())
+				m_LastRebindPublicIPv6 = curV6;
+			return RebindNoChange;
+		}
+		if (!CanProbeClientUDPEndpoint(currentEndpoint, targetEndpoint.m_NormalizedAddress)) {
+			m_dwLastRebindTick = prevTick;
+			return RebindRequiresRestart;
+		}
+	}
+	else if (m_hSocket != INVALID_SOCKET && thePrefs.GetUDPPort() == m_port) {
+		m_dwLastRebindTick = prevTick;
+		return RebindRequiresRestart;
+	}
+
+	CAsyncSocket newSocket;
+	uint16 nCreatedPort = 0;
+	ADDRESS_FAMILY nCreatedFamily = AF_UNSPEC;
+	bool bCreatedIPv6Only = false;
+	if (!CreateClientUDPSocketHandle(newSocket, nCreatedPort, nCreatedFamily, bCreatedIPv6Only, false)) {
+		m_dwLastRebindTick = prevTick;
+		return RebindFailedKeptOldSocket;
+	}
+
+	SOCKET hNewSocket = newSocket.Detach();
+	SOCKET hOldSocket = CAsyncSocket::Detach();
+	const ADDRESS_FAMILY nOldSocketFamily = m_nSocketFamily;
+	const bool bOldSocketIPv6Only = m_bSocketIPv6Only;
+	if (!CAsyncSocket::Attach(hNewSocket, FD_READ | FD_WRITE)) {
+		VERIFY(closesocket(hNewSocket) != SOCKET_ERROR);
+		if (hOldSocket != INVALID_SOCKET)
+			VERIFY(CAsyncSocket::Attach(hOldSocket, FD_READ | FD_WRITE));
+		m_nSocketFamily = nOldSocketFamily;
+		m_bSocketIPv6Only = bOldSocketIPv6Only;
+		m_dwLastRebindTick = prevTick;
+		return RebindFailedKeptOldSocket;
+	}
+
+	if (hOldSocket != INVALID_SOCKET)
+		VERIFY(closesocket(hOldSocket) != SOCKET_ERROR);
+
+	m_port = nCreatedPort;
+	m_nSocketFamily = nCreatedFamily;
+	m_bSocketIPv6Only = bCreatedIPv6Only;
+	m_dwLastRebindTick = now;
 	if (curV4 != 0)
 		m_dwLastRebindPublicIPv4 = curV4;
-
 	if (!curV6.IsNull())
 		m_LastRebindPublicIPv6 = curV6;
 
@@ -2245,7 +3261,7 @@ bool CClientUDPSocket::Rebind()
 	if (Kademlia::CKademlia::IsRunning() && Kademlia::CKademlia::GetRoutingZone() && Kademlia::CKademlia::GetRoutingZone()->GetNumContacts() == 0)
 		Kademlia::CKademlia::Process(); // Immediate attempt
 
-	return true;
+	return RebindSucceeded;
 }
 
 void CClientUDPSocket::RegisterPendingCallback(const CAddress& receiverIP, uint16 receiverPort, const uchar* fileHash)
@@ -2312,16 +3328,13 @@ void CClientUDPSocket::ProcessUtpPacket(const BYTE* packet, int size, const stru
 	if (!m_pUtpContext || !packet || size <= 0 || !from) {
 		return;
 	}
-	CSingleLock runtimeLock(&CUtpSocket::GetRuntimeLock(), TRUE);
 
 	// Extract IP and port for logging
 	CAddress IP;
 	uint16 nPort = 0;
 	IP.FromSA(from, fromlen, &nPort);
 
-	if (thePrefs.GetLogNatTraversalEvents()) {
-		DebugLog(_T("[NatTraversal] ProcessUtpPacket: Received uTP packet from %s:%u, size=%d"), (LPCTSTR)ipstr(IP), (UINT)nPort, size);
-	}
+	CSingleLock runtimeLock(&CUtpSocket::GetRuntimeLock(), TRUE);
 
 	// Feed the packet to uTP context for processing
 	utp_process_udp(m_pUtpContext, packet, size, from, fromlen);
@@ -2396,11 +3409,29 @@ void CClientUDPSocket::ProcessUtpPacket(const BYTE* packet, int size, const stru
 						(LPCTSTR)ipstr(IP), (UINT)nPort, (LPCTSTR)EscPercent(pClient->DbgGetClientInfo()));
 				}
 			}
-			if (thePrefs.GetLogNatTraversalEvents()) {
-				LPCTSTR pathHint = bMatchedExpectation ? _T("expectation") : _T("resolved endpoint");
-				DebugLog(_T("[NatTraversal] ProcessUtpPacket: Observed inbound uTP frame via %s (type=%u size=%d), %s"),
-					pathHint, (unsigned)frameType, size, (LPCTSTR)EscPercent(pClient->DbgGetClientInfo()));
-			}
 		}
+	}
+}
+
+
+void CClientUDPSocket::ProcessQuicNatPacket(const BYTE* packet, int size, const struct sockaddr* from, socklen_t fromlen)
+{
+	if (!packet || size <= 0 || !from)
+		return;
+
+	if (!CQuicNatSocket::ProcessQuicPacket(packet, size, from, fromlen) && thePrefs.GetLogNatTraversalEvents()) {
+		static DWORD s_dwLastQuicIgnoredLog = 0;
+		static UINT s_uSuppressedQuicIgnoredLogs = 0;
+		const DWORD dwNow = ::GetTickCount();
+		if (s_dwLastQuicIgnoredLog == 0 || dwNow - s_dwLastQuicIgnoredLog >= SEC2MS(2)) {
+			CAddress IP;
+			uint16 nPort = 0;
+			IP.FromSA(from, fromlen, &nPort);
+			CString diag = CQuicNatSocket::GetRoutingDiagnostics(packet, size, from, fromlen);
+			DebugLog(_T("[NatTraversal][QUIC] Ignored frame from %s:%u; no matching QUIC NAT-T session (suppressed=%u) diag={%s}"), (LPCTSTR)ipstr(IP), (UINT)nPort, s_uSuppressedQuicIgnoredLogs, (LPCTSTR)diag);
+			s_dwLastQuicIgnoredLog = dwNow;
+			s_uSuppressedQuicIgnoredLogs = 0;
+		} else
+			++s_uSuppressedQuicIgnoredLogs;
 	}
 }

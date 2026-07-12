@@ -16,16 +16,19 @@
 //along with this program; if not, write to the Free Software
 //Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 #include "stdafx.h"
+#include "eMuleAI/QuicNatSocket.h"
 #include <atlimage.h>
 #include <sys/stat.h>
 #include <share.h>
 #include <io.h>
 #include <fcntl.h>
+#include <math.h>
 #include <regex>
 #include <ShlObj_core.h>
 #include "emule.h"
 #include "UpDownClient.h"
 #include "DownloadQueue.h"
+#include "ClientUDPSocket.h"
 #include "Preferences.h"
 #include "PartFile.h"
 #include "SharedFileList.h"
@@ -534,7 +537,7 @@ CString URLEncode(const CString &sInT)
 }
 
 CString EncodeURLWC(const CString& value) {
-	std::wstring in = value;
+	std::wstring in((LPCTSTR)value);
 	std::wostringstream escaped;
 	escaped.fill('0');
 	escaped << std::hex;
@@ -2079,18 +2082,31 @@ void DbgSetThreadName(LPCSTR szThreadName, ...)
 #pragma warning(push)
 #pragma warning(disable: 6320 6322)
 	__try {
-		va_list args;
-		va_start(args, szThreadName);
 		int lenBuf = 0;
 		char *buffer = NULL;
 		int lenResult;
-		do { // the VS debugger truncates the string to 31 characters anyway!
+		do { // the VS debugger truncates the legacy exception name to 31 characters.
 			lenBuf += 128;
 			delete[] buffer;
 			buffer = new char[lenBuf];
+			va_list args;
+			va_start(args, szThreadName);
 			lenResult = vsnprintf(buffer, lenBuf, szThreadName, args);
+			va_end(args);
 		} while (lenResult == -1);
-		va_end(args);
+
+		typedef HRESULT(WINAPI *SetThreadDescriptionFunc)(HANDLE, PCWSTR);
+		HMODULE hKernel32 = ::GetModuleHandle(_T("kernel32.dll"));
+		SetThreadDescriptionFunc pfnSetThreadDescription = hKernel32 != NULL ? reinterpret_cast<SetThreadDescriptionFunc>(::GetProcAddress(hKernel32, "SetThreadDescription")) : NULL;
+		if (pfnSetThreadDescription != NULL) {
+			WCHAR wszThreadName[256];
+			int iConverted = ::MultiByteToWideChar(CP_UTF8, 0, buffer, -1, wszThreadName, _countof(wszThreadName));
+			if (iConverted == 0)
+				iConverted = ::MultiByteToWideChar(CP_ACP, 0, buffer, -1, wszThreadName, _countof(wszThreadName));
+			if (iConverted > 0)
+				(void)pfnSetThreadDescription(::GetCurrentThread(), wszThreadName);
+		}
+
 		THREADNAME_INFO info;
 		info.dwType = 0x1000;
 		info.szName = buffer;
@@ -2105,6 +2121,41 @@ void DbgSetThreadName(LPCSTR szThreadName, ...)
 	}
 #pragma warning(pop)
 }
+void DbgSetThreadNameByHandle(HANDLE hThread, LPCSTR szThreadName, ...)
+{
+	if (hThread == NULL || szThreadName == NULL)
+		return;
+
+	__try {
+		int lenBuf = 0;
+		char *buffer = NULL;
+		int lenResult;
+		do {
+			lenBuf += 128;
+			delete[] buffer;
+			buffer = new char[lenBuf];
+			va_list args;
+			va_start(args, szThreadName);
+			lenResult = vsnprintf(buffer, lenBuf, szThreadName, args);
+			va_end(args);
+		} while (lenResult == -1);
+
+		typedef HRESULT(WINAPI *SetThreadDescriptionFunc)(HANDLE, PCWSTR);
+		HMODULE hKernel32 = ::GetModuleHandle(_T("kernel32.dll"));
+		SetThreadDescriptionFunc pfnSetThreadDescription = hKernel32 != NULL ? reinterpret_cast<SetThreadDescriptionFunc>(::GetProcAddress(hKernel32, "SetThreadDescription")) : NULL;
+		if (pfnSetThreadDescription != NULL) {
+			WCHAR wszThreadName[256];
+			int iConverted = ::MultiByteToWideChar(CP_UTF8, 0, buffer, -1, wszThreadName, _countof(wszThreadName));
+			if (iConverted == 0)
+				iConverted = ::MultiByteToWideChar(CP_ACP, 0, buffer, -1, wszThreadName, _countof(wszThreadName));
+			if (iConverted > 0)
+				(void)pfnSetThreadDescription(hThread, wszThreadName);
+		}
+		delete[] buffer;
+	} __except (EXCEPTION_CONTINUE_EXECUTION) {
+	}
+}
+
 
 CString RemoveFileExtension(const CString &rstrFilePath)
 {
@@ -2179,8 +2230,10 @@ CString GetFormatedUInt(ULONG ulVal)
 		nf.LeadingZero = 0;
 		nf.Grouping = 3;
 		// we are hardcoding the following two format chars intentionally because the C-RTL also has the decimal sep hardcoded to '.'
-		nf.lpDecimalSep = _T(".");
-		nf.lpThousandSep = _T(",");
+		static TCHAR szDecimalSep[] = _T(".");
+			nf.lpDecimalSep = szDecimalSep;
+		static TCHAR szThousandSep[] = _T(",");
+			nf.lpThousandSep = szThousandSep;
 		nf.NegativeOrder = 0;
 	}
 	CString strVal;
@@ -2201,8 +2254,10 @@ CString GetFormatedUInt64(ULONGLONG ullVal)
 		nf.LeadingZero = 0;
 		nf.Grouping = 3;
 		// we are hardcoding the following two format chars intentionally because the C-RTL also has the decimal sep hardcoded to '.'
-		nf.lpDecimalSep = _T(".");
-		nf.lpThousandSep = _T(",");
+		static TCHAR szDecimalSep[] = _T(".");
+			nf.lpDecimalSep = szDecimalSep;
+		static TCHAR szThousandSep[] = _T(",");
+			nf.lpThousandSep = szThousandSep;
 		nf.NegativeOrder = 0;
 	}
 	const int iBuffSize = _countof(szVal) * 2;
@@ -2368,7 +2423,7 @@ CString DbgGetBlockInfo(uint64 StartOffset, uint64 EndOffset)
 	if (so == eo)
 		strInfo.AppendFormat(_T(", Block %I64u"), so);
 	else
-		strInfo.AppendFormat(_T(", Block %I64u-%I64u%s"), so, eo, (eo - so > 1) ? _T("(**)") : EMPTY);
+		strInfo.AppendFormat(_T(", Block %I64u-%I64u%s"), so, eo, (eo - so > 1) ? (LPCTSTR)_T("(**)") : (LPCTSTR)EMPTY);
 
 	return strInfo;
 }
@@ -2677,14 +2732,14 @@ ULONGLONG GetDiskFileSize(LPCTSTR pszFilePath)
 bool HasNodesDatContacts()
 {
 	const CString strNodesDatPath = thePrefs.GetMuleDirectory(EMULE_CONFIGDIR) + _T("nodes.dat");
-	if (!::PathFileExists(strNodesDatPath))
+	if (!PathFileExistsLongPath(strNodesDatPath))
 		return false;
 
 	if (GetDiskFileSize(strNodesDatPath) == 0)
 		return false;
 
 	CSafeBufferedFile file;
-	if (!file.Open(strNodesDatPath, CFile::modeRead | CFile::osSequentialScan | CFile::typeBinary | CFile::shareDenyWrite, NULL))
+	if (!file.Open(PreparePathForWin32LongPath(strNodesDatPath), CFile::modeRead | CFile::osSequentialScan | CFile::typeBinary | CFile::shareDenyWrite, NULL))
 		return false;
 
 	try {
@@ -3213,7 +3268,7 @@ void InstallSkin(LPCTSTR pszSkinPackage)
 						CString strDstDirPath(thePrefs.GetMuleDirectory(EMULE_SKINDIR));
 						strDstDirPath += zf->m_sName.Left(zf->m_sName.GetLength() - 1);
 						canonical(strDstDirPath);
-						if (!::CreateDirectory(strDstDirPath, NULL)) {
+						if (!DirectoryExistsLongPath(strDstDirPath) && !::CreateDirectory(PrepareDirectoryPathForWin32LongPath(strDstDirPath), NULL)) {
 							DWORD dwError = ::GetLastError();
 							CString strError;
 							strError.Format(GetResString(_T("INSTALL_SKIN_DIR_ERROR")), (LPCTSTR)strDstDirPath, (LPCTSTR)GetErrorMessage(dwError));
@@ -3918,6 +3973,41 @@ CString GetFileTypeName(EFileType ftype)
 	return CString(_T('?'));
 }
 
+bool GetFileNameWithDetectedExtension(const CString &strFileName, EFileType ftype, CString &strNewFileName, CString *pstrNewExtension)
+{
+	CString strNewExtension(GetFileTypeName(ftype));
+	if (strNewExtension == _T("?") || strNewExtension.IsEmpty())
+		return false;
+	if (strNewExtension == _T("MPEG Audio"))
+		strNewExtension = _T("mp3");
+	else if (strNewExtension == _T("ISO/NRG"))
+		strNewExtension = _T("iso");
+	else if (strNewExtension == _T("MPEG Video"))
+		strNewExtension = _T("mpg");
+	else if (strNewExtension == _T("Microsoft Media Audio/Video"))
+		strNewExtension = _T("wm");
+	else if (strNewExtension == _T("WIN/DOS EXE"))
+		strNewExtension = _T("exe");
+	else
+		strNewExtension.MakeLower();
+
+	LPCTSTR pDot = ::PathFindExtension(strFileName);
+	CString strExt(pDot + static_cast<int>(*pDot != _T('\0')));
+	strExt.MakeUpper();
+	if (IsExtensionTypeOf(ftype, strExt) == 1)
+		return false;
+
+	CString strBaseFileName(strFileName);
+	if (!strExt.IsEmpty() && strExt.GetLength() < 5) {
+		::PathRemoveExtension(strBaseFileName.GetBuffer(strBaseFileName.GetLength()));
+		strBaseFileName.ReleaseBuffer();
+	}
+	strNewFileName.Format(_T("%s.%s"), (LPCTSTR)strBaseFileName, (LPCTSTR)strNewExtension);
+	if (pstrNewExtension != NULL)
+		*pstrNewExtension = strNewExtension;
+	return true;
+}
+
 bool ExtensionIs(LPCTSTR pszFilePath, LPCTSTR pszExt)
 {
 	return _tcsicmp(::PathFindExtension(pszFilePath), pszExt) == 0;
@@ -4026,7 +4116,9 @@ bool DirAccsess(const CString &strDir)
 uint8 GetMyConnectOptions(bool bEncryption, bool bCallback)
 {
 	// Connect options Tag
-	// 4 Reserved (!)
+	// 1 legacy uTP NAT-T supported
+	// 1 QUIC NAT-T supported
+	// 2 Reserved (!)
 	// 1 Direct Callback
 	// 1 CryptLayer Required
 	// 1 CryptLayer Requested
@@ -4034,11 +4126,17 @@ uint8 GetMyConnectOptions(bool bEncryption, bool bCallback)
 	const uint8 uSupportsCryptLayer = static_cast<uint8>(thePrefs.IsCryptLayerEnabled() && bEncryption);
 	const uint8 uRequestsCryptLayer = static_cast<uint8>(thePrefs.IsCryptLayerPreferred() && bEncryption);
 	const uint8 uRequiresCryptLayer = static_cast<uint8>(thePrefs.IsCryptLayerRequired() && bEncryption);
+	const bool bNatEndpointReady = theApp.clientudp != NULL && theApp.clientudp->IsNatTraversalEndpointReady();
 	// direct callback is only possible if connected to kad, TCP firewalled and verified UDP open (for example on a full cone NAT)
-	const uint8 uDirectUDPCallback = static_cast<uint8>(bCallback && theApp.IsFirewalled() && Kademlia::CKademlia::IsRunning() && !Kademlia::CUDPFirewallTester::IsFirewalledUDP(true) && Kademlia::CUDPFirewallTester::IsVerified());
-
-	const uint8 uSupportsNatTraversal = (bCallback && thePrefs.IsNatTraversalServiceEnabled()) ? 1 : 0;
-	const uint8 byCryptOptions = (uSupportsNatTraversal << 7) | (uDirectUDPCallback << 3) | (uRequiresCryptLayer << 2) | (uRequestsCryptLayer << 1) | (uSupportsCryptLayer << 0);
+	const uint8 uDirectUDPCallback = static_cast<uint8>(bCallback && bNatEndpointReady && theApp.IsFirewalled() && Kademlia::CKademlia::IsRunning() && !Kademlia::CUDPFirewallTester::IsFirewalledUDP(true) && Kademlia::CUDPFirewallTester::IsVerified());
+	const uint8 uSupportsNatTraversalUtp = (bCallback && bNatEndpointReady && thePrefs.IsNatTraversalServiceEnabled() && thePrefs.IsNatTraversalUtpAllowed()) ? 1 : 0;
+	const uint8 uSupportsNatTraversalQuic = ((bCallback && bNatEndpointReady && thePrefs.IsNatTraversalServiceEnabled() && thePrefs.IsNatTraversalQuicAllowed() && CQuicNatSocket::IsRuntimeAvailable()) ? 1 : 0);
+	const uint8 byCryptOptions = (uSupportsNatTraversalUtp ? CONNECT_OPT_NAT_TRAVERSAL_UTP : 0)
+		| (uSupportsNatTraversalQuic ? CONNECT_OPT_NAT_TRAVERSAL_QUIC : 0)
+		| (uDirectUDPCallback ? CONNECT_OPT_DIRECT_UDP_CALLBACK : 0)
+		| (uRequiresCryptLayer ? CONNECT_OPT_CRYPT_REQUIRED : 0)
+		| (uRequestsCryptLayer ? CONNECT_OPT_CRYPT_REQUESTED : 0)
+		| (uSupportsCryptLayer ? CONNECT_OPT_CRYPT_SUPPORTED : 0);
 	return byCryptOptions;
 }
 
@@ -4249,57 +4347,59 @@ const bool IsNumber(const std::wstring& s)
 	return !s.empty() && std::find_if(s.begin(), s.end(), [](unsigned char c) { return !std::isdigit(c); }) == s.end();
 }
 
+static wchar_t GetTagCloseChar(wchar_t chOpen)
+{
+	switch (chOpen) {
+		case L'(': return L')';
+		case L'[': return L']';
+		case L'{': return L'}';
+		case L'<': return L'>';
+	}
+	return 0;
+}
+
 // Function to remove the tags from a given string
 const CString RemoveTags(const CString inputString, const bool dontRemoveNumericOnlyTags)
 {
-	std::wstring str = inputString;
+	std::wstring str((LPCTSTR)inputString);
+	std::wstring strOutput;
+	strOutput.reserve(str.length());
 
-	// This declares a lambda, which can be called just like a function
-	auto ProcessTags = [](std::wregex pattern, std::wstring in)
-	{
-		std::wstring m_strOutput = in;
-		auto words_begin = std::wsregex_iterator(in.begin(), in.end(), pattern);
-		auto words_end = std::wsregex_iterator();
-		for (std::wsregex_iterator i = words_begin; i != words_end; ++i)	{
-			std::wsmatch m_strMatch = *i;
-			std::wstring m_strReplacement = m_strMatch.str();
-			m_strReplacement.erase(m_strReplacement.begin()); //Remove first char which opens tag
-			m_strReplacement.pop_back(); //Remove last char which closes tag
-			if (IsNumber(m_strReplacement)) // If remaining part is a number we'll keep it
-				m_strOutput.replace(m_strOutput.find(m_strMatch.str()), m_strMatch.length(), m_strReplacement);
+	for (size_t i = 0; i < str.length(); ++i) {
+		const wchar_t chClose = GetTagCloseChar(str[i]);
+		if (chClose == 0) {
+			strOutput.push_back(str[i]);
+			continue;
 		}
-		return m_strOutput;
-	};
 
-	if (dontRemoveNumericOnlyTags && str.find('(') != std::wstring::npos && str.find(')') != std::wstring::npos) // Process only if the string includes the tag 
-		str = ProcessTags(std::wregex(_T("\\((\\d+)\\)")), str);
+		const size_t uClose = str.find(chClose, i + 1);
+		if (uClose == std::wstring::npos) {
+			strOutput.push_back(str[i]);
+			continue;
+		}
 
-	if (dontRemoveNumericOnlyTags && str.find('[') != std::wstring::npos && str.find(']') != std::wstring::npos) // Process only if the string includes the tag
-		str = ProcessTags(std::wregex(_T("\\[(\\d+)\\]")), str);
+		if (dontRemoveNumericOnlyTags) {
+			const std::wstring strTagValue = str.substr(i + 1, uClose - i - 1);
+			if (IsNumber(strTagValue))
+				strOutput.append(strTagValue);
+		}
+		i = uClose;
+	}
 
-	if (dontRemoveNumericOnlyTags && str.find('{') != std::wstring::npos && str.find('}') != std::wstring::npos) // Process only if the string includes the tag
-		str = ProcessTags(std::wregex(_T("\\{(\\d+)\\}")), str);
-
-	if (dontRemoveNumericOnlyTags && str.find('<') != std::wstring::npos && str.find('>') != std::wstring::npos) // Process only if the string includes the tag
-		str = ProcessTags(std::wregex(_T("\\<(\\d+)\\>")), str);
-
-	// Use regex_replace function in regex to erase every tags enclosed in () [] {} <>
-	str = std::regex_replace(str, std::wregex(_T("\\(.*?\\)|\\[.*?\\]|\\{.*?\\}|\\<.*?\\>")), _T(""));
-
-	return str.c_str();
+	return strOutput.c_str();
 }
 
 // Function to remove non-alphanumric characters from a given string
 const CString RemoveNonAlphaNumeric(const CString in)
 {
-	std::wstring str = in;
+	std::wstring str((LPCTSTR)in);
 	str.erase(remove_if(str.begin(), str.end(), [](wchar_t c) { return !iswalnum(c); }), str.end());
 	return str.c_str();
 }
 
 const CString ReplaceNonAlphaNumeric(const CString in)
 {
-	std::wstring str = in;
+	std::wstring str((LPCTSTR)in);
 	replace_if(str.begin(), str.end(), [](wchar_t c) { return !iswalnum(c); }, ' ');
 	return str.c_str();
 }
@@ -4615,6 +4715,163 @@ bool IsWin32LongPathsEnabled()
 	return g_bWin32LongPathsEnabled;
 }
 
+
+static const int g_iAnimatedRainbowPhaseCycle = 1536;
+
+static UINT NormalizeAnimatedRainbowPhase(int iPhase)
+{
+	iPhase %= g_iAnimatedRainbowPhaseCycle;
+	if (iPhase < 0)
+		iPhase += g_iAnimatedRainbowPhaseCycle;
+	return static_cast<UINT>(iPhase);
+}
+
+COLORREF GetAnimatedRainbowBorderColor(UINT uPhase)
+{
+	const UINT uStep = uPhase % g_iAnimatedRainbowPhaseCycle;
+	const UINT uRegion = uStep / 256;
+	const UINT uOffset = uStep % 256;
+	BYTE r = 0;
+	BYTE g = 0;
+	BYTE b = 0;
+
+	switch (uRegion) {
+	case 0: r = 255; g = static_cast<BYTE>(uOffset); b = 0; break;
+	case 1: r = static_cast<BYTE>(255 - uOffset); g = 255; b = 0; break;
+	case 2: r = 0; g = 255; b = static_cast<BYTE>(uOffset); break;
+	case 3: r = 0; g = static_cast<BYTE>(255 - uOffset); b = 255; break;
+	case 4: r = static_cast<BYTE>(uOffset); g = 0; b = 255; break;
+	default: r = 255; g = 0; b = static_cast<BYTE>(255 - uOffset); break;
+	}
+	return RGB(r, g, b);
+}
+
+static COLORREF GetClockwiseRainbowBorderColor(UINT uAnimationPhase, int iDistance, int iPerimeter, int iRainbowCycles, UINT uLineHueOffset)
+{
+	if (iPerimeter <= 0 || iRainbowCycles <= 0)
+		return GetAnimatedRainbowBorderColor(uAnimationPhase);
+
+	const int iWrappedDistance = iDistance % iPerimeter;
+	const int iSpatialPhase = MulDiv(iWrappedDistance, g_iAnimatedRainbowPhaseCycle * iRainbowCycles, iPerimeter);
+	const int iAnimatedPhase = iSpatialPhase + static_cast<int>(uLineHueOffset % g_iAnimatedRainbowPhaseCycle) - static_cast<int>(uAnimationPhase % g_iAnimatedRainbowPhaseCycle);
+	return GetAnimatedRainbowBorderColor(NormalizeAnimatedRainbowPhase(iAnimatedPhase));
+}
+
+static int RoundAnimatedRainbowBorderCoordinate(double dValue)
+{
+	return dValue >= 0.0 ? static_cast<int>(dValue + 0.5) : static_cast<int>(dValue - 0.5);
+}
+
+static CPoint GetClockwiseRainbowBorderArcPoint(int iCenterX, int iCenterY, int iRadius, double dDegrees)
+{
+	const double dPi = 3.14159265358979323846;
+	const double dRadians = dDegrees * dPi / 180.0;
+	return CPoint(iCenterX + RoundAnimatedRainbowBorderCoordinate(cos(dRadians) * iRadius), iCenterY + RoundAnimatedRainbowBorderCoordinate(sin(dRadians) * iRadius));
+}
+
+static void DrawClockwiseRainbowBorderLine(CDC* pDC, int iStartX, int iStartY, int iDeltaX, int iDeltaY, int iLength, int iDistanceStart, int iPerimeter, int iRainbowCycles, UINT uAnimationPhase, UINT uLineHueOffset)
+{
+	if (pDC == NULL || iLength <= 0)
+		return;
+
+	const int iSegmentLength = 8;
+	for (int iPos = 0; iPos < iLength; ) {
+		const int iLineLength = min(iSegmentLength, iLength - iPos);
+		const int iSampleDistance = iDistanceStart + iPos + iLineLength / 2;
+		CPen pen(PS_SOLID, 1, GetClockwiseRainbowBorderColor(uAnimationPhase, iSampleDistance, iPerimeter, iRainbowCycles, uLineHueOffset));
+		CPen* pOldPen = pDC->SelectObject(&pen);
+		pDC->MoveTo(iStartX + iDeltaX * iPos, iStartY + iDeltaY * iPos);
+		pDC->LineTo(iStartX + iDeltaX * (iPos + iLineLength), iStartY + iDeltaY * (iPos + iLineLength));
+		pDC->SelectObject(pOldPen);
+		iPos += iLineLength;
+	}
+}
+
+static void DrawClockwiseRainbowBorderArc(CDC* pDC, int iCenterX, int iCenterY, int iRadius, int iStartDegrees, int iSweepDegrees, int iArcLength, int iDistanceStart, int iPerimeter, int iRainbowCycles, UINT uAnimationPhase, UINT uLineHueOffset)
+{
+	if (pDC == NULL || iRadius <= 0 || iArcLength <= 0)
+		return;
+
+	const int iSteps = max(1, iArcLength * 2);
+	CPoint pointPrev = GetClockwiseRainbowBorderArcPoint(iCenterX, iCenterY, iRadius, static_cast<double>(iStartDegrees));
+	pDC->SetPixelV(pointPrev.x, pointPrev.y, GetClockwiseRainbowBorderColor(uAnimationPhase, iDistanceStart, iPerimeter, iRainbowCycles, uLineHueOffset));
+
+	for (int iStep = 1; iStep <= iSteps; ++iStep) {
+		const int iSampleDistance = iDistanceStart + MulDiv(iArcLength, iStep * 2 - 1, iSteps * 2);
+		const double dDegrees = static_cast<double>(iStartDegrees) + static_cast<double>(iSweepDegrees) * static_cast<double>(iStep) / static_cast<double>(iSteps);
+		const CPoint point = GetClockwiseRainbowBorderArcPoint(iCenterX, iCenterY, iRadius, dDegrees);
+		const COLORREF crLine = GetClockwiseRainbowBorderColor(uAnimationPhase, iSampleDistance, iPerimeter, iRainbowCycles, uLineHueOffset);
+		CPen pen(PS_SOLID, 1, crLine);
+		CPen* pOldPen = pDC->SelectObject(&pen);
+		pDC->MoveTo(pointPrev.x, pointPrev.y);
+		pDC->LineTo(point.x, point.y);
+		pDC->SetPixelV(point.x, point.y, crLine);
+		pDC->SelectObject(pOldPen);
+		pointPrev = point;
+	}
+}
+
+void DrawAnimatedRainbowBorder(CDC* pDC, const CRect& rcBorder, UINT uAnimationPhase, int iThickness, int iCornerDiameter)
+{
+	if (pDC == NULL || rcBorder.Width() <= 0 || rcBorder.Height() <= 0 || iThickness <= 0)
+		return;
+
+	int iMaxThickness = iThickness;
+	const int iHalfWidth = rcBorder.Width() / 2;
+	const int iHalfHeight = rcBorder.Height() / 2;
+	if (iMaxThickness > iHalfWidth)
+		iMaxThickness = iHalfWidth;
+	if (iMaxThickness > iHalfHeight)
+		iMaxThickness = iHalfHeight;
+	if (iMaxThickness <= 0)
+		return;
+
+	const int iTargetRainbowLength = 360;
+	const int iMinRainbowCycles = 3;
+	const int iMaxRainbowCycles = 7;
+	const UINT uInnerLineHueOffset = 96;
+	const int iCornerRadius = max(0, iCornerDiameter / 2);
+
+	for (int i = 0; i < iMaxThickness; ++i) {
+		const int iLeft = rcBorder.left + i;
+		const int iTop = rcBorder.top + i;
+		const int iRight = rcBorder.right - 1 - i;
+		const int iBottom = rcBorder.bottom - 1 - i;
+		if (iLeft > iRight || iTop > iBottom)
+			break;
+
+		const int iWidth = iRight - iLeft + 1;
+		const int iHeight = iBottom - iTop + 1;
+		const int iRadius = max(0, min(iCornerRadius - i, min(iWidth / 2, iHeight / 2)));
+		const int iHorizontalLength = max(0, iWidth - iRadius * 2);
+		const int iVerticalLength = max(0, iHeight - iRadius * 2);
+		const int iArcLength = iRadius > 0 ? max(1, MulDiv(iRadius, 157, 100)) : 0;
+		const int iPerimeter = iHorizontalLength * 2 + iVerticalLength * 2 + iArcLength * 4;
+		if (iPerimeter <= 0)
+			continue;
+
+		const int iRainbowCycles = max(iMinRainbowCycles, min(iMaxRainbowCycles, (iPerimeter + iTargetRainbowLength - 1) / iTargetRainbowLength));
+		const UINT uLineHueOffset = static_cast<UINT>(i) * uInnerLineHueOffset;
+		int iDistance = 0;
+
+		DrawClockwiseRainbowBorderLine(pDC, iLeft + iRadius, iTop, 1, 0, iHorizontalLength, iDistance, iPerimeter, iRainbowCycles, uAnimationPhase, uLineHueOffset);
+		iDistance += iHorizontalLength;
+		DrawClockwiseRainbowBorderArc(pDC, iRight - iRadius, iTop + iRadius, iRadius, -90, 90, iArcLength, iDistance, iPerimeter, iRainbowCycles, uAnimationPhase, uLineHueOffset);
+		iDistance += iArcLength;
+		DrawClockwiseRainbowBorderLine(pDC, iRight, iTop + iRadius, 0, 1, iVerticalLength, iDistance, iPerimeter, iRainbowCycles, uAnimationPhase, uLineHueOffset);
+		iDistance += iVerticalLength;
+		DrawClockwiseRainbowBorderArc(pDC, iRight - iRadius, iBottom - iRadius, iRadius, 0, 90, iArcLength, iDistance, iPerimeter, iRainbowCycles, uAnimationPhase, uLineHueOffset);
+		iDistance += iArcLength;
+		DrawClockwiseRainbowBorderLine(pDC, iRight - iRadius, iBottom, -1, 0, iHorizontalLength, iDistance, iPerimeter, iRainbowCycles, uAnimationPhase, uLineHueOffset);
+		iDistance += iHorizontalLength;
+		DrawClockwiseRainbowBorderArc(pDC, iLeft + iRadius, iBottom - iRadius, iRadius, 90, 90, iArcLength, iDistance, iPerimeter, iRainbowCycles, uAnimationPhase, uLineHueOffset);
+		iDistance += iArcLength;
+		DrawClockwiseRainbowBorderLine(pDC, iLeft, iBottom - iRadius, 0, -1, iVerticalLength, iDistance, iPerimeter, iRainbowCycles, uAnimationPhase, uLineHueOffset);
+		iDistance += iVerticalLength;
+		DrawClockwiseRainbowBorderArc(pDC, iLeft + iRadius, iTop + iRadius, iRadius, 180, 90, iArcLength, iDistance, iPerimeter, iRainbowCycles, uAnimationPhase, uLineHueOffset);
+	}
+}
+
 void DetectWin32LongPathsSupportAtStartup()
 {
 	// Detect HKLM\SYSTEM\CurrentControlSet\Control\FileSystem\LongPathsEnabled once at startup.
@@ -4631,28 +4888,79 @@ void DetectWin32LongPathsSupportAtStartup()
 	TRACE(_T("Win32 long paths support: %s\n"), g_bWin32LongPathsEnabled ? _T("enabled") : _T("disabled"));
 }
 
+static bool IsExtendedLengthPath(const CString& path)
+{
+	return path.Left(4).CompareNoCase(_T("\\\\?\\")) == 0;
+}
+
+static bool IsDeviceNamespacePath(const CString& path)
+{
+	return path.Left(4).CompareNoCase(_T("\\\\.\\")) == 0;
+}
+
+static bool IsDriveRootedAbsolutePath(const CString& path)
+{
+	return path.GetLength() >= 3 && _istalpha(path.GetAt(0)) && path.GetAt(1) == _T(':') && path.GetAt(2) == _T('\\');
+}
+
+static bool IsUncAbsolutePath(const CString& path)
+{
+	return path.Left(2) == _T("\\\\") && !IsDeviceNamespacePath(path) && !IsExtendedLengthPath(path);
+}
+
+static CString PreparePathForWin32LongPathWithLimit(const CString& path, int nMaxPathLimit)
+{
+	if (path.IsEmpty())
+		return path;
+
+	if (IsExtendedLengthPath(path) || IsDeviceNamespacePath(path))
+		return path;
+
+	const bool bDrivePath = IsDriveRootedAbsolutePath(path);
+	const bool bUncPath = IsUncAbsolutePath(path);
+	if (!bDrivePath && !bUncPath)
+		return path;
+
+	const bool bNeedPrefix = g_bWin32LongPathsEnabled || path.GetLength() >= nMaxPathLimit;
+	if (!bNeedPrefix)
+		return path;
+
+	if (bUncPath)
+		return _T("\\\\?\\UNC\\") + path.Mid(2);
+
+	return _T("\\\\?\\") + path;
+}
+
 CString PreparePathForWin32LongPath(const CString& path)
 {
-    // Always handle empty early.
-    if (path.IsEmpty())
-        return path;
+	return PreparePathForWin32LongPathWithLimit(path, MAX_PATH);
+}
 
-    // Already prefixed
-    if (path.Left(4).CompareNoCase(_T("\\\\?\\")) == 0)
-        return path;
+CString PrepareDirectoryPathForWin32LongPath(const CString& path)
+{
+	// CreateDirectory has a legacy MAX_PATH - 12 limit.
+	return PreparePathForWin32LongPathWithLimit(path, MAX_PATH - 12);
+}
 
-    // If OS-wide long path policy is enabled, always use long-prefix for stability.
-    // Otherwise, add the prefix only for overlong paths to bypass MAX_PATH limitations.
-    const bool needPrefix = g_bWin32LongPathsEnabled || path.GetLength() >= MAX_PATH;
-    if (!needPrefix)
-        return path;
+bool PathFileExistsLongPath(const CString& path)
+{
+	return ::GetFileAttributes(PreparePathForWin32LongPath(path)) != INVALID_FILE_ATTRIBUTES;
+}
 
-    // UNC path (\\server\share\...)
-    if (path.Left(2) == _T("\\\\"))
-        return _T("\\\\?\\UNC\\") + path.Mid(2);
+bool DirectoryExistsLongPath(const CString& path)
+{
+	const DWORD dwAttributes = ::GetFileAttributes(PrepareDirectoryPathForWin32LongPath(path));
+	return dwAttributes != INVALID_FILE_ATTRIBUTES && (dwAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+}
 
-    // Drive path (C:\...)
-    return _T("\\\\?\\") + path;
+bool DeleteFileLongPath(const CString& path)
+{
+	return ::DeleteFile(PreparePathForWin32LongPath(path)) != FALSE;
+}
+
+bool MoveFileExLongPath(const CString& strExistingFileName, const CString& strNewFileName, DWORD dwFlags)
+{
+	return ::MoveFileEx(PreparePathForWin32LongPath(strExistingFileName), PreparePathForWin32LongPath(strNewFileName), dwFlags) != FALSE;
 }
 
 // Long-path aware fopen replacement for read-only shared access.

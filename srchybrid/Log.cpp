@@ -1,4 +1,4 @@
-//This file is part of eMule AI
+﻿//This file is part of eMule AI
 //Copyright (C)2002-2026 Merkur ( strEmail.Format("%s@%s", "devteam", "emule-project.net") / https://www.emule-project.net )
 //Copyright (C)2026 eMule AI
 //
@@ -31,6 +31,123 @@
 static char THIS_FILE[] = __FILE__;
 #endif
 
+
+
+static bool ContainsLogTokenNoCase(LPCTSTR pszLine, LPCTSTR pszToken)
+{
+	if (pszLine == NULL || pszToken == NULL || *pszToken == _T('\0'))
+		return false;
+
+	const int iTokenLen = static_cast<int>(_tcslen(pszToken));
+	for (LPCTSTR p = pszLine; *p != _T('\0'); ++p) {
+		if (_tcsnicmp(p, pszToken, iTokenLen) == 0)
+			return true;
+	}
+	return false;
+}
+
+bool IsNatTraversalDebugLog(LPCTSTR pszLine)
+{
+	return ContainsLogTokenNoCase(pszLine, _T("NatTraversal"))
+		|| ContainsLogTokenNoCase(pszLine, _T("NAT-T"))
+		|| ContainsLogTokenNoCase(pszLine, _T("NATTTESTMODE"));
+}
+
+bool IsUiResponsivenessDebugLog(LPCTSTR pszLine)
+{
+	static const LPCTSTR s_apszTokens[] = {
+		_T("TimeBudget"),
+		_T("Chunked "),
+		_T("chunked "),
+		_T("UI list event"),
+		_T("UI notification"),
+		_T("continuation"),
+		_T("Startup metadata"),
+		_T("Startup loading"),
+		_T("startup load"),
+		_T("startup scan"),
+		_T("Stored search"),
+		_T("stored search"),
+		_T("known files readiness"),
+		_T("Known files"),
+		_T("client history"),
+		_T("Worker topology"),
+		_T("Backend lifecycle"),
+		_T("backend owner lane"),
+		_T("owner violation"),
+		_T("owner lane"),
+		_T("AsyncDiskWrite"),
+		_T("queue pressure"),
+		_T("deferred AICH"),
+		_T("Deferred AICH"),
+		_T("AICHSyncThread deferred"),
+		_T("Shared files startup"),
+		_T("Shared files bulk"),
+		_T("Shared files file-system reload"),
+		_T("Search ingest"),
+		_T("search ingest"),
+		_T("Search packet parse"),
+		_T("search answer parse"),
+		_T("spam rating"),
+		_T("UI command bridge"),
+		_T("application event"),
+		_T("UI log backlog"),
+		_T("FlushQueuedUiLogLines"),
+		_T("heartbeat exceeded"),
+		_T("Disk cleanup"),
+		_T("download state command"),
+		_T("download remove command"),
+		_T("bulk add"),
+		_T("bulk command"),
+		_T("Persistence requested"),
+		_T("persistence save"),
+		_T("model mutation"),
+		_T("Backend command"),
+		_T("Backend download"),
+		_T("Download command"),
+		_T("network command"),
+		_T("Network parser"),
+		_T("Download link parse"),
+		_T("Chunked download"),
+		_T("Bulk download"),
+		_T("Transfer list update"),
+		_T("Kad search list update"),
+		_T("Shared files command"),
+		_T("Shared files search thread"),
+		_T("Import part queued"),
+		_T("Part file owner event"),
+		_T("Telemetry application event"),
+		_T("[Persistence]"),
+		_T("Persistence command"),
+		_T("Persistence worker"),
+		_T("Startup download"),
+		_T("Skipping staged startup"),
+		_T("Skipping startup"),
+		_T("part-file disk"),
+		_T("Part file write thread"),
+		_T("Download batch"),
+		_T("Download state"),
+		_T("Download remove"),
+		_T("Download process-link"),
+		_T("Search start command"),
+		_T("Search cancel command"),
+		_T("Search results changed"),
+		_T("Local ED2K search"),
+		_T("Collection import command"),
+		_T("Kad contact-list event"),
+		_T("Kad search-list event"),
+		_T("Kad search-graph event"),
+		_T("Kad UI status refresh"),
+		_T("Kad connection state"),
+		_T("Upload/client refresh")
+	};
+
+	for (int i = 0; i < _countof(s_apszTokens); ++i) {
+		if (ContainsLogTokenNoCase(pszLine, s_apszTokens[i]))
+			return true;
+	}
+	return false;
+}
 
 void LogV(UINT uFlags, LPCTSTR pszFmt, va_list argp)
 {
@@ -217,12 +334,27 @@ void AddLogTextV(UINT uFlags, EDebugLogPriority dlpPriority, LPCTSTR pszLine, va
 {
 	ASSERT(pszLine != NULL);
 
-	if (((uFlags & LOG_DEBUG) || (uFlags & LOG_LEECHER)) && !(thePrefs.GetVerbose() && dlpPriority >= thePrefs.GetVerboseLogPriority()))
+	const bool bIsDebugLog = (uFlags & LOG_DEBUG) != 0;
+	const bool bIsVerboseLog = bIsDebugLog || (uFlags & LOG_LEECHER) != 0;
+
+	if (bIsVerboseLog && !(thePrefs.GetVerbose() && dlpPriority >= thePrefs.GetVerboseLogPriority()))
 		return;
+
+	if (bIsDebugLog) {
+		if (IsNatTraversalDebugLog(pszLine) && !thePrefs.GetLogNatTraversalEvents())
+			return;
+		if (IsUiResponsivenessDebugLog(pszLine) && !thePrefs.GetLogUiResponsivenessEvents())
+			return;
+	}
 
 	TCHAR szLogLine[1000];
 	_vsntprintf(szLogLine, _countof(szLogLine), pszLine, argptr);
 	szLogLine[_countof(szLogLine) - 1] = _T('\0');
+	int iLogLineLen = static_cast<int>(_tcslen(szLogLine));
+	while (iLogLineLen > 0 && (szLogLine[iLogLineLen - 1] == _T('\r') || szLogLine[iLogLineLen - 1] == _T('\n')))
+		szLogLine[--iLogLineLen] = _T('\0');
+	if (iLogLineLen == 0)
+		return;
 
 	if (theApp.emuledlg)
 		theApp.emuledlg->AddLogText(uFlags, szLogLine);

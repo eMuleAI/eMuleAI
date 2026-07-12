@@ -1,4 +1,4 @@
-/*
+﻿/*
 This file is part of eMule AI
 
 Copyright (C)2003 Barry Dunne (https://www.emule-project.net)
@@ -108,11 +108,17 @@ namespace Kademlia
 		void SendFindValue(CContact *pContact, bool bReAskMore = false);
 		void PrepareToStop();
 		bool StorePacket(CContact* pContact); // netfinity: We might be interrested in other nodes than just the one on top of the possible list
+		CContact* GetMoreResultsContact(CUInt128 *puDistance) const;
+		bool CanRequestMoreResults() const;
+		bool RequestMoreResults();
+		bool TryRequestMoreResultsOnStall();
 		uint8 GetRequestContactCount() const;
+		uint8 GetExpectedResponseContactCount(uint32 uFromIP, uint16 uFromPort) const;
 
 		WordList m_listWords;
 		UIntList m_listFileIDs;
 		std::map<Kademlia::CUInt128, bool> m_mapResponded;
+		std::map<Kademlia::CUInt128, bool> m_mapRequestedMoreNodes;
 		ContactMap m_mapPossible;
 		ContactMap m_mapTried;
 		ContactMap m_mapBest;
@@ -123,10 +129,11 @@ namespace Kademlia
 		SSearchTerm *m_pSearchTerm; // cached from m_pucSearchTermsData, used for verifying results later on
 		CKadClientSearcher *pNodeSpecialSearchRequester; // used to callback on result for NODESPECIAL searches
 		CLookupHistory *m_pLookupHistory;
-		CContact *pRequestedMoreNodesContact;
 		LPBYTE m_pucSearchTermsData;
 		time_t m_uLastResponse;
 		time_t m_tCreated;
+		time_t m_tPolicyLifetime;
+		uint32 m_uPolicyTotalLimit;
 		// Keep track of well known contacts we might use for storing/searching 
 		ContactMap m_mapCandidates;
 		ContactMap m_mapReferer;

@@ -11,6 +11,27 @@ static char THIS_FILE[] = __FILE__;
 
 #define MAX_INI_BUFFER 256
 
+CCriticalSection& GetIniFileWriteLock()
+{
+	static CCriticalSection s_lock;
+	return s_lock;
+}
+
+namespace
+{
+	BOOL WritePrivateProfileStringWithLock(LPCTSTR lpszSection, LPCTSTR lpszEntry, LPCTSTR lpszValue, LPCTSTR lpszFileName)
+	{
+		CSingleLock lock(&GetIniFileWriteLock(), TRUE);
+		return WritePrivateProfileString(lpszSection, lpszEntry, lpszValue, lpszFileName);
+	}
+
+	BOOL WritePrivateProfileStringAWithLock(LPCSTR lpszSection, LPCSTR lpszEntry, LPCSTR lpszValue, LPCSTR lpszFileName)
+	{
+		CSingleLock lock(&GetIniFileWriteLock(), TRUE);
+		return WritePrivateProfileStringA(lpszSection, lpszEntry, lpszValue, lpszFileName);
+	}
+}
+
 void CIni::AddModulePath(CString &rstrFileName, bool bModulPath)
 {
 	TCHAR drive[_MAX_DRIVE];
@@ -115,7 +136,7 @@ CString CIni::GetString(LPCTSTR lpszEntry, LPCTSTR lpszDefault, LPCTSTR lpszSect
 {
 	if (lpszSection != NULL)
 		m_strSection = lpszSection;
-	return Read(m_strFileName, m_strSection, lpszEntry, lpszDefault == NULL ? EMPTY : lpszDefault);
+	return Read(m_strFileName, m_strSection, lpszEntry, lpszDefault == NULL ? (LPCTSTR)EMPTY : lpszDefault);
 }
 
 CString CIni::GetStringLong(LPCTSTR lpszEntry, LPCTSTR lpszDefault, LPCTSTR lpszSection)
@@ -127,7 +148,7 @@ CString CIni::GetStringLong(LPCTSTR lpszEntry, LPCTSTR lpszDefault, LPCTSTR lpsz
 
 	CString ret;
 	do {
-		GetPrivateProfileString(m_strSection, lpszEntry, (lpszDefault ? lpszDefault : EMPTY)
+		GetPrivateProfileString(m_strSection, lpszEntry, (lpszDefault ? lpszDefault : (LPCTSTR)EMPTY)
 			, ret.GetBuffer(maxstrlen), maxstrlen, m_strFileName);
 		ret.ReleaseBuffer();
 		if ((unsigned)ret.GetLength() < maxstrlen - 2)
@@ -251,14 +272,14 @@ void CIni::WriteString(LPCTSTR lpszEntry, LPCTSTR lpsz, LPCTSTR lpszSection)
 {
 	if (lpszSection != NULL)
 		m_strSection = lpszSection;
-	WritePrivateProfileString(m_strSection, lpszEntry, lpsz, m_strFileName);
+	WritePrivateProfileStringWithLock(m_strSection, lpszEntry, lpsz, m_strFileName);
 }
 
 void CIni::WriteStringUTF8(LPCTSTR lpszEntry, LPCTSTR lpsz, LPCTSTR lpszSection)
 {
 	if (lpszSection != NULL)
 		m_strSection = lpszSection;
-	WritePrivateProfileStringA((CStringA)m_strSection, CStringA(lpszEntry), StrToUtf8(CString(lpsz)), CStringA(m_strFileName));
+	WritePrivateProfileStringAWithLock((CStringA)m_strSection, CStringA(lpszEntry), StrToUtf8(CString(lpsz)), CStringA(m_strFileName));
 }
 
 void CIni::WriteDouble(LPCTSTR lpszEntry, double f, LPCTSTR lpszSection)
@@ -268,7 +289,7 @@ void CIni::WriteDouble(LPCTSTR lpszEntry, double f, LPCTSTR lpszSection)
 	TCHAR szBuffer[MAX_PATH];
 	_sntprintf(szBuffer, _countof(szBuffer), _T("%g"), f);
 	szBuffer[_countof(szBuffer) - 1] = _T('\0');
-	WritePrivateProfileString(m_strSection, lpszEntry, szBuffer, m_strFileName);
+	WritePrivateProfileStringWithLock(m_strSection, lpszEntry, szBuffer, m_strFileName);
 }
 
 void CIni::WriteFloat(LPCTSTR lpszEntry, float f, LPCTSTR lpszSection)
@@ -278,7 +299,7 @@ void CIni::WriteFloat(LPCTSTR lpszEntry, float f, LPCTSTR lpszSection)
 	TCHAR szBuffer[MAX_PATH];
 	_sntprintf(szBuffer, _countof(szBuffer), _T("%g"), f);
 	szBuffer[_countof(szBuffer) - 1] = _T('\0');
-	WritePrivateProfileString(m_strSection, lpszEntry, szBuffer, m_strFileName);
+	WritePrivateProfileStringWithLock(m_strSection, lpszEntry, szBuffer, m_strFileName);
 }
 
 void CIni::WriteInt(LPCTSTR lpszEntry, int n, LPCTSTR lpszSection)
@@ -287,7 +308,7 @@ void CIni::WriteInt(LPCTSTR lpszEntry, int n, LPCTSTR lpszSection)
 		m_strSection = lpszSection;
 	TCHAR szBuffer[MAX_PATH];
 	_itot(n, szBuffer, 10);
-	WritePrivateProfileString(m_strSection, lpszEntry, szBuffer, m_strFileName);
+	WritePrivateProfileStringWithLock(m_strSection, lpszEntry, szBuffer, m_strFileName);
 }
 
 void CIni::WriteUInt64(LPCTSTR lpszEntry, ULONGLONG n, LPCTSTR lpszSection)
@@ -296,7 +317,7 @@ void CIni::WriteUInt64(LPCTSTR lpszEntry, ULONGLONG n, LPCTSTR lpszSection)
 		m_strSection = lpszSection;
 	TCHAR szBuffer[MAX_PATH];
 	_ui64tot(n, szBuffer, 10);
-	WritePrivateProfileString(m_strSection, lpszEntry, szBuffer, m_strFileName);
+	WritePrivateProfileStringWithLock(m_strSection, lpszEntry, szBuffer, m_strFileName);
 }
 
 void CIni::WriteWORD(LPCTSTR lpszEntry, WORD n, LPCTSTR lpszSection)
@@ -305,7 +326,7 @@ void CIni::WriteWORD(LPCTSTR lpszEntry, WORD n, LPCTSTR lpszSection)
 		m_strSection = lpszSection;
 	TCHAR szBuffer[MAX_PATH];
 	_ultot(n, szBuffer, 10);
-	WritePrivateProfileString(m_strSection, lpszEntry, szBuffer, m_strFileName);
+	WritePrivateProfileStringWithLock(m_strSection, lpszEntry, szBuffer, m_strFileName);
 }
 
 void CIni::WriteBool(LPCTSTR lpszEntry, bool b, LPCTSTR lpszSection)
@@ -315,7 +336,7 @@ void CIni::WriteBool(LPCTSTR lpszEntry, bool b, LPCTSTR lpszSection)
 	TCHAR szBuffer[MAX_PATH];
 	_sntprintf(szBuffer, _countof(szBuffer), _T("%d"), (int)b);
 	szBuffer[_countof(szBuffer) - 1] = _T('\0');
-	WritePrivateProfileString(m_strSection, lpszEntry, szBuffer, m_strFileName);
+	WritePrivateProfileStringWithLock(m_strSection, lpszEntry, szBuffer, m_strFileName);
 }
 
 void CIni::WritePoint(LPCTSTR lpszEntry, const CPoint &pt, LPCTSTR lpszSection)
@@ -694,7 +715,7 @@ CString CIni::Read(LPCTSTR lpszFileName, LPCTSTR lpszSection, LPCTSTR lpszEntry,
 
 void CIni::Write(LPCTSTR lpszFileName, LPCTSTR lpszSection, LPCTSTR lpszEntry, LPCTSTR lpszValue)
 {
-	WritePrivateProfileString(lpszSection, lpszEntry, lpszValue	, lpszFileName);
+	WritePrivateProfileStringWithLock(lpszSection, lpszEntry, lpszValue	, lpszFileName);
 }
 
 bool CIni::GetBinary(LPCTSTR lpszEntry, BYTE **ppData, UINT *pBytes, LPCTSTR pszSection)
@@ -733,5 +754,5 @@ bool CIni::WriteBinary(LPCTSTR lpszEntry, LPBYTE pData, size_t nBytes, LPCTSTR l
 
 void CIni::DeleteKey(LPCTSTR lpszKey)
 {
-	WritePrivateProfileString(m_strSection, lpszKey, NULL, m_strFileName);
+	WritePrivateProfileStringWithLock(m_strSection, lpszKey, NULL, m_strFileName);
 }

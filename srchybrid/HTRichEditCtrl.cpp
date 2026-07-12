@@ -59,12 +59,16 @@ CHTRichEditCtrl::CHTRichEditCtrl()
 	, m_crForeground(CLR_DEFAULT)
 	, m_crDfltForeground(CLR_DEFAULT)
 	, m_iLimitText()
+	, m_iTypedLogHistoryChars()
 	, m_bAutoScroll(true)
 	, m_bEnableSmileys()
 	, m_bEnErrSpace()
 	, m_bForceArrowCursor()
 	, m_bNoPaint()
 	, m_bRestoreFormat()
+	, m_bAddingTypedLogLine()
+	, m_bTypedLogHistoryComplete(true)
+	, m_bReplayingTypedLogHistory()
 	, m_bDfltForeground()
 	, m_bDfltBackground()
 {
@@ -194,13 +198,29 @@ void CHTRichEditCtrl::OnSize(UINT nType, int cx, int cy)
 
 COLORREF GetLogLineColor(UINT eMsgType)
 {
+	COLORREF crStored = CLR_DEFAULT;
 	switch (eMsgType) {
 	case LOG_SUCCESS:
-		return thePrefs.m_crLogSuccess;
+		crStored = thePrefs.m_crLogSuccess;
+		if (IsDarkModeEnabled() && crStored == RGB(0, 0, 255))
+			return RGB(173, 216, 255);
+		if (!IsDarkModeEnabled() && crStored == RGB(173, 216, 255))
+			return RGB(0, 0, 255);
+		return crStored;
 	case LOG_ERROR:
-		return thePrefs.m_crLogError;
+		crStored = thePrefs.m_crLogError;
+		if (IsDarkModeEnabled() && crStored == RGB(255, 0, 0))
+			return RGB(255, 102, 102);
+		if (!IsDarkModeEnabled() && crStored == RGB(255, 102, 102))
+			return RGB(255, 0, 0);
+		return crStored;
 	case LOG_WARNING:
-		return thePrefs.m_crLogWarning;
+		crStored = thePrefs.m_crLogWarning;
+		if (IsDarkModeEnabled() && crStored == RGB(128, 0, 128))
+			return RGB(186, 85, 211);
+		if (!IsDarkModeEnabled() && crStored == RGB(186, 85, 211))
+			return RGB(128, 0, 128);
+		return crStored;
 	default:
 		ASSERT(eMsgType == LOG_INFO);
 	}
@@ -213,9 +233,11 @@ void CHTRichEditCtrl::FlushBuffer()
 		for (INT_PTR i = 0; i < m_astrBuff.GetCount(); ++i) {
 			const CString &rstrLine(m_astrBuff[i]);
 			if (!rstrLine.IsEmpty()) {
-				if ((UINT)rstrLine[0] < 8)
+				if ((UINT)rstrLine[0] < 8) {
+					m_bAddingTypedLogLine = true;
 					AddLine((LPCTSTR)rstrLine + 1, rstrLine.GetLength() - 1, false, GetLogLineColor((UINT)rstrLine[0]));
-				else
+					m_bAddingTypedLogLine = false;
+				} else
 					AddLine((LPCTSTR)rstrLine, rstrLine.GetLength());
 			}
 		}
@@ -247,12 +269,83 @@ void CHTRichEditCtrl::Add(LPCTSTR pszMsg, int iLen)
 
 void CHTRichEditCtrl::AddTyped(LPCTSTR pszMsg, int iLen, UINT eMsgType)
 {
+	RecordTypedLogEntry(pszMsg, iLen, eMsgType & LOGMSGTYPEMASK);
+
 	if (m_hWnd == NULL) {
 		CString strLine((TCHAR)(eMsgType & LOGMSGTYPEMASK));
 		m_astrBuff.Add(strLine + pszMsg);
 	} else {
 		FlushBuffer();
+		m_bAddingTypedLogLine = true;
 		AddLine(pszMsg, iLen, false, GetLogLineColor(eMsgType & LOGMSGTYPEMASK));
+		m_bAddingTypedLogLine = false;
+	}
+}
+
+
+void CHTRichEditCtrl::RecordTypedLogEntry(LPCTSTR pszMsg, int iLen, UINT eMsgType)
+{
+	if (m_bReplayingTypedLogHistory || pszMsg == NULL)
+		return;
+
+	const int iMsgLen = (iLen == -1) ? (int)_tcslen(pszMsg) : iLen;
+	if (iMsgLen <= 0)
+		return;
+
+	STypedLogEntry entry;
+	entry.strText.SetString(pszMsg, iMsgLen);
+	entry.uMsgType = eMsgType & LOGMSGTYPEMASK;
+	m_typedLogHistory.push_back(entry);
+	m_iTypedLogHistoryChars += iMsgLen;
+	TrimTypedLogHistory();
+}
+
+void CHTRichEditCtrl::TrimTypedLogHistory()
+{
+	const int iLimit = m_iLimitText > 0 ? m_iLimitText : 128 * 1024;
+	const int iKeepMargin = min(max(iLimit / 16, 4096), 32768);
+	const int iTarget = max(0, iLimit - iKeepMargin);
+	while (!m_typedLogHistory.empty() && m_iTypedLogHistoryChars > iTarget) {
+		m_bTypedLogHistoryComplete = false;
+		m_iTypedLogHistoryChars -= m_typedLogHistory.front().strText.GetLength();
+		m_typedLogHistory.erase(m_typedLogHistory.begin());
+	}
+	if (m_iTypedLogHistoryChars < 0)
+		m_iTypedLogHistoryChars = 0;
+}
+
+void CHTRichEditCtrl::RepaintTypedLogHistory()
+{
+	if (m_hWnd == NULL || m_typedLogHistory.empty() || !m_bTypedLogHistoryComplete)
+		return;
+
+	bool bAtEndOfScroll;
+	SCROLLINFO si;
+	si.cbSize = (UINT)sizeof si;
+	si.fMask = SIF_ALL;
+	if ((GetStyle() & WS_VSCROLL) && GetScrollInfo(SB_VERT, &si))
+		bAtEndOfScroll = (si.nPos >= (int)(si.nMax - si.nPage));
+	else
+		bAtEndOfScroll = true;
+
+	bool bOldNoPaint = m_bNoPaint;
+	m_bNoPaint = true;
+	BOOL bIsVisible = IsWindowVisible();
+	if (bIsVisible)
+		SetRedraw(FALSE);
+
+	m_bReplayingTypedLogHistory = true;
+	SetWindowText(EMPTY);
+	for (std::vector<STypedLogEntry>::const_iterator it = m_typedLogHistory.begin(); it != m_typedLogHistory.end(); ++it)
+		AddLine(it->strText, it->strText.GetLength(), false, GetLogLineColor(it->uMsgType));
+	m_bReplayingTypedLogHistory = false;
+
+	m_bNoPaint = bOldNoPaint;
+	if (bAtEndOfScroll)
+		ScrollToLastLine();
+	if (bIsVisible && !m_bNoPaint) {
+		SetRedraw();
+		Invalidate(FALSE);
 	}
 }
 
@@ -261,6 +354,8 @@ void CHTRichEditCtrl::AddLine(LPCTSTR pszMsg, int iLen, bool bLink, COLORREF cr,
 	int iMsgLen = (iLen == -1) ? (int)_tcslen(pszMsg) : iLen;
 	if (iMsgLen == 0)
 		return;
+	if (!m_bAddingTypedLogLine && !m_bReplayingTypedLogHistory)
+		m_bTypedLogHistoryComplete = false;
 
 	// Get Edit contents dimensions and cursor position
 	long lStartChar, lEndChar;
@@ -424,16 +519,28 @@ void CHTRichEditCtrl::SafeAddLine(int nPos, LPCTSTR pszLine, int iLen, long &lSt
 			SetRedraw(FALSE);
 
 		while (iCurSize > 0 && iCurSize + iLen > m_iLimitText) {
-			// delete 1st line
-			int iLine0Len = LineLength(0) + 1; // add NL character
-			SetSel(0, iLine0Len);
+			const int iExcess = max(1, iCurSize + iLen - m_iLimitText);
+			const int iHeadroom = min(max(m_iLimitText / 16, 4096), 32768);
+			int iPurgeEnd = min(iCurSize, iExcess + iHeadroom);
+			const int iPurgeLine = LineFromChar(iPurgeEnd);
+			if (iPurgeLine > 0) {
+				const int iLineStart = LineIndex(iPurgeLine);
+				if (iLineStart > 0)
+					iPurgeEnd = iLineStart;
+			}
+			if (iPurgeEnd <= 0)
+				iPurgeEnd = min(iCurSize, LineLength(0) + 1);
+			if (iPurgeEnd <= 0)
+				break;
+
+			SetSel(0, iPurgeEnd);
 			ReplaceSel(EMPTY);
 
 			// update any possible available selection
-			lStartChar -= iLine0Len;
+			lStartChar -= iPurgeEnd;
 			if (lStartChar < 0)
 				lStartChar = 0;
-			lEndChar -= iLine0Len;
+			lEndChar -= iPurgeEnd;
 			if (lEndChar < 0)
 				lEndChar = 0;
 
@@ -447,7 +554,8 @@ void CHTRichEditCtrl::SafeAddLine(int nPos, LPCTSTR pszLine, int iLen, long &lSt
 		}
 	}
 
-	AddString(nPos, pszLine, bLink, cr, bk, mask);
+	int iAppendPos = GetWindowTextLength();
+	AddString(iAppendPos, pszLine, bLink, cr, bk, mask);
 
 	if (m_bEnErrSpace) {
 		bool bOldNoPaint = m_bNoPaint;
@@ -460,7 +568,7 @@ void CHTRichEditCtrl::SafeAddLine(int nPos, LPCTSTR pszLine, int iLen, long &lSt
 		int iSafetyCounter = 0;
 		while (m_bEnErrSpace && iSafetyCounter < 10) {
 			// delete the previous partially added line
-			SetSel(nPos, -1);
+			SetSel(iAppendPos, -1);
 			ReplaceSel(EMPTY);
 
 			// delete 1st line
@@ -478,7 +586,8 @@ void CHTRichEditCtrl::SafeAddLine(int nPos, LPCTSTR pszLine, int iLen, long &lSt
 
 			// add the new line again
 			nPos = GetWindowTextLength();
-			AddString(nPos, pszLine, bLink, cr, bk, mask);
+			iAppendPos = GetWindowTextLength();
+			AddString(iAppendPos, pszLine, bLink, cr, bk, mask);
 
 			if (m_bEnErrSpace && nPos == 0) {
 				// should never happen: if we tried to add the line another time in the 1st line, there
@@ -498,6 +607,9 @@ void CHTRichEditCtrl::SafeAddLine(int nPos, LPCTSTR pszLine, int iLen, long &lSt
 void CHTRichEditCtrl::Reset()
 {
 	m_astrBuff.RemoveAll();
+	m_typedLogHistory.clear();
+	m_iTypedLogHistoryChars = 0;
+	m_bTypedLogHistoryComplete = true;
 	SetRedraw(FALSE);
 	SetWindowText(EMPTY);
 	SetRedraw();
@@ -575,7 +687,7 @@ BOOL CHTRichEditCtrl::OnCommand(WPARAM wParam, LPARAM)
 bool CHTRichEditCtrl::SaveLog(LPCTSTR pszDefName)
 {
 	bool bResult = false;
-	const CString &fname(pszDefName ? pszDefName : m_strTitle);
+	const CString fname(pszDefName ? CString(pszDefName) : m_strTitle);
 	CFileDialog dlg(FALSE, _T("log"), (LPCTSTR)ValidFilename(fname), OFN_HIDEREADONLY | OFN_OVERWRITEPROMPT, _T("Log Files (*.log)|*.log||"), this, 0);
 	if (dlg.DoModal() == IDOK) {
 		const CString savePath = dlg.GetPathName();
@@ -807,10 +919,8 @@ void CHTRichEditCtrl::SetFont(CFont *pFont, BOOL bRedraw)
 	if (bAtEndOfScroll)
 		ScrollToLastLine();
 
-	if (bRedraw) {
-		Invalidate();
-		UpdateWindow();
-	}
+	if (bRedraw)
+		Invalidate(FALSE);
 }
 
 CFont* CHTRichEditCtrl::GetFont() const
@@ -887,6 +997,7 @@ void CHTRichEditCtrl::ApplySkin()
 			ScrollToLastLine();
 	}
 	PurgeSmileyCaches();
+	RepaintTypedLogHistory();
 }
 
 BOOL CHTRichEditCtrl::OnSetCursor(CWnd *pWnd, UINT nHitTest, UINT message)

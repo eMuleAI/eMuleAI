@@ -54,22 +54,20 @@ void CKadContactHistogramCtrl::Localize()
 		Invalidate();
 }
 
-inline UINT GetHistSlot(const Kademlia::CUInt128 &KadUint128)
+inline UINT GetHistSlot(const Kademlia::CContact *contact)
 {
-//	byte aucUInt128[16];
-
-	// same as above but quite faster
-	DWORD dwHighestWord = *(DWORD*)KadUint128.GetData();
-	UINT uHistSlot = dwHighestWord >> (128 - 3 * 32 - KAD_CONTACT_HIST_NEEDED_BITS);
+	UINT uHistSlot = contact->GetClientID().Get32BitChunk(0) >> (128 - 3 * 32 - KAD_CONTACT_HIST_NEEDED_BITS);
 	ASSERT(uHistSlot < KAD_CONTACT_HIST_SIZE);
 	return uHistSlot;
 }
 
 bool CKadContactHistogramCtrl::ContactAdd(const Kademlia::CContact *contact)
 {
-	Kademlia::CUInt128 distance;
-	contact->GetClientID(distance);
-	UINT uHistSlot = GetHistSlot(distance);
+	ASSERT(contact != NULL);
+	if (contact == NULL)
+		return false;
+
+	UINT uHistSlot = GetHistSlot(contact);
 	++m_aHist[uHistSlot];
 	Invalidate();
 	return true;
@@ -77,14 +75,22 @@ bool CKadContactHistogramCtrl::ContactAdd(const Kademlia::CContact *contact)
 
 void CKadContactHistogramCtrl::ContactRem(const Kademlia::CContact *contact)
 {
-	Kademlia::CUInt128 distance;
-	contact->GetClientID(distance);
-	UINT uHistSlot = GetHistSlot(distance);
+	ASSERT(contact != NULL);
+	if (contact == NULL)
+		return;
+
+	UINT uHistSlot = GetHistSlot(contact);
 	ASSERT(m_aHist[uHistSlot] > 0);
 	if (m_aHist[uHistSlot] > 0) {
 		--m_aHist[uHistSlot];
 		Invalidate();
 	}
+}
+
+void CKadContactHistogramCtrl::ResetContactHistogram()
+{
+	memset(m_aHist, 0, sizeof m_aHist);
+	Invalidate();
 }
 
 void CKadContactHistogramCtrl::OnPaint()

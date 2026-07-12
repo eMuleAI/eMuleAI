@@ -39,7 +39,7 @@ their client on the eMule forum.
 #pragma once
 #include "kademlia/utils/KadUDPKey.h"
 #include "kademlia/utils/UInt128.h"
-#include "eMuleAI/GeoLite2.h"
+#include "eMuleAI/IPGeolocation.h"
 
 namespace Kademlia
 {
@@ -104,7 +104,7 @@ namespace Kademlia
 
 		const CString GetGeolocationData() const;
 		const int GetCountryFlagIndex() const;
-		void	ResetGeoLite2();
+		void	ResetIPGeolocation();
 		GeolocationData_Struct m_structContactGeolocationData;
 	private:
 		void	InitContact(); // Common var initialization goes here

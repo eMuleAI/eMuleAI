@@ -415,6 +415,11 @@ void CHttpDownloadDlg::HandleThreadError(const CString &strIDError)
 void CHttpDownloadDlg::DownloadThread()
 {
 	ENCODING_INIT;
+	if (theApp.IsNetworkActivityBlockedByBind()) {
+		HandleThreadError(theApp.GetNetworkActivityBlockMessage());
+		return;
+	}
+
 	//Create the Internet session handle
 	ASSERT(m_hInternetSession == NULL);
 	m_hInternetSession = ::InternetOpen(AfxGetAppName(), INTERNET_OPEN_TYPE_PRECONFIG, NULL, NULL, 0);

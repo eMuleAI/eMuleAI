@@ -57,6 +57,19 @@ extern UINT g_uMainThreadId;
 #define	WND2_BUTTON_HEIGHT	22	// don't set the height to something different than 22 unless you know exactly what you are doing!
 #define	WND2_NUM_BUTTONS	4
 
+static const UINT s_auClientFilterCheckboxes[] = {
+	IDC_CHECK_FREEEZE,
+	IDC_CHECK_ARCHIVED,
+	IDC_CHECK_QUERYABLE,
+	IDC_CHECK_NOT_QUERIED,
+	IDC_CHECK_VALIDIP,
+	IDC_CHECK_HIGHID,
+	IDC_CHECK_BADCLIENT
+};
+static const int CLIENT_FILTER_CHECKBOX_XOFFSET = -7;
+static const int CLIENT_FILTER_TOOLBAR_GAP = 4;
+static const int DOWNLOAD_HEADER_CONTROL_GAP = 4;
+
 // CTransferWnd dialog
 
 IMPLEMENT_DYNCREATE(CTransferWnd, CResizableFormView)
@@ -81,6 +94,7 @@ BEGIN_MESSAGE_MAP(CTransferWnd, CResizableFormView)
 	ON_WM_SETTINGCHANGE()
 	ON_WM_SYSCOLORCHANGE()
 	ON_WM_PAINT()
+	ON_WM_SIZE()
 	ON_WM_SYSCOMMAND()
 	ON_MESSAGE(UM_DELAYED_EVALUATE, OnChangeFilter)
 	ON_MESSAGE(UM_INVALIDATE_CAT_TAB_INFO, OnInvalidateCatTabInfo)
@@ -112,10 +126,18 @@ CTransferWnd::CTransferWnd(CWnd* /*pParent =NULL*/)
 	, m_bIsDragging()
 	, downloadlistactive()
 	, m_bLayoutInited()
+	, m_bCatTabLayoutPending(true)
 	, m_iLastKnownQueueCount(0)
 	, m_uCachedBannedCount(0)
 	, m_dwLastQueueCountBannedRefreshTick(0)
 	, m_bQueueCountDirty(true)
+	, m_iPendingQueueCount(0)
+	, m_bPendingQueueCountValue(false)
+	, m_bPendingQueueCountForce(false)
+	, m_bPendingCatTabTitleForce(false)
+	, m_lQueueCountUpdatePending(0)
+	, m_lCatTabTitleUpdatePending(0)
+	, m_lCatTabInfoInvalidatePending(0)
 	, m_nFilterColumnDownloadList()
 	, m_nFilterColumnUploadList()
 	, m_nFilterColumnDownloadClients()
@@ -157,6 +179,15 @@ void CTransferWnd::OnInitialUpdate()
 
 	m_uWnd2 = (EWnd2)thePrefs.GetTransferWnd2();
 	ShowWnd2(m_uWnd2);
+
+	for (size_t i = 0; i < _countof(s_auClientFilterCheckboxes); ++i) {
+		CWnd* pCheckBox = GetDlgItem(s_auClientFilterCheckboxes[i]);
+		CRect rcCheckBox;
+		pCheckBox->GetWindowRect(&rcCheckBox);
+		ScreenToClient(&rcCheckBox);
+		rcCheckBox.OffsetRect(CLIENT_FILTER_CHECKBOX_XOFFSET, 0);
+		pCheckBox->MoveWindow(&rcCheckBox, FALSE);
+	}
 
 	AddOrReplaceAnchor(this, IDC_DOWNLOADLIST, TOP_LEFT, ANCHOR(100, thePrefs.GetSplitterbarPosition()));
 	AddOrReplaceAnchor(this, IDC_UPLOADLIST, ANCHOR(0, thePrefs.GetSplitterbarPosition()), BOTTOM_RIGHT);
@@ -257,14 +288,43 @@ void CTransferWnd::OnInitialUpdate()
 
 	// Capture the initial anchors and first list layout against the dialog template size first.
 	// Switching to a 1x1 scroll area earlier makes right-anchored controls use the tiny 50x50 startup frame.
+	UpdateClientFilterCheckboxVisibility();
 	SetScrollSizes(MM_TEXT, CSize(1, 1));
+}
+
+void CTransferWnd::UpdateClientFilterCheckboxVisibility()
+{
+	const bool bClientListVisible = m_dwShowListIDC == IDC_CLIENTLIST && m_btnWnd1.GetSafeHwnd() != NULL;
+	int nMinimumLeft = 0;
+	if (bClientListVisible) {
+		CRect rcToolbar;
+		m_btnWnd1.GetWindowRect(&rcToolbar);
+		ScreenToClient(&rcToolbar);
+		nMinimumLeft = rcToolbar.right + CLIENT_FILTER_TOOLBAR_GAP;
+	}
+
+	for (size_t i = 0; i < _countof(s_auClientFilterCheckboxes); ++i) {
+		CWnd* pCheckBox = GetDlgItem(s_auClientFilterCheckboxes[i]);
+		if (pCheckBox == NULL)
+			continue;
+
+		bool bShow = false;
+		if (bClientListVisible) {
+			CRect rcCheckBox;
+			pCheckBox->GetWindowRect(&rcCheckBox);
+			ScreenToClient(&rcCheckBox);
+			bShow = rcCheckBox.left >= nMinimumLeft;
+		}
+
+		if (((pCheckBox->GetStyle() & WS_VISIBLE) != 0) != bShow)
+			pCheckBox->ShowWindow(bShow ? SW_SHOW : SW_HIDE);
+	}
 }
 
 void CTransferWnd::ShowQueueCount(INT_PTR number)
 {
 	if (GetCurrentThreadId() != g_uMainThreadId) {
-		if (m_hWnd != NULL)
-			PostMessage(UM_UPDATE_QUEUE_COUNT, static_cast<WPARAM>(number), 0);
+		PostQueueCountUpdateAsync(true, number, false);
 		return;
 	}
 
@@ -276,8 +336,7 @@ void CTransferWnd::ShowQueueCount(INT_PTR number)
 void CTransferWnd::InvalidateQueueCount(bool bForceImmediateUpdate)
 {
 	if (GetCurrentThreadId() != g_uMainThreadId) {
-		if (m_hWnd != NULL)
-			PostMessage(UM_UPDATE_QUEUE_COUNT, static_cast<WPARAM>(m_iLastKnownQueueCount), bForceImmediateUpdate ? 1 : 0);
+		PostQueueCountUpdateAsync(false, 0, bForceImmediateUpdate);
 		return;
 	}
 
@@ -352,36 +411,29 @@ void CTransferWnd::DoResize(int delta)
 
 	if (m_dwShowListIDC == IDC_DOWNLOADLIST + IDC_UPLOADLIST) {
 		downloadlistctrl.Invalidate();
-		downloadlistctrl.UpdateWindow();
 		CHeaderCtrl *pHeaderUpdate = NULL;
 		switch (m_uWnd2) {
 		case wnd2Uploading:
 			pHeaderUpdate = uploadlistctrl.GetHeaderCtrl();
 			uploadlistctrl.Invalidate();
-			uploadlistctrl.UpdateWindow();
 			break;
 		case wnd2OnQueue:
 			pHeaderUpdate = queuelistctrl.GetHeaderCtrl();
 			queuelistctrl.Invalidate();
-			queuelistctrl.UpdateWindow();
 			break;
 		case wnd2Clients:
 			pHeaderUpdate = clientlistctrl.GetHeaderCtrl();
 			clientlistctrl.Invalidate();
-			clientlistctrl.UpdateWindow();
 			break;
 		case wnd2Downloading:
 			pHeaderUpdate = downloadclientsctrl.GetHeaderCtrl();
 			downloadclientsctrl.Invalidate();
-			downloadclientsctrl.UpdateWindow();
 			break;
 		default:
 			ASSERT(0);
 		}
-		if (pHeaderUpdate != NULL) {
+		if (pHeaderUpdate != NULL)
 			pHeaderUpdate->Invalidate();
-			pHeaderUpdate->UpdateWindow();
-		}
 	}
 }
 
@@ -414,6 +466,17 @@ void CTransferWnd::UpdateSplitterRange()
 	m_wndSplitter.SetRange(rcDown.top + 50, rcUp.bottom - 40);
 }
 
+void CTransferWnd::OnSize(UINT nType, int cx, int cy)
+{
+	CResizableFormView::OnSize(nType, cx, cy);
+	if (m_dlTab.GetSafeHwnd() == NULL || m_btnWnd1.GetSafeHwnd() == NULL) {
+		m_bCatTabLayoutPending = true;
+		return;
+	}
+	UpdateClientFilterCheckboxVisibility();
+	VerifyCatTabSize();
+}
+
 LRESULT CTransferWnd::DefWindowProc(UINT message, WPARAM wParam, LPARAM lParam)
 {
 	if (message == WM_WINDOWPOSCHANGED && m_wndSplitter)
@@ -429,8 +492,6 @@ void CTransferWnd::OnSplitterMoved(LPNMHDR pNMHDR, LRESULT* /*pResult*/)
 
 LRESULT CTransferWnd::OnChangeFilter(WPARAM wParam, LPARAM lParam)
 {
-	CWaitCursor curWait; // this may take a while
-
 	CEditDelayed::SFilterParam* pFilterParam = reinterpret_cast<CEditDelayed::SFilterParam*>(wParam);
 	bool m_bForceApplyFilter = false;
 	uint32 m_nFilterColumnTemp = 0;
@@ -1204,7 +1265,7 @@ void CTransferWnd::OnLvnBeginDragDownloadList(LPNMHDR pNMHDR, LRESULT *pResult)
 	int iSel = downloadlistctrl.GetSelectionMark();
 	if (iSel == -1)
 		return;
-	if (reinterpret_cast<CtrlItem_Struct*>(downloadlistctrl.GetItemData(iSel))->type != FILE_TYPE)
+	if (!downloadlistctrl.IsListedDownloadFileRow(iSel))
 		return;
 
 	const LPNMLISTVIEW pNMLV = reinterpret_cast<LPNMLISTVIEW>(pNMHDR);
@@ -1266,22 +1327,8 @@ void CTransferWnd::OnLButtonUp(UINT /*nFlags*/, CPoint /*point*/)
 		m_pDragImage = NULL;
 
 		if (m_nDropIndex >= 0 && (downloadlistctrl.curTab == 0 || (UINT)m_nDropIndex != downloadlistctrl.curTab)) {
-			// for multi-selections
-			CTypedPtrList<CPtrList, CPartFile*> selectedList;
-			for (POSITION pos = downloadlistctrl.GetFirstSelectedItemPosition(); pos != NULL;) {
-				int index = downloadlistctrl.GetNextSelectedItem(pos);
-				if (index >= 0) {
-					const CtrlItem_Struct *pItem = reinterpret_cast<CtrlItem_Struct*>(downloadlistctrl.GetItemData(index));
-					if (pItem->type == FILE_TYPE)
-						selectedList.AddTail(reinterpret_cast<CPartFile*>(pItem->value));
-				}
-			}
-
-			while (!selectedList.IsEmpty())
-				selectedList.RemoveHead()->SetCategory(m_nDropIndex);
+			downloadlistctrl.ChangeSelectedFilesCategoryFromUi(static_cast<UINT>(m_nDropIndex));
 			m_dlTab.SetCurSel(downloadlistctrl.curTab);
-			downloadlistctrl.UpdateCurrentCategoryView();
-			UpdateCatTabTitles();
 		} else
 			m_dlTab.SetCurSel(downloadlistctrl.curTab);
 		downloadlistctrl.Invalidate();
@@ -1314,7 +1361,8 @@ BOOL CTransferWnd::OnCommand(WPARAM wParam, LPARAM lParam)
 				thePrefs.SetCatFilter(m_isetcatmenu, 0);
 		}
 		downloadlistctrl.UpdateCurrentCategoryView();
-		EditCatTabLabel(m_isetcatmenu);
+		if (EditCatTabLabel(m_isetcatmenu))
+			VerifyCatTabSize();
 		thePrefs.SaveCats();
 		return TRUE;
 	}
@@ -1330,7 +1378,8 @@ BOOL CTransferWnd::OnCommand(WPARAM wParam, LPARAM lParam)
 			const CString &oldincpath(thePrefs.GetCatPath(m_rightclickindex));
 			CCatDialog dialog(m_rightclickindex);
 			if (dialog.DoModal() == IDOK) {
-				EditCatTabLabel(m_rightclickindex, thePrefs.GetCategoryDisplayTitle(m_rightclickindex));
+				if (EditCatTabLabel(m_rightclickindex, thePrefs.GetCategoryDisplayTitle(m_rightclickindex)))
+					VerifyCatTabSize();
 				m_dlTab.SetTabTextColor(m_rightclickindex, thePrefs.GetCatColor(m_rightclickindex));
 				theApp.emuledlg->searchwnd->UpdateCatTabs();
 				downloadlistctrl.UpdateCurrentCategoryView();
@@ -1449,8 +1498,12 @@ void CTransferWnd::UpdateCatTabTitles(bool force)
 {
 	// UI state is accessed here; defer to main thread when needed.
 	if (GetCurrentThreadId() != g_uMainThreadId) {
-		if (m_hWnd != NULL)
-			PostMessage(UM_UPDATE_CAT_TAB_TITLES, static_cast<WPARAM>(force), 0);
+		PostCatTabTitlesUpdateAsync(force);
+		return;
+	}
+
+	if (theApp.emuledlg != NULL && theApp.emuledlg->IsStartupLoadingDialogVisible()) {
+		m_bCatTabInfoDirty = true;
 		return;
 	}
 
@@ -1459,20 +1512,31 @@ void CTransferWnd::UpdateCatTabTitles(bool force)
 	if (!force && GetTabUnderMouse(point) >= 0)	// avoid cat tooltip jumping
 		return;
 
+	if (thePrefs.ShowCatTabInfos() && (m_bCatTabInfoDirty || m_cachedActiveDwl < 0))
+		RebuildActiveDownloadCache();
+	m_bCatTabInfoDirty = false;
+
+	bool bLayoutNeeded = force || m_bCatTabLayoutPending;
 	for (int i = m_dlTab.GetItemCount(); --i >= 0;) {
-		EditCatTabLabel(i, thePrefs.GetCategoryDisplayTitle(i));
-		m_dlTab.SetTabTextColor(i, thePrefs.GetCatColor(i));
+		bLayoutNeeded = EditCatTabLabel(i, thePrefs.GetCategoryDisplayTitle(i)) || bLayoutNeeded;
+
+		TCITEM tabitem;
+		memset(&tabitem, 0, sizeof(tabitem));
+		tabitem.mask = TCIF_PARAM;
+		const DWORD dwTabColor = thePrefs.GetCatColor(i);
+		if (!m_dlTab.GetItem(i, &tabitem) || tabitem.lParam != static_cast<LPARAM>(dwTabColor))
+			m_dlTab.SetTabTextColor(i, dwTabColor);
 	}
 
-	m_bCatTabInfoDirty = false; // we've refreshed everything
+	if (bLayoutNeeded)
+		VerifyCatTabSize();
 }
 
 // Update cat tab titles if dirty (m_bCatTabInfoDirty) or if forced
 void CTransferWnd::UpdateCatTabTitlesIfDirty(bool force)
 {
 	if (GetCurrentThreadId() != g_uMainThreadId) {
-		if (m_hWnd != NULL)
-			PostMessage(UM_UPDATE_CAT_TAB_TITLES, static_cast<WPARAM>(force), 0);
+		PostCatTabTitlesUpdateAsync(force);
 		return;
 	}
 
@@ -1484,8 +1548,7 @@ void CTransferWnd::UpdateCatTabTitlesIfDirty(bool force)
 void CTransferWnd::InvalidateCatTabInfo()
 {
 	if (GetCurrentThreadId() != g_uMainThreadId) {
-		if (m_hWnd != NULL)
-			PostMessage(UM_INVALIDATE_CAT_TAB_INFO, 0, 0);
+		PostCatTabInfoInvalidateAsync();
 		return;
 	}
 
@@ -1493,10 +1556,63 @@ void CTransferWnd::InvalidateCatTabInfo()
 	m_cachedActiveDwl = -1; // Force recalculation on next access
 }
 
+void CTransferWnd::PostQueueCountUpdateAsync(bool bHasQueueCount, INT_PTR iQueueCount, bool bForceImmediateUpdate)
+{
+	if (m_hWnd == NULL || !::IsWindow(m_hWnd) || theApp.IsClosing())
+		return;
+
+	bool bPostMessage = false;
+	{
+		CSingleLock lock(&m_transferMessagePostLock, TRUE);
+		if (bHasQueueCount) {
+			m_iPendingQueueCount = iQueueCount;
+			m_bPendingQueueCountValue = true;
+		}
+		m_bPendingQueueCountForce = m_bPendingQueueCountForce || bForceImmediateUpdate;
+		bPostMessage = InterlockedCompareExchange(&m_lQueueCountUpdatePending, 1, 0) == 0;
+	}
+	if (bPostMessage && !PostMessage(UM_UPDATE_QUEUE_COUNT, 0, 0)) {
+		CSingleLock lock(&m_transferMessagePostLock, TRUE);
+		m_bPendingQueueCountValue = false;
+		m_bPendingQueueCountForce = false;
+		InterlockedExchange(&m_lQueueCountUpdatePending, 0);
+	}
+}
+
+void CTransferWnd::PostCatTabTitlesUpdateAsync(bool bForce)
+{
+	if (m_hWnd == NULL || !::IsWindow(m_hWnd) || theApp.IsClosing())
+		return;
+
+	bool bPostMessage = false;
+	{
+		CSingleLock lock(&m_transferMessagePostLock, TRUE);
+		m_bPendingCatTabTitleForce = m_bPendingCatTabTitleForce || bForce;
+		bPostMessage = InterlockedCompareExchange(&m_lCatTabTitleUpdatePending, 1, 0) == 0;
+	}
+	if (bPostMessage && !PostMessage(UM_UPDATE_CAT_TAB_TITLES, 0, 0)) {
+		CSingleLock lock(&m_transferMessagePostLock, TRUE);
+		m_bPendingCatTabTitleForce = false;
+		InterlockedExchange(&m_lCatTabTitleUpdatePending, 0);
+	}
+}
+
+void CTransferWnd::PostCatTabInfoInvalidateAsync()
+{
+	if (m_hWnd == NULL || !::IsWindow(m_hWnd) || theApp.IsClosing())
+		return;
+
+	if (InterlockedCompareExchange(&m_lCatTabInfoInvalidatePending, 1, 0) != 0)
+		return;
+	if (!PostMessage(UM_INVALIDATE_CAT_TAB_INFO, 0, 0))
+		InterlockedExchange(&m_lCatTabInfoInvalidatePending, 0);
+}
+
 LRESULT CTransferWnd::OnInvalidateCatTabInfo(WPARAM wParam, LPARAM lParam)
 {
 	UNREFERENCED_PARAMETER(wParam);
 	UNREFERENCED_PARAMETER(lParam);
+	InterlockedExchange(&m_lCatTabInfoInvalidatePending, 0);
 	InvalidateCatTabInfo();
 	return 0;
 }
@@ -1504,32 +1620,49 @@ LRESULT CTransferWnd::OnInvalidateCatTabInfo(WPARAM wParam, LPARAM lParam)
 LRESULT CTransferWnd::OnUpdateCatTabTitlesIfDirty(WPARAM wParam, LPARAM lParam)
 {
 	UNREFERENCED_PARAMETER(lParam);
-	UpdateCatTabTitlesIfDirty(wParam != 0);
+	bool bForce = (wParam != 0);
+	{
+		CSingleLock lock(&m_transferMessagePostLock, TRUE);
+		bForce = bForce || m_bPendingCatTabTitleForce;
+		m_bPendingCatTabTitleForce = false;
+		InterlockedExchange(&m_lCatTabTitleUpdatePending, 0);
+	}
+	UpdateCatTabTitlesIfDirty(bForce);
 	return 0;
 }
 
 LRESULT CTransferWnd::OnUpdateQueueCount(WPARAM wParam, LPARAM lParam)
 {
-	m_iLastKnownQueueCount = static_cast<INT_PTR>(wParam);
+	bool bForceImmediateUpdate = (lParam != 0);
+	INT_PTR iQueueCount = static_cast<INT_PTR>(wParam);
+	bool bHasQueueCount = wParam != 0;
+	{
+		CSingleLock lock(&m_transferMessagePostLock, TRUE);
+		if (m_bPendingQueueCountValue) {
+			iQueueCount = m_iPendingQueueCount;
+			bHasQueueCount = true;
+		}
+		bForceImmediateUpdate = bForceImmediateUpdate || m_bPendingQueueCountForce;
+		m_bPendingQueueCountValue = false;
+		m_bPendingQueueCountForce = false;
+		InterlockedExchange(&m_lQueueCountUpdatePending, 0);
+	}
+	if (bHasQueueCount)
+		m_iLastKnownQueueCount = iQueueCount;
 	m_bQueueCountDirty = true;
-	if (lParam != 0)
+	if (bForceImmediateUpdate)
 		m_dwLastQueueCountBannedRefreshTick = 0;
-	UpdateQueueCountDisplay(lParam != 0);
+	UpdateQueueCountDisplay(bForceImmediateUpdate);
 	return 0;
 }
 
-void CTransferWnd::EditCatTabLabel(int index)
+bool CTransferWnd::EditCatTabLabel(int index)
 {
-	EditCatTabLabel(index, thePrefs.GetCategoryDisplayTitle(index));
+	return EditCatTabLabel(index, thePrefs.GetCategoryDisplayTitle(index));
 }
 
-void CTransferWnd::EditCatTabLabel(int index, CString newlabel)
+bool CTransferWnd::EditCatTabLabel(int index, CString newlabel)
 {
-	TCITEM tabitem;
-	tabitem.mask = TCIF_PARAM;
-	m_dlTab.GetItem(index, &tabitem);
-	tabitem.mask = TCIF_TEXT;
-
 	DupAmpersand(newlabel);
 
 	if (thePrefs.ShowCatTabInfos()) {
@@ -1554,10 +1687,25 @@ void CTransferWnd::EditCatTabLabel(int index, CString newlabel)
 		newlabel.AppendFormat(_T(" %i/%i"), activeDwlForCategory, count); // Here count is total number of files in this category (including completed). We show active/total
 	}
 
+	const int iTabTextBufferChars = 4096;
+	CString strCurrentText;
+	LPTSTR pszCurrentText = strCurrentText.GetBuffer(iTabTextBufferChars);
+	pszCurrentText[0] = _T('\0');
+	TCITEM tabitem;
+	memset(&tabitem, 0, sizeof(tabitem));
+	tabitem.mask = TCIF_TEXT;
+	tabitem.pszText = pszCurrentText;
+	tabitem.cchTextMax = iTabTextBufferChars;
+	const bool bHasCurrentText = m_dlTab.GetItem(index, &tabitem) != FALSE;
+	strCurrentText.ReleaseBuffer();
+	if (bHasCurrentText && newlabel == strCurrentText)
+		return false;
+
+	memset(&tabitem, 0, sizeof(tabitem));
+	tabitem.mask = TCIF_TEXT;
 	tabitem.pszText = const_cast<LPTSTR>((LPCTSTR)newlabel);
 	m_dlTab.SetItem(index, &tabitem);
-
-	VerifyCatTabSize();
+	return true;
 }
 
 int CTransferWnd::AddCategory(const CString &newtitle, const CString &newincoming, const CString &newcomment, const CString &newautocat, bool addTab)
@@ -1693,7 +1841,7 @@ CString CTransferWnd::GetTabStatistic(int tab)
 	}
 
 	int total;
-	int compl = downloadlistctrl.GetCompleteDownloads(tab, total);
+	int completed = downloadlistctrl.GetCompleteDownloads(tab, total);
 
 	LPCTSTR uid;
 	switch (thePrefs.GetCategory(tab)->prio) {
@@ -1709,11 +1857,11 @@ CString CTransferWnd::GetTabStatistic(int tab)
 
 	CString title(GetResString(_T("FILES")));
 	title.AppendFormat(_T(": %i\n\n%s: %i\n%s: %i\n%s: %i\n%s: %i\n\n%s: %s\n\n%s: %.1f %s\n%s: %s/%s\n%s%s") TOOLTIP_AUTOFORMAT_SUFFIX
-		, count + compl
+		, count + completed
 		, (LPCTSTR)GetResString(_T("DOWNLOADING")), dwl
 		, (LPCTSTR)GetResString(_T("PAUSED")), paus
 		, (LPCTSTR)GetResString(_T("ERRORLIKE")), err
-		, (LPCTSTR)GetResString(_T("DL_TRANSFCOMPL")), compl
+		, (LPCTSTR)GetResString(_T("DL_TRANSFCOMPL")), completed
 		, (LPCTSTR)GetResString(_T("PRIORITY")), (LPCTSTR)GetResString(uid)
 		, (LPCTSTR)GetResString(_T("DL_SPEED")), speed, (LPCTSTR)GetResString(_T("KBYTESPERSEC"))
 		, (LPCTSTR)GetResString(_T("DL_SIZE")), (LPCTSTR)CastItoXBytes(trsize), (LPCTSTR)CastItoXBytes(size)
@@ -1767,8 +1915,16 @@ void CTransferWnd::OnTabMovement(LPNMHDR, LRESULT*)
 
 void CTransferWnd::VerifyCatTabSize()
 {
+	if (theApp.emuledlg != NULL && theApp.emuledlg->IsStartupLoadingDialogVisible()) {
+		m_bCatTabLayoutPending = true;
+		return;
+	}
 	if (m_dwShowListIDC != IDC_DOWNLOADLIST && m_dwShowListIDC != IDC_UPLOADLIST + IDC_DOWNLOADLIST)
 		return;
+	if (m_dlTab.GetSafeHwnd() == NULL || m_btnWnd1.GetSafeHwnd() == NULL) {
+		m_bCatTabLayoutPending = true;
+		return;
+	}
 
 	int size = 0;
 	for (int i = m_dlTab.GetItemCount(); --i >= 0;) {
@@ -1778,22 +1934,55 @@ void CTransferWnd::VerifyCatTabSize()
 	}
 
 	WINDOWPLACEMENT wp;
-	downloadlistctrl.GetWindowPlacement(&wp);
-	int right = wp.rcNormalPosition.right;
 	m_dlTab.GetWindowPlacement(&wp);
 	if (wp.rcNormalPosition.right < 0)
 		return;
-	wp.rcNormalPosition.right = right - 428;
 
-	int left = wp.rcNormalPosition.right - size - 4;
 	RECT rcBtn1;
 	m_btnWnd1.GetWindowRect(&rcBtn1);
 	ScreenToClient(&rcBtn1);
+	const int nMinimumTabLeft = rcBtn1.right + 10;
+	const int nRequiredTabRight = nMinimumTabLeft + size + DOWNLOAD_HEADER_CONTROL_GAP;
+
+	CWnd* pPreview = GetDlgItem(IDC_CHECK_PREVIEW);
+	CWnd* pFileType = GetDlgItem(IDC_FILETYPE);
+	CWnd* pFilter = GetDlgItem(IDC_FILTER_DOWNLOAD_LIST);
+	if (pPreview == NULL || pPreview->GetSafeHwnd() == NULL || pFileType == NULL || pFileType->GetSafeHwnd() == NULL || pFilter == NULL || pFilter->GetSafeHwnd() == NULL) {
+		m_bCatTabLayoutPending = true;
+		return;
+	}
+	CRect rcPreview;
+	CRect rcFileType;
+	CRect rcFilter;
+	pPreview->GetWindowRect(&rcPreview);
+	pFileType->GetWindowRect(&rcFileType);
+	pFilter->GetWindowRect(&rcFilter);
+	ScreenToClient(&rcPreview);
+	ScreenToClient(&rcFileType);
+	ScreenToClient(&rcFilter);
+
+	const bool bShowPreview = rcPreview.left - DOWNLOAD_HEADER_CONTROL_GAP >= nRequiredTabRight;
+	const bool bShowFileType = rcFileType.left - DOWNLOAD_HEADER_CONTROL_GAP >= nRequiredTabRight;
+	if (((pPreview->GetStyle() & WS_VISIBLE) != 0) != bShowPreview)
+		pPreview->ShowWindow(bShowPreview ? SW_SHOW : SW_HIDE);
+	if (((pFileType->GetStyle() & WS_VISIBLE) != 0) != bShowFileType)
+		pFileType->ShowWindow(bShowFileType ? SW_SHOW : SW_HIDE);
+
+	const int nNextControlLeft = bShowPreview ? rcPreview.left : bShowFileType ? rcFileType.left : rcFilter.left;
+	wp.rcNormalPosition.right = nNextControlLeft - DOWNLOAD_HEADER_CONTROL_GAP;
+
+	int left = wp.rcNormalPosition.right - size - DOWNLOAD_HEADER_CONTROL_GAP;
 	wp.rcNormalPosition.left = (left >= rcBtn1.right + 10) ? left : rcBtn1.right + 10;
 
-	RemoveAnchor(m_dlTab);
-	m_dlTab.SetWindowPlacement(&wp);
-	AddOrReplaceAnchor(this, m_dlTab, ANCHOR(90, 0));
+	CRect rcCurrentTab;
+	m_dlTab.GetWindowRect(&rcCurrentTab);
+	ScreenToClient(&rcCurrentTab);
+	if (rcCurrentTab.left != wp.rcNormalPosition.left || rcCurrentTab.right != wp.rcNormalPosition.right) {
+		RemoveAnchor(m_dlTab);
+		m_dlTab.SetWindowPlacement(&wp);
+		AddOrReplaceAnchor(this, m_dlTab, ANCHOR(90, 0));
+	}
+	m_bCatTabLayoutPending = false;
 }
 
 CString CTransferWnd::GetCatTitle(int catid)
@@ -1877,6 +2066,7 @@ void CTransferWnd::ShowList(uint32 dwListIDC)
 		SetWnd1Icon(w1iDownloadFiles);
 		thePrefs.SetTransferWnd1(1);
 		downloadlistctrl.ReloadList(false, LSF_SELECTION);
+		downloadlistctrl.FlushDeferredReload(LSF_SELECTION);
 		break;
 	case IDC_UPLOADLIST:
 		uploadlistctrl.MoveWindow(&rcDown);
@@ -1906,6 +2096,7 @@ void CTransferWnd::ShowList(uint32 dwListIDC)
 		SetWnd1Icon(w1iClientsKnown);
 		thePrefs.SetTransferWnd1(5);
 		clientlistctrl.ReloadList(false, LSF_SELECTION);
+		clientlistctrl.FlushDeferredReload(LSF_SELECTION);
 		break;
 	default:
 		ASSERT(0);
@@ -1916,17 +2107,15 @@ void CTransferWnd::ShowList(uint32 dwListIDC)
 	m_ctlFilterDownloadClients.ShowWindow((dwListIDC == IDC_DOWNLOADCLIENTS) ? SW_SHOW : SW_HIDE);
 	m_ctlFilterQueueList.ShowWindow((dwListIDC == IDC_QUEUELIST) ? SW_SHOW : SW_HIDE);
 	m_ctlFilterClientList.ShowWindow((dwListIDC == IDC_CLIENTLIST) ? SW_SHOW : SW_HIDE);
-	GetDlgItem(IDC_FILETYPE)->ShowWindow((dwListIDC == IDC_DOWNLOADLIST) ? SW_SHOW : SW_HIDE);
-	GetDlgItem(IDC_CHECK_PREVIEW)->ShowWindow((dwListIDC == IDC_DOWNLOADLIST) ? SW_SHOW : SW_HIDE);
-	GetDlgItem(IDC_CHECK_FREEEZE)->ShowWindow((dwListIDC == IDC_CLIENTLIST) ? SW_SHOW : SW_HIDE);
-	GetDlgItem(IDC_CHECK_ARCHIVED)->ShowWindow((dwListIDC == IDC_CLIENTLIST) ? SW_SHOW : SW_HIDE);
-	GetDlgItem(IDC_CHECK_QUERYABLE)->ShowWindow((dwListIDC == IDC_CLIENTLIST) ? SW_SHOW : SW_HIDE);
-	GetDlgItem(IDC_CHECK_NOT_QUERIED)->ShowWindow((dwListIDC == IDC_CLIENTLIST) ? SW_SHOW : SW_HIDE);
-	GetDlgItem(IDC_CHECK_VALIDIP)->ShowWindow((dwListIDC == IDC_CLIENTLIST) ? SW_SHOW : SW_HIDE);
-	GetDlgItem(IDC_CHECK_HIGHID)->ShowWindow((dwListIDC == IDC_CLIENTLIST) ? SW_SHOW : SW_HIDE);
-	GetDlgItem(IDC_CHECK_BADCLIENT)->ShowWindow((dwListIDC == IDC_CLIENTLIST) ? SW_SHOW : SW_HIDE);
+	if (dwListIDC != IDC_DOWNLOADLIST) {
+		GetDlgItem(IDC_FILETYPE)->ShowWindow(SW_HIDE);
+		GetDlgItem(IDC_CHECK_PREVIEW)->ShowWindow(SW_HIDE);
+	}
+	UpdateClientFilterCheckboxVisibility();
 
 	AddOrReplaceAnchor(this, dwListIDC, TOP_LEFT, BOTTOM_RIGHT);
+	if (dwListIDC == IDC_DOWNLOADLIST)
+		VerifyCatTabSize();
 	UpdateQueueCountDisplay(false);
 }
 
@@ -1994,22 +2183,13 @@ void CTransferWnd::ShowSplitWindow(bool bReDraw)
 	AddOrReplaceAnchor(this, IDC_QUEUELIST, ANCHOR(0, thePrefs.GetSplitterbarPosition()), BOTTOM_RIGHT);
 	AddOrReplaceAnchor(this, IDC_CLIENTLIST, ANCHOR(0, thePrefs.GetSplitterbarPosition()), BOTTOM_RIGHT);
 	AddOrReplaceAnchor(this, IDC_DOWNLOADCLIENTS, ANCHOR(0, thePrefs.GetSplitterbarPosition()), BOTTOM_RIGHT);
-	VerifyCatTabSize(); //properly position tab control
-
 	m_ctlFilterDownloadList.ShowWindow(SW_SHOW);
 	m_ctlFilterUploadList.ShowWindow(SW_HIDE);
 	m_ctlFilterDownloadClients.ShowWindow(SW_HIDE);
 	m_ctlFilterQueueList.ShowWindow(SW_HIDE);
 	m_ctlFilterClientList.ShowWindow(SW_HIDE);
-	GetDlgItem(IDC_FILETYPE)->ShowWindow(SW_SHOW);
-	GetDlgItem(IDC_CHECK_PREVIEW)->ShowWindow(SW_SHOW);
-	GetDlgItem(IDC_CHECK_FREEEZE)->ShowWindow(SW_HIDE);
-	GetDlgItem(IDC_CHECK_ARCHIVED)->ShowWindow(SW_HIDE);
-	GetDlgItem(IDC_CHECK_QUERYABLE)->ShowWindow(SW_HIDE);
-	GetDlgItem(IDC_CHECK_NOT_QUERIED)->ShowWindow(SW_HIDE);
-	GetDlgItem(IDC_CHECK_VALIDIP)->ShowWindow(SW_HIDE);
-	GetDlgItem(IDC_CHECK_HIGHID)->ShowWindow(SW_HIDE);
-	GetDlgItem(IDC_CHECK_BADCLIENT)->ShowWindow(SW_HIDE);
+	VerifyCatTabSize(); //properly position tab control
+	UpdateClientFilterCheckboxVisibility();
 
 	downloadlistctrl.ShowWindow(SW_SHOW);
 	uploadlistctrl.ShowWindow((m_uWnd2 == wnd2Uploading) ? SW_SHOW : SW_HIDE);
@@ -2285,6 +2465,8 @@ void CTransferWnd::OnPaint()
 		else
 			ShowList(m_dwShowListIDC);
 	}
+	if (m_bCatTabLayoutPending && (m_dwShowListIDC == IDC_DOWNLOADLIST || m_dwShowListIDC == IDC_UPLOADLIST + IDC_DOWNLOADLIST))
+		VerifyCatTabSize();
 
 	if (m_wndSplitter) {
 		if (rcWnd.Height() > 0) {

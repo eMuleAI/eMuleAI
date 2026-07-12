@@ -4,7 +4,7 @@ This file is part of eMule AI
 Copyright (C)2026 eMule AI
 
 eMule AI Translator Script
-Updates the translations.map file using the cloud or a locally hosted API.
+Updates the translations.map file using Gemini, DeepSeek, or a locally hosted API.
 """
 
 import os
@@ -20,11 +20,18 @@ import builtins
 import unicodedata
 import argparse
 import shutil
+import concurrent.futures
+import gettext
 
 try:
     import pycountry
 except Exception:
     pycountry = None
+
+try:
+    from babel import Locale as BabelLocale
+except Exception:
+    BabelLocale = None
 
 # ==============================================================================
 # DEBUG LOG SETTINGS
@@ -39,7 +46,7 @@ SHARED_API_SYSTEM_PROMPT = (
     "You are a professional translation engine for software UI text. "
     "Follow the user's format requirements exactly. "
     "Return only final translation lines in the requested format. "
-    "Never reveal internal reasoning. Never output analysis, self-corrections, bullets, Markdown, JSON wrappers, <|channel>thought, or <channel|> tags. "
+    "Never reveal internal reasoning. Never output analysis, self-corrections, bullets, Markdown, JSON wrappers, <think> blocks, <|channel>thought, or <channel|> tags. "
     "Never leave ordinary English UI labels untranslated inside quotes, parentheses, or slash-separated mode names unless they are protected placeholders or strict all-uppercase acronyms. "
     "Start immediately with the final plain-text answer in the requested format."
 )
@@ -99,28 +106,81 @@ def format_elapsed_time(seconds_value):
 # ==============================================================================
 # USER SETTINGS
 # ==============================================================================
-API_TYPE = "ask"  # Valid values: ask, local, cloud.
+API_TYPE = "ask"  # Valid values: ask, local, gemini, deepseek.
 
-CLOUD_API_KEY = os.environ.get("CLOUD_API_KEY", "")
-CLOUD_MODEL_NAME = os.environ.get("CLOUD_MODEL_NAME", "gemini-3.1-flash-lite-preview")
-CLOUD_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
-CLOUD_API_REQUEST_TIMEOUT_SEC = 120
-CLOUD_API_MAX_RETRY_COUNT = 0  # 0 means retry indefinitely for transient Cloud API availability errors.
-CLOUD_API_RETRY_DELAY_SEC = 30
-CLOUD_API_MAX_LANGUAGES_PER_BATCH = 24
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+GEMINI_MODEL_NAME = os.environ.get("GEMINI_MODEL_NAME", "gemini-3.1-flash-lite")
+GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
+GEMINI_API_REQUEST_TIMEOUT_SEC = 120
+GEMINI_API_MAX_RETRY_COUNT = 0  # 0 means retry indefinitely for transient Gemini API availability errors.
+GEMINI_API_RETRY_DELAY_SEC = 30
+GEMINI_API_MAX_LANGUAGES_PER_BATCH = 24
+GEMINI_API_SOURCE_CHARS_PER_LANGUAGE_BATCH = 10000
+GEMINI_API_COMPLEX_SOURCE_CHAR_THRESHOLD = 1400
+GEMINI_API_VERY_COMPLEX_SOURCE_CHAR_THRESHOLD = 3200
+GEMINI_API_COMPLEX_SOURCE_PLACEHOLDER_THRESHOLD = 6
+GEMINI_API_COMPLEX_SOURCE_MAX_LANGUAGES_PER_BATCH = 12
+GEMINI_API_VERY_COMPLEX_SOURCE_MAX_LANGUAGES_PER_BATCH = 4
+GEMINI_API_INTER_CALL_DELAY_SEC = 3.0
+GEMINI_API_PIPELINE_CHUNKS = True
+API_REPAIR_REQUEST_TIMEOUT_SEC = 45
+API_REPAIR_TIMEOUT_RETRY_COUNT = 1
+COUNTRY_NAME_REPAIR_MAX_COMPLETION_TOKENS = 512
+LOCAL_COUNTRY_NAME_REPAIR_INITIAL_COMPLETION_TOKENS = 1024
+LOCAL_COUNTRY_NAME_REPAIR_MAX_COMPLETION_TOKENS = 2048
+
+DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
+DEEPSEEK_MODEL_NAME = os.environ.get("DEEPSEEK_MODEL_NAME", "deepseek-v4-flash")
+DEEPSEEK_API_URL = "https://api.deepseek.com"
+DEEPSEEK_API_REQUEST_TIMEOUT_SEC = 120
+DEEPSEEK_API_MAX_RETRY_COUNT = 0  # 0 means retry indefinitely for transient DeepSeek API availability errors.
+DEEPSEEK_API_RETRY_DELAY_SEC = 30
+DEEPSEEK_API_MAX_LANGUAGES_PER_BATCH = GEMINI_API_MAX_LANGUAGES_PER_BATCH
+DEEPSEEK_API_SOURCE_CHARS_PER_LANGUAGE_BATCH = GEMINI_API_SOURCE_CHARS_PER_LANGUAGE_BATCH
+DEEPSEEK_API_MAX_COMPLETION_TOKENS = 8192
+DEEPSEEK_API_MAX_TOKEN_LIMIT = 32768
+DEEPSEEK_API_COMPLEX_SOURCE_CHAR_THRESHOLD = GEMINI_API_COMPLEX_SOURCE_CHAR_THRESHOLD
+DEEPSEEK_API_VERY_COMPLEX_SOURCE_CHAR_THRESHOLD = GEMINI_API_VERY_COMPLEX_SOURCE_CHAR_THRESHOLD
+DEEPSEEK_API_COMPLEX_SOURCE_PLACEHOLDER_THRESHOLD = GEMINI_API_COMPLEX_SOURCE_PLACEHOLDER_THRESHOLD
+DEEPSEEK_API_COMPLEX_SOURCE_MAX_LANGUAGES_PER_BATCH = GEMINI_API_COMPLEX_SOURCE_MAX_LANGUAGES_PER_BATCH
+DEEPSEEK_API_VERY_COMPLEX_SOURCE_MAX_LANGUAGES_PER_BATCH = GEMINI_API_VERY_COMPLEX_SOURCE_MAX_LANGUAGES_PER_BATCH
+DEEPSEEK_API_INTER_CALL_DELAY_SEC = 3.0
+DEEPSEEK_API_PIPELINE_CHUNKS = True
 
 LOCAL_API_BASE_URL = os.environ.get(
     "LOCAL_API_BASE_URL", "http://192.168.10.11:1234/v1"
 )
 LOCAL_API_KEY = os.environ.get("LOCAL_API_KEY", "")
 LOCAL_MODEL_NAME = os.environ.get("LOCAL_MODEL_NAME", "")
-LOCAL_API_REQUEST_TIMEOUT_SEC = 120
-LOCAL_API_MAX_COMPLETION_TOKENS = 4096
-LOCAL_API_RETRY_DELAY_SEC = 3
-LOCAL_API_MAX_LANGUAGES_PER_BATCH = 12
-LOCAL_API_FAILED_LANGUAGE_MAX_LANGUAGES_PER_BATCH = 1
-ATOMIC_WRITE_RETRY_COUNT = 5
-ATOMIC_WRITE_RETRY_DELAY_SEC = 0.2
+LOCAL_API_REQUEST_TIMEOUT_SEC = 60
+LOCAL_API_MAX_RETRY_COUNT = 0  # 0 means retry indefinitely for transient Local API availability errors.
+LOCAL_API_RETRY_DELAY_SEC = 1
+LOCAL_API_MAX_LANGUAGES_PER_BATCH = DEEPSEEK_API_MAX_LANGUAGES_PER_BATCH
+LOCAL_API_COUNTRY_NAME_MAX_LANGUAGES_PER_BATCH = 12
+LOCAL_API_SOURCE_CHARS_PER_LANGUAGE_BATCH = 6000
+LOCAL_API_MAX_COMPLETION_TOKENS = 32768
+LOCAL_API_MAX_TOKEN_LIMIT = 32768
+LOCAL_API_STREAM_RESPONSE = True
+LOCAL_API_INTER_CALL_DELAY_SEC = 0.0
+LOCAL_API_PIPELINE_CHUNKS = True
+LOCAL_MODEL_DISCOVERY_TIMEOUT_SEC = 3
+LOCAL_MODEL_DISCOVERY_CACHE_TTL_SEC = 30
+LOCAL_MODEL_FAMILY_GENERIC = "generic"
+LOCAL_MODEL_FAMILY_GEMMA = "gemma"
+LOCAL_MODEL_FAMILY_QWEN = "qwen"
+LOCAL_MODEL_FAMILY_QWEN_MOE = "qwen-moe"
+LOCAL_COMPLEX_SOURCE_CHAR_THRESHOLD = 700
+LOCAL_VERY_COMPLEX_SOURCE_CHAR_THRESHOLD = 1400
+LOCAL_COMPLEX_SOURCE_PLACEHOLDER_THRESHOLD = 6
+LOCAL_COMPLEX_SOURCE_MAX_LANGUAGES_PER_BATCH = 8
+LOCAL_VERY_COMPLEX_SOURCE_MAX_LANGUAGES_PER_BATCH = 4
+LOCAL_SEGMENTED_SOURCE_CHAR_THRESHOLD = 600
+LOCAL_SEGMENTED_SOURCE_TARGET_CHARS = 220
+LOCAL_SEGMENTED_SOURCE_MAX_SEGMENTS = 8
+ATOMIC_WRITE_RETRY_COUNT = 20
+ATOMIC_WRITE_RETRY_DELAY_SEC = 0.5
+TRANSLATION_PIPELINE_MIN_CHUNKS = 2
+TRANSLATION_MAP_BATCH_WRITES = True
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 SRCHYBRID_DIR = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
@@ -141,14 +201,16 @@ TRANSLATION_FAILED_LANGUAGE_RETRY_COUNT = 3
 TRANSLATION_PHRASE_ONLY_FIX_MIN_FAILURES = 1
 
 API_BACKEND_LOCAL = "local"
-API_BACKEND_CLOUD = "cloud"
+API_BACKEND_GEMINI = "gemini"
+API_BACKEND_DEEPSEEK = "deepseek"
 API_BACKEND_ASK = "ask"
 BACKEND_SELECTION_PREVIOUS = "previous"
 BACKEND_SELECTION_NEXT = "next"
 BACKEND_SELECTION_CONFIRM = "confirm"
 BACKEND_SELECTION_OPTIONS = (
     (API_BACKEND_LOCAL, "Local API"),
-    (API_BACKEND_CLOUD, "Cloud API"),
+    (API_BACKEND_DEEPSEEK, "DeepSeek API"),
+    (API_BACKEND_GEMINI, "Gemini API"),
 )
 INTERACTIVE_MENU_OPTION_ITEMS = (
     ("backend", "Backend", BACKEND_SELECTION_OPTIONS),
@@ -166,48 +228,48 @@ INTERACTIVE_MENU_ACTION_DIGIT = "digit"
 MENU_OPTION_ITEMS = (
     ("1", "Find and complete missing translations only"),
     ("2", "Translate/update specific translation key(s)"),
-    ("3", "Clean then translate specific translation key(s)"),
-    ("4", "Clean then translate specific line number(s)"),
-    ("5", "Clean then translate specific translation key(s) and language code(s)"),
+    ("3", "Clean (non-English translations) specific translation keys"),
+    ("4", "Clean then translate specific translation key(s)"),
+    ("5", "Clean then translate specific line number(s)"),
+    ("6", "Clean then translate specific translation key(s) and language code(s)"),
     (
-        "6",
+        "7",
         "Resume the last interrupted multi-item translation job with its saved parameters and progress",
     ),
     (
-        "7",
+        "8",
         "Full mapping: Check and update all translations from the beginning (ignores resume file)",
     ),
-    ("8", "Find and remove unused translation keys"),
-    ("9", "Find missing translations (fast structural scan + JSON output)"),
-    ("10", "Fix and normalize translations.map formatting"),
-    ("11", "Import STRINGTABLE entries from an RC file into translations.map"),
-    ("12", "Compile translations.map into generated C++ headers"),
-    ("13", "Check translations.map consistency"),
-    ("14", "Set or add a translation entry by KEY and language"),
-    ("15", "Add a language code to every KEY block"),
-    ("16", "Remove a translation KEY block"),
-    ("17", "Clear all non-English translations for a KEY"),
+    ("9", "Find and remove unused translation keys"),
+    ("10", "Find missing translations (fast structural scan + JSON output)"),
+    ("11", "Fix and normalize translations.map formatting"),
+    ("12", "Import STRINGTABLE entries from an RC file into translations.map"),
+    ("13", "Compile translations.map into generated C++ headers"),
+    ("14", "Check translations.map consistency"),
+    ("15", "Set or add a translation entry by KEY and language"),
+    ("16", "Add a language code to every KEY block"),
+    ("17", "Remove a translation KEY block"),
     ("18", "Exit"),
 )
 MENU_OPTION_LABELS = dict(MENU_OPTION_ITEMS)
 MENU_OPTION_ALIASES = {
     "missing-only": "1",
     "specific-keys": "2",
-    "clean-specific-keys": "3",
-    "clean-line-numbers": "4",
-    "clean-specific-key-languages": "5",
-    "resume-mapping": "6",
-    "full-mapping": "7",
-    "remove-unused-keys": "8",
-    "find-missing-translations": "9",
-    "fix-translations-map": "10",
-    "import-rc-to-map": "11",
-    "compile-map-to-headers": "12",
-    "check-translations-map": "13",
-    "set-translation-entry": "14",
-    "add-language-to-map": "15",
-    "remove-translation-key": "16",
-    "clear-non-english-translations": "17",
+    "clear-non-english-translations": "3",
+    "clean-specific-keys": "4",
+    "clean-line-numbers": "5",
+    "clean-specific-key-languages": "6",
+    "resume-mapping": "7",
+    "full-mapping": "8",
+    "remove-unused-keys": "9",
+    "find-missing-translations": "10",
+    "fix-translations-map": "11",
+    "import-rc-to-map": "12",
+    "compile-map-to-headers": "13",
+    "check-translations-map": "14",
+    "set-translation-entry": "15",
+    "add-language-to-map": "16",
+    "remove-translation-key": "17",
     "exit": "18",
 }
 MAP_TOOLKIT_ALIAS_TO_ACTION = {
@@ -224,19 +286,20 @@ MAP_TOOLKIT_ALIAS_TO_ACTION = {
 TRANSLATE_COMMAND_TO_MENU_CHOICE = {
     "missing-only": "1",
     "key-list": "2",
-    "clean-key-list": "3",
-    "clean-lines": "4",
-    "clean-key-languages": "5",
-    "resume": "6",
-    "full": "7",
-    "remove-unused-keys": "8",
-    "find-missing": "9",
-    "fix-map-format": "10",
+    "clear-non-english": "3",
+    "clean-key-list": "4",
+    "clean-lines": "5",
+    "clean-key-languages": "6",
+    "resume": "7",
+    "full": "8",
+    "remove-unused-keys": "9",
+    "find-missing": "10",
+    "fix-map-format": "11",
 }
 CLI_BOOLEAN_TRUE_VALUES = {"1", "true", "yes", "y", "on"}
 CLI_BOOLEAN_FALSE_VALUES = {"0", "false", "no", "n", "off"}
 STOP_ON_FIRST_ERROR = False
-RESUME_STATE_VERSION = 2
+RESUME_STATE_VERSION = 3
 RESUME_PHASE_PREPARE_KEYS = "prepare_specific_keys"
 RESUME_PHASE_TRANSLATION_ROUND = "translation_round"
 RESUME_PHASE_LINE_NUMBERS = "line_numbers"
@@ -272,15 +335,23 @@ def append_ai_log(title, prompt=None, response=None):
 
 PROTECTED_TOKENS = {
     "eMule",
+    "Powershare",
+    "eServer Buddy",
+    "eDonkey Hybrid",
+    "Hello",
     "Kad",
+    "Lphant",
     "Windows",
     "Microsoft",
     "MaxMind",
-    "GeoLite",
-    "GeoLite City",
+    "Shareaza",
     "UNC",
 }
+PROTECTED_TOKEN_CANONICAL_MAP = {token.casefold(): token for token in PROTECTED_TOKENS}
+PROTECTED_TOKEN_NO_COMPOUND_TITLE_TERMS = {"Powershare"}
 TRANSLATABLE_ALL_UPPERCASE_TOKENS = {"OK"}
+PROTECTED_TECHNICAL_ACRONYMS = {"AICH", "ICMP", "IP", "QUIC", "TCP", "UDP", "URL"}
+TRANSLATABLE_DOTTED_LATIN_ABBREVIATIONS = {"e.g", "i.e"}
 
 TOKEN_SCAN_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9+._-]*")
 ASCII_LEADING_WORD_PATTERN = re.compile(r"[A-Za-z]+(?:['’-][A-Za-z]+)*")
@@ -324,6 +395,10 @@ ALLOWED_SHARED_LEADING_LABELS = {
     "Scenario",
     "Start",
 }
+TRANSLATABLE_PROTECTED_TITLE_PREFIX_WORDS = {
+    "restart",
+    "when",
+}
 ENGLISH_LEAK_STOPWORDS = {
     "a",
     "an",
@@ -364,6 +439,52 @@ ENGLISH_LEAK_STOPWORDS = {
     "will",
     "with",
 }
+# Common Latin-script loanwords that are valid untranslated in many target languages;
+# these share the same spelling in English and numerous Romance / Germanic languages.
+INTERNATIONAL_LATIN_LOANWORDS = {
+    "auto",
+    "bonus",
+    "handshake",
+    "internet",
+    "maximum",
+    "minimum",
+    "minus",
+    "modem",
+    "offline",
+    "online",
+    "plus",
+    "ratio",
+    "router",
+    "scenario",
+    "status",
+    "total",
+    "video",
+}
+LANGUAGE_SPECIFIC_SOURCE_LOANWORDS = {
+    "ast": {"non"},
+    "de": {"native"},
+    "fr": {"administration", "configuration", "configurations", "native"},
+    "fy": {"buffer"},
+    "ms": {"popular"},
+    "nl": {"buffer"},
+    "sq": {"version"},
+}
+SOURCE_WORD_LEAK_VARIANTS = {
+    "eastern": ("east",),
+    "northern": ("north",),
+    "southern": ("south",),
+    "western": ("west",),
+}
+LOW_VALUE_SLASH_SOURCE_PHRASE_WORDS = {"modem", "router"}
+SOURCE_BOOLEAN_LITERAL_WORDS = {"true", "false"}
+SOURCE_SYMBOLIC_VARIABLE_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9_])([A-Za-z])(?:th)?(?=\s+(?:is|are|=|equals?|time|times)\b)|\bwhere\s+([A-Za-z])\s+(?:is|are|=|equals?)\b",
+    re.IGNORECASE,
+)
+WINDOWS_VERSION_LITERAL_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9_])(?:Win|Windows)\s+(?:XP|Vista|[0-9]+(?:\.[0-9]+)?)(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
 GENERIC_SOURCE_PHRASE_EDGE_STOPWORDS = ENGLISH_LEAK_STOPWORDS | {
     "based",
     "rename",
@@ -394,22 +515,28 @@ GENERIC_LANGUAGE_IDENTITY_RULE_TEMPLATE = (
 MIN_EMBEDDED_ENGLISH_PHRASE_LEN = 2
 MIN_EMBEDDED_ENGLISH_PHRASE_CHAR_LEN = 10
 ESCAPE_ARTIFACT_PREFIXES = ("", "n", "r", "t")
-TERMINAL_PUNCTUATION_CHARS = ".!?؟。！？።"
-TERMINAL_PUNCTUATION_END_PATTERN = re.compile(r"[.!?؟。！？።]+\s*$")
+TERMINAL_PUNCTUATION_CHARS = ".!?؟۔。！？｡।॥։។៕။።፧፨…။"
+TERMINAL_PUNCTUATION_END_PATTERN = re.compile(
+    rf"[{re.escape(TERMINAL_PUNCTUATION_CHARS)}]+\s*$"
+)
 ESCAPED_LINE_SPLIT_PATTERN = re.compile(r"(\\r\\n|\\n|\\r|\r\n|\n|\r)")
 PROTECTED_TOKEN_LEADING_TRIM_CHARS = "\"'([{"
-PROTECTED_TOKEN_TRAILING_TRIM_CHARS = "\"')]}:;,.!?؟。！？።"
+PROTECTED_TOKEN_TRAILING_TRIM_CHARS = "\"')]}:;,.!?؟。！？።။"
 EXACT_KNOWN_PHRASE_MIN_WORDS = 2
 PROMPT_SOURCE_PHRASE_MIN_WORDS = 2
 PROMPT_SOURCE_PHRASE_MAX_COUNT = 8
 ENGLISH_LEAK_WORD_MIN_LEN = 6
-LOCAL_FORBIDDEN_SOURCE_WORD_MIN_LEN = 6
+LOCAL_FORBIDDEN_SOURCE_WORD_MIN_LEN = 4
+SHORT_PROTECTED_LABEL_SOURCE_WORD_MAX_COUNT = 5
+SHORT_PROTECTED_LABEL_LEAK_WORD_MIN_LEN = 4
 REPETITIVE_TOKEN_FLOOD_THRESHOLD = 8
 LANGUAGE_CODE_PATTERN = re.compile(r"[A-Za-z]{2,3}(?:-[A-Za-z0-9]+)*")
 MAP_TOOL_LANGUAGE_CODE_PATTERN = re.compile(r"[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*")
 PLACEHOLDER_TOKEN_PATTERN = re.compile(
     r"%%|%(?:\d+\$)?[-+#0]*(?:\*|\d+)?(?:\.(?:\*|\d+))?(?:hh|h|ll|l|I64|I32|w|z|j|t|L)?[diuoxXfFeEgGaAcCsSpn]"
 )
+LOCKED_TERM_PLACEHOLDER_PATTERN = re.compile(r"__LOCKED_TERM_\d+__")
+PERCENT_TEMPLATE_TOKEN_PATTERN = re.compile(r"%(?!%)[A-Za-z]")
 COMPILER_PERCENT_FLAG_CHARS = set("#0- +'IhlL0123456789.*")
 BRACKET_PAIRS = {
     "(": ")",
@@ -457,7 +584,34 @@ QUOTE_CHARS = {
 def extract_placeholder_tokens(text):
     if not isinstance(text, str) or not text:
         return []
-    return [match.group(0) for match in PLACEHOLDER_TOKEN_PATTERN.finditer(text)]
+    return [
+        match.group(0)
+        for match in PLACEHOLDER_TOKEN_PATTERN.finditer(text)
+        if match.group(0) != "%%"
+    ]
+
+
+def extract_percent_template_tokens(text):
+    if not isinstance(text, str) or not text:
+        return []
+
+    tokens = []
+    for match in PERCENT_TEMPLATE_TOKEN_PATTERN.finditer(text):
+        token = match.group(0)
+        if is_printf_placeholder_token(token):
+            continue
+        tokens.append(token)
+    return tokens
+
+
+def contains_placeholder_like_token(text):
+    if not isinstance(text, str) or not text:
+        return False
+    return bool(
+        extract_placeholder_tokens(text)
+        or extract_percent_template_tokens(text)
+        or LOCKED_TERM_PLACEHOLDER_PATTERN.search(text)
+    )
 
 
 def is_quote_char(ch):
@@ -482,6 +636,9 @@ def extract_placeholder_format_specs(text):
 
     specs = []
     for match in PLACEHOLDER_TOKEN_PATTERN.finditer(text):
+        if match.group(0) == "%%":
+            continue
+
         left_index = match.start() - 1
         right_index = match.end()
         wrapper_pairs = []
@@ -527,6 +684,58 @@ def build_placeholder_format_examples(en_text):
     return examples
 
 
+def build_repeated_placeholder_occurrence_text(placeholder_sequence):
+    if not placeholder_sequence:
+        return ""
+
+    counts = {}
+    for token in placeholder_sequence:
+        counts[token] = counts.get(token, 0) + 1
+
+    repeated_tokens = [
+        (token, count)
+        for token, count in counts.items()
+        if count > 1
+    ]
+    if not repeated_tokens:
+        return ""
+
+    repeated_block = ", ".join(
+        f"`{token}` exactly {count} times" for token, count in repeated_tokens
+    )
+    return (
+        f"Repeated identical placeholders in this source are separate ordered value slots ({repeated_block}); "
+        "the final translation must contain those exact counts and no additional copies. "
+        "Do NOT create helper placeholders, paired placeholders, or duplicate a placeholder to satisfy target-language grammar; translate the surrounding words around the existing ordered slots only. "
+    )
+
+
+def build_placeholder_occurrence_context_text(en_text):
+    specs = extract_placeholder_format_specs(en_text)
+    if len(specs) <= 1:
+        return ""
+
+    context_items = []
+    for index, spec in enumerate(specs, start=1):
+        token_start = spec.get("token_start", 0)
+        token_end = spec.get("token_end", 0)
+        excerpt_start = max(0, token_start - 36)
+        excerpt_end = min(len(en_text), token_end + 36)
+        excerpt = en_text[excerpt_start:excerpt_end].strip()
+        excerpt = excerpt.replace("\r", "\\r").replace("\n", "\\n").replace("`", "'")
+        if excerpt_start > 0:
+            excerpt = "..." + excerpt
+        if excerpt_end < len(en_text):
+            excerpt += "..."
+        context_items.append(f"slot {index}: `{excerpt}`")
+
+    return (
+        "Source placeholder slot context: "
+        + "; ".join(context_items)
+        + ". Each listed source slot must appear exactly once in the final translation; translate words around these existing slots instead of adding a new placeholder slot. "
+    )
+
+
 def build_placeholder_format_rule(en_text, rule_number="15"):
     placeholder_examples = build_placeholder_format_examples(en_text)
     if not placeholder_examples:
@@ -534,8 +743,20 @@ def build_placeholder_format_rule(en_text, rule_number="15"):
     placeholder_examples_block = ", ".join(
         f"`{example}`" for example in placeholder_examples
     )
+    placeholder_sequence = extract_placeholder_tokens(en_text)
+    placeholder_sequence_block = ", ".join(
+        f"`{token}`" for token in placeholder_sequence
+    )
+    repeated_placeholder_text = build_repeated_placeholder_occurrence_text(
+        placeholder_sequence
+    )
+    placeholder_context_text = build_placeholder_occurrence_context_text(en_text)
     return (
         f"{rule_number}. CRITICAL PLACEHOLDER FORMAT RULE: Preserve the exact source formatting around each placeholder occurrence independently. "
+        f"Keep the placeholder occurrence order exactly as the English source: {placeholder_sequence_block}. "
+        f"Do NOT move a later placeholder before an earlier placeholder; move the translated words around the placeholders instead. "
+        f"{repeated_placeholder_text}"
+        f"{placeholder_context_text}"
         f"If the English source uses different surrounding characters for different placeholders, keep the same surrounding characters on the corresponding placeholder occurrence in the translation. "
         f"Source placeholder examples for this string: {placeholder_examples_block}. "
         f"Do NOT add, remove, or change the direct balanced wrapper characters around placeholders. "
@@ -566,11 +787,7 @@ def collect_compiler_percent_tokens(text):
     if not isinstance(text, str) or not text:
         return [], ""
 
-    tokens = [
-        match.group(0)
-        for match in PLACEHOLDER_TOKEN_PATTERN.finditer(text)
-        if match.group(0) != "%%"
-    ]
+    tokens = [match.group(0) for match in PLACEHOLDER_TOKEN_PATTERN.finditer(text)]
     return tokens, ""
 
 
@@ -582,10 +799,34 @@ def is_printf_placeholder_token(token):
     )
 
 
+def count_literal_percent_occurrences(text):
+    if not isinstance(text, str) or not text:
+        return 0
+
+    count = 0
+    index = 0
+    while index < len(text):
+        if text[index] != "%":
+            index += 1
+            continue
+        if index + 1 < len(text) and text[index + 1] == "%":
+            index += 2
+            continue
+        placeholder_match = PLACEHOLDER_TOKEN_PATTERN.match(text, index)
+        if placeholder_match:
+            index = placeholder_match.end()
+            continue
+        count += 1
+        index += 1
+    return count
+
+
 def build_literal_percent_format_rule(en_text, rule_number="17"):
     source_tokens, source_error = collect_compiler_percent_tokens(en_text)
     if source_error:
         return ""
+    percent_template_tokens = extract_percent_template_tokens(en_text)
+    literal_percent_count = count_literal_percent_occurrences(en_text)
 
     literal_tokens = []
     seen_tokens = set()
@@ -598,13 +839,39 @@ def build_literal_percent_format_rule(en_text, rule_number="17"):
         literal_tokens.append(visible_token)
         seen_tokens.add(visible_token)
 
+    if percent_template_tokens:
+        token_examples = ", ".join(f"`{token}`" for token in dict.fromkeys(percent_template_tokens))
+        return (
+            f"{rule_number}. CRITICAL PERCENT TEMPLATE RULE: Preserve these source percent-template token(s) exactly and in order: {token_examples}. "
+            "Do NOT translate them, split the `%` from its following letter, or replace them with a localized date word.\n"
+        )
+
     if not literal_tokens:
-        return ""
+        placeholder_tokens = extract_placeholder_tokens(en_text)
+        if not placeholder_tokens:
+            if not literal_percent_count:
+                return ""
+            return (
+                f"{rule_number}. CRITICAL LITERAL PERCENT RULE: The English source contains {literal_percent_count} literal percent sign occurrence(s), not printf placeholders. "
+                "Preserve each literal `%` exactly once. Never attach a target-language suffix, letter, digit, or hyphen directly after `%`, because sequences such as `%-d` or `%0-ti` are parsed as printf placeholders. "
+                "Keep each literal `%` attached to the same numeric value as in the English source. "
+                "If target-language grammar needs a suffix after the percentage, insert a normal space after `%` or rephrase the surrounding words naturally.\n"
+            )
+        placeholder_examples = ", ".join(f"`{token}`" for token in placeholder_tokens)
+        allowed_percent_text = (
+            f" The only `%` characters allowed are inside these exact source placeholders: {placeholder_examples}."
+        )
+        return (
+            f"{rule_number}. CRITICAL LITERAL PERCENT RULE: The English source has no literal percent-sign token outside placeholders. "
+            f"Do NOT introduce `%`, `%%`, or any percent-sign symbol as an abbreviation or unit marker in the translation.{allowed_percent_text} "
+            "Translate percent-related wording as ordinary target-language text unless it is an exact source placeholder.\n"
+        )
 
     token_examples = ", ".join(f"`{token}`" for token in literal_tokens)
     return (
         f"{rule_number}. CRITICAL LITERAL PERCENT RULE: The translations.map tool reads every single literal `%` together with the immediately following raw boundary character from the English source. "
         f"Preserve that raw boundary pattern exactly for every literal percent occurrence. Source literal-percent token example(s) for this string: {token_examples}. "
+        "Keep each literal `%` attached to the same numeric value as in the English source. "
         "If the source literal percent is followed by a space, keep translated wording continuing after the percent sign. Do NOT move sentence-ending punctuation or string end directly next to `%` unless the English source does so too.\n"
     )
 
@@ -630,10 +897,22 @@ def build_compiler_percent_fix_requirements(en_text, translated_text):
         target_token_examples = ", ".join(
             f"`{visualize_compiler_percent_token(token)}`" for token in target_tokens
         )
+        source_placeholders = extract_placeholder_tokens(en_text)
+        target_placeholders = extract_placeholder_tokens(translated_text)
+        placeholder_count_text = ""
+        if source_placeholders or target_placeholders:
+            placeholder_count_text = (
+                f"Expected printf placeholder count: {len(source_placeholders)}. "
+                f"Current printf placeholder count: {len(target_placeholders)}. "
+            )
+            placeholder_count_text += build_repeated_placeholder_occurrence_text(
+                source_placeholders
+            )
         return (
             "17. CRITICAL PERCENT TOKEN FIX: The current translation changed the raw percent-token pattern that the translations.map tool derives from the English source. "
             f"Expected source token sequence: {source_token_examples or '`(none)`'}. "
             f"Current translation token sequence: {target_token_examples or '`(none)`'}. "
+            f"{placeholder_count_text}"
             "Rewrite the translation so each single `%` keeps the same immediate raw boundary pattern as the English source.\n"
         )
 
@@ -708,6 +987,21 @@ def validate_compiler_percent_token_alignment(en_text, translated_text):
     return True, ""
 
 
+def validate_percent_template_token_alignment(en_text, translated_text):
+    source_tokens = extract_percent_template_tokens(en_text)
+    if not source_tokens:
+        return True, ""
+
+    translated_tokens = extract_percent_template_tokens(translated_text)
+    if source_tokens != translated_tokens:
+        return (
+            False,
+            f"percent-template token mismatch (expected {source_tokens}, got {translated_tokens})",
+        )
+
+    return True, ""
+
+
 def looks_like_source_echo_line(text, en_text):
     if not isinstance(text, str):
         return False
@@ -741,6 +1035,7 @@ def is_invariant_translation_source(en_text):
         return False
 
     analysis_text = PLACEHOLDER_TOKEN_PATTERN.sub(" ", visible_text)
+    analysis_text = PERCENT_TEMPLATE_TOKEN_PATTERN.sub(" ", analysis_text)
     analysis_text = re.sub(r"__LOCKED_TERM_\d+__", " ", analysis_text)
 
     for protected_term in extract_protected_terms(en_text):
@@ -772,6 +1067,34 @@ def is_invariant_translation_source(en_text):
         return False
 
     return True
+
+
+def is_protected_technical_acronym_source(en_text):
+    if not isinstance(en_text, str):
+        return False
+
+    visible_text = build_visible_prompt_text(en_text)
+    if not visible_text or not visible_text.strip():
+        return False
+
+    analysis_text = PLACEHOLDER_TOKEN_PATTERN.sub(" ", visible_text)
+    analysis_text = PERCENT_TEMPLATE_TOKEN_PATTERN.sub(" ", analysis_text)
+    tokens = [
+        normalize_protected_token(match.group(0))
+        for match in TOKEN_SCAN_PATTERN.finditer(analysis_text)
+    ]
+    tokens = [token for token in tokens if token]
+    if not tokens or not all(token in PROTECTED_TECHNICAL_ACRONYMS for token in tokens):
+        return False
+
+    for token in tokens:
+        analysis_text = re.sub(
+            rf"(?<!{NON_WORD_BOUNDARY_PATTERN}){re.escape(token)}(?!{NON_WORD_BOUNDARY_PATTERN})",
+            " ",
+            analysis_text,
+        )
+
+    return not re.search(r"[A-Za-z]", analysis_text)
 
 
 def count_source_phrase_words(phrase):
@@ -974,6 +1297,9 @@ def is_low_value_source_phrase_fragment(phrase):
     if not normalized:
         return True
 
+    if is_low_value_slash_source_phrase_fragment(normalized):
+        return True
+
     words = SOURCE_ENGLISH_WORD_PATTERN.findall(normalized)
     if len(words) < 2:
         return False
@@ -993,12 +1319,29 @@ def is_low_value_source_phrase_fragment(phrase):
         "not",
         "apply",
         "applies",
+        "can",
+        "could",
+        "may",
+        "might",
+        "must",
+        "shall",
+        "should",
+        "will",
+        "would",
     }:
         return True
     if lowered_words[0] in {
+        "can",
         "if",
+        "may",
+        "might",
+        "must",
+        "shall",
+        "should",
         "when",
         "while",
+        "will",
+        "would",
         "this",
         "that",
         "these",
@@ -1014,6 +1357,36 @@ def is_low_value_source_phrase_fragment(phrase):
     return False
 
 
+def is_slash_separated_source_phrase_candidate(phrase):
+    normalized = normalize_candidate_source_phrase(phrase)
+    if "/" not in normalized or "\\" in normalized:
+        return False
+
+    words = SOURCE_ENGLISH_WORD_PATTERN.findall(normalized)
+    if len(words) < 2:
+        return False
+    lowered_words = [word.casefold() for word in words]
+    if lowered_words[0] in GENERIC_SOURCE_PHRASE_EDGE_STOPWORDS:
+        return False
+
+    segments = normalized.split("/")
+    first_segment_words = SOURCE_ENGLISH_WORD_PATTERN.findall(segments[0])
+    if len(first_segment_words) != 1:
+        return False
+
+    for left_segment, right_segment in zip(segments, segments[1:]):
+        left_words = SOURCE_ENGLISH_WORD_PATTERN.findall(left_segment)
+        right_words = SOURCE_ENGLISH_WORD_PATTERN.findall(right_segment)
+        if (
+            left_words
+            and right_words
+            and left_words[-1].casefold() == right_words[0].casefold()
+        ):
+            return False
+
+    return not is_low_value_slash_source_phrase_fragment(normalized)
+
+
 def get_prompt_source_phrase_priority(candidate):
     normalized = normalize_candidate_source_phrase(candidate)
     if not normalized:
@@ -1024,6 +1397,10 @@ def get_prompt_source_phrase_priority(candidate):
     score = 0
     if normalized.casefold().endswith(" mode"):
         score += 100
+    if is_slash_separated_source_phrase_candidate(normalized):
+        score += 90
+        if word_count >= 3:
+            score += 20
     if all(word[:1].isupper() for word in words if word):
         score += 70
     if word_count == 2:
@@ -1133,6 +1510,8 @@ def build_exact_memory_phrase_candidates(en_text):
         normalized = normalize_candidate_source_phrase(candidate)
         if not is_high_confidence_exact_phrase_candidate(normalized):
             return
+        if contains_placeholder_like_token(normalized):
+            return
         if is_low_value_source_phrase_fragment(normalized):
             return
         if normalized.casefold() == normalized_source.casefold():
@@ -1184,6 +1563,10 @@ def build_dynamic_source_phrase_candidates(en_text):
         if not normalized:
             return
         if normalized.casefold() in protected_terms_cf:
+            return
+        if source_phrase_overlaps_protected_term(normalized, protected_terms_cf):
+            return
+        if contains_placeholder_like_token(normalized):
             return
         if allow_short_quoted_ui_phrase:
             if not should_include_quoted_ui_phrase_candidate(normalized):
@@ -1284,24 +1667,130 @@ def get_source_words_covered_by_leading_ui_label(en_text):
     return covered
 
 
-def build_dynamic_source_leak_word_candidates(en_text):
+def extract_placeholder_adjacent_translatable_source_words(en_text):
     if not isinstance(en_text, str) or not en_text:
         return []
 
     visible_text = build_visible_prompt_text(en_text)
+    protected_terms = extract_protected_terms(en_text)
+    if not visible_text or not protected_terms:
+        return []
+
+    candidates = []
+    seen = set()
+
+    def add_candidate(raw_word):
+        normalized = normalize_candidate_source_phrase(raw_word)
+        if not normalized:
+            return
+        if not is_simple_title_case(normalized):
+            return
+        lowered = normalized.casefold()
+        if lowered in seen:
+            return
+        if is_preserved_source_literal_word(normalized):
+            return
+        if lowered in ENGLISH_LEAK_STOPWORDS:
+            return
+        if should_protect_token(normalized):
+            return
+        if len(normalized) < SHORT_PROTECTED_LABEL_LEAK_WORD_MIN_LEN:
+            return
+        candidates.append(normalized)
+        seen.add(lowered)
+
+    protected_spans = []
+    for term in sorted(protected_terms, key=lambda item: (-len(item), item.casefold())):
+        protected_spans.extend(find_protected_term_spans(visible_text, term))
+
+    for _, end in sorted(protected_spans):
+        after_match = re.match(
+            r"[\s:/,_-]+([A-Za-z]+(?:['-][A-Za-z]+)*)",
+            visible_text[end:],
+        )
+        if after_match:
+            add_candidate(after_match.group(1))
+
+    return candidates
+
+
+def extract_placeholder_adjacent_translatable_source_phrases(en_text):
+    if not isinstance(en_text, str) or not en_text:
+        return []
+
+    visible_text = build_visible_prompt_text(en_text)
+    protected_terms = extract_protected_terms(en_text)
+    if not visible_text or not protected_terms:
+        return []
+
+    phrases = []
+    seen = set()
+
+    def add_candidate(raw_phrase, raw_word):
+        phrase = normalize_candidate_source_phrase(raw_phrase)
+        word = normalize_candidate_source_phrase(raw_word)
+        if not phrase or not word:
+            return
+        if not is_simple_title_case(word):
+            return
+        if is_preserved_source_literal_word(word):
+            return
+        if word.casefold() in ENGLISH_LEAK_STOPWORDS:
+            return
+        if should_protect_token(word):
+            return
+        if len(word) < SHORT_PROTECTED_LABEL_LEAK_WORD_MIN_LEN:
+            return
+        phrase_cf = phrase.casefold()
+        if phrase_cf in seen:
+            return
+        phrases.append(phrase)
+        seen.add(phrase_cf)
+
+    protected_spans = []
+    for term in sorted(protected_terms, key=lambda item: (-len(item), item.casefold())):
+        protected_spans.extend(find_protected_term_spans(visible_text, term))
+
+    for start, end in sorted(protected_spans):
+        after_match = re.match(
+            r"[\s:/,_-]+([A-Za-z]+(?:['-][A-Za-z]+)*)",
+            visible_text[end:],
+        )
+        if after_match:
+            add_candidate(
+                visible_text[start : end + after_match.end()],
+                after_match.group(1),
+            )
+
+    return phrases
+
+
+def build_dynamic_source_leak_word_candidates(en_text):
+    if not isinstance(en_text, str) or not en_text:
+        return []
+
     candidate_map = {}
-    for word in SOURCE_ENGLISH_WORD_PATTERN.findall(visible_text):
-        normalized = normalize_candidate_source_phrase(word)
+    for word in extract_placeholder_adjacent_translatable_source_words(en_text):
+        candidate_map.setdefault(word.casefold(), word)
+
+    min_len = get_source_leak_word_min_len(en_text)
+    for match in iter_unprotected_source_word_matches(en_text):
+        normalized = normalize_candidate_source_phrase(match.group(0))
         if not normalized:
             continue
         lowered = normalized.casefold()
-        if len(normalized) < ENGLISH_LEAK_WORD_MIN_LEN:
+        if is_preserved_source_literal_word(normalized):
             continue
-        if lowered in ENGLISH_LEAK_STOPWORDS:
+        is_priority_prefix_word = lowered in TRANSLATABLE_PROTECTED_TITLE_PREFIX_WORDS
+        if len(normalized) < min_len and not is_priority_prefix_word:
+            continue
+        if lowered in ENGLISH_LEAK_STOPWORDS and not is_priority_prefix_word:
             continue
         if should_protect_token(normalized):
             continue
         candidate_map.setdefault(lowered, normalized)
+        for variant in SOURCE_WORD_LEAK_VARIANTS.get(lowered, ()):
+            candidate_map.setdefault(variant.casefold(), variant)
 
     return sorted(
         candidate_map.values(), key=lambda item: (-len(item), item.casefold())
@@ -1312,24 +1801,199 @@ def build_local_forbidden_source_word_candidates(en_text):
     if not isinstance(en_text, str) or not en_text:
         return []
 
-    visible_text = build_visible_prompt_text(en_text)
     candidate_map = {}
-    for word in SOURCE_ENGLISH_WORD_PATTERN.findall(visible_text):
-        normalized = normalize_candidate_source_phrase(word)
+    for word in extract_placeholder_adjacent_translatable_source_words(en_text):
+        candidate_map.setdefault(word.casefold(), word)
+
+    for match in iter_unprotected_source_word_matches(en_text):
+        normalized = normalize_candidate_source_phrase(match.group(0))
         if not normalized:
             continue
         lowered = normalized.casefold()
-        if len(normalized) < LOCAL_FORBIDDEN_SOURCE_WORD_MIN_LEN:
+        if is_preserved_source_literal_word(normalized):
             continue
-        if lowered in ENGLISH_LEAK_STOPWORDS:
+        is_priority_prefix_word = lowered in TRANSLATABLE_PROTECTED_TITLE_PREFIX_WORDS
+        if len(normalized) < LOCAL_FORBIDDEN_SOURCE_WORD_MIN_LEN and not is_priority_prefix_word:
+            continue
+        if lowered in ENGLISH_LEAK_STOPWORDS and not is_priority_prefix_word:
             continue
         if should_protect_token(normalized):
             continue
         candidate_map.setdefault(lowered, normalized)
+        for variant in SOURCE_WORD_LEAK_VARIANTS.get(lowered, ()):
+            candidate_map.setdefault(variant.casefold(), variant)
 
     return sorted(
         candidate_map.values(), key=lambda item: (-len(item), item.casefold())
     )
+
+
+def get_source_leak_word_min_len(en_text):
+    if is_short_protected_label_source(en_text):
+        return SHORT_PROTECTED_LABEL_LEAK_WORD_MIN_LEN
+    return ENGLISH_LEAK_WORD_MIN_LEN
+
+
+def is_preserved_source_literal_word(word):
+    if not isinstance(word, str):
+        return False
+    normalized = normalize_candidate_source_phrase(word).casefold()
+    return normalized in SOURCE_BOOLEAN_LITERAL_WORDS
+
+
+def extract_source_symbolic_variable_terms(en_text):
+    terms = set()
+    if not isinstance(en_text, str) or not en_text:
+        return []
+
+    source_text = build_visible_prompt_text(en_text)
+    for match in SOURCE_SYMBOLIC_VARIABLE_PATTERN.finditer(source_text):
+        for group in match.groups():
+            token = normalize_candidate_source_phrase(group)
+            if token and len(token) == 1 and token.isalpha():
+                terms.add(token)
+    for match in re.finditer(
+        r"(?<![A-Za-z0-9_])([A-Za-z])th(?=\s+time\b)",
+        source_text,
+        flags=re.IGNORECASE,
+    ):
+        token = normalize_candidate_source_phrase(match.group(0))
+        if token and len(token) == 3 and token[:1].isalpha():
+            terms.add(token)
+
+    return sorted(terms, key=lambda item: item.casefold())
+
+
+def extract_source_platform_version_terms(en_text):
+    terms = set()
+    if not isinstance(en_text, str) or not en_text:
+        return []
+
+    source_text = build_visible_prompt_text(en_text)
+    for match in WINDOWS_VERSION_LITERAL_PATTERN.finditer(source_text):
+        term = normalize_candidate_source_phrase(match.group(0))
+        if not term:
+            continue
+        terms.add(term)
+        parts = term.split(None, 1)
+        if len(parts) != 2:
+            continue
+        terms.add(parts[0])
+        version = parts[1]
+        if parts[0].casefold() == "win":
+            terms.add("Windows")
+            terms.add(f"Windows {version}")
+        elif parts[0].casefold() == "windows":
+            terms.add("Win")
+            terms.add(f"Win {version}")
+
+    return sorted(terms, key=lambda item: (-len(item), item.casefold()))
+
+
+def remove_preserved_source_literals_for_detection(text, en_text):
+    if not isinstance(text, str) or not text:
+        return text
+    if not isinstance(en_text, str) or not en_text:
+        return text
+
+    preserved_literals = set()
+    for match in SOURCE_ENGLISH_WORD_PATTERN.finditer(build_visible_prompt_text(en_text)):
+        word = normalize_candidate_source_phrase(match.group(0))
+        if is_preserved_source_literal_word(word):
+            preserved_literals.add(word)
+    for variable in extract_source_symbolic_variable_terms(en_text):
+        preserved_literals.add(variable)
+    if not preserved_literals:
+        return text
+
+    cleaned = text
+    for word in sorted(preserved_literals, key=lambda item: (-len(item), item.casefold())):
+        cleaned = re.sub(
+            rf"(?<!{NON_WORD_BOUNDARY_PATTERN}){re.escape(word)}(?!{NON_WORD_BOUNDARY_PATTERN})",
+            " ",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+    return cleaned
+
+
+def is_short_protected_label_source(en_text):
+    if not isinstance(en_text, str) or not en_text:
+        return False
+    if not extract_protected_terms(en_text):
+        return False
+
+    visible_text = build_visible_prompt_text(en_text)
+    words = SOURCE_ENGLISH_WORD_PATTERN.findall(visible_text)
+    if not words or len(words) > SHORT_PROTECTED_LABEL_SOURCE_WORD_MAX_COUNT:
+        return False
+
+    for match in iter_unprotected_source_word_matches(en_text):
+        word = normalize_candidate_source_phrase(match.group(0))
+        if not word:
+            continue
+        lowered = word.casefold()
+        if lowered in ENGLISH_LEAK_STOPWORDS or should_protect_token(word):
+            continue
+        if SHORT_PROTECTED_LABEL_LEAK_WORD_MIN_LEN <= len(word) < ENGLISH_LEAK_WORD_MIN_LEN:
+            return True
+
+    return False
+
+
+def is_low_value_slash_source_phrase_fragment(phrase):
+    normalized = normalize_candidate_source_phrase(phrase)
+    if "/" not in normalized:
+        return False
+
+    words = [
+        word.casefold()
+        for word in SOURCE_ENGLISH_WORD_PATTERN.findall(normalized)
+    ]
+    if len(words) < 2:
+        return False
+
+    return all(word in LOW_VALUE_SLASH_SOURCE_PHRASE_WORDS for word in words)
+
+
+def is_parenthesized_title_list_item(text):
+    normalized = normalize_candidate_source_phrase(text)
+    if not normalized:
+        return False
+    words = SOURCE_ENGLISH_WORD_PATTERN.findall(normalized)
+    if not words or len(words) > 3:
+        return False
+    return all(word[:1].isupper() or word.isupper() for word in words)
+
+
+def collect_parenthesized_title_list_item_spans(text):
+    spans = []
+    if not isinstance(text, str) or not text:
+        return spans
+
+    for match in re.finditer(r"\(([^)]*)\)", text):
+        content = match.group(1)
+        if "," not in content:
+            continue
+        item_start = 0
+        for raw_item in content.split(","):
+            relative_start = content.find(raw_item, item_start)
+            if relative_start < 0:
+                break
+            item_start = relative_start + len(raw_item) + 1
+            stripped_item = raw_item.strip()
+            if not stripped_item:
+                continue
+            if not is_parenthesized_title_list_item(stripped_item):
+                break
+            leading_ws = len(raw_item) - len(raw_item.lstrip())
+            trailing_ws = len(raw_item) - len(raw_item.rstrip())
+            start = match.start(1) + relative_start + leading_ws
+            end = match.start(1) + relative_start + len(raw_item) - trailing_ws
+            if start < end:
+                spans.append((start, end))
+
+    return spans
 
 
 def iter_unprotected_source_word_matches(en_text):
@@ -1340,17 +2004,170 @@ def iter_unprotected_source_word_matches(en_text):
     protected_terms_cf = {
         term.casefold() for term in extract_protected_terms(en_text)
     }
+    protected_terms_cf.update(
+        term.casefold() for term in extract_source_platform_version_terms(en_text)
+    )
+    protected_spans = collect_protected_term_spans(visible_text, protected_terms_cf)
+    protected_spans.extend(
+        (match.start(), match.end())
+        for match in PERCENT_TEMPLATE_TOKEN_PATTERN.finditer(visible_text)
+    )
+    protected_spans.extend(collect_parenthesized_title_list_item_spans(visible_text))
     for match in SOURCE_ENGLISH_WORD_PATTERN.finditer(visible_text):
         normalized = normalize_candidate_source_phrase(match.group(0))
         if not normalized:
+            continue
+        if span_is_inside_any(match.start(), match.end(), protected_spans):
             continue
         if normalized.casefold() in protected_terms_cf:
             continue
         yield match
 
 
+def collect_protected_term_spans(text, protected_terms):
+    spans = []
+    if not isinstance(text, str) or not text:
+        return spans
+    if not protected_terms:
+        return spans
+
+    for term in sorted(protected_terms, key=lambda item: (-len(item), item)):
+        if not isinstance(term, str) or not term:
+            continue
+        spans.extend(find_protected_term_spans(text, term))
+
+    return spans
+
+
+def span_is_inside_any(start, end, spans):
+    return any(span_start <= start and end <= span_end for span_start, span_end in spans)
+
+
+def find_protected_term_spans(text, term):
+    if not isinstance(text, str) or not text or not isinstance(term, str) or not term:
+        return []
+
+    pattern = re.compile(
+        rf"(?:(?<!{NON_WORD_BOUNDARY_PATTERN})|(?<=\\n)|(?<=\\r)|(?<=\\r\\n)){re.escape(term)}(?!{NON_WORD_BOUNDARY_PATTERN})",
+        re.IGNORECASE,
+    )
+    return [(match.start(), match.end()) for match in pattern.finditer(text)]
+
+
+def filter_covered_protected_terms(terms, source_text):
+    normalized_terms = []
+    seen = set()
+    for term in sorted(terms, key=lambda item: (-len(item), item.casefold())):
+        normalized = normalize_candidate_source_phrase(term)
+        if not normalized:
+            continue
+        normalized_cf = normalized.casefold()
+        if normalized_cf in seen:
+            continue
+        normalized_terms.append(normalized)
+        seen.add(normalized_cf)
+
+    if len(normalized_terms) < 2 or not isinstance(source_text, str) or not source_text:
+        return normalized_terms
+
+    term_spans = {
+        term: find_protected_term_spans(source_text, term) for term in normalized_terms
+    }
+    filtered_terms = []
+    for term in normalized_terms:
+        spans = term_spans.get(term, [])
+        if not spans:
+            filtered_terms.append(term)
+            continue
+
+        covering_spans = []
+        for other_term in normalized_terms:
+            if other_term == term or len(other_term) <= len(term):
+                continue
+            covering_spans.extend(term_spans.get(other_term, []))
+
+        if covering_spans and all(
+            span_is_inside_any(start, end, covering_spans) for start, end in spans
+        ):
+            continue
+        filtered_terms.append(term)
+
+    return sorted(filtered_terms, key=lambda item: (-len(item), item.casefold()))
+
+
+def source_phrase_overlaps_protected_term(phrase, protected_terms_cf):
+    if not isinstance(phrase, str) or not phrase or not protected_terms_cf:
+        return False
+
+    normalized = normalize_candidate_source_phrase(phrase)
+    if not normalized:
+        return False
+
+    phrase_words_cf = {
+        normalize_source_phrase_word_for_overlap(word)
+        for word in SOURCE_ENGLISH_WORD_PATTERN.findall(normalized)
+    }
+    phrase_words_cf.discard("")
+    if not phrase_words_cf:
+        return False
+
+    normalized_cf = normalized.casefold()
+    for protected_term_cf in protected_terms_cf:
+        if not protected_term_cf:
+            continue
+        if normalized_cf == protected_term_cf:
+            return True
+        protected_words_cf = {
+            normalize_source_phrase_word_for_overlap(word)
+            for word in SOURCE_ENGLISH_WORD_PATTERN.findall(protected_term_cf)
+        }
+        protected_words_cf.discard("")
+        if protected_words_cf and phrase_words_cf.intersection(protected_words_cf):
+            return True
+
+    return False
+
+
+def normalize_source_phrase_word_for_overlap(word):
+    normalized = normalize_candidate_source_phrase(word).casefold()
+    if normalized.endswith("'s") or normalized.endswith("’s"):
+        normalized = normalized[:-2]
+    return normalized
+
+
+def remove_protected_terms_for_source_leak_detection(text, en_text, placeholder_pairs=None):
+    if not isinstance(text, str) or not text:
+        return text
+
+    protected_terms = set(extract_source_ascii_literals_to_ignore_for_script_detection(en_text))
+    for _, term in placeholder_pairs or []:
+        if isinstance(term, str) and term:
+            protected_terms.add(term)
+    if not protected_terms:
+        return text
+
+    cleaned = text
+    for term in sorted(protected_terms, key=lambda item: (-len(item), item.casefold())):
+        pattern = re.compile(
+            rf"(?<!{NON_WORD_BOUNDARY_PATTERN}){re.escape(term)}(?!{NON_WORD_BOUNDARY_PATTERN})",
+            re.IGNORECASE,
+        )
+        cleaned = pattern.sub(" ", cleaned)
+    return cleaned
+
+
 def iter_embedded_english_phrase_candidates(en_text):
     seen = set()
+
+    for candidate in extract_placeholder_adjacent_translatable_source_phrases(en_text):
+        normalized = normalize_candidate_source_phrase(candidate)
+        if not normalized:
+            continue
+        normalized_cf = normalized.casefold()
+        if normalized_cf in seen:
+            continue
+        seen.add(normalized_cf)
+        yield normalized
 
     for candidate in build_authoritative_batch_phrase_candidates(en_text):
         normalized = normalize_candidate_source_phrase(candidate)
@@ -1368,10 +2185,6 @@ def iter_embedded_english_phrase_candidates(en_text):
             continue
         normalized_cf = normalized.casefold()
         if normalized_cf in seen:
-            continue
-
-        words = SOURCE_ENGLISH_WORD_PATTERN.findall(normalized)
-        if len(words) == 2 and all(word.islower() for word in words):
             continue
 
         seen.add(normalized_cf)
@@ -1417,19 +2230,15 @@ def build_prompt_source_phrase_candidates(en_text):
             return
         if normalized_cf in protected_terms_cf:
             return
+        if source_phrase_overlaps_protected_term(normalized, protected_terms_cf):
+            return
+        if contains_placeholder_like_token(normalized):
+            return
         normalized_words = SOURCE_ENGLISH_WORD_PATTERN.findall(normalized)
         if (
             normalized_cf in exact_memory_phrase_cf
             and len(normalized_words) == 2
             and all(word[:1].isupper() for word in normalized_words if word)
-        ):
-            return
-        if (
-            not allow_short_quoted_ui_phrase
-            and len(normalized_words) == 2
-            and len(normalized) < 12
-            and normalized_cf not in repeated_short_ui_labels_cf
-            and not normalized_cf.endswith(" mode")
         ):
             return
         if allow_short_quoted_ui_phrase:
@@ -1487,11 +2296,37 @@ def build_prompt_source_phrase_candidates(en_text):
 
 
 def build_source_phrase_translation_requirements(en_text):
-    phrases = [
-        phrase
-        for phrase in build_authoritative_batch_phrase_candidates(en_text)
-        if count_source_phrase_words(phrase) >= 2
-    ]
+    protected_terms_cf = {
+        term.casefold() for term in extract_protected_terms(en_text)
+    }
+    authoritative_phrases = build_authoritative_batch_phrase_candidates(en_text)
+    authoritative_phrase_cf = {
+        normalize_candidate_source_phrase(phrase).casefold()
+        for phrase in authoritative_phrases
+        if normalize_candidate_source_phrase(phrase)
+    }
+    phrases = []
+    seen = set()
+    for phrase in authoritative_phrases + build_prompt_source_phrase_candidates(en_text):
+        normalized = normalize_candidate_source_phrase(phrase)
+        if not normalized:
+            continue
+        normalized_cf = normalized.casefold()
+        if normalized_cf in seen:
+            continue
+        if (
+            normalized_cf not in authoritative_phrase_cf
+            and get_prompt_source_phrase_priority(normalized) < 20
+        ):
+            continue
+        if contains_placeholder_like_token(normalized):
+            continue
+        if count_source_phrase_words(normalized) < 2:
+            continue
+        if source_phrase_overlaps_protected_term(normalized, protected_terms_cf):
+            continue
+        seen.add(normalized_cf)
+        phrases.append(normalized)
     if not phrases:
         return ""
 
@@ -1501,14 +2336,43 @@ def build_source_phrase_translation_requirements(en_text):
     return (
         "14. CRITICAL: The following English UI phrase(s) from the source are ordinary translatable interface text for this key. In EVERY non-English target language, translate them naturally and completely. Do NOT copy them literally in English.\n"
         "This rule also applies when the phrase appears inside quotes, parentheses, slashes, or mode labels. Those are still ordinary UI words unless they are protected placeholders or strict all-uppercase acronyms.\n"
+        "For slash-separated UI text, translate each ordinary segment around the slash and keep the slash only as a separator; do not leave the original English segment text in the final translation.\n"
         f"Source UI phrase(s) that MUST be translated in non-English languages:\n{phrase_lines}\n"
+    )
+
+
+def build_locked_placeholder_adjacent_word_requirements(en_text, rule_number="15"):
+    words = extract_placeholder_adjacent_translatable_source_words(en_text)
+    if not words:
+        return ""
+
+    word_lines = "\n".join(f"- `{word}`" for word in words[:10])
+    phrase_examples = extract_placeholder_adjacent_translatable_source_phrases(en_text)
+    phrase_text = ""
+    if phrase_examples:
+        phrase_lines = "\n".join(f"- `{phrase}`" for phrase in phrase_examples[:10])
+        phrase_text = (
+            "Source protected-acronym + label phrase(s) where only the protected acronym stays unchanged and the label word must be translated:\n"
+            f"{phrase_lines}\n"
+            "Do NOT output these phrase(s) literally in non-English translations. If the protected acronym is shown as a locked placeholder, the raw English label after it is still forbidden; for example, do not output `__LOCKED_TERM_N__ Guard` or hybrid forms such as `Guard` plus a target-language suffix.\n"
+        )
+    return (
+        f"{rule_number}. CRITICAL LOCKED-ADJACENT WORD RULE: Locked placeholders protect only the placeholder token itself. "
+        "The following English word(s) are next to protected placeholders/acronyms in the source, but they are ordinary translatable UI words outside the placeholder. "
+        "Translate them naturally in every non-English target language; do NOT copy them literally in English. "
+        "If the prompt source shows a pattern like `__LOCKED_TERM_0__` followed by one of these listed words, keep only the placeholder unchanged and translate the listed word.\n"
+        f"{phrase_text}"
+        f"Locked-adjacent source word(s) that MUST be translated:\n{word_lines}\n"
     )
 
 
 _TRANSLATION_MEMORY_BY_ENGLISH_CACHE = None
 _INFERRED_SCRIPT_FAMILIES_CACHE = {}
 _INFERRED_LOANWORD_CACHE = {}
+_KNOWN_SAME_SPELLED_UI_TERM_CACHE = {}
 _UI_PHRASE_TRANSLATION_CACHE = {}
+_SAME_SPELLING_TRANSLATION_REVIEW_CACHE = {}
+_SOURCE_WORD_LEAK_REVIEW_CACHE = {}
 LAST_BATCH_LANGUAGE_ERRORS = {}
 LAST_BATCH_LANGUAGE_CANDIDATES = {}
 LAST_BATCH_RESULT_STATUS = ""
@@ -1597,15 +2461,6 @@ def get_inferred_untranslated_loanwords_for_lang(lang_code):
             continue
         if detect_repetitive_token_flood(translated_text):
             continue
-        if contains_embedded_english_phrase_leak(en_text, translated_text, lang_code):
-            continue
-        placeholder_pairs = build_protected_placeholders(
-            en_text, {lang_code: translated_text}
-        )
-        if detect_unexpected_script_mixture(
-            lang_code, translated_text, en_text, placeholder_pairs
-        ):
-            continue
 
         visible_translation = build_visible_prompt_text(translated_text)
         for match in iter_unprotected_source_word_matches(en_text):
@@ -1647,21 +2502,678 @@ def is_dynamically_allowed_untranslated_loanword(lang_code, word):
     return normalized in get_inferred_untranslated_loanwords_for_lang(lang_code)
 
 
+def is_known_same_spelled_ui_term_for_lang(lang_code, word):
+    if not isinstance(lang_code, str) or not isinstance(word, str):
+        return False
+
+    normalized_word = normalize_candidate_source_phrase(word)
+    if not normalized_word:
+        return False
+    source_words = SOURCE_ENGLISH_WORD_PATTERN.findall(normalized_word)
+    if len(source_words) != 1 or source_words[0] != normalized_word:
+        return False
+
+    cache_key = (lang_code.strip(), normalized_word.casefold())
+    cached = _KNOWN_SAME_SPELLED_UI_TERM_CACHE.get(cache_key)
+    if cached is not None:
+        return bool(cached)
+
+    allowed_scripts = build_allowed_script_families_for_lang(lang_code, "")
+    if "Latin" not in allowed_scripts:
+        _KNOWN_SAME_SPELLED_UI_TERM_CACHE[cache_key] = False
+        return False
+
+    memory = load_translation_memory_by_english()
+    known_lang_map = memory.get(normalized_word)
+    if known_lang_map is None:
+        normalized_cf = normalized_word.casefold()
+        for source_text, lang_map in memory.items():
+            if isinstance(source_text, str) and source_text.strip().casefold() == normalized_cf:
+                known_lang_map = lang_map
+                break
+
+    known_translation = ""
+    if isinstance(known_lang_map, dict):
+        known_translation = str(known_lang_map.get(lang_code, "")).strip()
+
+    is_known = known_translation.casefold() == normalized_word.casefold()
+    _KNOWN_SAME_SPELLED_UI_TERM_CACHE[cache_key] = is_known
+    return is_known
+
+
+def is_language_specific_source_loanword(lang_code, word):
+    if not isinstance(lang_code, str) or not isinstance(word, str):
+        return False
+
+    normalized_word = normalize_candidate_source_phrase(word).casefold()
+    normalized_lang = lang_code.strip().casefold()
+    if not normalized_word or not normalized_lang:
+        return False
+
+    allowed_words = set(LANGUAGE_SPECIFIC_SOURCE_LOANWORDS.get(normalized_lang, set()))
+    base_lang = normalized_lang.split("-", 1)[0]
+    if base_lang != normalized_lang:
+        allowed_words.update(LANGUAGE_SPECIFIC_SOURCE_LOANWORDS.get(base_lang, set()))
+    return normalized_word in allowed_words
+
+
+def is_allowed_source_spelled_base_word_for_lang(lang_code, word):
+    return (
+        is_language_specific_source_loanword(lang_code, word)
+        or is_dynamically_allowed_untranslated_loanword(lang_code, word)
+        or is_known_same_spelled_ui_term_for_lang(lang_code, word)
+        or _is_international_latin_loanword_for_lang(lang_code, word)
+    )
+
+
+def get_simple_source_plural_base_word(word):
+    normalized = normalize_candidate_source_phrase(word)
+    if not normalized or not re.fullmatch(r"[A-Za-z]+", normalized):
+        return ""
+    normalized_cf = normalized.casefold()
+    if len(normalized) < 5 or not normalized_cf.endswith("s"):
+        return ""
+    if normalized_cf.endswith(("ss", "us", "is")):
+        return ""
+    return normalized[:-1]
+
+
+def is_allowed_source_spelled_word_for_lang(lang_code, word):
+    if is_allowed_source_spelled_base_word_for_lang(lang_code, word):
+        return True
+
+    plural_base = get_simple_source_plural_base_word(word)
+    return bool(plural_base) and is_allowed_source_spelled_base_word_for_lang(
+        lang_code, plural_base
+    )
+
+
+def build_same_spelling_translation_cache_key(lang_code, en_text, translated_text):
+    return (
+        str(lang_code or "").strip(),
+        str(en_text or "").strip(),
+        str(translated_text or "").strip(),
+    )
+
+
+def is_same_spelling_translation_cached_as_valid(lang_code, en_text, translated_text):
+    cache_key = build_same_spelling_translation_cache_key(
+        lang_code, en_text, translated_text
+    )
+    return _SAME_SPELLING_TRANSLATION_REVIEW_CACHE.get(cache_key) is True
+
+
+def cache_same_spelling_translation_review(lang_code, en_text, translated_text, is_valid):
+    cache_key = build_same_spelling_translation_cache_key(
+        lang_code, en_text, translated_text
+    )
+    _SAME_SPELLING_TRANSLATION_REVIEW_CACHE[cache_key] = bool(is_valid)
+
+
+def normalize_source_word_leak_review_words(leaked_words):
+    normalized_words = []
+    seen = set()
+    for word in leaked_words or []:
+        normalized = normalize_candidate_source_phrase(word)
+        if not normalized:
+            continue
+        lowered = normalized.casefold()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        normalized_words.append(normalized)
+    return normalized_words
+
+
+def build_source_word_leak_review_cache_key(
+    lang_code, en_text, translated_text, leaked_words
+):
+    return (
+        str(lang_code or "").strip(),
+        str(en_text or "").strip(),
+        str(translated_text or "").strip(),
+        tuple(word.casefold() for word in normalize_source_word_leak_review_words(leaked_words)),
+    )
+
+
+def is_source_word_leak_review_cached_as_valid(
+    lang_code, en_text, translated_text, leaked_words
+):
+    cache_key = build_source_word_leak_review_cache_key(
+        lang_code, en_text, translated_text, leaked_words
+    )
+    return _SOURCE_WORD_LEAK_REVIEW_CACHE.get(cache_key) is True
+
+
+def cache_source_word_leak_review(
+    lang_code, en_text, translated_text, leaked_words, is_valid
+):
+    cache_key = build_source_word_leak_review_cache_key(
+        lang_code, en_text, translated_text, leaked_words
+    )
+    _SOURCE_WORD_LEAK_REVIEW_CACHE[cache_key] = bool(is_valid)
+
+
+def is_source_word_leak_review_candidate(
+    lang_code, en_text, translated_text, leaked_words
+):
+    if (
+        not isinstance(lang_code, str)
+        or not lang_code
+        or not isinstance(en_text, str)
+        or not isinstance(translated_text, str)
+        or not translated_text.strip()
+    ):
+        return False
+    if not normalize_source_word_leak_review_words(leaked_words):
+        return False
+
+    allowed_scripts = build_allowed_script_families_for_lang(lang_code, en_text)
+    return "Latin" in allowed_scripts
+
+
+def parse_source_word_leak_review_alias_decision(result_text, leaked_words):
+    if not isinstance(result_text, str) or not isinstance(leaked_words, list):
+        return False
+
+    expected_words = {
+        normalize_candidate_source_phrase(word).casefold()
+        for word in leaked_words
+        if normalize_candidate_source_phrase(word)
+    }
+    if not expected_words:
+        return False
+
+    approved_words = set()
+    for raw_line in result_text.strip().splitlines():
+        stripped = raw_line.strip()
+        if not stripped:
+            continue
+        match = re.match(r"^(.+?)\s*(?:\t|\\t)\s*(.+)$", stripped)
+        if not match:
+            return False
+
+        label = normalize_candidate_source_phrase(
+            match.group(1).strip().strip("`'\"")
+        ).casefold()
+        decision = match.group(2).strip().strip("`'\".").casefold()
+        if label not in expected_words or decision not in {"yes", "true", "ok", "valid"}:
+            return False
+        approved_words.add(label)
+
+    return expected_words.issubset(approved_words)
+
+
+def parse_prefixed_source_word_leak_review_decision(result_text, leaked_words):
+    if not isinstance(result_text, str) or not isinstance(leaked_words, list):
+        return {}
+
+    expected_words = {
+        normalize_candidate_source_phrase(word).casefold()
+        for word in leaked_words
+        if normalize_candidate_source_phrase(word)
+    }
+    if not expected_words:
+        return {}
+
+    for raw_line in result_text.strip().splitlines():
+        parts = re.split(r"\t|\\t", raw_line.strip(), maxsplit=2)
+        if len(parts) != 3:
+            continue
+
+        first_label = normalize_candidate_source_phrase(
+            parts[0].strip().strip("`'\"")
+        ).casefold()
+        decision_label = parts[1].strip().strip("`'\"").casefold()
+        decision_value = parts[2].strip()
+        if first_label not in expected_words or not decision_value:
+            continue
+
+        if decision_label == "corrected_translation":
+            return {"corrected_translation": decision_value}
+        if decision_label == "source_word_leak_ok":
+            return {"source_word_leak_ok": decision_value}
+
+    return {}
+
+
+def build_local_no_reasoning_rule(rule_number="18"):
+    if not is_local_backend():
+        return ""
+    return (
+        f"{rule_number}. LOCAL MODEL OUTPUT RULES: Return only the requested final plain-text line(s). "
+        "Do not reveal reasoning, alternatives, self-corrections, checklists, bullets, commentary, HTML, Markdown, arrows, or internal channel tags. "
+        "Never include scratch-work phrases such as placeholder counts, retry notes, `Wait`, or `Let's`; never append parenthetical self-checks after the final translation. "
+        "If uncertain, still output only your best final translation in the exact requested format.\n"
+    )
+
+
+def review_repeated_source_word_correction_with_ai(
+    lang_code, en_text, translated_text, leaked_words
+):
+    leaked_words = normalize_source_word_leak_review_words(leaked_words)
+    if not is_source_word_leak_review_candidate(
+        lang_code, en_text, translated_text, leaked_words
+    ):
+        return False
+
+    language_name = get_language_name_for_code(lang_code)
+    language_label = language_name if language_name else f"language code {lang_code}"
+    placeholder_pairs = build_protected_placeholders(
+        en_text, {lang_code: translated_text}
+    )
+    prompt_en_text = apply_protected_placeholders(en_text, placeholder_pairs)
+    prompt_translated_text = apply_protected_placeholders(
+        translated_text, placeholder_pairs
+    )
+    prompt_en_text_block = build_prompt_text_block(
+        "Original English Text", en_text, prompt_en_text
+    )
+    prompt_translation_block = build_prompt_text_block(
+        "Candidate Translation", translated_text, prompt_translated_text
+    )
+    protected_placeholders_json = get_protected_placeholders_prompt_block(
+        placeholder_pairs
+    )
+    leaked_word_lines = "\n".join(f"- `{word}`" for word in leaked_words)
+
+    prompt = f"""
+You are a bilingual UI localization reviewer for the eMule software.
+A previous correction attempt kept the same source-spelled token(s). Decide only whether those token(s) are natural {language_label} wording in this exact translation.
+
+KEY language code: '{lang_code}'
+KEY language name: '{language_label}'
+{prompt_en_text_block}
+
+{prompt_translation_block}
+
+Source-spelled token(s) kept by the correction:
+{leaked_word_lines}
+
+Rules:
+1. Return ONLY `same_source_spelling_ok<TAB>yes` if every listed token is natural {language_label} wording, a normal same-spelled UI term, or an accepted loanword in this exact translation.
+2. Return ONLY `same_source_spelling_ok<TAB>no` if any listed token is merely untranslated English or unnatural in {language_label}.
+3. Do NOT rewrite the translation in this review. Do NOT return `corrected_translation`.
+4. Do NOT explain anything. Do NOT return JSON, Markdown, notes, bullets, or extra lines.
+5. Translate your judgment for code `{lang_code}` as {language_label}, not as English or a neighboring language.
+{build_local_no_reasoning_rule(rule_number="6")}
+LOCKED PLACEHOLDERS JSON:
+{protected_placeholders_json}
+"""
+
+    result_text = call_active_api(
+        prompt,
+        plain_text=True,
+        request_timeout_sec=API_REPAIR_REQUEST_TIMEOUT_SEC,
+        timeout_retry_count=API_REPAIR_TIMEOUT_RETRY_COUNT,
+    )
+    if not result_text:
+        return False
+
+    try:
+        parsed = parse_line_based_updates_response(
+            result_text.strip(), en_text, {"same_source_spelling_ok"}
+        )
+        decision = str(parsed.get("same_source_spelling_ok", "")).strip().casefold()
+    except Exception:
+        decision = result_text.strip().strip("`'\".").casefold()
+
+    return decision in {"yes", "true", "ok", "valid"}
+
+
+def review_source_word_leak_with_ai(
+    lang_code, en_text, translated_text, leaked_words
+):
+    leaked_words = normalize_source_word_leak_review_words(leaked_words)
+    if not is_source_word_leak_review_candidate(
+        lang_code, en_text, translated_text, leaked_words
+    ):
+        return False, translated_text, "not a source-word leak review candidate"
+    if is_source_word_leak_review_cached_as_valid(
+        lang_code, en_text, translated_text, leaked_words
+    ):
+        return True, translated_text, ""
+
+    language_name = get_language_name_for_code(lang_code)
+    language_label = language_name if language_name else f"language code {lang_code}"
+    placeholder_pairs = build_protected_placeholders(
+        en_text, {lang_code: translated_text}
+    )
+    prompt_en_text = apply_protected_placeholders(en_text, placeholder_pairs)
+    prompt_translated_text = apply_protected_placeholders(
+        translated_text, placeholder_pairs
+    )
+    prompt_en_text_block = build_prompt_text_block(
+        "Original English Text", en_text, prompt_en_text
+    )
+    prompt_translation_block = build_prompt_text_block(
+        "Candidate Translation", translated_text, prompt_translated_text
+    )
+    protected_placeholders_json = get_protected_placeholders_prompt_block(
+        placeholder_pairs
+    )
+    leaked_word_lines = "\n".join(f"- `{word}`" for word in leaked_words)
+
+    last_error = ""
+    for attempt_index in range(1, 3):
+        retry_guidance = (
+            "8. The previous review response was invalid: "
+            f"{last_error} If every listed token is valid target-language wording in context, return `source_word_leak_ok<TAB>yes`; "
+            "otherwise return a corrected full translation after `corrected_translation<TAB>`.\n"
+            if last_error
+            else ""
+        )
+
+        prompt = f"""
+You are a bilingual UI localization reviewer for the eMule software.
+The validator found source-spelled word(s) inside the candidate translation. Decide whether every listed token is natural {language_label} wording in this context, or whether any token is untranslated English that must be fixed.
+
+KEY language code: '{lang_code}'
+KEY language name: '{language_label}'
+{prompt_en_text_block}
+
+{prompt_translation_block}
+
+Suspect source-spelled token(s):
+{leaked_word_lines}
+
+Rules:
+1. Return ONLY `source_word_leak_ok<TAB>yes` if every listed token is a natural and acceptable {language_label} word, cognate, loanword, or same-spelled UI term in this exact translation.
+2. If any listed token is merely untranslated English or unnatural in {language_label}, return ONLY `corrected_translation<TAB>your_fixed_full_translation_here`.
+3. Before returning `corrected_translation`, ensure the corrected full translation removes or replaces every suspect token you rejected. If your best correction keeps every suspect token exactly the same, return `source_word_leak_ok<TAB>yes` instead.
+4. The corrected translation must preserve placeholders, protected terms, escape sequences, digits, and punctuation required by the source.
+5. Do NOT explain anything. Do NOT return JSON, Markdown, notes, bullets, or extra lines.
+6. Translate into {language_label}, not into English and not into a neighboring language.
+7. Do not change locked placeholders such as __LOCKED_TERM_0__.
+8. If you return a corrected translation, return the complete full string, not only the changed phrase.
+{retry_guidance}{build_local_no_reasoning_rule(rule_number="9")}
+LOCKED PLACEHOLDERS JSON:
+{protected_placeholders_json}
+"""
+
+        result_text = call_active_api(
+            prompt,
+            plain_text=True,
+            request_timeout_sec=API_REPAIR_REQUEST_TIMEOUT_SEC,
+            timeout_retry_count=API_REPAIR_TIMEOUT_RETRY_COUNT,
+        )
+        if not result_text:
+            last_error = "source-word leak review returned empty response"
+            continue
+
+        try:
+            parsed = parse_line_based_updates_response(
+                result_text.strip(),
+                en_text,
+                {"source_word_leak_ok", "corrected_translation"},
+            )
+        except Exception:
+            parsed = {}
+
+        source_word_leak_ok = (
+            str(parsed.get("source_word_leak_ok", "")).strip().casefold()
+        )
+        if source_word_leak_ok in {"yes", "true", "ok", "valid"}:
+            cache_source_word_leak_review(
+                lang_code, en_text, translated_text, leaked_words, True
+            )
+            return True, translated_text, ""
+
+        if parse_source_word_leak_review_alias_decision(result_text, leaked_words):
+            cache_source_word_leak_review(
+                lang_code, en_text, translated_text, leaked_words, True
+            )
+            return True, translated_text, ""
+
+        prefixed_decision = parse_prefixed_source_word_leak_review_decision(
+            result_text, leaked_words
+        )
+        prefixed_ok = (
+            str(prefixed_decision.get("source_word_leak_ok", ""))
+            .strip()
+            .casefold()
+        )
+        if prefixed_ok in {"yes", "true", "ok", "valid"}:
+            cache_source_word_leak_review(
+                lang_code, en_text, translated_text, leaked_words, True
+            )
+            return True, translated_text, ""
+
+        stripped_decision = result_text.strip().strip("`'\".").casefold()
+        if stripped_decision in {"yes", "true", "ok", "valid"}:
+            cache_source_word_leak_review(
+                lang_code, en_text, translated_text, leaked_words, True
+            )
+            return True, translated_text, ""
+
+        corrected = parsed.get("corrected_translation", "") or prefixed_decision.get(
+            "corrected_translation", ""
+        )
+        if isinstance(corrected, str) and corrected.strip():
+            corrected = cleanup_single_translation_candidate_value(en_text, corrected)
+            corrected = restore_protected_placeholders(
+                corrected,
+                placeholder_pairs,
+                apply_protected_placeholders(en_text, placeholder_pairs),
+            )
+            corrected = cleanup_translated_text(
+                en_text, corrected, placeholder_pairs, lang_code
+            )
+            if corrected.strip() != translated_text.strip():
+                cache_source_word_leak_review(
+                    lang_code, en_text, translated_text, leaked_words, False
+                )
+                return False, corrected, "source word leak was rejected by review"
+            if review_repeated_source_word_correction_with_ai(
+                lang_code, en_text, translated_text, leaked_words
+            ):
+                cache_source_word_leak_review(
+                    lang_code, en_text, translated_text, leaked_words, True
+                )
+                return True, translated_text, ""
+            last_error = "corrected_translation repeated the same source-spelled token(s)"
+            continue
+
+        last_error = "source-word leak review did not return a usable decision"
+
+    cache_source_word_leak_review(
+        lang_code, en_text, translated_text, leaked_words, False
+    )
+    return False, translated_text, last_error or "source-word leak review did not approve the candidate"
+
+
+def get_same_spelling_review_source_words(en_text):
+    words = []
+    seen = set()
+    if not isinstance(en_text, str) or not en_text:
+        return words
+
+    for match in iter_unprotected_source_word_matches(en_text):
+        word = normalize_candidate_source_phrase(match.group(0))
+        if not word or should_protect_token(word):
+            continue
+        lowered = word.casefold()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        words.append(word)
+
+    return words
+
+
+def is_short_same_spelling_review_source(en_text, source_words):
+    if not isinstance(en_text, str):
+        return False
+    if not source_words:
+        return False
+
+    visible_source = build_visible_prompt_text(en_text).strip()
+    if len(visible_source) > 60:
+        return False
+    if len(source_words) == 1:
+        return True
+    if extract_protected_terms(en_text) and len(source_words) <= 2:
+        return True
+    return False
+
+
+def is_allowed_same_spelling_translation_by_source_words(
+    lang_code, en_text, translated_text
+):
+    if is_known_localized_country_name(lang_code, en_text, translated_text):
+        return True
+    if (
+        not isinstance(lang_code, str)
+        or not lang_code
+        or not isinstance(en_text, str)
+        or not isinstance(translated_text, str)
+        or translated_text.strip() != en_text.strip()
+    ):
+        return False
+
+    source_words = get_same_spelling_review_source_words(en_text)
+    if not is_short_same_spelling_review_source(en_text, source_words):
+        return False
+    return all(
+        is_allowed_source_spelled_word_for_lang(lang_code, word)
+        for word in source_words
+    )
+
+
+def is_same_spelling_translation_review_candidate(lang_code, en_text, translated_text):
+    if (
+        not isinstance(lang_code, str)
+        or not lang_code
+        or not isinstance(en_text, str)
+        or not isinstance(translated_text, str)
+    ):
+        return False
+    if translated_text.strip() != en_text.strip():
+        return False
+    if is_invariant_translation_source(en_text):
+        return False
+
+    allowed_scripts = build_allowed_script_families_for_lang(lang_code, en_text)
+    if "Latin" not in allowed_scripts:
+        return False
+
+    source_words = get_same_spelling_review_source_words(en_text)
+    if not is_short_same_spelling_review_source(en_text, source_words):
+        return False
+
+    return True
+
+
+def review_same_spelling_translation_with_ai(lang_code, en_text, translated_text):
+    if not is_same_spelling_translation_review_candidate(
+        lang_code, en_text, translated_text
+    ):
+        return False, translated_text, "not a same-spelling review candidate"
+    if is_same_spelling_translation_cached_as_valid(lang_code, en_text, translated_text):
+        return True, translated_text, ""
+
+    language_name = get_language_name_for_code(lang_code)
+    language_label = language_name if language_name else f"language code {lang_code}"
+    prompt_en_text_block = build_prompt_text_block(
+        "Original English UI Label", en_text, en_text
+    )
+
+    last_error = ""
+    for attempt_index in range(1, 3):
+        retry_guidance = (
+            "7. The previous review response was invalid: "
+            f"{last_error} If the identical spelling is acceptable, return `same_spelling_ok<TAB>yes`; "
+            "otherwise return a different target-language translation after `corrected_translation<TAB>`.\n"
+            if last_error
+            else ""
+        )
+
+        prompt = f"""
+You are a bilingual UI localization reviewer for the eMule software.
+The candidate translation is spelled exactly the same as the English source. Decide whether this exact same spelling is a natural target-language translation, not merely untranslated English.
+
+KEY language code: '{lang_code}'
+KEY language name: '{language_label}'
+{prompt_en_text_block}
+
+Candidate translation:
+{json.dumps(translated_text, ensure_ascii=False)}
+
+Rules:
+1. If the exact same spelling is a natural and acceptable {language_label} UI translation for this short label, return ONLY: `same_spelling_ok<TAB>yes`.
+2. If the target language normally uses this exact written word for the same UI action, return `same_spelling_ok<TAB>yes` even though it matches English.
+3. If the same spelling is just untranslated English or unnatural in {language_label}, return ONLY: `corrected_translation<TAB>your_fixed_translation_here`, and that corrected translation MUST differ from the English source.
+4. Preserve the source punctuation style, including ellipsis, unless the target language requires a natural equivalent.
+5. Do NOT explain anything. Do NOT return JSON, Markdown, notes, bullets, or extra lines.
+6. Translate into {language_label}, not into English and not into a neighboring language.
+{retry_guidance}
+"""
+
+        result_text = call_active_api(
+            prompt,
+            plain_text=True,
+            request_timeout_sec=API_REPAIR_REQUEST_TIMEOUT_SEC,
+            timeout_retry_count=API_REPAIR_TIMEOUT_RETRY_COUNT,
+        )
+        if not result_text:
+            last_error = "same-spelling review returned empty response"
+            continue
+
+        try:
+            parsed = parse_line_based_updates_response(
+                result_text.strip(),
+                en_text,
+                {"same_spelling_ok", "corrected_translation"},
+            )
+        except Exception:
+            parsed = {}
+
+        same_spelling_ok = str(parsed.get("same_spelling_ok", "")).strip().casefold()
+        if same_spelling_ok in {"yes", "true", "ok", "valid"}:
+            cache_same_spelling_translation_review(
+                lang_code, en_text, translated_text, True
+            )
+            return True, translated_text, ""
+
+        corrected = parsed.get("corrected_translation", "")
+        if isinstance(corrected, str) and corrected.strip():
+            corrected = cleanup_single_translation_candidate_value(en_text, corrected)
+            if corrected.strip() != translated_text.strip():
+                return False, corrected, "same spelling was rejected by review"
+            last_error = "corrected_translation repeated the identical source spelling"
+            if attempt_index == 2:
+                cache_same_spelling_translation_review(
+                    lang_code, en_text, translated_text, True
+                )
+                return True, translated_text, ""
+            continue
+
+        last_error = "same-spelling review did not return a usable decision"
+
+    cache_same_spelling_translation_review(lang_code, en_text, translated_text, False)
+    return False, translated_text, last_error or "same-spelling review did not approve the candidate"
+
+
 def get_known_translation_from_memory(lang_code, source_text):
     if not isinstance(lang_code, str) or not isinstance(source_text, str):
         return ""
 
     memory = load_translation_memory_by_english()
-    lang_map = memory.get(source_text.strip(), {})
+    stripped_source = source_text.strip()
+    lang_map = memory.get(stripped_source, {})
     candidate = lang_map.get(lang_code, "")
     if not isinstance(candidate, str):
         return ""
     candidate = candidate.strip()
     if not candidate:
         return ""
-    if candidate.casefold() == source_text.strip().casefold():
-        return ""
-    if source_text.strip().casefold() in candidate.casefold():
+    allow_same_spelling = is_known_same_spelled_ui_term_for_lang(
+        lang_code, stripped_source
+    )
+    if candidate.casefold() == stripped_source.casefold():
+        if not allow_same_spelling:
+            return ""
+    elif stripped_source.casefold() in candidate.casefold():
         return ""
     return candidate
 
@@ -1741,16 +3253,55 @@ def get_memory_context_examples(lang_code, source_phrase, limit=2):
     return examples
 
 
+def build_authoritative_exact_known_phrase_candidate_casefolds(en_text):
+    if not isinstance(en_text, str) or not en_text:
+        return set()
+
+    candidates = set()
+
+    def add_candidate(phrase):
+        normalized = normalize_candidate_source_phrase(phrase)
+        if not normalized:
+            return
+        candidates.add(normalized.casefold())
+
+    leading_label = extract_leading_ui_label_phrase(en_text)
+    if leading_label:
+        add_candidate(leading_label)
+
+    for phrase in extract_repeated_short_ui_label_phrases(en_text):
+        add_candidate(phrase)
+    for phrase in extract_plain_mode_label_phrases(en_text):
+        add_candidate(phrase)
+    for phrase in extract_parenthesized_ui_phrases(en_text):
+        add_candidate(phrase)
+    for phrase in extract_quoted_english_fragment_candidates(en_text):
+        add_candidate(phrase)
+    for phrase in extract_quoted_ui_context_phrases(en_text):
+        add_candidate(phrase)
+    for phrase in extract_title_case_ui_phrases(en_text):
+        add_candidate(phrase)
+
+    return candidates
+
+
 def get_known_phrase_requirements(en_text, lang_code):
     if not isinstance(en_text, str) or not isinstance(lang_code, str):
         return []
 
     visible_source = build_visible_prompt_text(en_text)
     stripped_visible_source = visible_source.lstrip()
+    authoritative_candidate_casefolds = (
+        build_authoritative_exact_known_phrase_candidate_casefolds(en_text)
+    )
+    if not authoritative_candidate_casefolds:
+        return []
     requirements = []
     seen = set()
 
     for phrase in build_exact_memory_phrase_candidates(en_text):
+        if phrase.casefold() not in authoritative_candidate_casefolds:
+            continue
         known_translation = get_known_translation_from_memory(lang_code, phrase)
         if not known_translation:
             continue
@@ -1760,12 +3311,14 @@ def get_known_phrase_requirements(en_text, lang_code):
             continue
         seen.add(signature)
 
-        is_leading = stripped_visible_source.startswith(phrase)
+        is_leading = False
         separator = ""
-        if is_leading:
+        if stripped_visible_source.startswith(phrase):
             remainder = stripped_visible_source[len(phrase) :]
             separator_match = re.match(r"^\s*([^\w\s])", remainder, re.UNICODE)
-            separator = separator_match.group(1) if separator_match else ""
+            if separator_match:
+                is_leading = True
+                separator = separator_match.group(1)
 
         requirements.append(
             {
@@ -1860,7 +3413,7 @@ def build_known_phrase_translation_requirements(en_text, prompt_lang_dict):
 
     return (
         "17. EXACT ESTABLISHED UI TERM RULES: Some UI terms already have trusted translations in translations.map. "
-        "Use the exact translations from the JSON mapping below unchanged. For any entry where `leading` is true, keep that exact translated label at the start of the line and only translate the remainder of the sentence naturally after the colon or locale-equivalent colon. Do NOT invent variants.\n"
+        "Use the exact translations from the JSON mapping below unchanged. For any entry where `leading` is true, keep that exact translated label at the start of the line and only translate the remainder of the sentence naturally after the source separator. If the source separator is `.`, use a sentence-ending period or locale-equivalent sentence punctuation; if it is `:`, use a colon or locale-equivalent colon. Do NOT invent variants.\n"
         "Exact established UI term mapping JSON:\n"
         f"{json.dumps(compact_rules, ensure_ascii=False, indent=2)}\n"
     )
@@ -1878,6 +3431,7 @@ def build_authoritative_batch_phrase_candidates(en_text):
     repeated_short_cf = {candidate.casefold() for candidate in repeated_short_phrases}
     plain_mode_cf = {candidate.casefold() for candidate in plain_mode_phrases}
     exact_memory_cf = {candidate.casefold() for candidate in exact_memory_phrases}
+    slash_phrase_cf = set()
 
     def add_candidate(phrase, high_priority_ui_label=False):
         normalized = normalize_candidate_source_phrase(phrase)
@@ -1893,6 +3447,8 @@ def build_authoritative_batch_phrase_candidates(en_text):
         if not high_priority_ui_label and is_low_value_source_phrase_fragment(
             normalized
         ):
+            return
+        if contains_placeholder_like_token(normalized):
             return
 
         word_count = count_source_phrase_words(normalized)
@@ -1914,10 +3470,26 @@ def build_authoritative_batch_phrase_candidates(en_text):
         add_candidate(phrase, high_priority_ui_label=True)
     for phrase in exact_memory_phrases:
         add_candidate(phrase, high_priority_ui_label=True)
+    for phrase in build_dynamic_source_phrase_candidates(en_text):
+        if is_slash_separated_source_phrase_candidate(phrase):
+            slash_phrase_cf.add(normalize_candidate_source_phrase(phrase).casefold())
+            add_candidate(phrase, high_priority_ui_label=True)
+    try:
+        use_local_phrase_expansion = is_local_gemma_compatibility_flow()
+    except RuntimeError:
+        use_local_phrase_expansion = False
+    if use_local_phrase_expansion and (
+        len(extract_protected_terms(en_text))
+        >= LOCAL_COMPLEX_SOURCE_PLACEHOLDER_THRESHOLD
+    ):
+        for phrase in build_dynamic_source_phrase_candidates(en_text):
+            add_candidate(phrase, high_priority_ui_label=True)
     candidates = prune_redundant_source_fragments(candidates)
+
     candidates.sort(
         key=lambda item: (
             -(120 if item.casefold() in repeated_short_cf else 0)
+            - (100 if item.casefold() in slash_phrase_cf else 0)
             - (80 if item.casefold() in plain_mode_cf else 0)
             - (60 if item.casefold() in exact_memory_cf else 0),
             count_source_phrase_words(item),
@@ -1928,15 +3500,98 @@ def build_authoritative_batch_phrase_candidates(en_text):
     return candidates[:8]
 
 
+def build_authoritative_source_word_candidates(en_text):
+    if not isinstance(en_text, str) or not en_text:
+        return []
+
+    visible_source = build_visible_prompt_text(en_text)
+    max_words = 8
+    if len(extract_protected_terms(en_text)) >= LOCAL_COMPLEX_SOURCE_PLACEHOLDER_THRESHOLD:
+        max_words = 12
+    source_word_candidates = build_dynamic_source_leak_word_candidates(en_text)
+    try:
+        use_local_word_expansion = is_local_gemma_compatibility_flow()
+    except RuntimeError:
+        use_local_word_expansion = False
+    if use_local_word_expansion:
+        seen_source_words = {
+            word.casefold() for word in source_word_candidates if isinstance(word, str)
+        }
+        for word in build_local_forbidden_source_word_candidates(en_text):
+            lowered = word.casefold()
+            if lowered in seen_source_words:
+                continue
+            seen_source_words.add(lowered)
+            source_word_candidates.append(word)
+    source_word_candidates.sort(
+        key=lambda word: (
+            -len(
+                re.findall(
+                    rf"(?<![A-Za-z]){re.escape(word)}(?![A-Za-z])",
+                    visible_source,
+                    flags=re.IGNORECASE,
+                )
+            ),
+            -(len(word) >= 8),
+            -len(word),
+            word.casefold(),
+        )
+    )
+    return source_word_candidates[:max_words]
+
+
+def should_build_authoritative_ui_phrase_map(en_text, prompt_lang_dict, phrases):
+    if not isinstance(prompt_lang_dict, dict) or not prompt_lang_dict or not phrases:
+        return False
+
+    visible_source = build_visible_prompt_text(en_text)
+    if (
+        QUOTED_UI_PHRASE_PATTERN.search(visible_source)
+        or PARENTHESIZED_UI_PHRASE_PATTERN.search(visible_source)
+        or extract_plain_mode_label_phrases(en_text)
+        or any(is_slash_separated_source_phrase_candidate(phrase) for phrase in phrases)
+    ):
+        return True
+
+    if extract_placeholder_adjacent_translatable_source_words(en_text):
+        return True
+
+    protected_term_count = len(extract_protected_terms(en_text))
+    return protected_term_count >= LOCAL_COMPLEX_SOURCE_PLACEHOLDER_THRESHOLD
+
+
 def build_authoritative_ui_phrase_map_requirements(en_text, prompt_lang_dict):
     if not isinstance(prompt_lang_dict, dict) or not prompt_lang_dict:
         return ""
 
     phrases = build_authoritative_batch_phrase_candidates(en_text)
-    if not phrases:
-        return ""
+    phrase_translations = (
+        translate_ui_phrases_for_batch(prompt_lang_dict, phrases)
+        if should_build_authoritative_ui_phrase_map(en_text, prompt_lang_dict, phrases)
+        else {}
+    )
+    try:
+        use_local_source_word_map = is_local_gemma_compatibility_flow()
+    except RuntimeError:
+        use_local_source_word_map = False
+    if use_local_source_word_map:
+        native_script_lang_dict = {}
+        for lang_code in sorted(prompt_lang_dict.keys()):
+            if lang_code == "en":
+                continue
+            allowed_scripts = build_allowed_script_families_for_lang(lang_code, en_text)
+            if allowed_scripts and "Latin" not in allowed_scripts:
+                native_script_lang_dict[lang_code] = prompt_lang_dict[lang_code]
+        if native_script_lang_dict:
+            source_words = build_authoritative_source_word_candidates(en_text)
+            source_word_translations = translate_ui_phrases_for_batch(
+                native_script_lang_dict, source_words
+            )
+            for translated_lang, translated_words in source_word_translations.items():
+                phrase_translations.setdefault(translated_lang, {}).update(
+                    translated_words
+                )
 
-    phrase_translations = translate_ui_phrases_for_batch(prompt_lang_dict, phrases)
     phrase_map = {}
     for lang_code in sorted(phrase_translations.keys()):
         language_name = get_language_name_for_code(lang_code) or lang_code
@@ -2079,6 +3734,1024 @@ LANGUAGE_NAME_MAP = {
 }
 
 
+COUNTRY_LOCALE_ALIASES = {
+    "ca-val": ("ca",),
+    "es-ar": ("es_AR", "es"),
+    "nb": ("nb_NO", "nb"),
+    "no": ("nb_NO", "nb", "nn"),
+    "pt-br": ("pt_BR", "pt"),
+    "tl": ("fil", "tl"),
+    "zh-cn": ("zh_CN", "zh_Hans"),
+    "zh-tw": ("zh_TW", "zh_Hant"),
+}
+COUNTRY_PSEUDO_CODES = {"AP", "EU"}
+COUNTRY_NAME_WORD_PATTERN = re.compile(r"[^\W\d_]+(?:[\u2019\'-][^\W\d_]+)*", re.UNICODE)
+COUNTRY_REQUIRED_TRANSLATED_CONNECTORS = {"and", "of", "the"}
+COUNTRY_TRANSLATABLE_SOURCE_WORDS = {
+    "administration",
+    "administrative",
+    "african",
+    "american",
+    "arab",
+    "argentine",
+    "bolivarian",
+    "british",
+    "central",
+    "christmas",
+    "cypriot",
+    "commonwealth",
+    "confederation",
+    "democratic",
+    "dominican",
+    "eastern",
+    "emirates",
+    "equatorial",
+    "federal",
+    "federated",
+    "federation",
+    "federative",
+    "french",
+    "grand",
+    "greek",
+    "hashemite",
+    "hellenic",
+    "holy",
+    "independent",
+    "indian",
+    "islamic",
+    "island",
+    "islands",
+    "italian",
+    "kingdom",
+    "kyrgyz",
+    "lebanese",
+    "mexican",
+    "minor",
+    "new",
+    "north",
+    "northern",
+    "outlying",
+    "palestinian",
+    "people's",
+    "plurinational",
+    "principality",
+    "province",
+    "republic",
+    "rwandese",
+    "russian",
+    "saint",
+    "socialist",
+    "south",
+    "southern",
+    "special",
+    "state",
+    "states",
+    "sultanate",
+    "swiss",
+    "syrian",
+    "territories",
+    "territory",
+    "togolese",
+    "union",
+    "united",
+    "virgin",
+    "west",
+    "western",
+}
+COUNTRY_REQUIRED_TRANSLATED_SOURCE_WORDS = (
+    COUNTRY_REQUIRED_TRANSLATED_CONNECTORS | COUNTRY_TRANSLATABLE_SOURCE_WORDS
+)
+COUNTRY_CONTEXTUAL_PROPER_NAME_SOURCE_WORDS = {
+    "VG": {"virgin"},
+    "VI": {"virgin"},
+}
+COUNTRY_ALLOWED_UNTRANSLATED_SOURCE_WORDS = {
+    ("TC", "ceb"): {"islands"},
+    ("TC", "hmw"): {"islands"},
+    ("VG", "ms"): {"british"},
+}
+COUNTRY_TRANSLATABLE_PROTECTED_TERMS_BY_SOURCE = {
+    "heard and mcdonald islands": {"mcdonald"},
+    "u.s. virgin islands": {"u.s", "u.s."},
+}
+COUNTRY_TRUSTED_LOCALIZED_NAME_VARIANTS = {
+    # CLDR-backed fallbacks used when Babel/pycountry locale data is unavailable.
+    ("BE", "vi"): ("Bỉ",),
+    ("GE", "xh"): ("EGeorgia",),
+    ("GE", "yo"): ("Gọgia",),
+    ("GE", "zu"): ("i-Georgia",),
+    ("GF", "ig"): ("French Guiana",),
+    ("GF", "mi"): ("Kiāna Wīwī",),
+    ("GF", "sn"): ("French Guiana",),
+    ("GF", "so"): ("Faransiis Gini",),
+    ("GF", "sw"): ("Guiana ya Ufaransa",),
+    ("GF", "xh"): ("EFrench Guiana",),
+    ("GF", "yo"): ("Firenṣi Guana",),
+    ("GF", "zu"): ("i-French Guiana",),
+    ("GN", "sd"): ("گني",),
+    ("GN", "ur"): ("گنی",),
+    ("GQ", "ca"): ("Guinea Equatorial",),
+    ("GQ", "ca-VAL"): ("Guinea Equatorial",),
+    ("GQ", "ceb"): ("Equatorial Guinea",),
+    ("GQ", "ha"): ("Ikwatoriyal Gini",),
+    ("GQ", "ig"): ("Equatorial Guinea",),
+    ("GQ", "pt"): ("Guiné Equatorial",),
+    ("GQ", "pt-BR"): ("Guiné Equatorial",),
+    ("GQ", "sn"): ("Equatorial Guinea",),
+    ("GQ", "tl"): ("Equatorial Guinea",),
+    ("GQ", "xh"): ("E-Equatorial Guinea",),
+    ("GQ", "yo"): ("Ekutoria Gini",),
+    ("GQ", "zu"): ("i-Equatorial Guinea",),
+    ("GS", "ceb"): ("South Georgia & South Sandwich Islands",),
+    ("GS", "ig"): ("South Georgia & South Sandwich Islands",),
+    ("GS", "yo"): ("Gúúsù Georgia àti Gúúsù Àwọn Erékùsù Sandwich",),
+    ("HM", "ar"): ("جزيرة هيرد وجزر ماكدونالد",),
+    ("HM", "ko"): ("허드 맥도널드 제도",),
+    ("IM", "ceb"): ("Isle of Man",),
+    ("IM", "da"): ("Isle of Man",),
+    ("IM", "de"): ("Isle of Man",),
+    ("IM", "ha"): ("Isle of Man",),
+    ("IM", "ig"): ("Isle of Man",),
+    ("IM", "nb"): ("Man",),
+    ("IM", "nl"): ("Isle of Man",),
+    ("IM", "nn"): ("Man",),
+    ("IM", "no"): ("Man",),
+    ("IM", "sv"): ("Isle of Man",),
+    ("IM", "tl"): ("Isle of Man",),
+    ("IM", "xh"): ("E-Isle of Man",),
+    ("IM", "yo"): ("Erékùṣù ilẹ̀ Man",),
+    ("IM", "zu"): ("i-Isle of Man",),
+    ("IO", "ms"): ("Wilayah Lautan Hindi British",),
+    ("IO", "ro"): ("Teritoriul Britanic din Oceanul Indian",),
+    ("IO", "sq"): ("Territori Britanik i Oqeanit Indian",),
+    ("KP", "ig"): ("North Korea",),
+    ("KR", "ig"): ("South Korea",),
+    ("KR", "sn"): ("Korea, South",),
+    ("MA", "tr"): ("Fas",),
+    ("MH", "tl"): ("Marshall Islands",),
+    ("MK", "ig"): ("North Macedonia",),
+    ("NC", "ha"): ("Kaledoniya Sabuwa",),
+    ("NC", "ig"): ("New Caledonia",),
+    ("NC", "ms"): ("New Caledonia",),
+    ("NC", "sn"): ("New Caledonia",),
+    ("NC", "so"): ("Jasiiradda Niyuu Kaledooniya",),
+    ("NC", "yo"): ("Kaledonia Titun",),
+    ("NF", "da"): ("Norfolk Island",),
+    ("NF", "ig"): ("Agwaetiti Norfolk",),
+    ("NF", "sn"): ("Chitsuwa cheNorfolk",),
+    ("NZ", "ceb"): ("New Zealand",),
+    ("NZ", "da"): ("New Zealand",),
+    ("NZ", "ha"): ("Nuzilan",),
+    ("NZ", "ig"): ("New Zealand",),
+    ("NZ", "ms"): ("New Zealand",),
+    ("NZ", "mt"): ("New Zealand",),
+    ("NZ", "nb"): ("New Zealand",),
+    ("NZ", "nn"): ("New Zealand",),
+    ("NZ", "no"): ("New Zealand",),
+    ("NZ", "so"): ("Niyuusiilaand",),
+    ("NZ", "tl"): ("New Zealand",),
+    ("NZ", "vi"): ("New Zealand",),
+    ("NZ", "yo"): ("Ṣilandi Titun",),
+}
+IPGEO_EXTENDED_DISPLAY_NAME_OVERRIDES = {
+    ("CY", "greek administration of southern cyprus"),
+}
+COUNTRY_TRUSTED_SHORT_NAME_VARIANTS = {
+    ("AT", "vi"): ("Áo",),
+    ("AU", "vi"): ("Úc",),
+    ("BE", "vi"): ("Bỉ",),
+    ("CZ", "fa"): ("چک",),
+    ("CZ", "km"): ("ឆេក",),
+    ("CZ", "mn"): ("Чех",),
+    ("CZ", "mr"): ("चेक",),
+    ("DE", "vi"): ("Đức",),
+    ("RU", "hi"): ("रूस",),
+    ("RU", "ne"): ("रूस",),
+    ("RU", "pa"): ("ਰੂਸ",),
+    ("RU", "sd"): ("روس",),
+    ("RU", "ur"): ("روس",),
+    ("RU", "vi"): ("Nga",),
+    ("TH", "et"): ("Tai",),
+    ("TH", "km"): ("ថៃ",),
+    ("US", "nb"): ("USA",),
+    ("US", "nn"): ("USA",),
+    ("US", "no"): ("USA",),
+    ("US", "sv"): ("USA",),
+}
+COUNTRY_SCRIPT_FAMILY_FALLBACKS = {
+    "am": {"Ethiopic"},
+    "ar": {"Arabic"},
+    "be": {"Cyrillic"},
+    "bg": {"Cyrillic"},
+    "bn": {"Bengali"},
+    "el": {"Greek"},
+    "fa": {"Arabic"},
+    "gu": {"Gujarati"},
+    "he": {"Hebrew"},
+    "hi": {"Devanagari"},
+    "hy": {"Armenian"},
+    "ja": {"Han", "Hiragana", "Katakana"},
+    "ka": {"Georgian"},
+    "kk": {"Cyrillic"},
+    "km": {"Khmer"},
+    "kn": {"Kannada"},
+    "ko": {"Hangul", "Han"},
+    "ky": {"Cyrillic"},
+    "lo": {"Lao"},
+    "mk": {"Cyrillic"},
+    "ml": {"Malayalam"},
+    "mn": {"Cyrillic"},
+    "mr": {"Devanagari"},
+    "my": {"Myanmar"},
+    "ne": {"Devanagari"},
+    "or": {"Oriya"},
+    "pa": {"Gurmukhi"},
+    "ps": {"Arabic"},
+    "ru": {"Cyrillic"},
+    "sd": {"Arabic"},
+    "si": {"Sinhala"},
+    "sr": {"Cyrillic"},
+    "ta": {"Tamil"},
+    "te": {"Telugu"},
+    "tg": {"Cyrillic"},
+    "th": {"Thai"},
+    "tt": {"Cyrillic"},
+    "ug": {"Arabic"},
+    "uk": {"Cyrillic"},
+    "ur": {"Arabic"},
+    "yi": {"Hebrew"},
+    "zh-CN": {"Han"},
+    "zh-TW": {"Han"},
+}
+_COUNTRY_TRANSLATION_CATALOG_CACHE = {}
+_LOCALIZED_COUNTRY_NAME_CACHE = {}
+_LOCALIZED_COUNTRY_NAME_CANDIDATES_CACHE = {}
+_COUNTRY_CODE_BY_ENGLISH_NAME_CACHE = {}
+
+
+def normalize_country_name_for_compare(text):
+    if not isinstance(text, str):
+        return ""
+    normalized = unicodedata.normalize("NFKC", text)
+    normalized = normalized.replace("’", "'").replace("`", "'")
+    normalized = re.sub(r"\s+", " ", normalized.strip())
+    return normalized.casefold()
+
+
+def normalize_latin_country_name_without_diacritics(text):
+    if not isinstance(text, str) or not text.strip():
+        return ""
+
+    normalized = unicodedata.normalize("NFKD", text)
+    output = []
+    for char in normalized:
+        category = unicodedata.category(char)
+        if category.startswith("M"):
+            continue
+        if char.isalpha() and "LATIN" not in unicodedata.name(char, ""):
+            return ""
+        output.append(char)
+
+    normalized = "".join(output)
+    normalized = normalized.replace("’", "'").replace("`", "'")
+    normalized = re.sub(r"\s+", " ", normalized.strip())
+    return normalized.casefold()
+
+
+def count_country_name_diacritic_marks(text):
+    if not isinstance(text, str) or not text:
+        return 0
+    decomposed = unicodedata.normalize("NFD", text)
+    return sum(
+        unicodedata.category(char).startswith("M") for char in decomposed
+    )
+
+
+def country_name_matches_localized_candidate(translated_text, localized_name):
+    candidate_normalized = normalize_country_name_for_compare(translated_text)
+    localized_normalized = normalize_country_name_for_compare(localized_name)
+    if not candidate_normalized or not localized_normalized:
+        return False
+    if candidate_normalized == localized_normalized:
+        return True
+
+    candidate_count = count_country_name_significant_characters(translated_text)
+    localized_count = count_country_name_significant_characters(localized_name)
+    if max(candidate_count, localized_count) > 4:
+        return False
+
+    candidate_latin = normalize_latin_country_name_without_diacritics(
+        translated_text
+    )
+    localized_latin = normalize_latin_country_name_without_diacritics(
+        localized_name
+    )
+    return bool(candidate_latin) and candidate_latin == localized_latin
+
+
+def count_country_name_base_letters(text):
+    if not isinstance(text, str) or not text:
+        return 0
+    normalized = unicodedata.normalize("NFKC", build_visible_prompt_text(text))
+    return sum(char.isalpha() for char in normalized)
+
+
+def count_country_name_significant_characters(text):
+    if not isinstance(text, str) or not text:
+        return 0
+    normalized = unicodedata.normalize("NFKC", build_visible_prompt_text(text))
+    return sum(
+        char.isalpha() or unicodedata.category(char).startswith("M")
+        for char in normalized
+    )
+
+
+def get_country_locale_candidates(lang_code):
+    if not isinstance(lang_code, str) or not lang_code.strip():
+        return []
+
+    normalized_code = lang_code.strip()
+    lowered_code = normalized_code.casefold()
+    candidates = list(COUNTRY_LOCALE_ALIASES.get(lowered_code, ()))
+    underscore_code = normalized_code.replace("-", "_")
+    candidates.append(underscore_code)
+    base_code = re.split(r"[-_]", normalized_code, maxsplit=1)[0]
+    candidates.append(base_code)
+
+    unique_candidates = []
+    seen = set()
+    for candidate in candidates:
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        unique_candidates.append(candidate)
+    return unique_candidates
+
+
+def get_country_translation_catalog(locale_code):
+    if not isinstance(locale_code, str) or not locale_code:
+        return None
+    if locale_code in _COUNTRY_TRANSLATION_CATALOG_CACHE:
+        return _COUNTRY_TRANSLATION_CATALOG_CACHE[locale_code]
+    if pycountry is None or not getattr(pycountry, "LOCALES_DIR", ""):
+        _COUNTRY_TRANSLATION_CATALOG_CACHE[locale_code] = None
+        return None
+
+    try:
+        translation = gettext.translation(
+            "iso3166-1",
+            pycountry.LOCALES_DIR,
+            languages=[locale_code],
+            fallback=False,
+        )
+        catalog = getattr(translation, "_catalog", None)
+        if not isinstance(catalog, dict):
+            catalog = None
+    except Exception:
+        catalog = None
+
+    _COUNTRY_TRANSLATION_CATALOG_CACHE[locale_code] = catalog
+    return catalog
+
+
+def get_standard_ipgeo_country_code(key_name):
+    if not isinstance(key_name, str):
+        return ""
+    match = re.fullmatch(r"IPGEO_COUNTRY_([A-Z]{2})", key_name.strip())
+    if not match:
+        return ""
+
+    country_code = match.group(1)
+    if country_code in COUNTRY_PSEUDO_CODES:
+        return ""
+    if pycountry is not None:
+        try:
+            if pycountry.countries.get(alpha_2=country_code) is None:
+                return ""
+        except Exception:
+            pass
+    elif BabelLocale is not None:
+        try:
+            if country_code not in BabelLocale.parse("en").territories:
+                return ""
+        except Exception:
+            pass
+    return country_code
+
+
+def is_standard_ipgeo_country_key(key_name, en_text=None):
+    if en_text is None:
+        return bool(get_standard_ipgeo_country_code(key_name))
+    return bool(get_standard_ipgeo_country_code_for_source(key_name, en_text))
+
+
+def get_country_code_from_english_name(en_text):
+    if not isinstance(en_text, str) or not en_text.strip():
+        return ""
+
+    source_name = en_text.strip()
+    cache_key = normalize_country_name_for_compare(source_name)
+    if cache_key in _COUNTRY_CODE_BY_ENGLISH_NAME_CACHE:
+        return _COUNTRY_CODE_BY_ENGLISH_NAME_CACHE[cache_key]
+
+    country_code = ""
+    if pycountry is not None:
+        try:
+            country = pycountry.countries.lookup(source_name)
+            country_code = str(getattr(country, "alpha_2", "") or "")
+        except Exception:
+            country_code = ""
+
+    if not country_code and BabelLocale is not None:
+        try:
+            english_territories = BabelLocale.parse("en").territories
+            for code, name in english_territories.items():
+                if normalize_country_name_for_compare(name) == cache_key:
+                    country_code = str(code)
+                    break
+        except Exception:
+            country_code = ""
+
+    _COUNTRY_CODE_BY_ENGLISH_NAME_CACHE[cache_key] = country_code
+    return country_code
+
+
+def get_standard_ipgeo_country_code_for_source(key_name, en_text):
+    country_code = get_standard_ipgeo_country_code(key_name)
+    if not country_code or not isinstance(en_text, str) or not en_text.strip():
+        return ""
+
+    normalized_source = normalize_country_name_for_compare(en_text)
+    if (country_code, normalized_source) in IPGEO_EXTENDED_DISPLAY_NAME_OVERRIDES:
+        return ""
+
+    resolved_country_code = get_country_code_from_english_name(en_text)
+    if resolved_country_code == country_code:
+        return country_code
+    if not resolved_country_code and pycountry is None and BabelLocale is None:
+        return country_code
+    return ""
+
+
+def is_extended_ipgeo_display_name(key_name, en_text):
+    return bool(
+        get_standard_ipgeo_country_code(key_name)
+        and not get_standard_ipgeo_country_code_for_source(key_name, en_text)
+    )
+
+
+def get_ipgeo_proper_name_country_code(key_name, en_text):
+    if not is_extended_ipgeo_display_name(key_name, en_text):
+        return ""
+    return get_standard_ipgeo_country_code(key_name)
+
+
+def detect_extended_ipgeo_translation_truncation(
+    key_name, en_text, translated_text, lang_code=""
+):
+    if not is_extended_ipgeo_display_name(key_name, en_text):
+        return ""
+    if not isinstance(en_text, str) or not isinstance(translated_text, str):
+        return ""
+
+    source_visible = build_visible_prompt_text(en_text)
+    candidate_visible = build_visible_prompt_text(translated_text)
+    source_alpha_count = sum(char.isalpha() for char in source_visible)
+    candidate_alpha_count = sum(char.isalpha() for char in candidate_visible)
+    source_word_count = len(SOURCE_ENGLISH_WORD_PATTERN.findall(source_visible))
+    if source_word_count < 3 or source_alpha_count < 16 or candidate_alpha_count <= 0:
+        return ""
+
+    allowed_scripts = build_allowed_script_families_for_lang(lang_code, en_text)
+    compact_scripts = {"Han", "Hiragana", "Katakana", "Hangul"}
+    minimum_ratio = 0.20 if allowed_scripts.intersection(compact_scripts) else 0.25
+    minimum_alpha_count = max(4, int(source_alpha_count * minimum_ratio + 0.999))
+    if candidate_alpha_count < minimum_alpha_count:
+        return (
+            "translation appears to omit descriptive parts of the extended territory name "
+            f"(alphabetic characters: expected at least {minimum_alpha_count}, got {candidate_alpha_count})"
+        )
+    return ""
+
+
+def get_babel_localized_country_name(country_code, lang_code):
+    if BabelLocale is None or not country_code:
+        return ""
+
+    for locale_code in get_country_locale_candidates(lang_code):
+        try:
+            locale = BabelLocale.parse(locale_code, sep="_")
+            localized_name = locale.territories.get(country_code, "")
+        except Exception:
+            localized_name = ""
+        if isinstance(localized_name, str) and localized_name.strip():
+            return localized_name.strip()
+    return ""
+
+
+def get_localized_country_name_candidates_by_code(country_code, en_text, lang_code):
+    if not isinstance(country_code, str) or not country_code.strip():
+        return ()
+    if not isinstance(lang_code, str) or not lang_code.strip():
+        return ()
+
+    normalized_code = country_code.strip().upper()
+    source_name = en_text.strip() if isinstance(en_text, str) else ""
+    cache_key = (normalized_code, source_name, lang_code.strip())
+    if cache_key in _LOCALIZED_COUNTRY_NAME_CANDIDATES_CACHE:
+        return _LOCALIZED_COUNTRY_NAME_CANDIDATES_CACHE[cache_key]
+
+    localized_names = []
+    seen_names = set()
+
+    def add_localized_name(value):
+        if not isinstance(value, str) or not value.strip():
+            return
+        cleaned = value.strip()
+        normalized = normalize_country_name_for_compare(cleaned)
+        if not normalized or normalized in seen_names:
+            return
+        seen_names.add(normalized)
+        localized_names.append(cleaned)
+
+    for trusted_name in COUNTRY_TRUSTED_LOCALIZED_NAME_VARIANTS.get(
+        (normalized_code, lang_code.strip()), ()
+    ):
+        add_localized_name(trusted_name)
+
+    if source_name:
+        for locale_code in get_country_locale_candidates(lang_code):
+            catalog = get_country_translation_catalog(locale_code)
+            if not catalog or source_name not in catalog:
+                continue
+            add_localized_name(catalog.get(source_name))
+
+    add_localized_name(
+        get_babel_localized_country_name(normalized_code, lang_code)
+    )
+
+    result = tuple(localized_names)
+    _LOCALIZED_COUNTRY_NAME_CANDIDATES_CACHE[cache_key] = result
+    return result
+
+
+def get_localized_country_name_by_code(country_code, en_text, lang_code):
+    if not isinstance(country_code, str) or not country_code.strip():
+        return ""
+    if not isinstance(lang_code, str) or not lang_code.strip():
+        return ""
+
+    normalized_code = country_code.strip().upper()
+    source_name = en_text.strip() if isinstance(en_text, str) else ""
+    cache_key = (normalized_code, source_name, lang_code.strip())
+    if cache_key in _LOCALIZED_COUNTRY_NAME_CACHE:
+        return _LOCALIZED_COUNTRY_NAME_CACHE[cache_key]
+
+    localized_names = get_localized_country_name_candidates_by_code(
+        normalized_code, source_name, lang_code
+    )
+    localized_name = localized_names[0] if localized_names else ""
+    for candidate_name in localized_names[1:]:
+        if not country_name_matches_localized_candidate(
+            localized_name, candidate_name
+        ):
+            continue
+        if count_country_name_diacritic_marks(
+            candidate_name
+        ) > count_country_name_diacritic_marks(localized_name):
+            localized_name = candidate_name
+    _LOCALIZED_COUNTRY_NAME_CACHE[cache_key] = localized_name
+    return localized_name
+
+
+def get_localized_country_name(en_text, lang_code):
+    country_code = get_country_code_from_english_name(en_text)
+    if not country_code:
+        return ""
+    return get_localized_country_name_by_code(country_code, en_text, lang_code)
+
+
+def is_known_localized_country_name_by_code(
+    country_code, lang_code, en_text, translated_text
+):
+    if not isinstance(translated_text, str) or not translated_text.strip():
+        return False
+    for localized_name in get_localized_country_name_candidates_by_code(
+        country_code, en_text, lang_code
+    ):
+        if country_name_matches_localized_candidate(
+            translated_text, localized_name
+        ):
+            return True
+    return False
+
+
+def is_known_localized_country_name(lang_code, en_text, translated_text):
+    country_code = get_country_code_from_english_name(en_text)
+    if not country_code:
+        return False
+    return is_known_localized_country_name_by_code(
+        country_code, lang_code, en_text, translated_text
+    )
+
+
+def get_country_name_source_words(en_text):
+    if not isinstance(en_text, str) or not en_text.strip():
+        return []
+
+    words = []
+    for match in COUNTRY_NAME_WORD_PATTERN.finditer(build_visible_prompt_text(en_text)):
+        normalized_word = normalize_candidate_source_phrase(match.group(0))
+        if normalized_word:
+            words.append(normalized_word)
+    return words
+
+
+def get_country_required_translated_source_words(en_text):
+    required_words = []
+    for word in get_country_name_source_words(en_text):
+        if word.casefold() in COUNTRY_REQUIRED_TRANSLATED_SOURCE_WORDS:
+            required_words.append(word)
+    return required_words
+
+
+def is_country_name_proper_name_only(en_text):
+    return bool(get_country_name_source_words(en_text)) and not get_country_required_translated_source_words(en_text)
+
+
+def is_trusted_short_country_name_variant(country_code, lang_code, translated_text):
+    if not country_code or not isinstance(lang_code, str) or not isinstance(translated_text, str):
+        return False
+
+    trusted_names = COUNTRY_TRUSTED_SHORT_NAME_VARIANTS.get(
+        (country_code.strip().upper(), lang_code.strip()), ()
+    )
+    return any(
+        country_name_matches_localized_candidate(translated_text, trusted_name)
+        for trusted_name in trusted_names
+    )
+
+
+def is_plausible_short_country_name_candidate(
+    country_code, en_text, translated_text, lang_code
+):
+    if is_trusted_short_country_name_variant(
+        country_code, lang_code, translated_text
+    ):
+        return True
+
+    candidate_base_count = count_country_name_base_letters(translated_text)
+    candidate_significant_count = count_country_name_significant_characters(
+        translated_text
+    )
+    if candidate_base_count <= 1 or candidate_significant_count <= 1:
+        return False
+    if candidate_significant_count > 3:
+        return True
+
+    allowed_scripts = build_allowed_script_families_for_lang(lang_code, en_text)
+    if not allowed_scripts:
+        allowed_scripts = set(
+            COUNTRY_SCRIPT_FAMILY_FALLBACKS.get(lang_code, set())
+        )
+    actual_scripts = extract_script_families(translated_text, allowed_scripts)
+    if allowed_scripts and any(
+        script not in allowed_scripts for script in actual_scripts
+    ):
+        return False
+
+    if actual_scripts and actual_scripts.issubset({"Ethiopic", "Myanmar"}):
+        return True
+
+    if actual_scripts and actual_scripts.issubset({"Latin"}):
+        return count_country_name_diacritic_marks(translated_text) > 0
+
+    return False
+
+
+def can_accept_same_spelling_country_name_without_ai(
+    country_code, lang_code, en_text, translated_text
+):
+    if not is_country_name_proper_name_only(en_text):
+        return False
+    return is_safe_same_spelling_country_name(
+        country_code, lang_code, en_text, translated_text
+    )
+
+
+def get_country_proper_name_source_words(en_text, country_code=""):
+    resolved_country_code = (
+        country_code.strip().upper()
+        if isinstance(country_code, str) and country_code.strip()
+        else get_country_code_from_english_name(en_text)
+    )
+    if not resolved_country_code:
+        return set()
+
+    contextual_words = COUNTRY_CONTEXTUAL_PROPER_NAME_SOURCE_WORDS.get(
+        resolved_country_code, set()
+    )
+    proper_words = set()
+    for word in get_country_name_source_words(en_text):
+        normalized_word = normalize_candidate_source_phrase(word).casefold()
+        if not normalized_word:
+            continue
+        if (
+            normalized_word in COUNTRY_REQUIRED_TRANSLATED_SOURCE_WORDS
+            and normalized_word not in contextual_words
+        ):
+            continue
+        proper_words.add(normalized_word)
+    return proper_words
+
+
+def is_country_allowed_untranslated_source_word(
+    country_code, lang_code, word
+):
+    if not isinstance(country_code, str) or not isinstance(lang_code, str):
+        return False
+    normalized_word = normalize_candidate_source_phrase(word).casefold()
+    if not normalized_word:
+        return False
+    allowed_words = COUNTRY_ALLOWED_UNTRANSLATED_SOURCE_WORDS.get(
+        (country_code.strip().upper(), lang_code.strip()), set()
+    )
+    return normalized_word in allowed_words
+
+
+def is_country_proper_name_source_word(en_text, word, country_code=""):
+    normalized_word = normalize_candidate_source_phrase(word).casefold()
+    return bool(normalized_word) and normalized_word in get_country_proper_name_source_words(
+        en_text, country_code=country_code
+    )
+
+
+def detect_truncated_localized_country_name(en_text, translated_text, lang_code):
+    if not isinstance(translated_text, str) or not translated_text.strip():
+        return ""
+
+    country_code = get_country_code_from_english_name(en_text)
+    localized_names = get_localized_country_name_candidates_by_code(
+        country_code, en_text, lang_code
+    )
+    if not localized_names:
+        return ""
+
+    for localized_name in localized_names:
+        if country_name_matches_localized_candidate(
+            translated_text, localized_name
+        ):
+            return ""
+
+    candidate_normalized = normalize_country_name_for_compare(translated_text)
+    if not candidate_normalized:
+        return ""
+
+    candidate_alpha_count = count_country_name_significant_characters(
+        candidate_normalized
+    )
+    for localized_name in localized_names:
+        expected_normalized = normalize_country_name_for_compare(localized_name)
+        expected_alpha_count = count_country_name_significant_characters(
+            expected_normalized
+        )
+        if (
+            candidate_alpha_count > 0
+            and candidate_alpha_count < expected_alpha_count
+            and expected_normalized.startswith(candidate_normalized)
+            and candidate_alpha_count <= max(3, expected_alpha_count // 2)
+        ):
+            return "translation appears truncated before the complete localized country name"
+    return ""
+
+
+def detect_suspiciously_short_translation(en_text, translated_text, lang_code=""):
+    if not isinstance(en_text, str) or not isinstance(translated_text, str):
+        return ""
+
+    source_visible = build_visible_prompt_text(en_text)
+    candidate_visible = build_visible_prompt_text(translated_text)
+    source_alpha_count = sum(char.isalpha() for char in source_visible)
+    candidate_alpha_count = sum(char.isalpha() for char in candidate_visible)
+    if source_alpha_count < 8 or candidate_alpha_count <= 0:
+        return ""
+
+    allowed_scripts = build_allowed_script_families_for_lang(lang_code, en_text)
+    compact_scripts = {"Han", "Hiragana", "Katakana", "Hangul"}
+    uses_compact_script = bool(allowed_scripts.intersection(compact_scripts))
+    source_word_count = len(SOURCE_ENGLISH_WORD_PATTERN.findall(source_visible))
+    minimum_alpha_count = 2 if uses_compact_script else 3
+    if source_word_count >= 2 and source_alpha_count >= 12 and not uses_compact_script:
+        minimum_alpha_count = 4
+
+    if candidate_alpha_count < minimum_alpha_count:
+        return (
+            "translation appears truncated or suspiciously short "
+            f"(alphabetic characters: expected at least {minimum_alpha_count}, got {candidate_alpha_count})"
+        )
+    return ""
+
+
+def detect_suspicious_country_name_candidate(
+    country_code, en_text, translated_text, lang_code
+):
+    if not country_code or not isinstance(translated_text, str):
+        return ""
+
+    candidate_visible = build_visible_prompt_text(translated_text).strip()
+    source_visible = build_visible_prompt_text(en_text).strip()
+    if not candidate_visible:
+        return "translation is empty"
+
+    if re.search(r"[?？]\s*(?:no|not|rather|instead|correction)\b", candidate_visible, flags=re.IGNORECASE):
+        return "translation contains inline self-correction or explanation text"
+    if re.search(r'[\"“”`]', candidate_visible) and re.search(
+        r"(?:no|not|rather|instead|correction|mean)\b",
+        candidate_visible,
+        flags=re.IGNORECASE,
+    ):
+        return "translation contains quoted self-correction or explanation text"
+
+    localized_names = get_localized_country_name_candidates_by_code(
+        country_code, en_text, lang_code
+    )
+    if any(
+        country_name_matches_localized_candidate(candidate_visible, localized_name)
+        for localized_name in localized_names
+    ):
+        return ""
+    if is_trusted_short_country_name_variant(
+        country_code, lang_code, candidate_visible
+    ):
+        return ""
+
+    candidate_normalized = normalize_country_name_for_compare(candidate_visible)
+    source_normalized = normalize_country_name_for_compare(source_visible)
+    candidate_base_letter_count = count_country_name_base_letters(candidate_visible)
+    candidate_alpha_count = count_country_name_significant_characters(
+        candidate_visible
+    )
+    source_alpha_count = count_country_name_significant_characters(source_visible)
+
+    for localized_name in localized_names:
+        expected_normalized = normalize_country_name_for_compare(localized_name)
+        if (
+            expected_normalized
+            and candidate_normalized
+            and expected_normalized.startswith(candidate_normalized)
+            and candidate_normalized != expected_normalized
+            and candidate_alpha_count
+            <= max(
+                3,
+                count_country_name_significant_characters(localized_name) // 2,
+            )
+        ):
+            return "translation appears truncated before the complete localized country name"
+
+    if (
+        source_normalized
+        and candidate_normalized
+        and source_normalized.startswith(candidate_normalized)
+        and candidate_normalized != source_normalized
+        and candidate_alpha_count <= max(3, source_alpha_count // 2)
+    ):
+        return "translation appears truncated before the complete country name"
+
+    allowed_scripts = build_allowed_script_families_for_lang(lang_code, en_text)
+    compact_scripts = {"Han", "Hiragana", "Katakana", "Hangul"}
+    uses_compact_script = bool(allowed_scripts.intersection(compact_scripts))
+    if source_alpha_count >= 6 and not uses_compact_script:
+        if candidate_base_letter_count <= 1:
+            return "translation appears truncated or suspiciously short for a country name"
+        if (
+            candidate_alpha_count <= 3
+            and not is_plausible_short_country_name_candidate(
+                country_code, en_text, candidate_visible, lang_code
+            )
+        ):
+            return "translation appears truncated or suspiciously short for a country name"
+
+    return ""
+
+
+def is_safe_same_spelling_country_name(
+    country_code, lang_code, en_text, translated_text
+):
+    if not country_code:
+        return False
+    if not isinstance(en_text, str) or not isinstance(translated_text, str):
+        return False
+    if (
+        normalize_country_name_for_compare(translated_text)
+        != normalize_country_name_for_compare(en_text)
+    ):
+        return False
+    if detect_suspicious_country_name_candidate(
+        country_code, en_text, translated_text, lang_code
+    ):
+        return False
+
+    allowed_scripts = build_allowed_script_families_for_lang(lang_code, en_text)
+    if not allowed_scripts:
+        allowed_scripts = set(COUNTRY_SCRIPT_FAMILY_FALLBACKS.get(lang_code, set()))
+    actual_scripts = extract_script_families(translated_text, allowed_scripts)
+    if allowed_scripts and any(
+        script not in allowed_scripts for script in actual_scripts
+    ):
+        return False
+    return True
+
+
+def cache_safe_same_spelling_country_name(
+    country_code, lang_code, en_text, translated_text
+):
+    if not can_accept_same_spelling_country_name_without_ai(
+        country_code, lang_code, en_text, translated_text
+    ):
+        return False
+
+    cache_same_spelling_translation_review(
+        lang_code, en_text, translated_text, True
+    )
+    return True
+
+
+def apply_standard_country_translations(key_name, en_text, target_langs):
+    country_code = get_standard_ipgeo_country_code_for_source(key_name, en_text)
+    if not country_code:
+        return dict(target_langs or {}), False
+
+    updated_langs = dict(target_langs or {})
+    catalog_updates = {}
+    rejected_languages = []
+    for lang_code, current_text in list(updated_langs.items()):
+        if lang_code == "en":
+            continue
+
+        current_text = current_text if isinstance(current_text, str) else ""
+        localized_name = get_localized_country_name_by_code(
+            country_code, en_text, lang_code
+        )
+        suspicious_message = detect_suspicious_country_name_candidate(
+            country_code, en_text, current_text, lang_code
+        ) if current_text.strip() else ""
+
+        should_use_catalog = False
+        if localized_name:
+            localized_matches_source = (
+                normalize_country_name_for_compare(localized_name)
+                == normalize_country_name_for_compare(en_text)
+            )
+            current_matches_catalog = (
+                normalize_country_name_for_compare(current_text)
+                == normalize_country_name_for_compare(localized_name)
+            )
+            if not current_matches_catalog:
+                should_use_catalog = (
+                    not localized_matches_source
+                    or not current_text.strip()
+                    or bool(suspicious_message)
+                )
+
+        if should_use_catalog:
+            catalog_updates[lang_code] = localized_name
+            updated_langs[lang_code] = localized_name
+            continue
+
+        if suspicious_message:
+            updated_langs[lang_code] = ""
+            rejected_languages.append((lang_code, suspicious_message))
+
+    made_any_change = False
+    if catalog_updates:
+        try:
+            messages = set_translation_entries_in_map(
+                MAP_FILE_PATH, key_name, catalog_updates, backup=False
+            )
+        except Exception as err:
+            print(
+                f"[{key_name}] Warning: Country catalog batch update failed: {err}"
+            )
+            for lang_code in catalog_updates:
+                updated_langs[lang_code] = target_langs.get(lang_code, "")
+        else:
+            for lang_code in sorted(catalog_updates):
+                message = messages.get(lang_code, "")
+                print(
+                    f"  -> [{lang_code}] Successfully added/updated from country catalog: {message}"
+                )
+            made_any_change = any(
+                message.startswith("OK:") for message in messages.values()
+            )
+
+    for lang_code, suspicious_message in rejected_languages:
+        print(
+            f"  -> [{lang_code}] Existing country name rejected for retranslation: {suspicious_message}"
+        )
+
+    return updated_langs, made_any_change
+
+
 SCRIPT_FAMILY_EXTRA_ALLOWLIST = {
     "ja": {"Han", "Hiragana", "Katakana"},
     "zh-CN": {"Han"},
@@ -2145,12 +4818,69 @@ def get_unicode_script_family(char):
     return ""
 
 
-def extract_script_families(text):
+def is_ascii_latin_letter(char):
+    return isinstance(char, str) and len(char) == 1 and (
+        "A" <= char <= "Z" or "a" <= char <= "z"
+    )
+
+
+def is_non_ascii_latin_diacritic_letter(char):
+    if not isinstance(char, str) or len(char) != 1:
+        return False
+    if ord(char) < 128 or not char.isalpha():
+        return False
+    name = unicodedata.name(char, "")
+    if "LATIN" not in name or "WITH" not in name:
+        return False
+    decomposed = unicodedata.normalize("NFD", char)
+    return bool(decomposed and is_ascii_latin_letter(decomposed[0]))
+
+
+def is_contextual_diacritic_for_allowed_script(text, index, allowed_scripts):
+    if (
+        not isinstance(text, str)
+        or not isinstance(index, int)
+        or index < 0
+        or index >= len(text)
+        or not allowed_scripts
+        or "Latin" in allowed_scripts
+        or not is_non_ascii_latin_diacritic_letter(text[index])
+    ):
+        return False
+
+    start = index
+    while start > 0 and (
+        text[start - 1].isalpha()
+        or unicodedata.category(text[start - 1]).startswith("M")
+    ):
+        start -= 1
+    end = index + 1
+    while end < len(text) and (
+        text[end].isalpha() or unicodedata.category(text[end]).startswith("M")
+    ):
+        end += 1
+
+    token = text[start:end]
+    if any(is_ascii_latin_letter(char) for char in token):
+        return False
+
+    for char in token:
+        family = get_unicode_script_family(char)
+        if family and family != "Latin" and family in allowed_scripts:
+            return True
+    return False
+
+
+def extract_script_families(text, allowed_scripts=None):
     families = set()
     if not isinstance(text, str):
         return families
-    for char in text:
+    for index, char in enumerate(text):
         family = get_unicode_script_family(char)
+        if family == "Latin" and is_contextual_diacritic_for_allowed_script(
+            text, index, allowed_scripts
+        ):
+            continue
         if family:
             families.add(family)
     return families
@@ -2221,6 +4951,359 @@ def build_allowed_script_families_for_lang(lang_code, en_text):
     return allowed
 
 
+def collect_arrow_path_source_words(en_text):
+    if not isinstance(en_text, str) or "->" not in en_text:
+        return []
+
+    visible_text = build_visible_prompt_text(en_text)
+    protected_terms_cf = {
+        term.casefold() for term in extract_protected_terms(en_text)
+    }
+    protected_spans = collect_protected_term_spans(visible_text, protected_terms_cf)
+    words = []
+    seen = set()
+
+    def add_word_from_match(match):
+        if span_is_inside_any(match.start(), match.end(), protected_spans):
+            return
+        word = normalize_candidate_source_phrase(match.group(0))
+        if not word:
+            return
+        lowered = word.casefold()
+        if lowered in seen or lowered in protected_terms_cf or should_protect_token(word):
+            return
+        seen.add(lowered)
+        words.append(word)
+
+    for arrow_match in re.finditer(r"->", visible_text):
+        segment_start = max(
+            visible_text.rfind(",", 0, arrow_match.start()),
+            visible_text.rfind("\n", 0, arrow_match.start()),
+            visible_text.rfind("\\n", 0, arrow_match.start()),
+        )
+        segment_start = 0 if segment_start < 0 else segment_start + 1
+        segment_end_candidates = [
+            pos
+            for pos in (
+                visible_text.find(",", arrow_match.end()),
+                visible_text.find("\n", arrow_match.end()),
+                visible_text.find("\\n", arrow_match.end()),
+            )
+            if pos >= 0
+        ]
+        segment_end = min(segment_end_candidates) if segment_end_candidates else len(visible_text)
+
+        left_matches = [
+            match
+            for match in SOURCE_ENGLISH_WORD_PATTERN.finditer(
+                visible_text, segment_start, arrow_match.start()
+            )
+            if not span_is_inside_any(match.start(), match.end(), protected_spans)
+        ]
+        if left_matches:
+            add_word_from_match(left_matches[-1])
+
+        for match in SOURCE_ENGLISH_WORD_PATTERN.finditer(
+            visible_text, arrow_match.end(), segment_end
+        ):
+            add_word_from_match(match)
+
+    return words
+
+
+def extract_source_escape_sequence_examples(en_text):
+    examples = []
+    if not isinstance(en_text, str) or not en_text:
+        return examples
+
+    for raw, visible in (
+        ("\\r\\n", "\\r\\n"),
+        ("\\n", "\\n"),
+        ("\\r", "\\r"),
+        ("\\t", "\\t"),
+        ("\r\n", "\\r\\n"),
+        ("\n", "\\n"),
+        ("\r", "\\r"),
+        ("\t", "\\t"),
+    ):
+        if raw in en_text and visible not in examples:
+            examples.append(visible)
+    return examples
+
+
+def source_has_line_break_boundary(en_text):
+    if not isinstance(en_text, str) or not en_text:
+        return False
+    return any(token in en_text for token in ("\\r\\n", "\\n", "\\r", "\r\n", "\n", "\r"))
+
+
+def build_source_format_preservation_rule(en_text, rule_number="5"):
+    rule_parts = []
+    placeholder_tokens = extract_placeholder_tokens(en_text)
+    if placeholder_tokens:
+        placeholder_examples = ", ".join(f"`{token}`" for token in dict.fromkeys(placeholder_tokens))
+        rule_parts.append(
+            f"preserve source placeholder token(s) exactly and in order: {placeholder_examples}"
+        )
+
+    escape_examples = extract_source_escape_sequence_examples(en_text)
+    if escape_examples:
+        rule_parts.append(
+            "preserve source escape sequence(s) exactly: "
+            + ", ".join(f"`{example}`" for example in escape_examples)
+        )
+
+    percent_tokens, source_error = collect_compiler_percent_tokens(en_text)
+    percent_template_tokens = extract_percent_template_tokens(en_text)
+    if not source_error and (percent_tokens or percent_template_tokens):
+        rule_parts.append("preserve literal percent formatting exactly as used by the source")
+
+    if not rule_parts:
+        return ""
+
+    return (
+        f"{rule_number}. SOURCE FORMAT RULE: "
+        + "; ".join(rule_parts)
+        + ".\n"
+    )
+
+
+def build_source_line_break_translation_rule(en_text, rule_number="14"):
+    if not source_has_line_break_boundary(en_text):
+        return ""
+    return (
+        f"{rule_number}. IMPORTANT: The source string contains escaped or real line breaks. "
+        "Treat the text after each line break as a new translated line or paragraph, and translate the first word after each boundary fully.\n"
+    )
+
+
+def source_has_partial_english_leadin_risk(en_text):
+    if not isinstance(en_text, str) or not en_text:
+        return False
+    visible_text = build_visible_prompt_text(en_text)
+    starters = tuple(SUSPICIOUS_ENGLISH_LEADING_FRAGMENTS) + ("Use",)
+    for segment in re.split(r"[\r\n]+", visible_text):
+        stripped = segment.lstrip()
+        if not stripped:
+            continue
+        for starter in starters:
+            if starts_with_phrase_boundary(stripped, starter):
+                return True
+    return False
+
+
+def build_partial_english_leadin_rule(en_text, rule_number="12"):
+    if not source_has_partial_english_leadin_risk(en_text):
+        return ""
+    return (
+        f"{rule_number}. NEVER keep a partial English lead-in at the beginning of any translated paragraph or line. "
+        "If the source segment starts with English words like `Do`, `Do you`, `Please`, or `Use`, translate them fully instead of leaving them in English.\n"
+    )
+
+
+def build_no_english_gloss_rule(en_text, rule_number="13"):
+    if not isinstance(en_text, str) or not en_text:
+        return ""
+    visible_text = build_visible_prompt_text(en_text)
+    has_ui_label_context = (
+        QUOTED_UI_PHRASE_PATTERN.search(visible_text)
+        or PARENTHESIZED_UI_PHRASE_PATTERN.search(visible_text)
+        or extract_plain_mode_label_phrases(en_text)
+    )
+    if not has_ui_label_context:
+        return ""
+    return (
+        f"{rule_number}. IMPORTANT: Do NOT keep the English original in parentheses after you translate a quoted UI label, mode name, menu item, or option name. "
+        "Translate it once naturally into the target language and omit the English copy.\n"
+    )
+
+
+def build_locked_term_prompt_rule(protected_placeholders_json, rule_number="11"):
+    if not isinstance(protected_placeholders_json, str):
+        return ""
+    if protected_placeholders_json.strip() in {"", "{}"}:
+        return ""
+    return (
+        f"{rule_number}. LOCKED TERM RULE: If you see placeholders like __LOCKED_TERM_0__, these represent protected special terms and acronyms. "
+        "Never translate, never transliterate, never inflect, never remove, and never alter these placeholders. "
+        "Keep the placeholder token itself exactly unchanged in output strings. Do NOT replace it with the real term shown in the JSON block, and do NOT attach target-language prefixes or suffixes to it. "
+        "English words immediately before or after a locked placeholder are not locked unless they are also inside a placeholder; translate those ordinary surrounding words normally. "
+        "If two locked placeholders are separated by a space, slash, hyphen, or punctuation in the source string, preserve that separator; never concatenate two locked placeholders into one token. "
+        "For Latin-script surrounding words, leave a visible separator around each locked placeholder; do not output forms like `i__LOCKED_TERM_0__`, `ku__LOCKED_TERM_0__`, or `__LOCKED_TERM_0__only`.\n"
+    )
+
+
+def build_locked_term_punctuation_rule(protected_placeholders_json, rule_number="15"):
+    if not isinstance(protected_placeholders_json, str):
+        return ""
+    if protected_placeholders_json.strip() in {"", "{}"}:
+        return ""
+    return (
+        f"{rule_number}. IMPORTANT: Locked placeholders protect only the special term itself, not the punctuation around it. "
+        "If English has a pattern like `MaxMind.\\n\\nCopy...`, the period ends the sentence, but it does NOT have to stay immediately after the protected term in the target language if the sentence structure changes.\n"
+    )
+
+
+def build_batch_source_word_policy_requirements(
+    en_text, prompt_lang_dict, rule_number="7b", excluded_words=None
+):
+    if not isinstance(en_text, str) or not en_text:
+        return ""
+
+    target_langs = [
+        lang_code
+        for lang_code in (prompt_lang_dict or {}).keys()
+        if isinstance(lang_code, str) and lang_code != "en"
+    ]
+    preserve_terms = []
+    preserve_seen = set()
+    for term in extract_protected_terms(en_text):
+        normalized = normalize_candidate_source_phrase(term)
+        if not normalized:
+            continue
+        lowered = normalized.casefold()
+        if lowered in preserve_seen:
+            continue
+        preserve_seen.add(lowered)
+        preserve_terms.append(normalized)
+
+    translate_words = []
+    translate_seen = set()
+    excluded_word_keys = {
+        normalize_candidate_source_phrase(word).casefold()
+        for word in (excluded_words or ())
+        if normalize_candidate_source_phrase(word)
+    }
+
+    def add_translate_word(raw_word, allow_stopword=False):
+        word = normalize_candidate_source_phrase(raw_word)
+        if not word or not re.search(r"[A-Za-z]", word):
+            return
+        lowered = word.casefold()
+        if lowered in translate_seen or lowered in excluded_word_keys:
+            return
+        if is_preserved_source_literal_word(word):
+            return
+        if not allow_stopword and lowered in ENGLISH_LEAK_STOPWORDS:
+            return
+        if should_protect_token(word):
+            return
+        if target_langs and all(
+            is_allowed_source_spelled_word_for_lang(lang_code, word)
+            for lang_code in target_langs
+        ):
+            return
+        translate_seen.add(lowered)
+        translate_words.append(word)
+
+    for word in extract_placeholder_adjacent_translatable_source_words(en_text):
+        add_translate_word(word, allow_stopword=True)
+        if len(translate_words) >= 12:
+            break
+
+    if len(translate_words) < 12:
+        for word in build_dynamic_source_leak_word_candidates(en_text):
+            add_translate_word(word)
+            if len(translate_words) >= 12:
+                break
+
+    if not preserve_terms and not translate_words:
+        return ""
+
+    lines = [
+        f"{rule_number}. SOURCE WORD POLICY FOR THIS KEY: Preserve only true source exceptions and translate the rest of the English wording naturally in every non-English line."
+    ]
+    if preserve_terms:
+        preserve_text = ", ".join(f"`{term}`" for term in preserve_terms[:12])
+        lines.append(
+            f"Preserve/source-exception term(s) for this key: {preserve_text}. If one is shown as a locked placeholder, output only the placeholder token."
+        )
+    if translate_words:
+        translate_text = ", ".join(f"`{word}`" for word in translate_words[:12])
+        lines.append(
+            f"Ordinary English source word(s) that must be translated, not copied raw, unless the target language genuinely uses the exact same spelling as a natural loanword: {translate_text}."
+        )
+    return " ".join(lines) + "\n"
+
+
+def build_unprotected_source_word_translation_rule(
+    en_text, lang_code, rule_number="9", priority_words=None
+):
+    base_rule = (
+        f"{rule_number}. Translate every ordinary English source word naturally. "
+        "Keep only locked placeholders, strict all-uppercase acronyms, brands, file/path literals, digits, and required punctuation unchanged."
+    )
+    allowed_scripts = build_allowed_script_families_for_lang(lang_code, en_text)
+    if not allowed_scripts:
+        return base_rule + "\n"
+    if "Latin" not in allowed_scripts:
+        base_rule += (
+            " For this non-Latin target script, do NOT output ASCII-letter romanizations or hybrid Latin/target-script word forms for ordinary translated words; write those words in the target script instead."
+        )
+
+    words = []
+    seen = set()
+
+    def add_word(raw_word, allow_stopword=False):
+        word = normalize_candidate_source_phrase(raw_word)
+        if not word or not re.search(r"[A-Za-z]", word):
+            return False
+        lowered = word.casefold()
+        if lowered in seen:
+            return False
+        if is_preserved_source_literal_word(word):
+            return False
+        if is_allowed_source_spelled_word_for_lang(lang_code, word):
+            return False
+        if not allow_stopword and lowered in ENGLISH_LEAK_STOPWORDS:
+            return False
+        if should_protect_token(word):
+            return False
+        seen.add(lowered)
+        words.append(word)
+        return True
+
+    for word in priority_words or []:
+        add_word(word, allow_stopword=True)
+        if len(words) >= 12:
+            break
+
+    if len(words) < 12:
+        for match in iter_unprotected_source_word_matches(en_text):
+            add_word(match.group(0))
+            if len(words) >= 12:
+                break
+
+    if words:
+        word_examples = ", ".join(f"`{word}`" for word in words)
+        return (
+            base_rule
+            + f" Do NOT copy these unprotected source word(s) in Latin script or inside hybrid target-language forms: {word_examples}. The exact listed Latin string(s) must be absent from the final answer unless they appear inside a locked placeholder.\n"
+        )
+
+    return base_rule + "\n"
+
+
+def build_leaked_english_fragment_rewrite_requirements(
+    en_text, translated_text, lang_code, rule_number="9"
+):
+    leaked_phrases = get_leaked_source_phrases(en_text, translated_text, lang_code)
+    leaked_words = get_leaked_source_words(en_text, translated_text, lang_code)
+    if not leaked_phrases and not leaked_words:
+        return ""
+
+    lines = [
+        f"{rule_number}. CRITICAL LEAK REWRITE RULE: The current translation still contains ordinary English source fragments. Translate every listed fragment naturally into the target language. Do NOT keep these fragments unchanged in parentheses, quotes, menu paths, glosses, or labels.",
+    ]
+    if leaked_phrases:
+        lines.append("Leaked English phrase(s) that must be absent from the final line:")
+        lines.extend(f"- `{phrase}`" for phrase in leaked_phrases[:10])
+    if leaked_words:
+        lines.append("Leaked English word(s) that must be absent from the final line unless inside a locked placeholder:")
+        lines.extend(f"- `{word}`" for word in leaked_words[:12])
+    return "\n".join(lines) + "\n"
+
+
 def get_preferred_script_signature_for_lang(lang_code, en_text=""):
     preferred = set(get_inferred_script_families_for_lang(lang_code))
     if not preferred:
@@ -2233,7 +5316,7 @@ def get_preferred_script_signature_for_lang(lang_code, en_text=""):
 
 def should_force_single_language_local_batch(lang_codes, en_text=""):
     if (
-        not resolve_backend_selection()
+        not is_local_gemma_compatibility_flow()
         or not isinstance(lang_codes, (list, tuple))
         or len(lang_codes) <= 1
     ):
@@ -2254,6 +5337,42 @@ def should_force_single_language_local_batch(lang_codes, en_text=""):
     return len(signatures) > 1
 
 
+def build_language_processing_batches(
+    lang_codes, batch_size, en_text="", preserve_existing_text=False
+):
+    ordered_codes = list(lang_codes or [])
+    if not ordered_codes:
+        return []
+
+    effective_batch_size = max(1, int(batch_size))
+    if not (
+        is_local_backend()
+        and should_force_single_language_local_batch(ordered_codes, en_text)
+    ):
+        return [
+            ordered_codes[i : i + effective_batch_size]
+            for i in range(0, len(ordered_codes), effective_batch_size)
+        ]
+
+    grouped_codes = {}
+    unknown_codes = []
+    for lang_code in ordered_codes:
+        signature = get_preferred_script_signature_for_lang(lang_code, en_text)
+        if not signature:
+            unknown_codes.append([lang_code])
+            continue
+        grouped_codes.setdefault(signature, []).append(lang_code)
+
+    batches = []
+    for signature in sorted(grouped_codes.keys(), key=lambda item: (len(item), item)):
+        signature_codes = grouped_codes[signature]
+        for i in range(0, len(signature_codes), effective_batch_size):
+            batches.append(signature_codes[i : i + effective_batch_size])
+
+    batches.extend(unknown_codes)
+    return batches
+
+
 def detect_unexpected_script_mixture(
     lang_code, translated_text, en_text, placeholder_pairs=None
 ):
@@ -2270,6 +5389,7 @@ def detect_unexpected_script_mixture(
 
     cleaned_text = strip_known_translated_phrases(en_text, translated_text, lang_code)
     cleaned_text = PLACEHOLDER_TOKEN_PATTERN.sub(" ", cleaned_text)
+    cleaned_text = PERCENT_TEMPLATE_TOKEN_PATTERN.sub(" ", cleaned_text)
     cleaned_text = re.sub(r"__LOCKED_TERM_\d+__", " ", cleaned_text)
 
     if placeholder_pairs:
@@ -2281,18 +5401,123 @@ def detect_unexpected_script_mixture(
                 flags=re.IGNORECASE,
             )
 
-    for literal in extract_source_ascii_literal_terms(en_text):
+    for literal in extract_source_ascii_literals_to_ignore_for_script_detection(en_text):
         cleaned_text = re.sub(
             re.escape(literal), " ", cleaned_text, flags=re.IGNORECASE
         )
+    cleaned_text = remove_preserved_source_literals_for_detection(
+        cleaned_text, en_text
+    )
+    cleaned_text = remove_complete_rate_unit_tokens_for_script_detection(
+        cleaned_text, en_text
+    )
 
-    actual_scripts = extract_script_families(cleaned_text)
+    cleaned_text = build_visible_prompt_text(cleaned_text)
+    actual_scripts = extract_script_families(cleaned_text, allowed_scripts)
     unexpected_scripts = sorted(
         script for script in actual_scripts if script not in allowed_scripts
     )
     if unexpected_scripts:
         return ", ".join(unexpected_scripts)
     return ""
+
+
+def strip_small_unexpected_script_artifacts(
+    lang_code, translated_text, en_text, placeholder_pairs=None
+):
+    if (
+        not isinstance(lang_code, str)
+        or not lang_code
+        or not isinstance(translated_text, str)
+        or not translated_text
+    ):
+        return translated_text
+
+    allowed_scripts = build_allowed_script_families_for_lang(lang_code, en_text)
+    if not allowed_scripts:
+        return translated_text
+
+    protected_tokens = {
+        term.casefold()
+        for _, term in (placeholder_pairs or [])
+        if isinstance(term, str) and term
+    }
+    protected_tokens.update(
+        literal.casefold()
+        for literal in extract_source_ascii_literals_to_ignore_for_script_detection(
+            en_text
+        )
+    )
+
+    repaired_parts = []
+    index = 0
+    while index < len(translated_text):
+        if not (
+            translated_text[index].isalpha()
+            or unicodedata.category(translated_text[index]).startswith("M")
+        ):
+            repaired_parts.append(translated_text[index])
+            index += 1
+            continue
+
+        end = index + 1
+        while end < len(translated_text) and (
+            translated_text[end].isalpha()
+            or unicodedata.category(translated_text[end]).startswith("M")
+        ):
+            end += 1
+
+        token = translated_text[index:end]
+        if token.casefold() in protected_tokens:
+            repaired_parts.append(token)
+            index = end
+            continue
+
+        scripts = [get_unicode_script_family(char) for char in token]
+        unexpected_positions = [
+            pos
+            for pos, script in enumerate(scripts)
+            if script and script not in allowed_scripts
+        ]
+        allowed_positions = [
+            pos for pos, script in enumerate(scripts) if script in allowed_scripts
+        ]
+        repaired_token = token
+
+        if unexpected_positions and not allowed_positions:
+            if len(token) <= 3:
+                repaired_token = ""
+        elif unexpected_positions and len(unexpected_positions) <= 3:
+            scripted_positions = [
+                pos for pos, script in enumerate(scripts) if script
+            ]
+            is_prefix = unexpected_positions == scripted_positions[
+                : len(unexpected_positions)
+            ]
+            is_suffix = unexpected_positions == scripted_positions[
+                -len(unexpected_positions) :
+            ]
+            if (is_prefix or is_suffix) and len(allowed_positions) >= 2:
+                kept_chars = []
+                previous_base_kept = False
+                for char, script in zip(token, scripts):
+                    if unicodedata.category(char).startswith("M"):
+                        if previous_base_kept:
+                            kept_chars.append(char)
+                        continue
+                    keep_char = script in allowed_scripts or not script
+                    if keep_char:
+                        kept_chars.append(char)
+                    previous_base_kept = keep_char
+                repaired_token = "".join(kept_chars)
+
+        repaired_parts.append(repaired_token)
+        index = end
+
+    repaired = "".join(repaired_parts)
+    repaired = re.sub(r"[ \t]{2,}", " ", repaired)
+    repaired = re.sub(r" +([,.;:!?])", r"\1", repaired)
+    return repaired.strip()
 
 
 def contains_response_artifact_lines(translated_text):
@@ -2311,7 +5536,49 @@ def contains_response_artifact_lines(translated_text):
         return True
     if "Wait," in translated_text or "Final check" in translated_text:
         return True
+    if re.search(
+        r"(^|\n)\s*(?:Let's|Let us)\s+(?:try|use|look|re-?map|re-?read|count|build|translate|fix|check|follow)\b",
+        translated_text,
+        flags=re.IGNORECASE,
+    ):
+        return True
+    if re.search(r"(^|\n)\s*Actually\b", translated_text, flags=re.IGNORECASE):
+        return True
+    if re.search(
+        r"(^|\n)\s*(?:Let's|Let us)\s+re-?evaluate\b",
+        translated_text,
+        flags=re.IGNORECASE,
+    ):
+        return True
+    if re.search(
+        r"(^|\n)\s*(?:Corrected|Correction|Correct)\b[^:\n]{0,60}:",
+        translated_text,
+        flags=re.IGNORECASE,
+    ):
+        return True
+    if re.search(
+        r"(^|\n)\s*(?:Corrected mapping|Translation attempt|Placeholders?|Total)\b[^\n]{0,160}\b(?:placeholder|translation|source|English)\b",
+        translated_text,
+        flags=re.IGNORECASE,
+    ):
+        return True
+    if re.search(
+        r"\s->\s*Still\s+\d+\s+placeholders?\b",
+        translated_text,
+        flags=re.IGNORECASE,
+    ):
+        return True
+    if re.search(r'"[^"\n]{1,400}"\s*->\s*"[^"\n]{1,400}"', translated_text):
+        return True
+    if "the user wants me to fix" in translated_text.casefold():
+        return True
     return False
+
+
+def is_response_artifact_text(text):
+    return contains_response_artifact_lines(text) or bool(
+        detect_structural_translation_artifact(text)
+    )
 
 
 def detect_structural_translation_artifact(translated_text):
@@ -2323,11 +5590,54 @@ def detect_structural_translation_artifact(translated_text):
     return ""
 
 
+def detect_unexpected_arrow_rewrite_artifact(source_text, translated_text):
+    if not isinstance(source_text, str) or not isinstance(translated_text, str):
+        return ""
+    if "->" in source_text or "→" in source_text:
+        return ""
+    if re.search(r"\s(?:->|→)\s", translated_text):
+        return "translation contains arrow-style rewrite artifact"
+    return ""
+
+
+def detect_repetitive_ngram_run(tokens, ngram_size):
+    if not tokens or ngram_size <= 0:
+        return ""
+
+    min_run_token_count = REPETITIVE_TOKEN_FLOOD_THRESHOLD * ngram_size
+    for start_index in range(0, len(tokens) - min_run_token_count + 1):
+        ngram = tuple(tokens[start_index : start_index + ngram_size])
+        if not ngram:
+            continue
+
+        repeat_count = 1
+        next_index = start_index + ngram_size
+        while (
+            next_index + ngram_size <= len(tokens)
+            and tuple(tokens[next_index : next_index + ngram_size]) == ngram
+        ):
+            repeat_count += 1
+            if repeat_count >= REPETITIVE_TOKEN_FLOOD_THRESHOLD:
+                return " ".join(ngram[:4])
+            next_index += ngram_size
+
+    return ""
+
+
 def detect_repetitive_token_flood(translated_text):
     if not isinstance(translated_text, str):
         return ""
 
-    tokens = re.findall(r"[\w'’-]+", translated_text, re.UNICODE)
+    token_pattern = re.compile(
+        PLACEHOLDER_TOKEN_PATTERN.pattern + r"|[\w'’-]+",
+        re.UNICODE,
+    )
+    tokens = [
+        match.group(0).casefold()
+        for match in token_pattern.finditer(translated_text)
+        if PLACEHOLDER_TOKEN_PATTERN.fullmatch(match.group(0))
+        or len(match.group(0)) > 1
+    ]
     if not tokens:
         return ""
 
@@ -2346,14 +5656,174 @@ def detect_repetitive_token_flood(translated_text):
             run_length = 1
         if run_length >= REPETITIVE_TOKEN_FLOOD_THRESHOLD:
             return normalized
+
+    max_ngram_size = min(6, max(2, len(tokens) // REPETITIVE_TOKEN_FLOOD_THRESHOLD))
+    for ngram_size in range(2, max_ngram_size + 1):
+        repeated_ngram = detect_repetitive_ngram_run(tokens, ngram_size)
+        if repeated_ngram:
+            return repeated_ngram
+
     return ""
 
 
 def get_local_effective_batch_size(batch_size, en_text, lang_count):
-    effective_batch_size = min(batch_size, LOCAL_API_MAX_LANGUAGES_PER_BATCH)
+    effective_batch_size = min(batch_size, get_local_max_languages_per_batch())
     if lang_count <= 1:
         return 1
+    if should_use_deepseek_compatible_local_flow():
+        return max(1, effective_batch_size)
+
+    visible_source_len = len(build_visible_prompt_text(en_text))
+    protected_term_count = len(extract_protected_terms(en_text))
+    if (
+        visible_source_len >= LOCAL_COMPLEX_SOURCE_CHAR_THRESHOLD
+        or protected_term_count >= LOCAL_COMPLEX_SOURCE_PLACEHOLDER_THRESHOLD
+    ):
+        effective_batch_size = min(
+            effective_batch_size,
+            LOCAL_COMPLEX_SOURCE_MAX_LANGUAGES_PER_BATCH,
+        )
+    if visible_source_len >= LOCAL_VERY_COMPLEX_SOURCE_CHAR_THRESHOLD:
+        effective_batch_size = min(
+            effective_batch_size,
+            LOCAL_VERY_COMPLEX_SOURCE_MAX_LANGUAGES_PER_BATCH,
+        )
     return max(1, effective_batch_size)
+
+
+def should_try_local_segmented_translation(lang_code, en_text):
+    if not is_local_gemma_compatibility_flow():
+        return False
+    if not isinstance(lang_code, str) or not lang_code:
+        return False
+    if not isinstance(en_text, str) or not en_text.strip():
+        return False
+
+    visible_source_len = len(build_visible_prompt_text(en_text))
+    protected_term_count = len(extract_protected_terms(en_text))
+    if (
+        visible_source_len < LOCAL_SEGMENTED_SOURCE_CHAR_THRESHOLD
+        and protected_term_count < LOCAL_COMPLEX_SOURCE_PLACEHOLDER_THRESHOLD
+    ):
+        return False
+
+    allowed_scripts = build_allowed_script_families_for_lang(lang_code, en_text)
+    return bool(allowed_scripts and any(script != "Latin" for script in allowed_scripts))
+
+
+def split_source_for_segmented_translation(en_text):
+    if not isinstance(en_text, str):
+        return []
+
+    source_text = en_text.strip()
+    if not source_text:
+        return []
+
+    sentence_parts = [
+        part.strip()
+        for part in re.split(r"(?<=[.!?])\s+", source_text)
+        if part.strip()
+    ]
+    if not sentence_parts:
+        return []
+
+    expanded_parts = []
+    for part in sentence_parts:
+        if len(part) <= LOCAL_SEGMENTED_SOURCE_TARGET_CHARS:
+            expanded_parts.append(part)
+            continue
+
+        sub_parts = [
+            sub_part.strip()
+            for sub_part in re.split(r"(?<=[,;:])\s+", part)
+            if sub_part.strip()
+        ]
+        expanded_parts.extend(sub_parts if sub_parts else [part])
+
+    segments = []
+    current_segment = ""
+    for part in expanded_parts:
+        if (
+            current_segment
+            and len(current_segment) + 1 + len(part)
+            > LOCAL_SEGMENTED_SOURCE_TARGET_CHARS
+        ):
+            segments.append(current_segment)
+            current_segment = part
+        elif current_segment:
+            current_segment = f"{current_segment} {part}"
+        else:
+            current_segment = part
+
+    if current_segment:
+        segments.append(current_segment)
+
+    if len(segments) <= 1 or len(segments) > LOCAL_SEGMENTED_SOURCE_MAX_SEGMENTS:
+        return []
+    return segments
+
+
+def translate_segmented_single_language_source(key_name, lang_code, en_text):
+    if not should_try_local_segmented_translation(lang_code, en_text):
+        return None, "segmented local translation is not needed for this source"
+
+    segments = split_source_for_segmented_translation(en_text)
+    if not segments:
+        return None, "source could not be split into safe local translation segments"
+
+    translated_segments = []
+    for segment_index, segment_text in enumerate(segments, start=1):
+        translated_segment = translate_single_line(
+            f"{key_name}_segment_{segment_index}",
+            lang_code,
+            segment_text,
+            request_timeout_sec=API_REPAIR_REQUEST_TIMEOUT_SEC,
+            timeout_retry_count=API_REPAIR_TIMEOUT_RETRY_COUNT,
+        )
+        if not isinstance(translated_segment, str) or not translated_segment.strip():
+            return None, f"segment {segment_index} returned empty translation"
+
+        segment_placeholders = build_protected_placeholders(
+            segment_text, {lang_code: translated_segment}
+        )
+        cleaned_segment = cleanup_translated_text(
+            segment_text, translated_segment, segment_placeholders, lang_code
+        )
+        is_valid, validation_error = validate_translation_text(
+            segment_text, cleaned_segment, segment_placeholders, lang_code
+        )
+        if not is_valid:
+            repaired_success, repaired_text, repaired_error = (
+                repair_candidate_text_for_validation(
+                    lang_code,
+                    cleaned_segment,
+                    segment_text,
+                    validation_error=validation_error,
+                )
+            )
+            if not repaired_success:
+                return (
+                    None,
+                    f"segment {segment_index} failed validation: {repaired_error or validation_error}",
+                )
+            cleaned_segment = repaired_text
+
+        translated_segments.append(cleaned_segment.strip())
+
+    combined_text = " ".join(segment for segment in translated_segments if segment)
+    full_placeholders = build_protected_placeholders(
+        en_text, {lang_code: combined_text}
+    )
+    combined_text = cleanup_translated_text(
+        en_text, combined_text, full_placeholders, lang_code
+    )
+    is_valid, validation_error = validate_translation_text(
+        en_text, combined_text, full_placeholders, lang_code
+    )
+    if not is_valid:
+        return None, f"segmented translation failed final validation: {validation_error}"
+
+    return combined_text, ""
 
 
 def build_local_target_language_map(prompt_lang_dict):
@@ -2406,7 +5876,7 @@ def build_batch_focus_requirements(en_text, prompt_lang_dict):
 
 def build_local_batch_focus_requirements(en_text, prompt_lang_dict):
     if (
-        not resolve_backend_selection()
+        not is_local_gemma_compatibility_flow()
         or not isinstance(prompt_lang_dict, dict)
         or not prompt_lang_dict
     ):
@@ -2416,10 +5886,11 @@ def build_local_batch_focus_requirements(en_text, prompt_lang_dict):
     target_language_json = json.dumps(target_language_map, ensure_ascii=False, indent=2)
     requirements = [
         "18. LOCAL MODEL OUTPUT RULES: Never reveal internal reasoning. Never output self-corrections, analysis, checklists, bullets, or commentary. Never output internal channel tags such as <|channel>thought or <channel|>. Never output LaTeX, arrows like -> or $\rightarrow$, or mixed-script garbage. Never output HTML fragments. Return only final translation lines in the exact requested format.\n",
+        "18a. LOCAL BATCH STABILITY RULE: Translate the source exactly once per requested language. Do NOT loop, repeat a word or phrase many times, or continue generating after the complete translated sentence. Do NOT wrap translation values in braces, brackets, Python sets, dictionaries, or any other container syntax.\n",
         "19. LOCAL TARGET LANGUAGE MAP: Translate each language code only into the language shown in this JSON map. Do NOT mix languages between lines and do NOT answer in a neighboring or more common language.\n",
         f"{target_language_json}\n",
         "20. LOCAL UI LABEL RULE: If you translate a quoted UI label or mode name, do NOT append the original English label in parentheses, quotes, or gloss form after the translated label. The final line must not contain duplicated English UI labels.\n",
-        "20. LOCAL QUOTED UI LABEL RULE: If the English source contains quoted mode names, slash-separated menu labels, or parenthesized UI text, translate those words too unless they are protected placeholders or strict all-uppercase acronyms.\n",
+        "20. LOCAL QUOTED UI LABEL RULE: If the English source contains quoted mode names, slash-separated menu labels, or parenthesized UI text, translate those words too unless they are protected placeholders or strict all-uppercase acronyms. For slash-separated UI text, translate each ordinary segment around the slash and keep the slash only as a separator.\n",
         "21. LOCAL NO RAW ENGLISH RULE: Do NOT leave ordinary English source words, quoted UI labels, or parenthesized UI labels untranslated anywhere in the final non-English lines. Do NOT append the English original in parentheses after a translated UI label.\n",
     ]
 
@@ -2432,7 +5903,7 @@ def build_local_batch_focus_requirements(en_text, prompt_lang_dict):
 
 
 def build_local_single_language_guidance(en_text, prompt_lang_dict):
-    if not resolve_backend_selection():
+    if not is_local_gemma_compatibility_flow():
         return ""
     if not isinstance(prompt_lang_dict, dict) or len(prompt_lang_dict) != 1:
         return ""
@@ -2440,7 +5911,11 @@ def build_local_single_language_guidance(en_text, prompt_lang_dict):
     lang_code = next(iter(prompt_lang_dict.keys()))
     requirement = get_known_leading_phrase_requirement(en_text, lang_code)
     allowed_scripts = sorted(build_allowed_script_families_for_lang(lang_code, en_text))
-    forbidden_source_words = build_local_forbidden_source_word_candidates(en_text)[:8]
+    forbidden_source_words = [
+        word
+        for word in build_local_forbidden_source_word_candidates(en_text)
+        if not is_allowed_source_spelled_word_for_lang(lang_code, word)
+    ][:8]
 
     script_rule = ""
     language_name = get_language_name_for_code(lang_code)
@@ -2462,6 +5937,14 @@ def build_local_single_language_guidance(en_text, prompt_lang_dict):
                 "Do NOT mix in letters from any other scripts. Placeholders, digits, and normal punctuation may remain unchanged.\n"
             )
 
+    native_wording_rule = ""
+    if allowed_scripts and "Latin" not in allowed_scripts:
+        native_wording_rule = (
+            "21a. LOCAL NATIVE WORDING RULE: Do not copy, romanize, or transliterate ordinary Latin source words. "
+            "If an exact target-language UI term is uncertain, use a short natural descriptive wording in the allowed target script instead. "
+            "The final line must not contain ASCII letters A-Z/a-z unless they are part of a locked placeholder, strict acronym, brand, file/path literal, or other protected source literal that the source rules explicitly preserve.\n"
+        )
+
     forbidden_words_rule = ""
     if forbidden_source_words:
         forbidden_words_lines = ", ".join(
@@ -2472,12 +5955,21 @@ def build_local_single_language_guidance(en_text, prompt_lang_dict):
             f"{forbidden_words_lines}.\n"
         )
 
+    repetition_guard_rule = ""
+    if extract_placeholder_tokens(en_text) or extract_protected_terms(en_text):
+        repetition_guard_rule = (
+            "22a. LOCAL REPETITION GUARD: Translate the source once only. Do NOT loop, repeat sentence fragments, or duplicate placeholder-bearing phrases. "
+            "Use each source placeholder only the exact number of times it appears in the English source, and never invent extra `%s` placeholders.\n"
+        )
+
     if not requirement:
         return (
             "19. LOCAL STYLE RULE: Use a neutral UI status-message tone. Do NOT use first-person wording equivalent to 'I renamed' or 'we changed'. "
             "Do NOT leave raw English words like filename, source, sources, majority, or renamed in the final line unless they are protected terms.\n"
             + script_rule
+            + native_wording_rule
             + forbidden_words_rule
+            + repetition_guard_rule
             + identity_rule
         )
 
@@ -2500,7 +5992,9 @@ def build_local_single_language_guidance(en_text, prompt_lang_dict):
         "20. LOCAL STYLE RULE: Use a neutral UI status-message tone. Do NOT use first-person wording equivalent to 'I renamed' or 'we changed'. "
         "Do NOT leave raw English words like filename, source, sources, majority, or renamed in the final line unless they are protected terms.\n"
         + script_rule
+        + native_wording_rule
         + forbidden_words_rule
+        + repetition_guard_rule
         + identity_rule
     )
 
@@ -2542,11 +6036,20 @@ def is_simple_title_case(token):
     return token[0].isupper() and token[1:].islower()
 
 
+def get_explicit_protected_token(token):
+    if not isinstance(token, str) or not token:
+        return ""
+    return PROTECTED_TOKEN_CANONICAL_MAP.get(token.casefold(), "")
+
+
 def should_protect_token(token):
     if not token:
         return False
 
-    if token in PROTECTED_TOKENS:
+    if get_explicit_protected_token(token):
+        return True
+
+    if token in PROTECTED_TECHNICAL_ACRONYMS:
         return True
 
     if token in TRANSLATABLE_ALL_UPPERCASE_TOKENS:
@@ -2610,6 +6113,8 @@ def is_probable_translatable_ascii_slash_label(token, source_text):
         return False
     if any(should_protect_token(segment) for segment in segments):
         return False
+    if all(segment.islower() for segment in segments):
+        return True
 
     visible_source = build_visible_prompt_text(source_text)
     quoted_pattern = re.compile(
@@ -2632,9 +6137,14 @@ def extract_source_ascii_literal_terms(en_text):
 
     source_text = build_visible_prompt_text(en_text)
 
-    for match in re.finditer(r"[A-Za-z0-9_./\\-]+\.[A-Za-z0-9_./\\-]+", source_text):
+    for match in re.finditer(
+        r"(?<![A-Za-z0-9_/\\-])(?:[A-Za-z0-9_-]+\.)+[A-Za-z0-9][A-Za-z0-9_-]*(?![A-Za-z0-9_/\\-])",
+        source_text,
+    ):
         token = match.group(0).strip(".,:;!?()[]{}<>\"'")
         if token and re.search(r"[A-Za-z]", token):
+            if token.casefold() in TRANSLATABLE_DOTTED_LATIN_ABBREVIATIONS:
+                continue
             literals.add(token)
 
     for match in re.finditer(
@@ -2649,15 +6159,201 @@ def extract_source_ascii_literal_terms(en_text):
     return sorted(literals, key=lambda item: (-len(item), item.casefold()))
 
 
+def extract_source_ascii_rate_unit_tokens(en_text):
+    if not isinstance(en_text, str) or not en_text:
+        return []
+
+    source_text = build_visible_prompt_text(en_text)
+    tokens = {
+        match.group(0)
+        for match in re.finditer(
+            r"(?<![A-Za-z0-9_])(?:[A-Za-z]+)/(?:[a-z]{1,2})(?![A-Za-z0-9_])",
+            source_text,
+        )
+    }
+    return sorted(tokens, key=lambda item: (-len(item), item.casefold()))
+
+
+def build_source_rate_unit_format_rule(en_text, rule_number="17a"):
+    source_rate_units = extract_source_ascii_rate_unit_tokens(en_text)
+    if not source_rate_units:
+        return ""
+
+    examples = ", ".join(f"`{token}`" for token in source_rate_units)
+    return (
+        f"{rule_number}. CRITICAL RATE UNIT RULE: The source contains complete rate unit expression(s): {examples}. "
+        "Keep each rate unit complete in the translation. You may localize the unit name naturally, but never drop the slash denominator or leave a dangling slash such as `bytes/`.\n"
+    )
+
+
+def remove_complete_rate_unit_tokens_for_script_detection(text, en_text):
+    if not isinstance(text, str) or not text:
+        return text
+    if not extract_source_ascii_rate_unit_tokens(en_text):
+        return text
+
+    return re.sub(
+        r"(?<!\w)[\w.+-]+/[A-Za-z]{1,2}(?!\w)",
+        " ",
+        text,
+        flags=re.UNICODE,
+    )
+
+
+def validate_no_dangling_source_rate_unit(en_text, translated_text):
+    if not extract_source_ascii_rate_unit_tokens(en_text):
+        return True, ""
+    if not isinstance(translated_text, str):
+        return False, "translation is not a string"
+
+    visible_translation = build_visible_prompt_text(translated_text)
+    if re.search(r"(?<!\w)[\w.+-]+/(?=\s|$)", visible_translation, re.UNICODE):
+        return False, "translation contains an incomplete rate unit ending with a slash"
+    return True, ""
+
+
+def is_strong_product_anchor_token(token):
+    if not should_protect_token(token):
+        return False
+    explicit_token = get_explicit_protected_token(token)
+    return (
+        bool(explicit_token)
+        and explicit_token not in PROTECTED_TOKEN_NO_COMPOUND_TITLE_TERMS
+        and not token.isupper()
+    )
+
+
+def is_translatable_title_prefix_token(token):
+    if not isinstance(token, str) or not token:
+        return False
+    lowered = token.casefold()
+    return (
+        lowered in TRANSLATABLE_PROTECTED_TITLE_PREFIX_WORDS
+        or lowered in GENERIC_SOURCE_PHRASE_EDGE_STOPWORDS
+        or lowered in ENGLISH_LEAK_STOPWORDS
+    )
+
+
+def extract_source_protected_title_terms(en_text):
+    terms = set()
+    if not isinstance(en_text, str) or not en_text:
+        return []
+
+    source_text = build_visible_prompt_text(en_text)
+    current_matches = []
+
+    def flush_current():
+        if len(current_matches) < 2:
+            current_matches.clear()
+            return
+
+        matches = list(current_matches)
+        tokens = [
+            normalize_protected_token(match.group(0)) for match in matches
+        ]
+        first_strong_anchor_index = next(
+            (
+                idx
+                for idx, token in enumerate(tokens)
+                if is_strong_product_anchor_token(token)
+            ),
+            -1,
+        )
+        if first_strong_anchor_index > 0:
+            leading_tokens = tokens[:first_strong_anchor_index]
+            if all(is_translatable_title_prefix_token(token) for token in leading_tokens):
+                matches = matches[first_strong_anchor_index:]
+                tokens = tokens[first_strong_anchor_index:]
+
+        while (
+            len(matches) > 1
+            and any(is_strong_product_anchor_token(token) for token in tokens[:-1])
+            and is_simple_title_case(tokens[-1])
+            and not should_protect_token(tokens[-1])
+        ):
+            matches = matches[:-1]
+            tokens = tokens[:-1]
+
+        if len(matches) < 2:
+            current_matches.clear()
+            return
+
+        has_title_word = any(is_simple_title_case(token) for token in tokens)
+        has_strong_anchor = any(is_strong_product_anchor_token(token) for token in tokens)
+        has_protected_compound = has_strong_anchor and all(
+            should_protect_token(token) for token in tokens
+        )
+        if has_strong_anchor and (has_title_word or has_protected_compound):
+            term = normalize_candidate_source_phrase(
+                source_text[matches[0].start() : matches[-1].end()]
+            )
+            if term:
+                terms.add(term)
+            current_strong_anchor_index = next(
+                (
+                    idx
+                    for idx, token in enumerate(tokens)
+                    if is_strong_product_anchor_token(token)
+                ),
+                -1,
+            )
+            if current_strong_anchor_index > 0:
+                suffix_term = normalize_candidate_source_phrase(
+                    source_text[
+                        matches[current_strong_anchor_index].start() : matches[-1].end()
+                    ]
+                )
+                if suffix_term:
+                    terms.add(suffix_term)
+
+        current_matches.clear()
+
+    for match in TOKEN_SCAN_PATTERN.finditer(source_text):
+        token = normalize_protected_token(match.group(0))
+        if not token:
+            flush_current()
+            continue
+
+        is_candidate_token = should_protect_token(token) or is_simple_title_case(token)
+        if not is_candidate_token:
+            flush_current()
+            continue
+
+        if current_matches:
+            previous_raw_token = current_matches[-1].group(0).rstrip()
+            if previous_raw_token and is_sentence_terminal_punctuation_char(previous_raw_token[-1]):
+                flush_current()
+            if current_matches:
+                separator = source_text[current_matches[-1].end() : match.start()]
+                if separator.strip():
+                    flush_current()
+
+        current_matches.append(match)
+
+    flush_current()
+    return sorted(terms, key=lambda item: (-len(item), item.casefold()))
+
+
 def extract_source_ascii_literals_to_ignore_for_script_detection(en_text):
     literals = set()
     if not isinstance(en_text, str) or not en_text:
         return []
 
+    visible_text = build_visible_prompt_text(en_text)
     for term in extract_protected_terms(en_text):
+        literals.add(term)
+    for term in extract_source_protected_title_terms(visible_text):
         literals.add(term)
     for literal in extract_source_ascii_literal_terms(en_text):
         literals.add(literal)
+    for variable in extract_source_symbolic_variable_terms(en_text):
+        literals.add(variable)
+    for term in extract_source_platform_version_terms(en_text):
+        literals.add(term)
+    for start, end in collect_parenthesized_title_list_item_spans(visible_text):
+        literal = normalize_candidate_source_phrase(visible_text[start:end])
+        if literal:
+            literals.add(literal)
 
     return sorted(literals, key=lambda item: (-len(item), item.casefold()))
 
@@ -2671,20 +6367,47 @@ def extract_protected_terms(en_text):
     for match in TOKEN_SCAN_PATTERN.finditer(extraction_text):
         token = normalize_protected_token(match.group(0))
         if should_protect_token(token):
-            terms.add(token)
+            terms.add(get_explicit_protected_token(token) or token)
 
     for fixed_term in PROTECTED_TOKENS:
-        if fixed_term in extraction_text:
+        pattern = re.compile(
+            rf"(?<!{NON_WORD_BOUNDARY_PATTERN}){re.escape(fixed_term)}(?!{NON_WORD_BOUNDARY_PATTERN})",
+            re.IGNORECASE,
+        )
+        if pattern.search(extraction_text):
             terms.add(fixed_term)
+
+    for term in extract_source_protected_title_terms(extraction_text):
+        terms.add(term)
 
     for literal in extract_source_ascii_literal_terms(extraction_text):
         terms.add(literal)
 
-    return sorted(terms, key=lambda item: (-len(item), item))
+    return filter_covered_protected_terms(terms, extraction_text)
+
+
+def get_effective_protected_terms(en_text):
+    terms = extract_protected_terms(en_text)
+    if not terms:
+        return []
+
+    source_key = normalize_country_name_for_compare(en_text)
+    translatable_terms = COUNTRY_TRANSLATABLE_PROTECTED_TERMS_BY_SOURCE.get(
+        source_key, set()
+    )
+    if not translatable_terms:
+        return terms
+
+    return [
+        term
+        for term in terms
+        if normalize_candidate_source_phrase(term).casefold()
+        not in translatable_terms
+    ]
 
 
 def build_protected_placeholders(en_text, lang_dict):
-    terms = extract_protected_terms(en_text)
+    terms = get_effective_protected_terms(en_text)
     if not terms:
         return []
 
@@ -2713,20 +6436,120 @@ def apply_protected_placeholders(text, placeholder_pairs):
     masked = text
     for placeholder, term in placeholder_pairs:
         pattern = re.compile(
-            rf"(?<!{NON_WORD_BOUNDARY_PATTERN}){re.escape(term)}(?!{NON_WORD_BOUNDARY_PATTERN})"
+            rf"(?<!{NON_WORD_BOUNDARY_PATTERN}){re.escape(term)}(?!{NON_WORD_BOUNDARY_PATTERN})",
+            re.IGNORECASE,
         )
         masked = pattern.sub(placeholder, masked)
 
     return masked
 
 
-def restore_protected_placeholders(text, placeholder_pairs):
+def normalize_locked_placeholder_separators_by_reference(reference_text, text):
+    if not isinstance(reference_text, str) or not isinstance(text, str):
+        return text
+    if "__LOCKED_TERM_" not in reference_text or "__LOCKED_TERM_" not in text:
+        return text
+
+    normalized = text
+    pair_pattern = re.compile(
+        r"(__LOCKED_TERM_\d+__)([^A-Za-z0-9_]{1,16})(__LOCKED_TERM_\d+__)"
+    )
+    for _ in range(3):
+        changed = False
+        for match in pair_pattern.finditer(reference_text):
+            left, separator, right = match.groups()
+            collapsed = left + right
+            expanded = left + separator + right
+            if collapsed in normalized:
+                normalized = normalized.replace(collapsed, expanded)
+                changed = True
+        if not changed:
+            break
+
+    return normalized
+
+
+def normalize_locked_placeholder_ascii_word_boundaries(text):
+    if not isinstance(text, str) or "__LOCKED_TERM_" not in text:
+        return text
+
+    normalized = re.sub(
+        r"(?<=[A-Za-z0-9_])(__LOCKED_TERM_\d+__)",
+        r" \1",
+        text,
+    )
+    normalized = re.sub(
+        r"(__LOCKED_TERM_\d+__)(?=[A-Za-z0-9_])",
+        r"\1 ",
+        normalized,
+    )
+    return normalized
+
+
+def normalize_protected_term_ascii_word_boundaries(text, placeholder_pairs):
     if not isinstance(text, str) or not placeholder_pairs:
         return text
 
-    restored = text
+    normalized = text
+    protected_terms = [
+        term
+        for _, term in (placeholder_pairs or [])
+        if isinstance(term, str) and term and re.search(r"[A-Za-z0-9_]", term)
+    ]
+    protected_terms = sorted(set(protected_terms), key=lambda item: (-len(item), item))
+    for term in protected_terms:
+        if not isinstance(term, str) or not term or not re.search(r"[A-Za-z0-9_]", term):
+            continue
+        escaped_term = re.escape(term)
+        longer_terms = [
+            longer_term
+            for longer_term in protected_terms
+            if len(longer_term) > len(term)
+            and longer_term.startswith(term)
+        ]
+
+        def is_inside_longer_term(start):
+            return any(
+                normalized.startswith(longer_term, start)
+                for longer_term in longer_terms
+            )
+
+        def split_before(match):
+            if is_inside_longer_term(match.start(1)):
+                return match.group(0)
+            return " " + match.group(1)
+
+        def split_after(match):
+            if is_inside_longer_term(match.start(1)):
+                return match.group(0)
+            return match.group(1) + " "
+
+        normalized = re.sub(
+            rf"(?<=[A-Za-z0-9_])({escaped_term})",
+            split_before,
+            normalized,
+        )
+        normalized = re.sub(
+            rf"({escaped_term})(?=[A-Za-z0-9_])",
+            split_after,
+            normalized,
+        )
+    return normalized
+
+
+def restore_protected_placeholders(text, placeholder_pairs, reference_text=None):
+    if not isinstance(text, str) or not placeholder_pairs:
+        return text
+
+    restored = normalize_locked_placeholder_separators_by_reference(
+        reference_text, text
+    )
+    restored = normalize_locked_placeholder_ascii_word_boundaries(restored)
     for placeholder, term in placeholder_pairs:
         restored = restored.replace(placeholder, term)
+    restored = normalize_protected_term_ascii_word_boundaries(
+        restored, placeholder_pairs
+    )
 
     return restored
 
@@ -2736,7 +6559,7 @@ def all_protected_terms_preserved(text, placeholder_pairs):
         return False
 
     for _, term in placeholder_pairs:
-        if term not in text:
+        if not find_protected_term_spans(text, term):
             return False
 
     return True
@@ -2748,10 +6571,58 @@ def get_missing_protected_terms(text, placeholder_pairs):
         return [term for _, term in placeholder_pairs]
 
     for _, term in placeholder_pairs:
-        if term not in text:
+        if not find_protected_term_spans(text, term):
             missing_terms.append(term)
 
     return missing_terms
+
+
+def get_protected_term_count_mismatches(en_text, text, placeholder_pairs):
+    mismatches = []
+    if not isinstance(en_text, str) or not isinstance(text, str):
+        return mismatches
+
+    for _, term in placeholder_pairs or []:
+        if not isinstance(term, str) or not term:
+            continue
+        expected_count = len(find_protected_term_spans(en_text, term))
+        actual_count = len(find_protected_term_spans(text, term))
+        if expected_count != actual_count:
+            mismatches.append((term, expected_count, actual_count))
+
+    return mismatches
+
+
+def collapse_adjacent_duplicate_protected_terms(en_text, text, placeholder_pairs):
+    if (
+        not isinstance(en_text, str)
+        or not isinstance(text, str)
+        or not placeholder_pairs
+    ):
+        return text
+
+    repaired = text
+    for _, term in sorted(
+        placeholder_pairs or [], key=lambda item: (-len(item[1]), item[1].casefold())
+    ):
+        if not isinstance(term, str) or not term:
+            continue
+
+        expected_count = len(find_protected_term_spans(en_text, term))
+        if expected_count <= 0:
+            continue
+
+        while len(find_protected_term_spans(repaired, term)) > expected_count:
+            pattern = re.compile(
+                rf"(?<!{NON_WORD_BOUNDARY_PATTERN})({re.escape(term)})([\s\\-_/]+){re.escape(term)}(?!{NON_WORD_BOUNDARY_PATTERN})",
+                re.IGNORECASE,
+            )
+            repaired_next, count = pattern.subn(r"\1", repaired, count=1)
+            if count <= 0 or repaired_next == repaired:
+                break
+            repaired = repaired_next
+
+    return repaired
 
 
 def get_protected_placeholders_prompt_block(placeholder_pairs):
@@ -2760,6 +6631,63 @@ def get_protected_placeholders_prompt_block(placeholder_pairs):
 
     mapping = {placeholder: term for placeholder, term in placeholder_pairs}
     return json.dumps(mapping, ensure_ascii=False, indent=2)
+
+
+def build_locked_placeholder_occurrence_context_text(prompt_en_text, placeholder_pairs):
+    if not isinstance(prompt_en_text, str) or not placeholder_pairs:
+        return ""
+
+    context_lines = []
+    for placeholder, _ in placeholder_pairs:
+        if not isinstance(placeholder, str) or not placeholder:
+            continue
+        for index, match in enumerate(
+            re.finditer(re.escape(placeholder), prompt_en_text), start=1
+        ):
+            excerpt_start = max(0, match.start() - 36)
+            excerpt_end = min(len(prompt_en_text), match.end() + 36)
+            excerpt = prompt_en_text[excerpt_start:excerpt_end].strip()
+            excerpt = excerpt.replace("\r", "\\r").replace("\n", "\\n").replace("`", "'")
+            if excerpt_start > 0:
+                excerpt = "..." + excerpt
+            if excerpt_end < len(prompt_en_text):
+                excerpt += "..."
+            context_lines.append(f"- `{placeholder}` occurrence {index}: `{excerpt}`")
+
+    if not context_lines:
+        return ""
+
+    return (
+        "Source locked-placeholder occurrence context. Preserve exactly these occurrences only; do not add another copy as a label for translated words, nearby nouns, or value placeholders:\n"
+        + "\n".join(context_lines[:16])
+        + "\n"
+    )
+
+
+def build_locked_placeholder_count_requirements(prompt_en_text, placeholder_pairs):
+    if not isinstance(prompt_en_text, str) or not placeholder_pairs:
+        return ""
+
+    count_lines = []
+    for placeholder, _ in placeholder_pairs:
+        count = prompt_en_text.count(placeholder)
+        if count > 0:
+            count_lines.append(
+                f"- `{placeholder}` must appear exactly {count} time(s) in each returned translation line."
+            )
+
+    if not count_lines:
+        return ""
+
+    return (
+        "16. LOCKED PLACEHOLDER COUNT RULE: Preserve each locked placeholder exactly the same number of times as it appears in the ORIGINAL ENGLISH TEXT. "
+        "Do not omit locked placeholders and do not insert extra copies.\n"
+        + "\n".join(count_lines[:12])
+        + "\n"
+        + build_locked_placeholder_occurrence_context_text(
+            prompt_en_text, placeholder_pairs
+        )
+    )
 
 
 def starts_with_phrase_boundary(text, phrase):
@@ -3080,6 +7008,28 @@ def repair_leaked_terminal_punctuation(en_text, translated_text, placeholder_pai
     return "".join(cleaned_parts)
 
 
+def normalize_terminal_vertical_bar_punctuation(en_text, translated_text):
+    if not isinstance(en_text, str) or not isinstance(translated_text, str):
+        return translated_text
+    if not en_text or not translated_text:
+        return translated_text
+
+    source_text = strip_trailing_closing_punctuation(build_visible_prompt_text(en_text))
+    if not source_text or source_text[-1] not in ".!?":
+        return translated_text
+
+    stripped_translation = translated_text.rstrip()
+    if not stripped_translation.endswith("|"):
+        return translated_text
+
+    trailing_whitespace = translated_text[len(stripped_translation):]
+    translated_prefix = stripped_translation[:-1].rstrip()
+    if not translated_prefix:
+        return translated_text
+
+    return translated_prefix + source_text[-1] + trailing_whitespace
+
+
 def has_alpha_before_parenthetical_gloss(text, match_start):
     if not isinstance(text, str) or not text or not isinstance(match_start, int):
         return False
@@ -3144,9 +7094,6 @@ def strip_english_parenthetical_glosses(
                 continue
             candidate_phrases.append(normalized)
 
-    if not candidate_phrases:
-        return translated_text
-
     cleaned_text = translated_text
     for phrase in sorted(
         set(candidate_phrases), key=lambda item: (-len(item), item.casefold())
@@ -3191,7 +7138,44 @@ def cleanup_translated_text(en_text, translated_text, placeholder_pairs, lang_co
     cleaned_text = repair_leaked_terminal_punctuation(
         en_text, cleaned_text, placeholder_pairs
     )
+    cleaned_text = normalize_terminal_vertical_bar_punctuation(en_text, cleaned_text)
+    cleaned_text = normalize_language_specific_terminal_punctuation(
+        en_text, cleaned_text, lang_code
+    )
+    cleaned_text = normalize_percent_like_characters(cleaned_text, en_text)
+    cleaned_text = normalize_literal_percent_suffix_boundaries(cleaned_text, en_text)
+    cleaned_text = collapse_adjacent_duplicate_protected_terms(
+        en_text, cleaned_text, placeholder_pairs
+    )
+    cleaned_text = normalize_protected_term_ascii_word_boundaries(
+        cleaned_text, placeholder_pairs
+    )
     return normalize_translated_ok_label(en_text, cleaned_text)
+
+
+def normalize_language_specific_terminal_punctuation(en_text, translated_text, lang_code=""):
+    """Fix terminal punctuation where models use ASCII look-alikes instead of locale-specific characters."""
+    if not isinstance(en_text, str) or not isinstance(translated_text, str):
+        return translated_text
+    if not en_text or not translated_text:
+        return translated_text
+
+    lang_key = str(lang_code or "").strip().casefold()
+    source_visible = build_visible_prompt_text(en_text).rstrip()
+    if not source_visible or source_visible[-1] not in ".!?":
+        return translated_text
+
+    candidate_visible = build_visible_prompt_text(translated_text).rstrip()
+    if not candidate_visible:
+        return translated_text
+
+    # Armenian: DeepSeek often uses U+003A ':' instead of U+0589 Armenian full stop '։'
+    if lang_key == "hy" and candidate_visible[-1] == ":":
+        translated_text = translated_text.rstrip()
+        if translated_text[-1] == ":":
+            translated_text = translated_text[:-1] + "\u0589"
+
+    return translated_text
 
 
 def has_escape_or_punctuation_leak_issue(en_text, translated_text, placeholder_pairs):
@@ -3232,6 +7216,14 @@ def strip_copied_english_leading_fragments(en_text, translated_text):
         if idx % 2 == 1:
             cleaned_parts.append(translated_part)
             continue
+        if idx == 0:
+            cleaned_parts.append(translated_part)
+            continue
+        cleaned_parts.append(
+            strip_copied_english_leading_fragment(en_parts[idx], translated_part)
+        )
+
+    return "".join(cleaned_parts)
 
 
 def get_language_name_for_code(lang_code):
@@ -3291,12 +7283,37 @@ def source_phrase_leaks_into_translation(
     if phrase_cf not in lowered_visible_translation:
         return False
     if " " not in phrase:
-        return True
+        return source_word_leaks_into_translation(phrase, visible_translation)
     pattern = re.compile(
         rf"(?<!{NON_WORD_BOUNDARY_PATTERN}){re.escape(phrase)}(?!{NON_WORD_BOUNDARY_PATTERN})",
         re.IGNORECASE,
     )
     return bool(pattern.search(visible_translation))
+
+
+def is_allowed_same_spelled_source_phrase_for_lang(lang_code, phrase):
+    if not isinstance(lang_code, str) or not lang_code:
+        return False
+    if not isinstance(phrase, str) or not phrase:
+        return False
+
+    source_words = [
+        normalize_candidate_source_phrase(word)
+        for word in SOURCE_ENGLISH_WORD_PATTERN.findall(phrase)
+    ]
+    source_words = [word for word in source_words if word]
+    if len(source_words) < 2:
+        return False
+
+    checked_words = 0
+    for word in source_words:
+        if should_protect_token(word) or is_preserved_source_literal_word(word):
+            continue
+        checked_words += 1
+        if not is_allowed_source_spelled_word_for_lang(lang_code, word):
+            return False
+
+    return checked_words > 0
 
 
 def extract_quoted_english_fragment_candidates(text):
@@ -3338,6 +7355,17 @@ def extract_suspicious_transliterated_or_foreign_tokens(
         strip_known_translated_phrases(en_text, translated_text, lang_code)
     )
     visible_translation = PLACEHOLDER_TOKEN_PATTERN.sub(" ", visible_translation)
+    visible_translation = PERCENT_TEMPLATE_TOKEN_PATTERN.sub(" ", visible_translation)
+    visible_translation = LOCKED_TERM_PLACEHOLDER_PATTERN.sub(" ", visible_translation)
+    visible_translation = remove_protected_terms_for_source_leak_detection(
+        visible_translation, en_text, placeholder_pairs
+    )
+    visible_translation = remove_preserved_source_literals_for_detection(
+        visible_translation, en_text
+    )
+    visible_translation = remove_complete_rate_unit_tokens_for_script_detection(
+        visible_translation, en_text
+    )
     protected_literals = {
         item.casefold()
         for item in extract_source_ascii_literals_to_ignore_for_script_detection(
@@ -3366,14 +7394,14 @@ def extract_suspicious_transliterated_or_foreign_tokens(
         if PLACEHOLDER_TOKEN_PATTERN.fullmatch(normalized_token):
             continue
 
-        token_scripts = extract_script_families(normalized_token)
+        token_scripts = extract_script_families(normalized_token, allowed_scripts)
         if not token_scripts:
             continue
 
-        is_mixed_script = len(token_scripts) >= 2
         has_unexpected_script = any(
             script not in allowed_scripts for script in token_scripts
         )
+        is_mixed_script = len(token_scripts) >= 2 and has_unexpected_script
         looks_like_transliteration = (
             "Latin" in token_scripts
             and preferred_scripts
@@ -3407,14 +7435,27 @@ def get_leaked_source_phrases(en_text, translated_text, lang_code=""):
     protected_terms_cf = {
         term.casefold() for term in extract_protected_terms(en_text)
     }
+    protected_terms_cf.update(
+        term.casefold() for term in extract_source_platform_version_terms(en_text)
+    )
+    protected_adjacent_phrase_cf = {
+        phrase.casefold()
+        for phrase in extract_placeholder_adjacent_translatable_source_phrases(en_text)
+    }
     for phrase in iter_embedded_english_phrase_candidates(en_text):
         normalized_phrase = normalize_candidate_source_phrase(phrase)
         if not normalized_phrase:
             continue
+        normalized_phrase_cf = normalized_phrase.casefold()
         if (
-            normalized_phrase.casefold() in protected_terms_cf
-            or should_protect_token(normalized_phrase)
+            normalized_phrase_cf not in protected_adjacent_phrase_cf
+            and (
+                normalized_phrase_cf in protected_terms_cf
+                or should_protect_token(normalized_phrase)
+            )
         ):
+            continue
+        if is_allowed_same_spelled_source_phrase_for_lang(lang_code, normalized_phrase):
             continue
         if source_phrase_leaks_into_translation(
             phrase, visible_translation, lowered_visible_translation
@@ -3423,31 +7464,105 @@ def get_leaked_source_phrases(en_text, translated_text, lang_code=""):
     return leaked
 
 
-def source_word_leaks_into_translation(word, visible_translation):
+def should_use_ascii_source_word_boundaries(lang_code, word):
+    if not isinstance(lang_code, str) or not lang_code:
+        return False
+    if not isinstance(word, str) or not re.search(r"[A-Za-z]", word):
+        return False
+    allowed_scripts = build_allowed_script_families_for_lang(lang_code, "")
+    return bool(allowed_scripts) and "Latin" not in allowed_scripts
+
+
+def source_word_leaks_into_translation(word, visible_translation, lang_code=""):
     if (
         not isinstance(word, str)
         or not word
         or not isinstance(visible_translation, str)
     ):
         return False
+    boundary_pattern = (
+        NON_WORD_BOUNDARY_PATTERN
+        if should_use_ascii_source_word_boundaries(lang_code, word)
+        else r"[\w]"
+    )
     pattern = re.compile(
-        rf"(?<!{NON_WORD_BOUNDARY_PATTERN}){re.escape(word)}(?!{NON_WORD_BOUNDARY_PATTERN})",
+        rf"(?<!{boundary_pattern}){re.escape(word)}(?!{boundary_pattern})",
         re.IGNORECASE,
     )
     return bool(pattern.search(visible_translation))
 
 
-def get_leaked_source_words(en_text, translated_text, lang_code=""):
+def get_leaked_source_words(
+    en_text,
+    translated_text,
+    lang_code="",
+    country_code="",
+    country_proper_name_code="",
+):
     leaked = []
     if not isinstance(translated_text, str):
         return leaked
+    if is_known_localized_country_name(lang_code, en_text, translated_text):
+        return leaked
+    placeholder_pairs = build_protected_placeholders(
+        en_text, {lang_code: translated_text}
+    )
     visible_translation = build_visible_prompt_text(
         strip_known_translated_phrases(en_text, translated_text, lang_code)
     )
+    visible_translation = remove_protected_terms_for_source_leak_detection(
+        visible_translation, en_text, placeholder_pairs
+    )
+    proper_name_country_code = country_proper_name_code or country_code
     for word in build_dynamic_source_leak_word_candidates(en_text):
-        if source_word_leaks_into_translation(word, visible_translation):
-            leaked.append(word)
+        if not source_word_leaks_into_translation(word, visible_translation, lang_code):
+            continue
+        if is_country_proper_name_source_word(
+            en_text, word, country_code=proper_name_country_code
+        ):
+            continue
+        if is_country_allowed_untranslated_source_word(
+            proper_name_country_code, lang_code, word
+        ):
+            continue
+        if is_allowed_source_spelled_word_for_lang(lang_code, word):
+            continue
+        leaked.append(word)
+
+    if proper_name_country_code or get_country_code_from_english_name(en_text):
+        leaked_keys = {word.casefold() for word in leaked}
+        for normalized_word in get_country_name_source_words(en_text):
+            lowered_word = normalized_word.casefold()
+            if (
+                lowered_word not in COUNTRY_REQUIRED_TRANSLATED_SOURCE_WORDS
+                or lowered_word in leaked_keys
+                or is_country_proper_name_source_word(
+                    en_text, normalized_word, country_code=proper_name_country_code
+                )
+                or is_country_allowed_untranslated_source_word(
+                    proper_name_country_code, lang_code, normalized_word
+                )
+                or is_allowed_source_spelled_word_for_lang(
+                    lang_code, normalized_word
+                )
+                or not source_word_leaks_into_translation(
+                    normalized_word, visible_translation, lang_code
+                )
+            ):
+                continue
+            leaked.append(normalized_word)
+            leaked_keys.add(lowered_word)
     return leaked
+
+
+def _is_international_latin_loanword_for_lang(lang_code, word):
+    """Return True when word is a common Latin-origin term that is valid untranslated in the target language's script."""
+    if not isinstance(lang_code, str) or not isinstance(word, str):
+        return False
+    if word.casefold() not in INTERNATIONAL_LATIN_LOANWORDS:
+        return False
+    allowed_scripts = build_allowed_script_families_for_lang(lang_code, "")
+    return "Latin" in allowed_scripts
 
 
 def build_missing_known_phrase_rewrite_requirements(
@@ -3467,6 +7582,41 @@ def build_missing_known_phrase_rewrite_requirements(
         "9. CRITICAL: The final translation must use the exact established target-language UI term(s) below when the matching source phrase appears in this key. Do NOT paraphrase these specific UI term(s).\n"
         f"Exact UI term requirement(s):\n{requirement_lines}\n"
     )
+
+
+def repair_candidate_text_by_stripping_script_artifacts(
+    lang_code, candidate_text, en_text
+):
+    if not isinstance(candidate_text, str) or not candidate_text.strip():
+        return (
+            False,
+            candidate_text,
+            "no candidate text available for script artifact cleanup",
+        )
+
+    placeholder_pairs = build_protected_placeholders(
+        en_text, {lang_code: candidate_text}
+    )
+    repaired_text = strip_small_unexpected_script_artifacts(
+        lang_code, candidate_text, en_text, placeholder_pairs
+    )
+    if repaired_text == candidate_text:
+        return (
+            False,
+            candidate_text,
+            "no safely removable small script artifact found",
+        )
+
+    cleaned_text = cleanup_translated_text(
+        en_text, repaired_text, placeholder_pairs, lang_code
+    )
+    is_valid, validation_message = validate_translation_text(
+        en_text, cleaned_text, placeholder_pairs, lang_code
+    )
+    if not is_valid:
+        return False, cleaned_text, validation_message
+
+    return True, cleaned_text, ""
 
 
 def repair_candidate_text_with_script_rewrite(lang_code, candidate_text, en_text):
@@ -3512,8 +7662,9 @@ def repair_candidate_text_with_script_rewrite(lang_code, candidate_text, en_text
         en_text, candidate_text, lang_code
     )
     local_fix_guidance = (
-        build_local_single_language_guidance(en_text, {lang_code: candidate_text})
-        if resolve_backend_selection()
+        build_local_no_reasoning_rule(rule_number="11")
+        + build_local_single_language_guidance(en_text, {lang_code: candidate_text})
+        if is_local_gemma_compatibility_flow()
         else ""
     )
     allowed_scripts = sorted(build_allowed_script_families_for_lang(lang_code, en_text))
@@ -3524,6 +7675,20 @@ def repair_candidate_text_with_script_rewrite(lang_code, candidate_text, en_text
         "\n".join(f"- `{token}`" for token in suspicious_tokens[:12])
         if suspicious_tokens
         else "- None"
+    )
+    source_word_translation_rule = build_unprotected_source_word_translation_rule(
+        en_text,
+        lang_code,
+        rule_number="9",
+        priority_words=list(suspicious_tokens) + collect_arrow_path_source_words(en_text),
+    )
+    leaked_fragment_requirements = build_leaked_english_fragment_rewrite_requirements(
+        en_text, candidate_text, lang_code, rule_number="10"
+    )
+    authoritative_phrase_map_requirements = (
+        build_authoritative_ui_phrase_map_requirements(
+            en_text, {lang_code: candidate_text}
+        )
     )
 
     prompt = f"""
@@ -3539,7 +7704,7 @@ KEY language name: '{language_label}'
 Rules:
 1. Return ONLY one plain text line in this exact format: `corrected_translation<TAB>your_fixed_translation_string_here`.
 2. The separator must be a real TAB character.
-3. Preserve all placeholders, protected placeholders, escape sequences, digits, protected brands, and file names copied from the source exactly.
+3. Preserve all placeholders, protected placeholders, escape sequences, digits, protected brands, and file names copied from the source exactly. If the source contains a locked placeholder such as __LOCKED_TERM_0__, output that placeholder token itself; do NOT replace it with the real term shown in the JSON block or attach target-language prefixes or suffixes. English words immediately before or after a locked placeholder are not locked unless they are also inside a placeholder; translate those ordinary surrounding words normally.
 4. Keep the text in `{language_label}` only. Do NOT leave ordinary target-language words written in another script or in Latin transliteration.
 5. Do NOT explain anything. Do NOT return JSON, Markdown, notes, bullets, or extra lines.
 6. Keep already-correct translated wording when possible and rewrite only what is necessary to remove the foreign-script or transliterated snippets naturally.
@@ -3547,12 +7712,17 @@ Rules:
 8. Do NOT keep the suspicious snippets below in the final line.
 Suspicious foreign-script or transliterated snippet(s) that MUST be removed or rewritten:
 {suspicious_lines}
-{exact_known_phrase_requirements}{local_fix_guidance}
+{source_word_translation_rule}{leaked_fragment_requirements}{authoritative_phrase_map_requirements}{exact_known_phrase_requirements}{local_fix_guidance}
 LOCKED PLACEHOLDERS JSON:
 {protected_placeholders_json}
 """
 
-    result_text = call_active_api(prompt, plain_text=True)
+    result_text = call_active_api(
+        prompt,
+        plain_text=True,
+        request_timeout_sec=API_REPAIR_REQUEST_TIMEOUT_SEC,
+        timeout_retry_count=API_REPAIR_TIMEOUT_RETRY_COUNT,
+    )
     if not result_text:
         return False, candidate_text, "script rewrite repair returned empty response"
 
@@ -3573,7 +7743,12 @@ LOCKED PLACEHOLDERS JSON:
             "script rewrite repair returned no corrected translation",
         )
 
-    corrected_restored = restore_protected_placeholders(corrected, placeholder_pairs)
+    corrected_restored = restore_protected_placeholders(
+        corrected, placeholder_pairs, prompt_en_text
+    )
+    corrected_restored = normalize_doubled_map_escape_sequences(
+        en_text, corrected_restored
+    )
     corrected_cleaned = cleanup_translated_text(
         en_text, corrected_restored, placeholder_pairs, lang_code
     )
@@ -3584,6 +7759,163 @@ LOCKED PLACEHOLDERS JSON:
         return False, corrected_cleaned, validation_message
 
     return True, corrected_cleaned, ""
+
+
+def repair_candidate_text_with_single_language_retranslation(
+    lang_code, candidate_text, en_text
+):
+    if not isinstance(candidate_text, str) or not candidate_text.strip():
+        return (
+            False,
+            candidate_text,
+            "no candidate text available for single-language retranslation repair",
+        )
+
+    placeholder_pairs = build_protected_placeholders(
+        en_text, {lang_code: candidate_text}
+    )
+    suspicious_tokens = extract_suspicious_transliterated_or_foreign_tokens(
+        lang_code, candidate_text, en_text, placeholder_pairs
+    )
+    unexpected_scripts = detect_unexpected_script_mixture(
+        lang_code, candidate_text, en_text, placeholder_pairs
+    )
+    repetitive_token = detect_repetitive_token_flood(candidate_text)
+    if not suspicious_tokens and not unexpected_scripts and not repetitive_token:
+        return (
+            False,
+            candidate_text,
+            "no script-related or repetitive-output validation issue found for single-language retranslation repair",
+        )
+
+    translated_text = translate_single_line(
+        "single_language_retranslation_repair",
+        lang_code,
+        en_text,
+        request_timeout_sec=API_REPAIR_REQUEST_TIMEOUT_SEC,
+        timeout_retry_count=API_REPAIR_TIMEOUT_RETRY_COUNT,
+    )
+    if not isinstance(translated_text, str) or not translated_text.strip():
+        return (
+            False,
+            candidate_text,
+            "single-language retranslation repair returned empty response",
+        )
+
+    repaired_placeholders = build_protected_placeholders(
+        en_text, {lang_code: translated_text}
+    )
+    cleaned_text = cleanup_translated_text(
+        en_text, translated_text, repaired_placeholders, lang_code
+    )
+    is_valid, validation_message = validate_translation_text(
+        en_text, cleaned_text, repaired_placeholders, lang_code
+    )
+    if not is_valid:
+        return False, cleaned_text, validation_message
+
+    return True, cleaned_text, ""
+
+
+def repair_candidate_text_with_segmented_retranslation(lang_code, candidate_text, en_text):
+    if not isinstance(candidate_text, str) or not candidate_text.strip():
+        return (
+            False,
+            candidate_text,
+            "no candidate text available for segmented retranslation repair",
+        )
+    if not should_try_local_segmented_translation(lang_code, en_text):
+        return (
+            False,
+            candidate_text,
+            "segmented retranslation repair is not needed for this source",
+        )
+
+    translated_text, segmented_error = translate_segmented_single_language_source(
+        "segmented_retranslation_repair", lang_code, en_text
+    )
+    if not isinstance(translated_text, str) or not translated_text.strip():
+        return (
+            False,
+            candidate_text,
+            segmented_error or "segmented retranslation repair returned empty response",
+        )
+
+    return True, translated_text, ""
+
+
+def normalize_doubled_map_escape_sequences(source_text, translated_text):
+    if not isinstance(source_text, str) or not isinstance(translated_text, str):
+        return translated_text
+    if escape_parity_matches(source_text, translated_text):
+        return translated_text
+
+    reduced = re.sub(r"\\\\([nrtabfv\"\\0])", r"\\\1", translated_text)
+    if reduced != translated_text and escape_parity_matches(source_text, reduced):
+        return reduced
+    return translated_text
+
+
+def unwrap_single_quoted_container(value):
+    if not isinstance(value, str):
+        return ""
+
+    cleaned = value.strip().rstrip(",")
+    if len(cleaned) >= 4 and cleaned[0] == "{" and cleaned[-1] == "}":
+        inner = cleaned[1:-1].strip()
+        if len(inner) >= 2 and inner[0] == inner[-1] and inner[0] in ('"', "'"):
+            cleaned = inner[1:-1].strip()
+    return cleaned
+
+
+def cleanup_single_translation_candidate_value(source_text, value):
+    if not isinstance(value, str):
+        return ""
+
+    cleaned = unwrap_single_quoted_container(value)
+    if len(cleaned) >= 2 and cleaned[0] == cleaned[-1] and cleaned[0] in ('"', "'"):
+        cleaned = cleaned[1:-1].strip()
+    cleaned = cleaned.replace("\\t", "	").replace('\\"', '"')
+    cleaned = normalize_doubled_map_escape_sequences(source_text, cleaned)
+    cleaned = normalize_placeholder_quote_style(source_text, cleaned)
+    return cleaned.strip()
+
+
+def is_single_translation_candidate_tab_label(label, source_text_stripped):
+    if not isinstance(label, str):
+        return False
+
+    normalized = label.strip().strip("\"'")
+    if not normalized:
+        return False
+
+    normalized_cf = normalized.casefold()
+    if normalized_cf in {
+        "translated_phrase",
+        "corrected_translation",
+        "validation_repair",
+        "translation",
+        "translated text",
+        "answer",
+    }:
+        return True
+
+    if source_text_stripped and normalized == source_text_stripped:
+        return True
+    if re.fullmatch(LANGUAGE_CODE_PATTERN, normalized):
+        return True
+    if re.fullmatch(r"P\d+", normalized):
+        return True
+
+    return False
+
+
+def is_usable_single_translation_candidate(source_text, candidate):
+    return bool(
+        candidate
+        and not is_response_artifact_text(candidate)
+        and not detect_unexpected_arrow_rewrite_artifact(source_text, candidate)
+    )
 
 
 def extract_single_translation_candidate_from_plain_text(result_text, source_text=""):
@@ -3598,9 +7930,9 @@ def extract_single_translation_candidate_from_plain_text(result_text, source_tex
         return ""
 
     source_text_stripped = source_text.strip() if isinstance(source_text, str) else ""
+    has_response_artifacts = is_response_artifact_text(normalized)
 
     candidate_lines = []
-    line_count = len(normalized.splitlines())
     for raw_line in normalized.splitlines():
         stripped = raw_line.strip()
         if not stripped:
@@ -3613,30 +7945,49 @@ def extract_single_translation_candidate_from_plain_text(result_text, source_tex
         parts = re.split(r"\\t|\t", stripped, maxsplit=1)
         if len(parts) == 2 and parts[1].strip():
             label = parts[0].strip().strip("\"'")
-            if (
-                label.lower() in {"translated_phrase", "corrected_translation"}
-                or label == source_text_stripped
-                or line_count == 1
+            if is_single_translation_candidate_tab_label(
+                label, source_text_stripped
             ):
-                return normalize_placeholder_quote_style(source_text, parts[1].strip())
+                candidate = cleanup_single_translation_candidate_value(
+                    source_text, parts[1]
+                )
+                if is_usable_single_translation_candidate(source_text, candidate):
+                    return candidate
+                continue
+            continue
+        if len(parts) == 2:
+            continue
 
         if stripped.lower().startswith("translated_phrase"):
             parts = re.split(r"\t|	", stripped, maxsplit=1)
             if len(parts) == 2 and parts[1].strip():
-                return normalize_placeholder_quote_style(source_text, parts[1].strip())
+                candidate = cleanup_single_translation_candidate_value(
+                    source_text, parts[1]
+                )
+                if is_usable_single_translation_candidate(source_text, candidate):
+                    return candidate
+                continue
             stripped = re.sub(
                 r"^translated_phrase\s*[:=-]?\s*", "", stripped, flags=re.IGNORECASE
             ).strip()
         if stripped.lower().startswith("corrected_translation"):
             parts = re.split(r"\t|	", stripped, maxsplit=1)
             if len(parts) == 2 and parts[1].strip():
-                return normalize_placeholder_quote_style(source_text, parts[1].strip())
+                candidate = cleanup_single_translation_candidate_value(
+                    source_text, parts[1]
+                )
+                if is_usable_single_translation_candidate(source_text, candidate):
+                    return candidate
+                continue
             stripped = re.sub(
                 r"^corrected_translation\s*[:=-]?\s*", "", stripped, flags=re.IGNORECASE
             ).strip()
         candidate_lines.append(stripped)
 
     if not candidate_lines:
+        return ""
+
+    if has_response_artifacts and len(candidate_lines) > 1:
         return ""
 
     if len(candidate_lines) >= 2 and re.fullmatch(
@@ -3650,19 +8001,15 @@ def extract_single_translation_candidate_from_plain_text(result_text, source_tex
             else " ".join(candidate_lines)
         )
 
-    candidate = candidate.strip().rstrip(",")
-    if (
-        len(candidate) >= 2
-        and candidate[0] == candidate[-1]
-        and candidate[0] in ('"', "'")
-    ):
-        candidate = candidate[1:-1].strip()
+    candidate = cleanup_single_translation_candidate_value(source_text, candidate)
     if not candidate:
+        return ""
+    if not is_usable_single_translation_candidate(source_text, candidate):
         return ""
     if looks_like_source_echo_line(candidate, source_text):
         return ""
 
-    return normalize_placeholder_quote_style(source_text, candidate)
+    return candidate
 
 
 def validate_ui_phrase_translation(lang_code, source_phrase, translated_phrase):
@@ -3673,14 +8020,6 @@ def validate_ui_phrase_translation(lang_code, source_phrase, translated_phrase):
     normalized_translation = translated_phrase.strip()
     if not normalized_source_phrase or not normalized_translation:
         return False, "", "phrase translation is empty"
-    if normalized_translation.casefold() == normalized_source_phrase.casefold():
-        return False, "", "phrase translation is identical to the source phrase"
-    if normalized_source_phrase.casefold() in normalized_translation.casefold():
-        return (
-            False,
-            "",
-            "phrase translation still contains the source phrase in English",
-        )
 
     placeholder_pairs = build_protected_placeholders(
         normalized_source_phrase, {lang_code: normalized_translation}
@@ -3688,14 +8027,40 @@ def validate_ui_phrase_translation(lang_code, source_phrase, translated_phrase):
     cleaned_phrase = cleanup_translated_text(
         normalized_source_phrase, normalized_translation, placeholder_pairs, lang_code
     )
-    if not cleaned_phrase.strip():
+    cleaned_phrase = cleaned_phrase.strip()
+    if not cleaned_phrase:
         return False, "", "phrase translation became empty after cleanup"
+
+    source_words = SOURCE_ENGLISH_WORD_PATTERN.findall(normalized_source_phrase)
+    if cleaned_phrase.casefold() == normalized_source_phrase.casefold():
+        if not (
+            len(source_words) == 1
+            and is_allowed_source_spelled_word_for_lang(lang_code, normalized_source_phrase)
+        ):
+            return False, "", "phrase translation is identical to the source phrase"
+    if source_phrase_leaks_into_translation(
+        normalized_source_phrase, cleaned_phrase, cleaned_phrase.casefold()
+    ):
+        if not (
+            len(source_words) == 1
+            and is_allowed_source_spelled_word_for_lang(lang_code, normalized_source_phrase)
+        ):
+            return (
+                False,
+                "",
+                "phrase translation still contains the source phrase in English",
+            )
 
     if contains_response_artifact_lines(cleaned_phrase):
         return False, "", "phrase translation contains response-format artifacts"
     structural_artifact_message = detect_structural_translation_artifact(cleaned_phrase)
     if structural_artifact_message:
         return False, "", structural_artifact_message
+    arrow_artifact_message = detect_unexpected_arrow_rewrite_artifact(
+        normalized_source_phrase, cleaned_phrase
+    )
+    if arrow_artifact_message:
+        return False, "", arrow_artifact_message
     repetitive_token = detect_repetitive_token_flood(cleaned_phrase)
     if repetitive_token:
         return (
@@ -3766,6 +8131,12 @@ def parse_phrase_translation_batch_response(result_text, phrase_ids):
             translation = translation[1:-1].strip()
         if not translation:
             continue
+        if is_response_artifact_text(translation):
+            continue
+        if phrase_id in results:
+            if results[phrase_id] == translation:
+                continue
+            raise ValueError("Duplicate phrase translation line")
 
         results[phrase_id] = translation
 
@@ -3815,6 +8186,12 @@ def parse_multilang_phrase_translation_batch_response(result_text, valid_pairs):
             translation = translation[1:-1].strip()
         if not translation:
             continue
+        if is_response_artifact_text(translation):
+            continue
+        if (lang_code, phrase_id) in results:
+            if results[(lang_code, phrase_id)] == translation:
+                continue
+            raise ValueError("Duplicate multi-language phrase translation line")
 
         results[(lang_code, phrase_id)] = translation
 
@@ -3907,10 +8284,26 @@ def translate_ui_phrases_for_batch(prompt_lang_dict, source_phrases):
 
     for attempt in range(1, 4):
         attempt_pairs = set(pending_pairs)
+        attempt_lang_codes = {lang_code for lang_code, _ in attempt_pairs}
+        attempt_phrase_ids = {phrase_id for _, phrase_id in attempt_pairs}
+        attempt_target_language_map = {
+            lang_code: target_language_map[lang_code]
+            for lang_code in sorted(attempt_lang_codes)
+        }
+        attempt_preferred_script_map = {
+            lang_code: preferred_script_map[lang_code]
+            for lang_code in sorted(attempt_lang_codes)
+            if lang_code in preferred_script_map
+        }
+        attempt_phrase_id_map = {
+            phrase_id: phrase_id_map[phrase_id]
+            for phrase_id in phrase_id_map
+            if phrase_id in attempt_phrase_ids
+        }
         retry_guidance = ""
         if last_error:
             retry_guidance = (
-                "10. IMPORTANT: The previous attempt was invalid or incomplete. "
+                "12. IMPORTANT: The previous attempt was invalid or incomplete. "
                 f"Fix this exact problem and do not repeat it: {last_error}\n"
             )
 
@@ -3927,14 +8320,17 @@ Rules:
 7. Each `language_code` must be translated only into the language shown for that code in the target language map.
 8. If a preferred script map is provided for a language code, use only those script families for normal translated words unless the source token is a protected brand, acronym, placeholder, or file name copied unchanged from the source.
 9. One output line translates one `phrase_id` for one `language_code`.
+10. For any target language whose preferred script is not Latin, do not copy, romanize, or transliterate ordinary Latin source words from the phrase. If there is no exact target-language UI term, use a short native-script descriptive phrase.
+10a. For any target language whose preferred script list does not include Latin, a Latin-script romanization or transliteration is invalid even if it sounds like the target language. Output normal translated words in the preferred script instead.
+11. If a source phrase contains `/`, translate every ordinary segment around the slash into the target language. Keep `/` only as a separator and do not leave the original English segment text in the translated phrase.
 {retry_guidance}{language_specific_requirements}Target language map JSON:
-{json.dumps(target_language_map, ensure_ascii=False, indent=2)}
+{json.dumps(attempt_target_language_map, ensure_ascii=False, indent=2)}
 
 Preferred script map JSON:
-{json.dumps(preferred_script_map, ensure_ascii=False, indent=2)}
+{json.dumps(attempt_preferred_script_map, ensure_ascii=False, indent=2)}
 
 Phrase ID JSON:
-{json.dumps(phrase_id_map, ensure_ascii=False, indent=2)}
+{json.dumps(attempt_phrase_id_map, ensure_ascii=False, indent=2)}
 
 Response format example:
 so\tP1\tTranslated phrase here
@@ -4032,6 +8428,11 @@ def translate_ui_phrases_for_language(lang_code, source_phrases):
     language_label = language_name if language_name else f"language code {lang_code}"
     language_specific_requirements = build_language_specific_requirements(lang_code)
     allowed_scripts = sorted(build_allowed_script_families_for_lang(lang_code, ""))
+    source_word_translation_rule = build_unprotected_source_word_translation_rule(
+        " ".join(pending),
+        lang_code,
+        rule_number="10",
+    )
     script_rule = ""
     if allowed_scripts:
         if len(allowed_scripts) == 1:
@@ -4045,6 +8446,11 @@ def translate_ui_phrases_for_language(lang_code, source_phrases):
                 f"{', '.join(allowed_scripts)}. "
                 "Do NOT use letters from any other scripts unless the exact source token is a protected brand, acronym, placeholder, or file name copied unchanged from the source.\n"
             )
+        if "Latin" not in allowed_scripts:
+            script_rule += (
+                "8a. A Latin-script romanization or transliteration is invalid for this target language. "
+                "Output normal translated words in the allowed target script instead.\n"
+            )
 
     last_error = ""
     for attempt in range(1, 4):
@@ -4054,7 +8460,7 @@ def translate_ui_phrases_for_language(lang_code, source_phrases):
         retry_guidance = ""
         if last_error:
             retry_guidance = (
-                "9. IMPORTANT: The previous attempt was invalid or incomplete. "
+                "11. IMPORTANT: The previous attempt was invalid or incomplete. "
                 f"Fix this exact problem and do not repeat it: {last_error}\n"
             )
 
@@ -4071,7 +8477,8 @@ Rules:
 5. Do NOT leave the English source phrase unchanged.
 6. Do NOT return JSON, Markdown, explanations, notes, numbering, bullets, or extra lines.
 7. Translate into {language_label}, not into English and not into a neighboring or more common language.
-{script_rule}{retry_guidance}{language_specific_requirements}Phrase ID JSON:
+9. If a source phrase contains `/`, translate every ordinary segment around the slash into {language_label}. Keep `/` only as a separator and do not leave the original English segment text in the translated phrase.
+{script_rule}{source_word_translation_rule}{retry_guidance}{language_specific_requirements}Phrase ID JSON:
 {json.dumps(phrase_id_map, ensure_ascii=False, indent=2)}
 
 Response format example:
@@ -4151,18 +8558,25 @@ def translate_ui_phrase_for_language(lang_code, source_phrase):
     allowed_scripts = sorted(
         build_allowed_script_families_for_lang(lang_code, source_phrase)
     )
+    source_word_translation_rule = build_unprotected_source_word_translation_rule(
+        source_phrase,
+        lang_code,
+        rule_number="9",
+    )
     script_rule = ""
     if allowed_scripts:
         if len(allowed_scripts) == 1:
             script_rule = f"8. Write the translation using only the `{allowed_scripts[0]}` script for normal letters. Do NOT switch to Latin or a neighboring script unless the exact source token is a protected brand, acronym, placeholder, or file name copied unchanged from the source.\n"
         else:
             script_rule = f"8. Write the translation using only these script families for normal letters: {', '.join(allowed_scripts)}. Do NOT use letters from any other scripts unless the exact source token is a protected brand, acronym, placeholder, or file name copied unchanged from the source.\n"
+        if "Latin" not in allowed_scripts:
+            script_rule += "8a. A Latin-script romanization or transliteration is invalid for this target language. Output normal translated words in the allowed target script instead.\n"
 
     last_error = ""
     for attempt in range(1, 4):
         retry_guidance = ""
         if last_error:
-            retry_guidance = f"9. IMPORTANT: The previous attempt was invalid. Fix this exact problem and do not repeat it: {last_error}\n"
+            retry_guidance = f"10. IMPORTANT: The previous attempt was invalid. Fix this exact problem and do not repeat it: {last_error}\n"
 
         prompt = f"""
 You are a professional UI translator for the eMule software.
@@ -4179,7 +8593,7 @@ Rules:
 5. Do NOT return JSON, Markdown, explanations, examples, notes, or extra lines.
 6. Translate into {language_label}, not into English and not into a neighboring or more common language.
 7. Do NOT append pronunciation, transliteration, romanization, or glosses in parentheses.
-{script_rule}{retry_guidance}{example_block}{language_specific_requirements}
+{script_rule}{source_word_translation_rule}{retry_guidance}{example_block}{language_specific_requirements}
 """
         result_text = call_active_api(prompt, plain_text=True)
         if not result_text:
@@ -4246,8 +8660,14 @@ def repair_candidate_text_in_memory(lang_code, candidate_text, en_text):
 
     repaired_text = candidate_text
     repaired_any = False
+    protected_adjacent_phrases = {
+        phrase.casefold()
+        for phrase in extract_placeholder_adjacent_translatable_source_phrases(en_text)
+    }
 
     for phrase in leaked_phrases:
+        if phrase.casefold() in protected_adjacent_phrases:
+            continue
         translated_phrase = translate_ui_phrase_for_language(lang_code, phrase)
         if not translated_phrase:
             return (
@@ -4334,7 +8754,7 @@ def repair_candidate_text_with_known_phrase_rewrite(
     language_specific_requirements = build_language_specific_requirements(lang_code)
     local_fix_guidance = (
         build_local_single_language_guidance(en_text, {lang_code: candidate_text})
-        if resolve_backend_selection()
+        if is_local_gemma_compatibility_flow()
         else ""
     )
 
@@ -4364,7 +8784,12 @@ LOCKED PLACEHOLDERS JSON:
 {protected_placeholders_json}
 """
 
-    result_text = call_active_api(prompt, plain_text=True)
+    result_text = call_active_api(
+        prompt,
+        plain_text=True,
+        request_timeout_sec=API_REPAIR_REQUEST_TIMEOUT_SEC,
+        timeout_retry_count=API_REPAIR_TIMEOUT_RETRY_COUNT,
+    )
     if not result_text:
         return False, candidate_text, "known-phrase rewrite repair returned empty response"
 
@@ -4387,7 +8812,10 @@ LOCKED PLACEHOLDERS JSON:
             )
 
         corrected_restored = restore_protected_placeholders(
-            corrected, placeholder_pairs
+            corrected, placeholder_pairs, prompt_en_text
+        )
+        corrected_restored = normalize_doubled_map_escape_sequences(
+            en_text, corrected_restored
         )
         corrected_cleaned = cleanup_translated_text(
             en_text, corrected_restored, placeholder_pairs, lang_code
@@ -4445,9 +8873,20 @@ def repair_candidate_text_with_targeted_rewrite(lang_code, candidate_text, en_te
         else "- None"
     )
     language_specific_requirements = build_language_specific_requirements(lang_code)
+    source_word_translation_rule = build_unprotected_source_word_translation_rule(
+        en_text,
+        lang_code,
+        rule_number="10",
+        priority_words=list(leaked_words) + collect_arrow_path_source_words(en_text),
+    )
     local_fix_guidance = (
         build_local_single_language_guidance(en_text, {lang_code: candidate_text})
-        if resolve_backend_selection()
+        if is_local_gemma_compatibility_flow()
+        else ""
+    )
+    deepseek_fix_guidance = (
+        "IMPORTANT: Complete the full corrected translation in one line. Do not truncate mid-sentence. Ensure all English fragments are fully translated.\n"
+        if is_deepseek_compatible_backend()
         else ""
     )
 
@@ -4477,12 +8916,18 @@ Rules:
 6. Do NOT keep the leaked English fragments listed above anywhere in the final line.
 7. Do NOT append the English original in parentheses after translated labels or mode names.
 8. Keep already-correct translated wording when possible and only rewrite what is needed to remove the leaked English fragments naturally.
-{language_specific_requirements}{local_fix_guidance}{build_placeholder_format_rule(en_text, rule_number="9")}
+9. If leaked words appear in a menu path joined by `->`, translate the menu labels around the arrows while preserving locked placeholders and strict acronyms.
+{source_word_translation_rule}{language_specific_requirements}{local_fix_guidance}{deepseek_fix_guidance}{build_placeholder_format_rule(en_text, rule_number="11")}
 LOCKED PLACEHOLDERS JSON:
 {protected_placeholders_json}
 """
 
-    result_text = call_active_api(prompt, plain_text=True)
+    result_text = call_active_api(
+        prompt,
+        plain_text=True,
+        request_timeout_sec=API_REPAIR_REQUEST_TIMEOUT_SEC,
+        timeout_retry_count=API_REPAIR_TIMEOUT_RETRY_COUNT,
+    )
     if not result_text:
         return False, candidate_text, "targeted rewrite repair returned empty response"
 
@@ -4505,7 +8950,10 @@ LOCKED PLACEHOLDERS JSON:
             )
 
         corrected_restored = restore_protected_placeholders(
-            corrected, placeholder_pairs
+            corrected, placeholder_pairs, prompt_en_text
+        )
+        corrected_restored = normalize_doubled_map_escape_sequences(
+            en_text, corrected_restored
         )
         corrected_cleaned = cleanup_translated_text(
             en_text, corrected_restored, placeholder_pairs, lang_code
@@ -4543,17 +8991,31 @@ def try_phrase_only_repair(key_name, lang_code, candidate_text, en_text):
                 return True, cleaned_text, msg
 
     repaired_success, repaired_text, repaired_msg = (
-        repair_candidate_text_with_script_rewrite(lang_code, candidate_text, en_text)
+        repair_candidate_text_by_stripping_script_artifacts(
+            lang_code, candidate_text, en_text
+        )
     )
+    if not repaired_success:
+        if is_safe_repair_text_to_carry_forward(repaired_text):
+            candidate_text = repaired_text
+        repaired_success, repaired_text, repaired_msg = repair_candidate_text_in_memory(
+            lang_code, candidate_text, en_text
+        )
+    if not repaired_success:
+        repaired_success, repaired_text, repaired_msg = (
+            repair_candidate_text_with_script_rewrite(lang_code, candidate_text, en_text)
+        )
+    if not repaired_success:
+        repaired_success, repaired_text, repaired_msg = (
+            repair_candidate_text_with_single_language_retranslation(
+                lang_code, candidate_text, en_text
+            )
+        )
     if not repaired_success:
         repaired_success, repaired_text, repaired_msg = (
             repair_candidate_text_with_known_phrase_rewrite(
                 lang_code, candidate_text, en_text
             )
-        )
-    if not repaired_success:
-        repaired_success, repaired_text, repaired_msg = repair_candidate_text_in_memory(
-            lang_code, candidate_text, en_text
         )
     if not repaired_success:
         repaired_success, repaired_text, repaired_msg = (
@@ -4572,8 +9034,371 @@ def try_phrase_only_repair(key_name, lang_code, candidate_text, en_text):
     return False, repaired_text, msg
 
 
+def select_repair_failure_message(primary_message, repair_message):
+    if not isinstance(repair_message, str) or not repair_message.strip():
+        return primary_message
+    if isinstance(primary_message, str) and primary_message.strip():
+        normalized_repair_message = repair_message.strip().casefold()
+        if normalized_repair_message.startswith(
+            (
+                "no leaked source phrase or word found for phrase-only repair",
+                "no leaked source phrase or word found for targeted rewrite repair",
+                "no suspicious foreign-script or transliterated fragments found",
+                "no script-related validation issue found",
+            )
+        ):
+            return primary_message
+    return repair_message
+
+
+def review_source_word_validation_failure(
+    lang_code, en_text, candidate_text, validation_error
+):
+    if not (
+        isinstance(validation_error, str)
+        and "untranslated english source word" in validation_error.casefold()
+    ):
+        return False, candidate_text, validation_error
+
+    placeholder_pairs = build_protected_placeholders(
+        en_text, {lang_code: candidate_text}
+    )
+    cleaned_text = cleanup_translated_text(
+        en_text, candidate_text, placeholder_pairs, lang_code
+    )
+    leaked_source_words = get_leaked_source_words(en_text, cleaned_text, lang_code)
+    if not leaked_source_words:
+        return False, cleaned_text, validation_error
+
+    leak_ok, reviewed_text, review_error = review_source_word_leak_with_ai(
+        lang_code, en_text, cleaned_text, leaked_source_words
+    )
+    if leak_ok:
+        return True, reviewed_text, ""
+
+    if isinstance(reviewed_text, str) and reviewed_text.strip() and reviewed_text != cleaned_text:
+        reviewed_placeholders = build_protected_placeholders(
+            en_text, {lang_code: reviewed_text}
+        )
+        reviewed_cleaned = cleanup_translated_text(
+            en_text, reviewed_text, reviewed_placeholders, lang_code
+        )
+        reviewed_valid, reviewed_validation_error = validate_translation_text(
+            en_text, reviewed_cleaned, reviewed_placeholders, lang_code
+        )
+        if reviewed_valid:
+            return True, reviewed_cleaned, ""
+        return False, cleaned_text, reviewed_validation_error
+
+    return False, cleaned_text, review_error or validation_error
+
+
+def is_safe_repair_text_to_carry_forward(repaired_text):
+    if not isinstance(repaired_text, str) or not repaired_text.strip():
+        return False
+    if contains_response_artifact_lines(repaired_text):
+        return False
+    if detect_structural_translation_artifact(repaired_text):
+        return False
+    if detect_repetitive_token_flood(repaired_text):
+        return False
+    return True
+
+
+def parse_country_name_repair_response(result_text, en_text):
+    try:
+        return parse_line_based_updates_response(
+            result_text.strip(), en_text, {"corrected_translation"}
+        )
+    except Exception as primary_error:
+        normalized = preprocess_line_response_text(result_text)
+        meaningful_lines = []
+        for raw_line in normalized.splitlines():
+            stripped = raw_line.strip()
+            if not stripped or stripped.startswith("```"):
+                continue
+            meaningful_lines.append(stripped)
+
+        if len(meaningful_lines) != 1:
+            raise primary_error
+
+        parts = re.split(r"(?:\t|\\t)", meaningful_lines[0], maxsplit=1)
+        if len(parts) != 2 or not parts[1].strip():
+            raise primary_error
+
+        fallback_line = f"corrected_translation\t{parts[1].strip()}"
+        return parse_line_based_updates_response(
+            fallback_line, en_text, {"corrected_translation"}
+        )
+
+
+def build_local_country_name_repair_stream_stop_checker(en_text):
+    if not (is_local_backend() and LOCAL_API_STREAM_RESPONSE):
+        return None
+
+    def is_complete(result_text):
+        if not isinstance(result_text, str) or not result_text.endswith(("\n", "\r")):
+            return False
+        try:
+            parsed = parse_country_name_repair_response(result_text, en_text)
+        except Exception:
+            return False
+        return bool(parsed.get("corrected_translation", "").strip())
+
+    return is_complete
+
+
+def repair_country_name_candidate_for_validation(
+    key_name, lang_code, candidate_text, en_text, validation_error=""
+):
+    country_code = get_standard_ipgeo_country_code_for_source(key_name, en_text)
+    if not country_code:
+        return False, candidate_text, validation_error
+
+    localized_name = get_localized_country_name_by_code(
+        country_code, en_text, lang_code
+    )
+    if isinstance(localized_name, str) and localized_name.strip():
+        localized_placeholders = build_protected_placeholders(
+            en_text, {lang_code: localized_name}
+        )
+        localized_cleaned = cleanup_translated_text(
+            en_text, localized_name, localized_placeholders, lang_code
+        )
+        country_error = detect_suspicious_country_name_candidate(
+            country_code, en_text, localized_cleaned, lang_code
+        )
+        if not country_error:
+            if localized_cleaned.strip() == en_text.strip():
+                cache_same_spelling_translation_review(
+                    lang_code, en_text, localized_cleaned, True
+                )
+            localized_valid, localized_error = validate_translation_text(
+                en_text,
+                localized_cleaned,
+                localized_placeholders,
+                lang_code,
+                country_code=country_code,
+            )
+            if localized_valid:
+                return True, localized_cleaned, ""
+            validation_error = localized_error or validation_error
+
+    validation_error_cf = str(validation_error or "").casefold()
+    required_descriptor_words = get_country_required_translated_source_words(en_text)
+    should_try_descriptor_repair = bool(
+        required_descriptor_words
+        and (
+            candidate_text.strip() == en_text.strip()
+            or "untranslated english source word" in validation_error_cf
+            or "identical to the english source" in validation_error_cf
+        )
+    )
+    if should_try_descriptor_repair:
+        phrase_success, phrase_text, phrase_error = repair_candidate_text_in_memory(
+            lang_code, candidate_text, en_text
+        )
+        if phrase_success:
+            phrase_placeholders = build_protected_placeholders(
+                en_text, {lang_code: phrase_text}
+            )
+            phrase_cleaned = cleanup_translated_text(
+                en_text, phrase_text, phrase_placeholders, lang_code
+            )
+            country_error = detect_suspicious_country_name_candidate(
+                country_code, en_text, phrase_cleaned, lang_code
+            )
+            if not country_error:
+                phrase_valid, phrase_validation_error = validate_translation_text(
+                    en_text,
+                    phrase_cleaned,
+                    phrase_placeholders,
+                    lang_code,
+                    country_code=country_code,
+                )
+                if phrase_valid:
+                    return True, phrase_cleaned, ""
+                validation_error = phrase_validation_error or validation_error
+        elif phrase_error:
+            validation_error = phrase_error or validation_error
+
+        if candidate_text.strip() == en_text.strip() and is_local_backend():
+            return False, candidate_text, validation_error
+
+    language_name = get_language_name_for_code(lang_code)
+    language_label = language_name if language_name else f"language code {lang_code}"
+    allowed_scripts = build_allowed_script_families_for_lang(lang_code, en_text)
+    allowed_scripts_text = ", ".join(sorted(allowed_scripts)) or "the target language's normal script"
+    protected_terms = get_effective_protected_terms(en_text)
+    protected_terms_rule = ""
+    if protected_terms:
+        protected_terms_rule = (
+            "\n8. Preserve these protected source term(s) exactly, including punctuation: "
+            + ", ".join(json.dumps(term, ensure_ascii=False) for term in protected_terms)
+            + "."
+        )
+    descriptor_translation_rule = ""
+    if required_descriptor_words:
+        descriptor_translation_rule = (
+            "\n7a. Translate these English descriptor or connector word(s) naturally: "
+            + ", ".join(
+                json.dumps(word, ensure_ascii=False)
+                for word in required_descriptor_words
+            )
+            + ". Proper-name components may be transliterated or keep their conventional spelling."
+        )
+    candidate_block = build_prompt_text_block(
+        "Current candidate country name", candidate_text, candidate_text
+    )
+    prompt = f"""
+You are a professional geographic-name localization reviewer.
+
+KEY: '{key_name}'
+ISO country code: '{country_code}'
+Target language code: '{lang_code}'
+Target language: '{language_label}'
+English country name: {json.dumps(en_text, ensure_ascii=False)}
+{candidate_block}
+
+The current candidate failed validation: {validation_error or 'invalid country name'}
+
+Rules:
+1. Return the complete conventional short country name used in {language_label}.
+2. The result may be spelled exactly the same as the English country name when that is the normal {language_label} name.
+3. Never return a prefix, first syllable, isolated character, or partial country name. A complete conventional name may legitimately contain only one to three letters, or be a conventional acronym such as `USA`; do not expand it solely because it is short.
+4. Use only these script families for normal letters: {allowed_scripts_text}.
+5. Return ONLY one line in this exact format: `corrected_translation<TAB>complete_country_name`.
+5a. The first column must be the literal text `corrected_translation`; never put the country name or language code before the TAB.
+6. Use a real TAB character and do not return explanations, JSON, Markdown, notes, or extra lines.
+7. If the validation error names untranslated English descriptor or connector words, translate those named words naturally instead of returning the same candidate again.{descriptor_translation_rule}{protected_terms_rule}
+"""
+
+    def accept_current_same_spelling_candidate(failure_message):
+        if not cache_safe_same_spelling_country_name(
+            country_code, lang_code, en_text, candidate_text
+        ):
+            return False, candidate_text, failure_message
+
+        fallback_placeholders = build_protected_placeholders(
+            en_text, {lang_code: candidate_text}
+        )
+        fallback_cleaned = cleanup_translated_text(
+            en_text, candidate_text, fallback_placeholders, lang_code
+        )
+        fallback_valid, fallback_error = validate_translation_text(
+            en_text,
+            fallback_cleaned,
+            fallback_placeholders,
+            lang_code,
+            country_code=country_code,
+        )
+        if fallback_valid:
+            return True, fallback_cleaned, ""
+        cache_same_spelling_translation_review(
+            lang_code, en_text, candidate_text, False
+        )
+        return False, fallback_cleaned, fallback_error or failure_message
+
+    early_same_spelling_result = accept_current_same_spelling_candidate(
+        validation_error or "translation is identical to the English source"
+    )
+    if early_same_spelling_result[0]:
+        return early_same_spelling_result
+
+    repair_initial_tokens = (
+        LOCAL_COUNTRY_NAME_REPAIR_INITIAL_COMPLETION_TOKENS
+        if is_local_backend()
+        else COUNTRY_NAME_REPAIR_MAX_COMPLETION_TOKENS
+    )
+    repair_max_tokens = (
+        LOCAL_COUNTRY_NAME_REPAIR_MAX_COMPLETION_TOKENS
+        if is_local_backend()
+        else COUNTRY_NAME_REPAIR_MAX_COMPLETION_TOKENS
+    )
+
+    result_text = call_active_api(
+        prompt,
+        plain_text=True,
+        request_timeout_sec=API_REPAIR_REQUEST_TIMEOUT_SEC,
+        timeout_retry_count=API_REPAIR_TIMEOUT_RETRY_COUNT,
+        max_completion_tokens=repair_initial_tokens,
+        max_token_limit=repair_initial_tokens if is_local_backend() else repair_max_tokens,
+        stream_stop_checker=build_local_country_name_repair_stream_stop_checker(
+            en_text
+        ),
+    )
+    if not result_text and is_local_backend():
+        compact_prompt = (
+            f"Return exactly one line: corrected_translation<TAB>the conventional {language_label} "
+            f"short country name for ISO {country_code} ({en_text}). Use a real TAB. "
+            "No reasoning, explanation, quotes, alternatives, or extra text."
+        )
+        print(
+            f"[{key_name}] Info: Country-name repair produced no final text at "
+            f"max_tokens={repair_initial_tokens}; retrying once with a compact prompt "
+            f"and max_tokens={repair_max_tokens}."
+        )
+        result_text = call_active_api(
+            compact_prompt,
+            plain_text=True,
+            request_timeout_sec=API_REPAIR_REQUEST_TIMEOUT_SEC,
+            timeout_retry_count=API_REPAIR_TIMEOUT_RETRY_COUNT,
+            max_completion_tokens=repair_max_tokens,
+            max_token_limit=repair_max_tokens,
+            stream_stop_checker=build_local_country_name_repair_stream_stop_checker(
+                en_text
+            ),
+        )
+    if not result_text:
+        return accept_current_same_spelling_candidate(
+            "country-name repair returned empty response"
+        )
+
+    try:
+        parsed = parse_country_name_repair_response(result_text, en_text)
+    except Exception as err:
+        return accept_current_same_spelling_candidate(
+            f"country-name repair response parse failed: {err}"
+        )
+
+    corrected = parsed.get("corrected_translation", "")
+    if not isinstance(corrected, str) or not corrected.strip():
+        return accept_current_same_spelling_candidate(
+            "country-name repair returned empty translation"
+        )
+
+    corrected_placeholders = build_protected_placeholders(
+        en_text, {lang_code: corrected}
+    )
+    corrected_cleaned = cleanup_translated_text(
+        en_text, corrected, corrected_placeholders, lang_code
+    )
+    country_error = detect_suspicious_country_name_candidate(
+        country_code, en_text, corrected_cleaned, lang_code
+    )
+    if country_error:
+        return accept_current_same_spelling_candidate(country_error)
+
+    if corrected_cleaned.strip() == en_text.strip():
+        cache_same_spelling_translation_review(
+            lang_code, en_text, corrected_cleaned, True
+        )
+    corrected_valid, corrected_error = validate_translation_text(
+        en_text,
+        corrected_cleaned,
+        corrected_placeholders,
+        lang_code,
+        country_code=country_code,
+    )
+    if corrected_valid:
+        return True, corrected_cleaned, ""
+    return accept_current_same_spelling_candidate(
+        corrected_error or validation_error
+    )
+
+
 def repair_candidate_text_for_validation(
-    lang_code, candidate_text, en_text, validation_error=""
+    lang_code, candidate_text, en_text, validation_error="", key_name=""
 ):
     placeholder_pairs = build_protected_placeholders(
         en_text, {lang_code: candidate_text}
@@ -4581,15 +9406,73 @@ def repair_candidate_text_for_validation(
     cleaned_text = cleanup_translated_text(
         en_text, candidate_text, placeholder_pairs, lang_code
     )
+    country_code = get_standard_ipgeo_country_code_for_source(key_name, en_text)
+    country_proper_name_code = get_ipgeo_proper_name_country_code(key_name, en_text)
+    country_key = bool(country_code)
     is_valid, cleaned_validation_error = validate_translation_text(
-        en_text, cleaned_text, placeholder_pairs, lang_code
+        en_text,
+        cleaned_text,
+        placeholder_pairs,
+        lang_code,
+        country_code=country_code,
+        country_proper_name_code=country_proper_name_code,
     )
-    if is_valid:
+    external_validation_error = (
+        validation_error.strip()
+        if isinstance(validation_error, str) and validation_error.strip()
+        else ""
+    )
+    if is_valid and not external_validation_error:
         return True, cleaned_text, ""
 
-    last_error = cleaned_validation_error or validation_error or ""
+    last_error = external_validation_error or cleaned_validation_error or ""
+    if country_key:
+        return repair_country_name_candidate_for_validation(
+            key_name,
+            lang_code,
+            cleaned_text,
+            en_text,
+            validation_error=last_error,
+        )
+    if last_error.casefold() == "translation is identical to the english source":
+        same_ok, reviewed_text, review_error = review_same_spelling_translation_with_ai(
+            lang_code, en_text, cleaned_text
+        )
+        if same_ok:
+            return True, reviewed_text, ""
+        if isinstance(reviewed_text, str) and reviewed_text.strip() and reviewed_text != cleaned_text:
+            reviewed_placeholders = build_protected_placeholders(
+                en_text, {lang_code: reviewed_text}
+            )
+            reviewed_cleaned = cleanup_translated_text(
+                en_text, reviewed_text, reviewed_placeholders, lang_code
+            )
+            reviewed_valid, reviewed_validation_error = validate_translation_text(
+                en_text,
+                reviewed_cleaned,
+                reviewed_placeholders,
+                lang_code,
+                country_proper_name_code=country_proper_name_code,
+            )
+            if reviewed_valid:
+                return True, reviewed_cleaned, ""
+            last_error = reviewed_validation_error or review_error or last_error
+
+    source_review_ok, source_reviewed_text, source_review_error = (
+        review_source_word_validation_failure(
+            lang_code, en_text, cleaned_text, last_error
+        )
+    )
+    if source_review_ok:
+        return True, source_reviewed_text, ""
+    if source_review_error and source_review_error != last_error:
+        last_error = source_review_error
+
     repair_attempts = (
+        repair_candidate_text_by_stripping_script_artifacts,
         repair_candidate_text_with_script_rewrite,
+        repair_candidate_text_with_single_language_retranslation,
+        repair_candidate_text_with_segmented_retranslation,
         repair_candidate_text_with_known_phrase_rewrite,
         repair_candidate_text_in_memory,
         repair_candidate_text_with_targeted_rewrite,
@@ -4602,10 +9485,66 @@ def repair_candidate_text_for_validation(
         )
         if repaired_success:
             return True, repaired_text, ""
-        if isinstance(repaired_text, str) and repaired_text.strip():
+        if is_safe_repair_text_to_carry_forward(repaired_text):
             current_text = repaired_text
+            source_review_ok, source_reviewed_text, source_review_error = (
+                review_source_word_validation_failure(
+                    lang_code, en_text, repaired_text, repaired_error
+                )
+            )
+            if source_review_ok:
+                return True, source_reviewed_text, ""
+            if source_review_error and source_review_error != repaired_error:
+                repaired_error = source_review_error
         if isinstance(repaired_error, str) and repaired_error.strip():
+            normalized_repaired_error = repaired_error.strip().casefold()
+            if last_error and normalized_repaired_error.startswith(
+                (
+                    "no candidate text available for script rewrite repair",
+                    "no suspicious foreign-script or transliterated fragments found for script rewrite repair",
+                    "no candidate text available for single-language retranslation repair",
+                    "no script-related validation issue found for single-language retranslation repair",
+                    "no script-related or repetitive-output validation issue found for single-language retranslation repair",
+                    "no candidate text available for segmented retranslation repair",
+                    "segmented retranslation repair is not needed for this source",
+                    "no exact established ui term mismatch found for known-phrase rewrite",
+                    "no leaked source phrase or word found for phrase-only repair",
+                    "no leaked source phrase or word found for targeted rewrite repair",
+                )
+            ):
+                continue
             last_error = repaired_error
+
+    if last_error:
+        fixed_text = fix_translation_with_active_api(
+            "validation_repair", lang_code, current_text, last_error, en_text
+        )
+        if isinstance(fixed_text, str) and fixed_text.strip():
+            fixed_placeholders = build_protected_placeholders(
+                en_text, {lang_code: fixed_text}
+            )
+            fixed_cleaned = cleanup_translated_text(
+                en_text, fixed_text, fixed_placeholders, lang_code
+            )
+            is_valid, fixed_validation_error = validate_translation_text(
+                en_text,
+                fixed_cleaned,
+                fixed_placeholders,
+                lang_code,
+                country_proper_name_code=country_proper_name_code,
+            )
+            if is_valid:
+                return True, fixed_cleaned, ""
+            source_review_ok, source_reviewed_text, source_review_error = (
+                review_source_word_validation_failure(
+                    lang_code, en_text, fixed_cleaned, fixed_validation_error
+                )
+            )
+            if source_review_ok:
+                return True, source_reviewed_text, ""
+            if is_safe_repair_text_to_carry_forward(fixed_cleaned):
+                current_text = fixed_cleaned
+            last_error = source_review_error or fixed_validation_error or last_error
 
     return False, current_text, last_error
 
@@ -4617,6 +9556,77 @@ def contains_embedded_english_phrase_leak(en_text, translated_text, lang_code=""
         return False
 
     return bool(get_leaked_source_phrases(en_text, translated_text, lang_code))
+
+
+def strip_trailing_closing_punctuation(text):
+    if not isinstance(text, str):
+        return ""
+
+    stripped = text.rstrip()
+    closing_chars = "\"')]}»”’›）］｝」』】〕〉》"
+    while stripped and stripped[-1] in closing_chars:
+        stripped = stripped[:-1].rstrip()
+    return stripped
+
+
+def is_sentence_terminal_punctuation_char(char):
+    if not isinstance(char, str) or not char:
+        return False
+    if char in TERMINAL_PUNCTUATION_CHARS:
+        return True
+
+    char_name = unicodedata.name(char, "")
+    sentence_terminal_name_parts = (
+        "FULL STOP",
+        "QUESTION MARK",
+        "EXCLAMATION MARK",
+        "ELLIPSIS",
+        "DANDA",
+        "SIGN SECTION",
+    )
+    return any(name_part in char_name for name_part in sentence_terminal_name_parts)
+
+
+def has_sentence_terminal_punctuation(candidate_text, source_terminal_char):
+    if not candidate_text:
+        return False
+
+    terminal_char = candidate_text[-1]
+    if is_sentence_terminal_punctuation_char(terminal_char):
+        return True
+
+    if (
+        source_terminal_char == "?"
+        and terminal_char == ";"
+        and "Greek" in extract_script_families(candidate_text)
+    ):
+        return True
+
+    return False
+
+
+def validate_terminal_sentence_punctuation(en_text, translated_text, lang_code=""):
+    if not isinstance(en_text, str) or not isinstance(translated_text, str):
+        return True, ""
+
+    if str(lang_code or "").strip().casefold() in ("th",):
+        return True, ""
+
+    source_text = strip_trailing_closing_punctuation(build_visible_prompt_text(en_text))
+    candidate_text = strip_trailing_closing_punctuation(build_visible_prompt_text(translated_text))
+    if not source_text or not candidate_text:
+        return True, ""
+
+    if source_text[-1] not in ".!?":
+        return True, ""
+    if has_sentence_terminal_punctuation(candidate_text, source_text[-1]):
+        return True, ""
+
+    # DeepSeek often returns Armenian sentences ending with U+003A ':' instead of U+0589 '։'
+    if str(lang_code or "").strip().casefold() == "hy" and candidate_text[-1] == ":":
+        return True, ""
+
+    return False, "translation appears truncated or is missing terminal sentence punctuation"
 
 
 def build_embedded_phrase_fix_requirements(en_text, translated_text, lang_code=""):
@@ -4678,6 +9688,8 @@ def has_equivalent_separator_after_text(separator, remainder_text):
     first_char = stripped_remainder[0]
     if separator == ":":
         return first_char in COLON_EQUIVALENT_CHARS
+    if separator == ".":
+        return is_sentence_terminal_punctuation_char(first_char)
     return first_char == separator
 
 
@@ -4714,6 +9726,11 @@ def validate_required_known_phrase_usage(en_text, translated_text, lang_code):
                     False,
                     f"translation must keep a colon or a locale-equivalent colon immediately after exact UI term ({known_translation})",
                 )
+            if separator == ".":
+                return (
+                    False,
+                    f"translation must keep a sentence-ending period or locale-equivalent sentence punctuation immediately after exact UI term ({known_translation})",
+                )
             return (
                 False,
                 f"translation must keep `{separator}` immediately after exact UI term ({known_translation})",
@@ -4725,11 +9742,237 @@ def validate_required_known_phrase_usage(en_text, translated_text, lang_code):
     )
 
 
+def extract_required_source_numeric_literals(en_text):
+    if not isinstance(en_text, str) or not en_text:
+        return []
+
+    visible_text = build_visible_prompt_text(en_text)
+    visible_text = PLACEHOLDER_TOKEN_PATTERN.sub(" ", visible_text)
+    visible_text = PERCENT_TEMPLATE_TOKEN_PATTERN.sub(" ", visible_text)
+    visible_text = LOCKED_TERM_PLACEHOLDER_PATTERN.sub(" ", visible_text)
+    numbers = []
+    seen = set()
+    for match in re.finditer(r"(?<![A-Za-z0-9_])\d+(?:[.,]\d+)*(?![A-Za-z0-9_])", visible_text):
+        number_text = match.group(0)
+        if number_text in seen:
+            continue
+        seen.add(number_text)
+        numbers.append(number_text)
+    return numbers
+
+
+def normalize_decimal_digits_for_numeric_compare(text):
+    if not isinstance(text, str):
+        return ""
+
+    normalized_chars = []
+    for char in text:
+        if char.isdecimal():
+            try:
+                normalized_chars.append(str(unicodedata.decimal(char)))
+                continue
+            except (TypeError, ValueError):
+                pass
+        normalized_chars.append(char)
+    return "".join(normalized_chars)
+
+
+def extract_literal_percentage_values(text, ignored_placeholder_tokens=None):
+    if not isinstance(text, str) or not text:
+        return []
+
+    normalized_text = normalize_decimal_digits_for_numeric_compare(
+        normalize_percent_like_characters(text, "%")
+    )
+    ignored_token_counts = {}
+    for token in ignored_placeholder_tokens or []:
+        ignored_token_counts[token] = ignored_token_counts.get(token, 0) + 1
+
+    values = []
+    index = 0
+    while index < len(normalized_text):
+        if normalized_text[index] != "%":
+            index += 1
+            continue
+        if index + 1 < len(normalized_text) and normalized_text[index + 1] == "%":
+            index += 2
+            continue
+
+        placeholder_match = PLACEHOLDER_TOKEN_PATTERN.match(normalized_text, index)
+        if placeholder_match:
+            placeholder_token = placeholder_match.group(0)
+            if ignored_token_counts.get(placeholder_token, 0) > 0:
+                ignored_token_counts[placeholder_token] -= 1
+                index = placeholder_match.end()
+                continue
+
+        left_match = re.search(
+            r"(\d+(?:[.,]\d+)*)\s*$", normalized_text[:index]
+        )
+        right_match = re.match(
+            r"\s*(\d+(?:[.,]\d+)*)", normalized_text[index + 1 :]
+        )
+        numeric_value = ""
+        if left_match:
+            numeric_value = left_match.group(1)
+        elif right_match:
+            numeric_value = right_match.group(1)
+
+        if numeric_value:
+            values.append(numeric_value.replace(",", "."))
+        index += 1
+
+    return values
+
+
+def validate_required_literal_percentage_values(en_text, translated_text):
+    source_placeholder_tokens = extract_placeholder_tokens(en_text)
+    required_values = extract_literal_percentage_values(
+        en_text, source_placeholder_tokens
+    )
+    if not required_values:
+        return True, ""
+    if not isinstance(translated_text, str):
+        return False, "translation is not a string"
+
+    translated_values = extract_literal_percentage_values(
+        translated_text, source_placeholder_tokens
+    )
+    required_counts = {}
+    translated_counts = {}
+    for value in required_values:
+        required_counts[value] = required_counts.get(value, 0) + 1
+    for value in translated_values:
+        translated_counts[value] = translated_counts.get(value, 0) + 1
+
+    missing_values = [
+        f"{value}% (expected {expected_count}, got {translated_counts.get(value, 0)})"
+        for value, expected_count in required_counts.items()
+        if translated_counts.get(value, 0) < expected_count
+    ]
+    if missing_values:
+        return (
+            False,
+            "translation is missing required literal percentage value(s): "
+            + ", ".join(missing_values[:5]),
+        )
+    return True, ""
+
+
+def validate_source_numeric_literals(en_text, translated_text):
+    required_numbers = extract_required_source_numeric_literals(en_text)
+    if not required_numbers:
+        return True, ""
+    if not isinstance(translated_text, str):
+        return False, "translation is not a string"
+
+    translated_text_for_compare = normalize_decimal_digits_for_numeric_compare(
+        translated_text
+    )
+    missing_numbers = []
+    for number_text in required_numbers:
+        number_pattern = "".join(
+            "[.,]" if part in (".", ",") else re.escape(part)
+            for part in re.split(r"([.,])", number_text)
+            if part
+        )
+        if not re.search(
+            rf"(?<!\d){number_pattern}(?!\d)", translated_text_for_compare
+        ):
+            missing_numbers.append(number_text)
+    if missing_numbers:
+        return (
+            False,
+            f"translation is missing source numeric literal(s): {', '.join(missing_numbers[:5])}",
+        )
+    return True, ""
+
+
 def validate_translation_text(
-    en_text, translated_text, placeholder_pairs, lang_code=""
+    en_text,
+    translated_text,
+    placeholder_pairs,
+    lang_code="",
+    country_code="",
+    country_proper_name_code="",
 ):
     if not isinstance(translated_text, str):
         return False, "translation is not a string"
+
+    localized_country_name_ok = (
+        is_known_localized_country_name_by_code(
+            country_code, lang_code, en_text, translated_text
+        )
+        if country_code
+        else is_known_localized_country_name(
+            lang_code, en_text, translated_text
+        )
+    )
+
+    if (
+        isinstance(en_text, str)
+        and is_protected_technical_acronym_source(en_text)
+        and translated_text.strip() != en_text.strip()
+    ):
+        return False, "translation must preserve protected technical acronym text exactly"
+
+    if (
+        isinstance(en_text, str)
+        and translated_text.strip() == en_text.strip()
+        and en_text.strip() != "OK"
+        and not is_invariant_translation_source(en_text)
+        and not is_same_spelling_translation_cached_as_valid(
+            lang_code, en_text, translated_text
+        )
+        and not localized_country_name_ok
+        and not is_allowed_same_spelling_translation_by_source_words(
+            lang_code, en_text, translated_text
+        )
+    ):
+        return False, "translation is identical to the English source"
+
+    structural_artifact_message = detect_structural_translation_artifact(
+        translated_text
+    )
+    if structural_artifact_message:
+        return False, structural_artifact_message
+    arrow_artifact_message = detect_unexpected_arrow_rewrite_artifact(
+        en_text, translated_text
+    )
+    if arrow_artifact_message:
+        return False, arrow_artifact_message
+
+    if contains_response_artifact_lines(translated_text):
+        return False, "translation still contains response-format artifact lines"
+
+    repetitive_token = detect_repetitive_token_flood(translated_text)
+    if repetitive_token:
+        return (
+            False,
+            f"translation contains repetitive token flood artifact ({repetitive_token})",
+        )
+
+    truncated_country_message = detect_truncated_localized_country_name(
+        en_text, translated_text, lang_code
+    )
+    if truncated_country_message:
+        return False, truncated_country_message
+
+    suspicious_short_message = (
+        ""
+        if localized_country_name_ok
+        else (
+            detect_suspicious_country_name_candidate(
+                country_code, en_text, translated_text, lang_code
+            )
+            if country_code
+            else detect_suspiciously_short_translation(
+                en_text, translated_text, lang_code
+            )
+        )
+    )
+    if suspicious_short_message:
+        return False, suspicious_short_message
 
     placeholders_ok, expected_placeholders, actual_placeholders = (
         validate_placeholder_sequence(en_text, translated_text)
@@ -4746,11 +9989,45 @@ def validate_translation_text(
         missing_terms = get_missing_protected_terms(translated_text, placeholder_pairs)
         return False, f"protected terms were not preserved ({', '.join(missing_terms)})"
 
+    protected_count_mismatches = get_protected_term_count_mismatches(
+        en_text, translated_text, placeholder_pairs
+    )
+    if protected_count_mismatches:
+        mismatch_text = ", ".join(
+            f"{term}: expected {expected_count}, got {actual_count}"
+            for term, expected_count, actual_count in protected_count_mismatches[:3]
+        )
+        return False, f"protected term occurrence count mismatch ({mismatch_text})"
+
     if not validate_placeholder_quote_style(en_text, translated_text):
         return (
             False,
             "placeholder wrapper style does not match the source placeholder format",
         )
+
+    source_numbers_ok, source_numbers_message = validate_source_numeric_literals(
+        en_text, translated_text
+    )
+    if not source_numbers_ok:
+        return False, source_numbers_message
+
+    rate_unit_ok, rate_unit_message = validate_no_dangling_source_rate_unit(
+        en_text, translated_text
+    )
+    if not rate_unit_ok:
+        return False, rate_unit_message
+
+    literal_percentage_ok, literal_percentage_message = (
+        validate_required_literal_percentage_values(en_text, translated_text)
+    )
+    if not literal_percentage_ok:
+        return False, literal_percentage_message
+
+    terminal_punctuation_ok, terminal_punctuation_message = (
+        validate_terminal_sentence_punctuation(en_text, translated_text, lang_code)
+    )
+    if not terminal_punctuation_ok:
+        return False, terminal_punctuation_message
 
     compiler_percent_ok, compiler_percent_message = (
         validate_compiler_percent_token_alignment(en_text, translated_text)
@@ -4758,27 +10035,52 @@ def validate_translation_text(
     if not compiler_percent_ok:
         return False, compiler_percent_message
 
-    if contains_embedded_english_phrase_leak(en_text, translated_text, lang_code):
+    percent_template_ok, percent_template_message = (
+        validate_percent_template_token_alignment(en_text, translated_text)
+    )
+    if not percent_template_ok:
+        return False, percent_template_message
+
+    same_spelling_review_ok = is_same_spelling_translation_cached_as_valid(
+        lang_code, en_text, translated_text
+    )
+    allowed_same_spelling = is_allowed_same_spelling_translation_by_source_words(
+        lang_code, en_text, translated_text
+    )
+    leaked_source_words = (
+        []
+        if localized_country_name_ok or same_spelling_review_ok or allowed_same_spelling
+        else get_leaked_source_words(
+            en_text,
+            translated_text,
+            lang_code,
+            country_code=country_code,
+            country_proper_name_code=country_proper_name_code,
+        )
+    )
+    if leaked_source_words:
+        if not is_source_word_leak_review_cached_as_valid(
+            lang_code, en_text, translated_text, leaked_source_words
+        ):
+            leaked_word_list = ", ".join(leaked_source_words[:5])
+            return (
+                False,
+                f"translation still contains untranslated English source word(s): {leaked_word_list}",
+            )
+
+    if (
+        not country_code
+        and not localized_country_name_ok
+        and not same_spelling_review_ok
+        and not allowed_same_spelling
+        and contains_embedded_english_phrase_leak(
+            en_text, translated_text, lang_code
+        )
+    ):
         return (
             False,
             "translation still contains untranslated embedded English phrase(s) from the source",
         )
-
-    structural_artifact_message = detect_structural_translation_artifact(
-        translated_text
-    )
-    if structural_artifact_message:
-        return False, structural_artifact_message
-
-    repetitive_token = detect_repetitive_token_flood(translated_text)
-    if repetitive_token:
-        return (
-            False,
-            f"translation contains repetitive token flood artifact ({repetitive_token})",
-        )
-
-    if contains_response_artifact_lines(translated_text):
-        return False, "translation still contains response-format artifact lines"
 
     unexpected_scripts = detect_unexpected_script_mixture(
         lang_code, translated_text, en_text, placeholder_pairs
@@ -4838,6 +10140,51 @@ def normalize_percent_like_characters(text, source_text=""):
         normalized_chars.append(ch)
 
     return "".join(normalized_chars)
+
+
+def normalize_literal_percent_suffix_boundaries(text, source_text=""):
+    if not isinstance(text, str) or not text:
+        return text
+    if count_literal_percent_occurrences(source_text) <= 0:
+        return text
+    if extract_placeholder_tokens(source_text):
+        return text
+
+    rebuilt = []
+    cursor = 0
+    for match in PLACEHOLDER_TOKEN_PATTERN.finditer(text):
+        if match.group(0) == "%%" or match.start() <= 0:
+            continue
+
+        previous_index = match.start() - 1
+        while previous_index >= 0 and text[previous_index].isspace():
+            previous_index -= 1
+        if previous_index < 0 or not text[previous_index].isdecimal():
+            continue
+
+        number_start = previous_index
+        while number_start > 0 and text[number_start - 1].isdecimal():
+            number_start -= 1
+        preceding_number = text[number_start : previous_index + 1]
+        suffix_text = match.group(0)[1:]
+        if (
+            preceding_number
+            and suffix_text.startswith(preceding_number)
+            and len(suffix_text) > len(preceding_number)
+            and suffix_text[len(preceding_number)] in "-‐‑‒–—"
+        ):
+            suffix_text = suffix_text[len(preceding_number) :]
+
+        rebuilt.append(text[cursor : match.start()])
+        rebuilt.append("% ")
+        rebuilt.append(suffix_text)
+        cursor = match.end()
+
+    if not rebuilt:
+        return text
+
+    rebuilt.append(text[cursor:])
+    return "".join(rebuilt)
 
 
 def get_preferred_literal_percent_sequence(source_text):
@@ -5989,6 +11336,7 @@ def normalize_translation_text_for_map(new_text, en_text=None):
         clean_text.replace("\r", "\\r").replace("\n", "\\n").replace("\t", "\\t")
     )
     clean_text = normalize_percent_like_characters(clean_text, en_text)
+    clean_text = normalize_literal_percent_suffix_boundaries(clean_text, en_text)
     clean_text = normalize_literal_percent_sequences(clean_text, en_text)
     return clean_text
 
@@ -6029,13 +11377,24 @@ def normalize_candidate_translation_against_english(
 
     english_char_count = len(english_decoded)
     candidate_char_count = len(candidate_decoded)
-    if english_char_count > 0 and (
+    ratio_is_suspicious = english_char_count > 0 and (
         candidate_char_count > english_char_count * 10
         or candidate_char_count * 10 < english_char_count
-    ):
-        raise MapParseError(
-            f"Text length suspicious vs 'en' (ratio check failed) for key '{key_name}' language '{lang_code}'"
+    )
+    if ratio_is_suspicious:
+        country_code = get_standard_ipgeo_country_code_for_source(
+            key_name, english_decoded
         )
+        verified_short_country_name = bool(
+            country_code
+            and is_known_localized_country_name_by_code(
+                country_code, lang_code, english_decoded, candidate_decoded
+            )
+        )
+        if not verified_short_country_name:
+            raise MapParseError(
+                f"Text length suspicious vs 'en' (ratio check failed) for key '{key_name}' language '{lang_code}'"
+            )
 
     return candidate_text
 
@@ -6051,6 +11410,177 @@ def build_map_translation_lines(lang_code, raw_text, line_eol):
     for part in parts[1:]:
         lines.append(f"\t\t{part}{line_eol}")
     return lines
+
+
+def set_translation_entries_in_map(map_path, key_name, translations, backup=False):
+    if not key_name:
+        raise RuntimeError("--key is required")
+    if not isinstance(translations, dict) or not translations:
+        return {}
+
+    for lang_code in translations:
+        if not validate_map_language_code(lang_code):
+            raise RuntimeError(f"Invalid language code: {lang_code}")
+        if lang_code.lower() == "en":
+            raise RuntimeError("Bulk translation updates cannot modify English text.")
+
+    lines, has_bom = read_text_lines_with_bom(map_path)
+    key_index = find_map_key_line_index(lines, key_name)
+    if key_index < 0:
+        raise RuntimeError(f"Key not found: {key_name}.")
+
+    english_index = find_map_language_line_index(lines, key_index, "en")
+    english_raw = get_map_language_raw_text_from_lines(lines, english_index)
+    if not has_meaningful_translation_text(english_raw):
+        raise RuntimeError(
+            f'English text is missing for key "{key_name}". First set language "en".'
+        )
+
+    normalized_translations = {}
+    for lang_code, text in translations.items():
+        normalized_text = normalize_translation_text_for_map(text, english_raw)
+        if normalized_text:
+            normalized_text = normalize_candidate_translation_against_english(
+                english_raw, normalized_text, key_name, lang_code
+            )
+        normalized_translations[lang_code] = normalized_text
+
+    if backup:
+        create_backup_file(map_path)
+
+    messages = {}
+    changed = False
+    for lang_code in sorted(normalized_translations, key=lambda value: value.lower()):
+        normalized_text = normalized_translations[lang_code]
+        lang_index = find_map_language_line_index(lines, key_index, lang_code)
+        if lang_index < 0:
+            insert_index = find_map_language_insert_index(lines, key_index, lang_code)
+            line_eol = detect_line_eol(lines[insert_index - 1]) if lines else "\r\n"
+            replacement_lines = build_map_translation_lines(
+                lang_code, normalized_text, line_eol
+            )
+            lines[insert_index:insert_index] = replacement_lines
+            messages[lang_code] = (
+                f'OK: Key "{key_name}" / Lang "{lang_code}" added.'
+            )
+            changed = True
+            continue
+
+        replacement_end = lang_index + 1
+        while replacement_end < len(lines) and lines[replacement_end].startswith("\t\t"):
+            replacement_end += 1
+
+        line_eol = detect_line_eol(lines[lang_index])
+        replacement_lines = build_map_translation_lines(
+            lang_code, normalized_text, line_eol
+        )
+        if lines[lang_index:replacement_end] == replacement_lines:
+            messages[lang_code] = (
+                f'INFO: Line already has the same content; no changes made (key={key_name}, lang={lang_code}).'
+            )
+            continue
+
+        lines[lang_index:replacement_end] = replacement_lines
+        messages[lang_code] = (
+            f'OK: Key "{key_name}" / Lang "{lang_code}" updated.'
+        )
+        changed = True
+
+    if changed:
+        write_text_lines_with_bom(map_path, lines, has_bom=has_bom)
+    return messages
+
+
+_ACTIVE_TRANSLATION_MAP_UPDATE_BATCH = None
+
+
+class TranslationMapUpdateBatch:
+    def __init__(self, map_path):
+        self.map_path = map_path
+        self.pending_by_key = {}
+
+    def has_pending_updates(self):
+        return any(self.pending_by_key.values())
+
+    def pending_update_count(self):
+        return sum(len(translations) for translations in self.pending_by_key.values())
+
+    def stage(self, key_name, lang_code, clean_text):
+        key_updates = self.pending_by_key.setdefault(key_name, {})
+        key_updates[lang_code] = clean_text
+        return (
+            f'OK: Key "{key_name}" / Lang "{lang_code}" validated and queued for batch save.'
+        )
+
+    def flush(self):
+        if not self.has_pending_updates():
+            return 0, 0
+
+        persisted_update_count = 0
+        persisted_key_count = 0
+        for key_name in list(self.pending_by_key.keys()):
+            key_updates = self.pending_by_key.get(key_name, {})
+            if not key_updates:
+                self.pending_by_key.pop(key_name, None)
+                continue
+
+            update_snapshot = dict(key_updates)
+            set_translation_entries_in_map(
+                self.map_path, key_name, update_snapshot, backup=False
+            )
+            persisted_key_count += 1
+            persisted_update_count += len(update_snapshot)
+
+            current_updates = self.pending_by_key.get(key_name, {})
+            for lang_code, staged_text in update_snapshot.items():
+                if current_updates.get(lang_code) == staged_text:
+                    current_updates.pop(lang_code, None)
+            if not current_updates:
+                self.pending_by_key.pop(key_name, None)
+
+        return persisted_update_count, persisted_key_count
+
+
+def begin_translation_map_update_batch():
+    global _ACTIVE_TRANSLATION_MAP_UPDATE_BATCH
+
+    if not TRANSLATION_MAP_BATCH_WRITES:
+        return None
+    if _ACTIVE_TRANSLATION_MAP_UPDATE_BATCH is not None:
+        raise RuntimeError("A translations.map batch update is already active.")
+
+    batch = TranslationMapUpdateBatch(MAP_FILE_PATH)
+    _ACTIVE_TRANSLATION_MAP_UPDATE_BATCH = batch
+    return batch
+
+
+def end_translation_map_update_batch(batch):
+    global _ACTIVE_TRANSLATION_MAP_UPDATE_BATCH
+
+    if batch is not None and _ACTIVE_TRANSLATION_MAP_UPDATE_BATCH is batch:
+        _ACTIVE_TRANSLATION_MAP_UPDATE_BATCH = None
+
+
+def flush_active_translation_map_updates(key_name, reason):
+    batch = _ACTIVE_TRANSLATION_MAP_UPDATE_BATCH
+    if batch is None or not batch.has_pending_updates():
+        return True, ""
+
+    pending_count = batch.pending_update_count()
+    try:
+        persisted_update_count, persisted_key_count = batch.flush()
+    except Exception as err:
+        return False, str(err)
+
+    if persisted_update_count:
+        key_label = "key" if persisted_key_count == 1 else "keys"
+        print(
+            f"[{key_name}] Batch-saved {persisted_update_count} translation(s) across "
+            f"{persisted_key_count} {key_label} after {reason}."
+        )
+    elif pending_count:
+        return False, "translations.map batch save completed without persisting queued updates"
+    return True, ""
 
 
 def set_translation_entry_in_map(
@@ -6276,8 +11806,26 @@ def clear_other_languages_for_key(map_path, key_name, backup=False):
     return f'OK: All translations except "en" cleared for key "{key_name}".'
 
 
-def update_translation_via_compiler(key_name, lang_code, new_text, en_text=None):
+def prepare_translation_for_map_update(
+    key_name, lang_code, new_text, en_text=None
+):
     clean_text = new_text
+    country_code = get_standard_ipgeo_country_code_for_source(key_name, en_text)
+    country_proper_name_code = get_ipgeo_proper_name_country_code(key_name, en_text)
+    extended_name_error = detect_extended_ipgeo_translation_truncation(
+        key_name, en_text, clean_text, lang_code
+    )
+    if extended_name_error:
+        return False, clean_text, extended_name_error
+    if country_code and isinstance(en_text, str) and en_text:
+        country_error = detect_suspicious_country_name_candidate(
+            country_code, en_text, clean_text, lang_code
+        )
+        if country_error:
+            return False, clean_text, country_error
+        cache_safe_same_spelling_country_name(
+            country_code, lang_code, en_text, clean_text
+        )
     if isinstance(en_text, str) and en_text:
         placeholder_pairs = build_protected_placeholders(
             en_text, {lang_code: clean_text}
@@ -6286,12 +11834,43 @@ def update_translation_via_compiler(key_name, lang_code, new_text, en_text=None)
             en_text, clean_text, placeholder_pairs, lang_code
         )
         is_valid, validation_message = validate_translation_text(
-            en_text, clean_text, placeholder_pairs, lang_code
+            en_text,
+            clean_text,
+            placeholder_pairs,
+            lang_code,
+            country_code=country_code,
+            country_proper_name_code=country_proper_name_code,
         )
         if not is_valid:
-            return False, validation_message
+            if country_code and clean_text.strip() == en_text.strip():
+                cache_same_spelling_translation_review(
+                    lang_code, en_text, clean_text, False
+                )
+            return False, clean_text, validation_message
+    return True, clean_text, ""
+
+
+def update_translation_via_compiler(key_name, lang_code, new_text, en_text=None):
+    prepared, clean_text, validation_message = prepare_translation_for_map_update(
+        key_name, lang_code, new_text, en_text
+    )
+    if not prepared:
+        return False, validation_message
 
     try:
+        active_batch = _ACTIVE_TRANSLATION_MAP_UPDATE_BATCH
+        if active_batch is not None:
+            normalized_text = normalize_translation_text_for_map(
+                clean_text, en_text if isinstance(en_text, str) else None
+            )
+            if normalized_text and isinstance(en_text, str) and en_text:
+                normalized_text = normalize_candidate_translation_against_english(
+                    en_text, normalized_text, key_name, lang_code
+                )
+            return True, active_batch.stage(
+                key_name, lang_code, normalized_text
+            )
+
         return True, set_translation_entry_in_map(
             MAP_FILE_PATH,
             key_name,
@@ -6489,7 +12068,7 @@ def parse_map_toolkit_arguments(argv):
 def add_common_translate_cli_arguments(parser):
     parser.add_argument(
         "--backend",
-        choices=(API_BACKEND_ASK, API_BACKEND_LOCAL, API_BACKEND_CLOUD),
+        choices=(API_BACKEND_ASK, API_BACKEND_LOCAL, API_BACKEND_GEMINI, API_BACKEND_DEEPSEEK),
         help="Select the translation backend.",
     )
     parser.add_argument(
@@ -6500,8 +12079,10 @@ def add_common_translate_cli_arguments(parser):
         "--stop-on-error",
         help="Abort immediately on the first error.",
     )
-    parser.add_argument("--cloud-api-key", help="Override CLOUD_API_KEY.")
-    parser.add_argument("--cloud-model-name", help="Override CLOUD_MODEL_NAME.")
+    parser.add_argument("--gemini-api-key", help="Override GEMINI_API_KEY.")
+    parser.add_argument("--gemini-model-name", help="Override GEMINI_MODEL_NAME.")
+    parser.add_argument("--deepseek-api-key", help="Override DEEPSEEK_API_KEY.")
+    parser.add_argument("--deepseek-model-name", help="Override DEEPSEEK_MODEL_NAME.")
     parser.add_argument("--local-api-base-url", help="Override LOCAL_API_BASE_URL.")
     parser.add_argument("--local-api-key", help="Override LOCAL_API_KEY.")
     parser.add_argument("--local-model-name", help="Override LOCAL_MODEL_NAME.")
@@ -6554,6 +12135,16 @@ def parse_structured_translate_arguments(argv):
     )
     key_list_parser.add_argument(
         "--rounds", type=int, help="Translation round count."
+    )
+
+    clear_non_english_parser = subparsers.add_parser(
+        "clear-non-english",
+        aliases=["clear-non-english-translations"],
+        help="Clear non-English translations for specific KEY values.",
+    )
+    add_common_translate_cli_arguments(clear_non_english_parser)
+    clear_non_english_parser.add_argument(
+        "--keys", required=True, help="Comma-separated KEY list."
     )
 
     clean_key_list_parser = subparsers.add_parser(
@@ -6657,8 +12248,10 @@ def parse_structured_translate_arguments(argv):
             limit=getattr(parsed_args, "limit", None),
             loop=getattr(parsed_args, "loop", None),
             stop_on_error=getattr(parsed_args, "stop_on_error", None),
-            cloud_api_key=getattr(parsed_args, "cloud_api_key", None),
-            cloud_model_name=getattr(parsed_args, "cloud_model_name", None),
+            gemini_api_key=getattr(parsed_args, "gemini_api_key", None),
+            gemini_model_name=getattr(parsed_args, "gemini_model_name", None),
+            deepseek_api_key=getattr(parsed_args, "deepseek_api_key", None),
+            deepseek_model_name=getattr(parsed_args, "deepseek_model_name", None),
             local_api_base_url=getattr(parsed_args, "local_api_base_url", None),
             local_api_key=getattr(parsed_args, "local_api_key", None),
             local_model_name=getattr(parsed_args, "local_model_name", None),
@@ -6680,35 +12273,35 @@ def parse_command_line_arguments(argv):
     )
     parser.add_argument(
         "--backend",
-        choices=(API_BACKEND_ASK, API_BACKEND_LOCAL, API_BACKEND_CLOUD),
+        choices=(API_BACKEND_ASK, API_BACKEND_LOCAL, API_BACKEND_GEMINI, API_BACKEND_DEEPSEEK),
         help="Override the startup backend selection.",
     )
     parser.add_argument(
         "--keys",
-        help="Comma-separated KEY list for operations 2 and 3.",
+        help="Comma-separated KEY list for operations 2, 3, and 4.",
     )
     parser.add_argument(
         "--key-lang-pairs",
-        help="Comma-separated alternating KEY and language code values for operation 5.",
+        help="Comma-separated alternating KEY and language code values for operation 6.",
     )
     parser.add_argument(
         "--line-numbers",
-        help="Comma-separated line number list for operation 4.",
+        help="Comma-separated line number list for operation 5.",
     )
     parser.add_argument(
         "--rounds",
         type=int,
-        help="Translation round count for operations 1, 2, and 3.",
+        help="Translation round count for operations 1, 2, and 4.",
     )
     parser.add_argument(
         "--start-line",
         type=int,
-        help="StartLine value for operation 9.",
+        help="StartLine value for operation 10.",
     )
     parser.add_argument(
         "--limit",
         type=int,
-        help="Limit value for operation 9.",
+        help="Limit value for operation 10.",
     )
     parser.add_argument(
         "--loop",
@@ -6718,8 +12311,10 @@ def parse_command_line_arguments(argv):
         "--stop-on-error",
         help="Whether command-line execution should stop immediately on the first error.",
     )
-    parser.add_argument("--cloud-api-key", help="Override CLOUD_API_KEY.")
-    parser.add_argument("--cloud-model-name", help="Override CLOUD_MODEL_NAME.")
+    parser.add_argument("--gemini-api-key", help="Override GEMINI_API_KEY.")
+    parser.add_argument("--gemini-model-name", help="Override GEMINI_MODEL_NAME.")
+    parser.add_argument("--deepseek-api-key", help="Override DEEPSEEK_API_KEY.")
+    parser.add_argument("--deepseek-model-name", help="Override DEEPSEEK_MODEL_NAME.")
     parser.add_argument("--local-api-base-url", help="Override LOCAL_API_BASE_URL.")
     parser.add_argument("--local-api-key", help="Override LOCAL_API_KEY.")
     parser.add_argument("--local-model-name", help="Override LOCAL_MODEL_NAME.")
@@ -6736,18 +12331,24 @@ def parse_command_line_arguments(argv):
 
 def apply_command_line_overrides(args):
     global API_TYPE
-    global CLOUD_API_KEY
-    global CLOUD_MODEL_NAME
+    global GEMINI_API_KEY
+    global GEMINI_MODEL_NAME
+    global DEEPSEEK_API_KEY
+    global DEEPSEEK_MODEL_NAME
     global LOCAL_API_BASE_URL
     global LOCAL_API_KEY
     global LOCAL_MODEL_NAME
 
     if args.backend is not None:
         API_TYPE = args.backend
-    if args.cloud_api_key is not None:
-        CLOUD_API_KEY = args.cloud_api_key
-    if args.cloud_model_name is not None:
-        CLOUD_MODEL_NAME = args.cloud_model_name
+    if args.gemini_api_key is not None:
+        GEMINI_API_KEY = args.gemini_api_key
+    if args.gemini_model_name is not None:
+        GEMINI_MODEL_NAME = args.gemini_model_name
+    if args.deepseek_api_key is not None:
+        DEEPSEEK_API_KEY = args.deepseek_api_key
+    if args.deepseek_model_name is not None:
+        DEEPSEEK_MODEL_NAME = args.deepseek_model_name
     if args.local_api_base_url is not None:
         LOCAL_API_BASE_URL = args.local_api_base_url
     if args.local_api_key is not None:
@@ -6876,7 +12477,7 @@ def execute_map_toolkit_action(map_args):
 
 
 def run_map_toolkit_menu_operation(choice):
-    if choice == "11":
+    if choice == "12":
         rc_path = read_cli_or_prompt_value(
             None,
             f'RC file path (default "{DEFAULT_RC_FILE_PATH}"): ',
@@ -6903,7 +12504,7 @@ def run_map_toolkit_menu_operation(choice):
             )
         )
 
-    if choice == "12":
+    if choice == "13":
         map_path = read_cli_or_prompt_value(
             None,
             f'translations.map path (default "{MAP_FILE_PATH}"): ',
@@ -6931,7 +12532,7 @@ def run_map_toolkit_menu_operation(choice):
             )
         )
 
-    if choice == "13":
+    if choice == "14":
         map_path = read_cli_or_prompt_value(
             None,
             f'translations.map path (default "{MAP_FILE_PATH}"): ',
@@ -6942,7 +12543,7 @@ def run_map_toolkit_menu_operation(choice):
             argparse.Namespace(map_action="check", map_path=map_path)
         )
 
-    if choice == "14":
+    if choice == "15":
         map_path = read_cli_or_prompt_value(
             None,
             f'translations.map path (default "{MAP_FILE_PATH}"): ',
@@ -6970,7 +12571,7 @@ def run_map_toolkit_menu_operation(choice):
             )
         )
 
-    if choice == "15":
+    if choice == "16":
         map_path = read_cli_or_prompt_value(
             None,
             f'translations.map path (default "{MAP_FILE_PATH}"): ',
@@ -6990,7 +12591,7 @@ def run_map_toolkit_menu_operation(choice):
             )
         )
 
-    if choice == "16":
+    if choice == "17":
         map_path = read_cli_or_prompt_value(
             None,
             f'translations.map path (default "{MAP_FILE_PATH}"): ',
@@ -7008,25 +12609,45 @@ def run_map_toolkit_menu_operation(choice):
             )
         )
 
-    if choice == "17":
-        map_path = read_cli_or_prompt_value(
-            None,
-            f'translations.map path (default "{MAP_FILE_PATH}"): ',
-            "",
-            default_value=MAP_FILE_PATH,
-        )
-        key_name = read_cli_or_prompt_value(None, "KEY to clear: ", "KEY is required.")
-        create_backup = prompt_boolean_option("Create backup before writing", False)
-        return execute_map_toolkit_action(
-            argparse.Namespace(
-                map_action="clear-other-languages",
-                map_path=map_path,
-                key=key_name,
-                backup=create_backup,
-            )
+    raise RuntimeError(f"Unsupported menu toolkit choice: {choice}")
+
+
+def clean_non_english_specific_keys_logic(raw_input_text=None, stop_on_error=False):
+    print("\nClean Non-English Translations For Specific Translation Key(s)")
+
+    raw_keys_input = read_cli_or_prompt_value(
+        raw_input_text,
+        "Enter the KEY or comma-separated KEY list to clean non-English translations: ",
+        "KEY list must be provided for operation 3 when stdin is not interactive.",
+    )
+    specific_keys = parse_specific_keys_input(raw_keys_input)
+    if not specific_keys:
+        print("Invalid KEY input.")
+        handle_operation_error("Invalid KEY input for operation 3.", stop_on_error)
+        return 1
+
+    processed_count = 0
+    error_count = 0
+    for key_name in specific_keys:
+        print(f"[{key_name}] Clearing all translations except [en]...")
+        success, msg = clear_other_translations_via_compiler(key_name)
+        if success:
+            processed_count += 1
+            if msg:
+                print(f"[{key_name}] Clear completed: {msg}")
+            else:
+                print(f"[{key_name}] Clear completed.")
+            continue
+
+        print(f"[{key_name}] Clear failed: {msg}")
+        error_count += 1
+        handle_operation_error(
+            f"[{key_name}] Failed to clear translations: {msg}",
+            stop_on_error,
         )
 
-    raise RuntimeError(f"Unsupported menu toolkit choice: {choice}")
+    print(f"\nOperation completed! Processed: {processed_count}, Errors: {error_count}")
+    return error_count
 
 
 def print_total_elapsed_time():
@@ -7040,7 +12661,7 @@ def handle_operation_error(message, stop_on_error=False):
 
 
 def get_active_backend_key():
-    return API_BACKEND_LOCAL if resolve_backend_selection() else API_BACKEND_CLOUD
+    return resolve_backend_selection()
 
 
 def collect_runtime_override_settings(cli_args=None):
@@ -7051,8 +12672,10 @@ def collect_runtime_override_settings(cli_args=None):
         return runtime_settings
 
     for attr_name in (
-        "cloud_api_key",
-        "cloud_model_name",
+        "gemini_api_key",
+        "gemini_model_name",
+        "deepseek_api_key",
+        "deepseek_model_name",
         "local_api_base_url",
         "local_api_key",
         "local_model_name",
@@ -7066,8 +12689,10 @@ def collect_runtime_override_settings(cli_args=None):
 
 def apply_runtime_override_settings(runtime_settings):
     global API_TYPE
-    global CLOUD_API_KEY
-    global CLOUD_MODEL_NAME
+    global GEMINI_API_KEY
+    global GEMINI_MODEL_NAME
+    global DEEPSEEK_API_KEY
+    global DEEPSEEK_MODEL_NAME
     global LOCAL_API_BASE_URL
     global LOCAL_API_KEY
     global LOCAL_MODEL_NAME
@@ -7076,13 +12701,17 @@ def apply_runtime_override_settings(runtime_settings):
         return
 
     backend_value = runtime_settings.get("backend")
-    if backend_value in (API_BACKEND_LOCAL, API_BACKEND_CLOUD, API_BACKEND_ASK):
-        API_TYPE = backend_value
+    if backend_value is not None:
+        API_TYPE = normalize_backend_setting(backend_value)
 
-    if "cloud_api_key" in runtime_settings:
-        CLOUD_API_KEY = runtime_settings.get("cloud_api_key", "")
-    if "cloud_model_name" in runtime_settings:
-        CLOUD_MODEL_NAME = runtime_settings.get("cloud_model_name", "")
+    if "gemini_api_key" in runtime_settings:
+        GEMINI_API_KEY = runtime_settings.get("gemini_api_key", "")
+    if "gemini_model_name" in runtime_settings:
+        GEMINI_MODEL_NAME = runtime_settings.get("gemini_model_name", "")
+    if "deepseek_api_key" in runtime_settings:
+        DEEPSEEK_API_KEY = runtime_settings.get("deepseek_api_key", "")
+    if "deepseek_model_name" in runtime_settings:
+        DEEPSEEK_MODEL_NAME = runtime_settings.get("deepseek_model_name", "")
     if "local_api_base_url" in runtime_settings:
         LOCAL_API_BASE_URL = runtime_settings.get("local_api_base_url", "")
     if "local_api_key" in runtime_settings:
@@ -7092,17 +12721,22 @@ def apply_runtime_override_settings(runtime_settings):
 
 
 def ensure_translation_backend_ready(prompt_user=True):
-    backend_is_local = resolve_backend_selection(prompt_user=prompt_user)
-    if not backend_is_local and not CLOUD_API_KEY:
-        raise RuntimeError("CLOUD_API_KEY environment variable is not set.")
-    return backend_is_local
+    backend_key = resolve_backend_selection(prompt_user=prompt_user)
+    if backend_key == API_BACKEND_GEMINI and not GEMINI_API_KEY:
+        raise RuntimeError("GEMINI_API_KEY environment variable is not set.")
+    if backend_key == API_BACKEND_DEEPSEEK and not DEEPSEEK_API_KEY:
+        raise RuntimeError("DEEPSEEK_API_KEY environment variable is not set.")
+    return backend_key
 
 
 def print_active_backend_info():
-    backend_is_local = ensure_translation_backend_ready(prompt_user=False)
+    backend_key = ensure_translation_backend_ready(prompt_user=False)
     print(f"Info: Backend = {get_active_backend_label()}")
-    if backend_is_local:
+    if backend_key == API_BACKEND_LOCAL:
         print(f"Info: URL = {LOCAL_API_BASE_URL.rstrip('/')}/chat/completions")
+        print(f"Info: Local model family = {get_local_model_family()}")
+    elif backend_key == API_BACKEND_DEEPSEEK:
+        print(f"Info: URL = {DEEPSEEK_API_URL.rstrip('/')}/chat/completions")
     print(f"Info: Model = {get_active_model_name()}")
 
 
@@ -7148,7 +12782,7 @@ def build_legacy_resume_state(resume_key):
         "saved_at": "",
         "legacy_resume_mode": True,
         "operation": {
-            "choice": "6",
+            "choice": "7",
             "label": "Legacy single-key mapping resume",
         },
         "params": {
@@ -7207,7 +12841,7 @@ def load_resume_state():
         )
 
     operation = resume_state.get("operation", {})
-    if normalize_menu_choice(operation.get("choice")) not in {"1", "2", "3", "4", "5", "7"}:
+    if normalize_menu_choice(operation.get("choice")) not in {"1", "2", "4", "5", "6", "8"}:
         raise ValueError("Resume file does not contain a supported multi-item translation operation.")
 
     resume_state.setdefault("params", {})
@@ -7442,7 +13076,13 @@ def prompt_translation_round_count(cli_value=None):
         )
 
 
-def should_require_translation_completion(en_text, existing_text):
+def should_require_translation_completion(
+    en_text,
+    existing_text,
+    lang_code="",
+    force_review_existing=False,
+    key_name="",
+):
     if is_invariant_translation_source(en_text):
         if not isinstance(existing_text, str):
             return True
@@ -7455,20 +13095,85 @@ def should_require_translation_completion(en_text, existing_text):
         return True
 
     if existing_text == en_text:
+        if is_extended_ipgeo_display_name(key_name, en_text):
+            return True
+        if is_known_localized_country_name(lang_code, en_text, existing_text):
+            return False
+        same_ok, _, _ = review_same_spelling_translation_with_ai(
+            lang_code, en_text, existing_text
+        )
+        if same_ok:
+            return False
+        return True
+
+    if force_review_existing:
         return True
 
     placeholder_pairs = build_protected_placeholders(
         en_text, {"candidate": existing_text}
     )
-    is_valid, _ = validate_translation_text(en_text, existing_text, placeholder_pairs)
-    return not is_valid
+    country_code = get_standard_ipgeo_country_code_for_source(key_name, en_text)
+    country_proper_name_code = get_ipgeo_proper_name_country_code(key_name, en_text)
+    extended_name_error = detect_extended_ipgeo_translation_truncation(
+        key_name, en_text, existing_text, lang_code
+    )
+    if extended_name_error:
+        return True
+    is_valid, validation_error = validate_translation_text(
+        en_text,
+        existing_text,
+        placeholder_pairs,
+        lang_code,
+        country_code=country_code,
+        country_proper_name_code=country_proper_name_code,
+    )
+    if is_valid:
+        return False
+
+    leaked_source_words = get_leaked_source_words(
+        en_text,
+        existing_text,
+        lang_code,
+        country_code=country_code,
+        country_proper_name_code=country_proper_name_code,
+    )
+    if (
+        leaked_source_words
+        and "untranslated english source word" in validation_error.casefold()
+    ):
+        leak_ok, _, _ = review_source_word_leak_with_ai(
+            lang_code, en_text, existing_text, leaked_source_words
+        )
+        if leak_ok:
+            return False
+
+    return True
 
 
-def build_pending_language_map(en_text, target_langs):
+def build_pending_language_map(
+    en_text, target_langs, force_review_existing=False, key_name=""
+):
     pending = {}
     for lang_code, current_text in target_langs.items():
-        if should_require_translation_completion(en_text, current_text):
-            pending[lang_code] = current_text
+        if should_require_translation_completion(
+            en_text,
+            current_text,
+            lang_code=lang_code,
+            force_review_existing=force_review_existing,
+            key_name=key_name,
+        ):
+            discard_existing = bool(
+                detect_truncated_localized_country_name(
+                    en_text, current_text, lang_code
+                )
+                or detect_suspiciously_short_translation(
+                    en_text, current_text, lang_code
+                )
+                or detect_extended_ipgeo_translation_truncation(
+                    key_name, en_text, current_text, lang_code
+                )
+            )
+            pending[lang_code] = "" if discard_existing else current_text
     return pending
 
 
@@ -7482,14 +13187,14 @@ def try_fix_language_until_valid(
         print(
             f"  -> [{lang_code}] Attempting targeted completion fix ({attempt}/{TRANSLATION_COMPLETION_PER_LANGUAGE_FIX_RETRIES})..."
         )
-        time.sleep(API_DELAY_SEC)
+        sleep_between_active_api_calls()
         extra_requirements = build_embedded_phrase_fix_requirements(
             en_text, latest_text if isinstance(latest_text, str) else "", lang_code
         )
         extra_requirements += build_compiler_percent_fix_requirements(
             en_text, latest_text if isinstance(latest_text, str) else ""
         )
-        fixed_text = fix_translation_with_cloud(
+        fixed_text = fix_translation_with_active_api(
             key_name,
             lang_code,
             latest_text if isinstance(latest_text, str) else "",
@@ -7505,7 +13210,7 @@ def try_fix_language_until_valid(
                 f"  -> [{lang_code}] Failed to get targeted completion fix from {get_active_backend_label()}. Retrying in {retry_delay_sec} seconds (Attempt {retry_count + 1}/3)..."
             )
             time.sleep(retry_delay_sec)
-            fixed_text = fix_translation_with_cloud(
+            fixed_text = fix_translation_with_active_api(
                 key_name,
                 lang_code,
                 latest_text if isinstance(latest_text, str) else "",
@@ -7533,22 +13238,30 @@ def try_fix_language_until_valid(
 
 
 def get_mini_retry_batch_size(en_text="", lang_count=0):
-    if resolve_backend_selection():
+    if is_local_backend():
         return get_local_effective_batch_size(
-            LOCAL_API_MAX_LANGUAGES_PER_BATCH, en_text, lang_count
+            get_local_max_languages_per_batch(), en_text, lang_count
         )
-    return CLOUD_API_MAX_LANGUAGES_PER_BATCH
+    return get_active_max_languages_per_batch()
 
 
 def get_failed_language_batch_size():
-    if resolve_backend_selection():
-        return max(1, LOCAL_API_FAILED_LANGUAGE_MAX_LANGUAGES_PER_BATCH)
     return 1
 
 
-def retry_translation_chunk(key_name, en_text, batch_langs, error_context=""):
-    updates = check_and_translate_with_cloud(
-        key_name, en_text, batch_langs, error_context=error_context
+def retry_translation_chunk(
+    key_name,
+    en_text,
+    batch_langs,
+    error_context="",
+    preserve_existing_text=False,
+):
+    updates = check_and_translate_with_active_api(
+        key_name,
+        en_text,
+        batch_langs,
+        error_context=error_context,
+        preserve_existing_text=preserve_existing_text,
     )
     retry_count = 0
     while (
@@ -7561,11 +13274,42 @@ def retry_translation_chunk(key_name, en_text, batch_langs, error_context=""):
             f"[{key_name}] Chunk API call or response parsing failed. Retrying in {retry_delay_sec} seconds (Attempt {retry_count + 1}/{TRANSLATION_CHUNK_RETRY_COUNT})..."
         )
         time.sleep(retry_delay_sec)
-        updates = check_and_translate_with_cloud(
-            key_name, en_text, batch_langs, error_context=error_context
+        updates = check_and_translate_with_active_api(
+            key_name,
+            en_text,
+            batch_langs,
+            error_context=error_context,
+            preserve_existing_text=preserve_existing_text,
         )
         retry_count += 1
     return updates
+
+
+def capture_last_batch_state():
+    return {
+        "status": LAST_BATCH_RESULT_STATUS,
+        "errors": dict(LAST_BATCH_LANGUAGE_ERRORS),
+        "candidates": dict(LAST_BATCH_LANGUAGE_CANDIDATES),
+    }
+
+
+def run_translation_chunk_capture(
+    key_name,
+    en_text,
+    batch_langs,
+    error_context="",
+    preserve_existing_text=False,
+):
+    updates = retry_translation_chunk(
+        key_name,
+        en_text,
+        batch_langs,
+        error_context=error_context,
+        preserve_existing_text=preserve_existing_text,
+    )
+    result = capture_last_batch_state()
+    result["updates"] = updates
+    return result
 
 
 def should_attempt_candidate_repair(failure_reason):
@@ -7575,6 +13319,10 @@ def should_attempt_candidate_repair(failure_reason):
         for fragment in (
             "untranslated embedded english phrase",
             "untranslated embedded english word",
+            "untranslated english source word",
+            "identical to the english source",
+            "same as the english source",
+            "source echo",
             "unexpected script mixture",
             "suspicious transliterated or foreign token",
         )
@@ -7582,9 +13330,10 @@ def should_attempt_candidate_repair(failure_reason):
 
 
 def try_repair_skipped_candidate_immediately(
-    key_name, lang_code, en_text, pending_states, failure_reason
+    key_name, lang_code, en_text, pending_states, failure_reason, batch_candidates=None
 ):
-    candidate_text = LAST_BATCH_LANGUAGE_CANDIDATES.get(lang_code, "")
+    candidate_source = batch_candidates if isinstance(batch_candidates, dict) else LAST_BATCH_LANGUAGE_CANDIDATES
+    candidate_text = candidate_source.get(lang_code, "")
     if not (isinstance(candidate_text, str) and candidate_text.strip()):
         return False
     if not should_attempt_candidate_repair(failure_reason):
@@ -7608,6 +13357,81 @@ def try_repair_skipped_candidate_immediately(
     return True
 
 
+def should_discard_failed_candidate(en_text, candidate_text, lang_code, failure_reason=""):
+    lowered_reason = str(failure_reason or "").casefold()
+    if any(
+        fragment in lowered_reason
+        for fragment in (
+            "ratio check failed",
+            "appears truncated",
+            "suspiciously short",
+            "missing terminal sentence punctuation",
+        )
+    ):
+        return True
+    return bool(
+        detect_truncated_localized_country_name(
+            en_text, candidate_text, lang_code
+        )
+        or detect_suspiciously_short_translation(
+            en_text, candidate_text, lang_code
+        )
+    )
+
+
+def prepare_failed_candidate_for_retry(
+    en_text, candidate_text, lang_code, failure_reason=""
+):
+    if should_discard_failed_candidate(
+        en_text, candidate_text, lang_code, failure_reason
+    ):
+        return ""
+    return candidate_text if isinstance(candidate_text, str) else ""
+
+
+def try_focused_regenerate_language(
+    key_name, lang_code, candidate_text, en_text, failure_reason
+):
+    if not isinstance(lang_code, str) or not lang_code:
+        return False, candidate_text, "invalid language code"
+
+    error_context = str(failure_reason or "translation validation failed").strip()
+    retry_candidate = prepare_failed_candidate_for_retry(
+        en_text, candidate_text, lang_code, error_context
+    )
+    focused_langs = {lang_code: retry_candidate}
+    updates = retry_translation_chunk(
+        key_name,
+        en_text,
+        focused_langs,
+        error_context=error_context,
+        preserve_existing_text=bool(retry_candidate),
+    )
+    if not updates or lang_code not in updates:
+        msg = LAST_BATCH_LANGUAGE_ERRORS.get(lang_code, "focused regenerate returned no usable translation")
+        return False, candidate_text, msg
+
+    regenerated_text = updates.get(lang_code, "")
+    success, msg = update_translation_via_compiler(
+        key_name, lang_code, regenerated_text, en_text
+    )
+    if success:
+        return True, regenerated_text, msg
+    return False, regenerated_text, msg
+
+
+def build_failed_language_retry_fingerprint(candidate_text, failure_reason):
+    candidate = unicodedata.normalize(
+        "NFKC", str(candidate_text or "")
+    )
+    candidate = re.sub(r"\s+", " ", candidate.strip()).casefold()
+    reason = unicodedata.normalize("NFKC", str(failure_reason or ""))
+    reason = re.sub(r"\s+", " ", reason.strip()).casefold()
+    if not candidate and not reason:
+        return ""
+    return f"{candidate}\n{reason}"
+
+
 def process_failed_languages_immediately(
     key_name, en_text, failed_lang_codes, pending_states
 ):
@@ -7625,12 +13449,28 @@ def process_failed_languages_immediately(
         del failed_queue[:focused_batch_size]
 
         batch_langs = {
-            lang_code: pending_states[lang_code].get("text", "")
+            lang_code: prepare_failed_candidate_for_retry(
+                en_text,
+                pending_states[lang_code].get("text", ""),
+                lang_code,
+                pending_states[lang_code].get("last_error", ""),
+            )
             for lang_code in current_langs
             if lang_code in pending_states
         }
         if not batch_langs:
             continue
+
+        for lang_code in batch_langs:
+            state = pending_states.get(lang_code)
+            if not isinstance(state, dict):
+                continue
+            state.setdefault(
+                "last_retry_fingerprint",
+                build_failed_language_retry_fingerprint(
+                    state.get("text", ""), state.get("last_error", "")
+                ),
+            )
 
         last_error_context = ""
         if len(batch_langs) == 1:
@@ -7707,10 +13547,21 @@ def process_failed_languages_immediately(
                 print(
                     f"  -> [{lang_code}] Map update error after immediate retry: {msg}"
                 )
+                focused_success, focused_text, focused_msg = try_focused_regenerate_language(
+                    key_name, lang_code, candidate_text, en_text, msg
+                )
+                if focused_success:
+                    print(
+                        f"  -> [{lang_code}] Successfully regenerated and updated: {focused_msg}"
+                    )
+                    made_any_change = True
+                    del pending_states[lang_code]
+                    continue
+
                 if should_attempt_candidate_repair(msg):
                     repaired_success, repaired_text, repaired_msg = (
                         try_phrase_only_repair(
-                            key_name, lang_code, candidate_text, en_text
+                            key_name, lang_code, focused_text, en_text
                         )
                     )
                     if repaired_success:
@@ -7725,22 +13576,45 @@ def process_failed_languages_immediately(
                     )
 
                 fixed_success, fixed_text, fixed_msg = try_fix_language_until_valid(
-                    key_name, lang_code, candidate_text, en_text, msg
+                    key_name, lang_code, focused_text, en_text, focused_msg or msg
                 )
                 if fixed_success:
                     made_any_change = True
                     del pending_states[lang_code]
                     continue
 
-                state["text"] = candidate_text
+                prepared_text = prepare_failed_candidate_for_retry(
+                    en_text, focused_text, lang_code, fixed_msg
+                )
+                retry_fingerprint = build_failed_language_retry_fingerprint(
+                    prepared_text, fixed_msg
+                )
+                if (
+                    retry_fingerprint
+                    and retry_fingerprint == state.get("last_retry_fingerprint", "")
+                ):
+                    state["text"] = prepared_text
+                    state["last_error"] = fixed_msg
+                    print(
+                        f"  -> [{lang_code}] Unchanged invalid candidate repeated; stopping further retries for this language."
+                    )
+                    continue
+
+                state["text"] = prepared_text
                 state["last_error"] = fixed_msg
+                state["last_retry_fingerprint"] = retry_fingerprint
                 retry_needed.append(lang_code)
 
             if not retry_needed:
                 break
 
             batch_langs = {
-                lang_code: pending_states[lang_code].get("text", "")
+                lang_code: prepare_failed_candidate_for_retry(
+                    en_text,
+                    pending_states[lang_code].get("text", ""),
+                    lang_code,
+                    pending_states[lang_code].get("last_error", ""),
+                )
                 for lang_code in retry_needed
                 if lang_code in pending_states
             }
@@ -7753,16 +13627,31 @@ def process_failed_languages_immediately(
                 last_error_context = ""
 
             if attempt_index < TRANSLATION_FAILED_LANGUAGE_RETRY_COUNT:
-                time.sleep(API_DELAY_SEC)
+                sleep_between_active_api_calls()
 
     return made_any_change
 
 
-def complete_key_translations(key_name, en_text, target_langs, batch_size):
-    pending_langs = build_pending_language_map(en_text, target_langs)
+def complete_key_translations(
+    key_name,
+    en_text,
+    target_langs,
+    batch_size,
+    force_review_existing=False,
+    preserve_existing_text=False,
+):
+    target_langs, country_catalog_change = apply_standard_country_translations(
+        key_name, en_text, target_langs
+    )
+    pending_langs = build_pending_language_map(
+        en_text,
+        target_langs,
+        force_review_existing=force_review_existing,
+        key_name=key_name,
+    )
     if not pending_langs:
         return {
-            "made_any_change": False,
+            "made_any_change": country_catalog_change,
             "remaining_languages": [],
             "had_pending_languages": False,
         }
@@ -7770,7 +13659,11 @@ def complete_key_translations(key_name, en_text, target_langs, batch_size):
     effective_batch_size = get_translation_completion_limits(
         batch_size, en_text, len(pending_langs)
     )
-    made_any_change = False
+    if is_local_backend() and is_standard_ipgeo_country_key(key_name, en_text):
+        effective_batch_size = min(
+            effective_batch_size, LOCAL_API_COUNTRY_NAME_MAX_LANGUAGES_PER_BATCH
+        )
+    made_any_change = country_catalog_change
     pending_states = {
         lang_code: {
             "text": text,
@@ -7780,47 +13673,69 @@ def complete_key_translations(key_name, en_text, target_langs, batch_size):
     }
 
     pending_order = sorted(pending_states.keys())
-    if should_force_single_language_local_batch(pending_order, en_text):
-        effective_batch_size = 1
-    total_chunks = (
-        len(pending_order) + effective_batch_size - 1
-    ) // effective_batch_size
+    processing_batches = build_language_processing_batches(
+        pending_order,
+        effective_batch_size,
+        en_text,
+        preserve_existing_text=preserve_existing_text,
+    )
+    total_chunks = len(processing_batches)
     print(
         f"[{key_name}] Processing {len(pending_order)} remaining language(s) in {total_chunks} chunk(s)..."
     )
 
-    chunk_counter = 0
-    start_index = 0
-    while start_index < len(pending_order):
-        current_langs = pending_order[start_index : start_index + effective_batch_size]
-        start_index += effective_batch_size
+    def build_chunk_request(batch_index, current_langs):
         current_langs = [
             lang_code for lang_code in current_langs if lang_code in pending_states
         ]
-        if not current_langs:
-            continue
-
-        chunk_counter += 1
         batch_langs = {
             lang_code: pending_states[lang_code].get("text", "")
             for lang_code in current_langs
         }
-        print(
-            f"[{key_name}] Completion chunk {chunk_counter}/{total_chunks} for {len(batch_langs)} language(s)..."
-        )
-
         error_context = ""
         if len(batch_langs) == 1:
             only_lang_code = next(iter(batch_langs.keys()))
-            error_context = pending_states.get(only_lang_code, {}).get("last_error", "")
+            error_context = pending_states.get(only_lang_code, {}).get(
+                "last_error", ""
+            )
+        return {
+            "batch_index": batch_index,
+            "current_langs": current_langs,
+            "batch_langs": batch_langs,
+            "error_context": error_context,
+        }
 
-        updates = retry_translation_chunk(
-            key_name, en_text, batch_langs, error_context=error_context
+    def run_chunk_request(request):
+        batch_langs = request["batch_langs"]
+        if request.get("sleep_before_call"):
+            sleep_between_active_api_calls()
+        if not batch_langs:
+            return {
+                "updates": {},
+                "status": "success",
+                "errors": {},
+                "candidates": {},
+            }
+        return run_translation_chunk_capture(
+            key_name,
+            en_text,
+            batch_langs,
+            error_context=request["error_context"],
+            preserve_existing_text=preserve_existing_text,
         )
+
+    def process_chunk_result(request, chunk_result, allow_api_repairs=True):
+        nonlocal made_any_change
+
+        current_langs = request["current_langs"]
+        updates = chunk_result.get("updates") if isinstance(chunk_result, dict) else None
+        batch_status = chunk_result.get("status", "") if isinstance(chunk_result, dict) else "call_failure"
+        batch_errors = chunk_result.get("errors", {}) if isinstance(chunk_result, dict) else {}
+        batch_candidates = chunk_result.get("candidates", {}) if isinstance(chunk_result, dict) else {}
         failed_lang_codes = []
 
         if updates is None:
-            if LAST_BATCH_RESULT_STATUS in ("call_failure", "parse_failure"):
+            if batch_status in ("call_failure", "parse_failure"):
                 print(
                     f"[{key_name}] Chunk failed after grouped retries. Switching its languages to immediate retry mode."
                 )
@@ -7828,19 +13743,24 @@ def complete_key_translations(key_name, en_text, target_langs, batch_size):
                 if lang_code not in pending_states:
                     continue
                 state = pending_states[lang_code]
-                if LAST_BATCH_RESULT_STATUS in ("call_failure", "parse_failure"):
+                if batch_status in ("call_failure", "parse_failure"):
                     state["last_error"] = (
                         "chunk API call failed"
-                        if LAST_BATCH_RESULT_STATUS == "call_failure"
+                        if batch_status == "call_failure"
                         else "line-based response parse failed"
                     )
                 else:
-                    missing_reason = LAST_BATCH_LANGUAGE_ERRORS.get(
+                    missing_reason = batch_errors.get(
                         lang_code, "translation was rejected during validation"
                     )
                     state["last_error"] = missing_reason
-                    if try_repair_skipped_candidate_immediately(
-                        key_name, lang_code, en_text, pending_states, missing_reason
+                    if allow_api_repairs and try_repair_skipped_candidate_immediately(
+                        key_name,
+                        lang_code,
+                        en_text,
+                        pending_states,
+                        missing_reason,
+                        batch_candidates=batch_candidates,
                     ):
                         made_any_change = True
                         continue
@@ -7853,12 +13773,17 @@ def complete_key_translations(key_name, en_text, target_langs, batch_size):
                 state = pending_states[lang_code]
                 candidate_text = updates.get(lang_code, state.get("text", ""))
                 if not (isinstance(candidate_text, str) and candidate_text.strip()):
-                    missing_reason = LAST_BATCH_LANGUAGE_ERRORS.get(
+                    missing_reason = batch_errors.get(
                         lang_code, "language was not returned by the translation model"
                     )
                     state["last_error"] = missing_reason
-                    if try_repair_skipped_candidate_immediately(
-                        key_name, lang_code, en_text, pending_states, missing_reason
+                    if allow_api_repairs and try_repair_skipped_candidate_immediately(
+                        key_name,
+                        lang_code,
+                        en_text,
+                        pending_states,
+                        missing_reason,
+                        batch_candidates=batch_candidates,
                     ):
                         made_any_change = True
                         continue
@@ -7875,10 +13800,29 @@ def complete_key_translations(key_name, en_text, target_langs, batch_size):
                     continue
 
                 print(f"  -> [{lang_code}] Map update error: {msg}")
+                if not allow_api_repairs:
+                    state["text"] = prepare_failed_candidate_for_retry(
+                        en_text, candidate_text, lang_code, msg
+                    )
+                    state["last_error"] = msg
+                    failed_lang_codes.append(lang_code)
+                    continue
+
+                focused_success, focused_text, focused_msg = try_focused_regenerate_language(
+                    key_name, lang_code, candidate_text, en_text, msg
+                )
+                if focused_success:
+                    print(
+                        f"  -> [{lang_code}] Successfully regenerated and updated: {focused_msg}"
+                    )
+                    made_any_change = True
+                    del pending_states[lang_code]
+                    continue
+
                 if should_attempt_candidate_repair(msg):
                     repaired_success, repaired_text, repaired_msg = (
                         try_phrase_only_repair(
-                            key_name, lang_code, candidate_text, en_text
+                            key_name, lang_code, focused_text, en_text
                         )
                     )
                     if repaired_success:
@@ -7893,25 +13837,132 @@ def complete_key_translations(key_name, en_text, target_langs, batch_size):
                     )
 
                 fixed_success, fixed_text, fixed_msg = try_fix_language_until_valid(
-                    key_name, lang_code, candidate_text, en_text, msg
+                    key_name, lang_code, focused_text, en_text, focused_msg or msg
                 )
                 if fixed_success:
                     made_any_change = True
                     del pending_states[lang_code]
                     continue
 
-                state["text"] = candidate_text
+                state["text"] = prepare_failed_candidate_for_retry(
+                    en_text, focused_text, lang_code, fixed_msg
+                )
                 state["last_error"] = fixed_msg
                 failed_lang_codes.append(lang_code)
 
-        if failed_lang_codes:
-            if process_failed_languages_immediately(
-                key_name, en_text, failed_lang_codes, pending_states
-            ):
-                made_any_change = True
+        return failed_lang_codes
 
-        if start_index < len(pending_order):
-            time.sleep(API_DELAY_SEC)
+    final_batch_flush_error = ""
+    use_pipeline = should_pipeline_translation_chunks(total_chunks)
+    executor = None
+    scheduled_future = None
+    scheduled_request = None
+    ready_request = None
+    ready_result = None
+    next_submit_index = 0
+
+    def submit_next_chunk():
+        nonlocal next_submit_index
+        if next_submit_index >= total_chunks:
+            return None, None
+        batch_index = next_submit_index + 1
+        request = build_chunk_request(batch_index, processing_batches[next_submit_index])
+        next_submit_index += 1
+        request["sleep_before_call"] = executor is not None and batch_index > 1
+        if request["batch_langs"]:
+            print(
+                f"[{key_name}] Completion chunk {batch_index}/{total_chunks} for {len(request['batch_langs'])} language(s)..."
+            )
+        if executor is None:
+            return request, None
+        return request, executor.submit(run_chunk_request, request)
+
+    map_update_batch = begin_translation_map_update_batch()
+    try:
+        if use_pipeline:
+            executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+            scheduled_request, scheduled_future = submit_next_chunk()
+
+        while next_submit_index < total_chunks or scheduled_request is not None or ready_request is not None:
+            if ready_request is not None:
+                current_request = ready_request
+                chunk_result = ready_result
+                ready_request = None
+                ready_result = None
+            elif executor is not None:
+                current_request = scheduled_request
+                if current_request is None:
+                    break
+                chunk_result = scheduled_future.result()
+                scheduled_request = None
+                scheduled_future = None
+            else:
+                current_request, _ = submit_next_chunk()
+                if current_request is None:
+                    break
+                chunk_result = run_chunk_request(current_request)
+
+            if (
+                executor is not None
+                and scheduled_request is None
+                and next_submit_index < total_chunks
+            ):
+                scheduled_request, scheduled_future = submit_next_chunk()
+
+            failed_lang_codes = process_chunk_result(
+                current_request,
+                chunk_result,
+                allow_api_repairs=(scheduled_future is None),
+            )
+            flush_ok, flush_error = flush_active_translation_map_updates(
+                key_name,
+                f"completion chunk {current_request['batch_index']}/{total_chunks}",
+            )
+            if not flush_ok:
+                raise RuntimeError(
+                    f"translations.map batch save failed: {flush_error}"
+                )
+
+            if failed_lang_codes and scheduled_future is not None:
+                ready_request = scheduled_request
+                ready_result = scheduled_future.result()
+                scheduled_request = None
+                scheduled_future = None
+
+            if failed_lang_codes:
+                if process_failed_languages_immediately(
+                    key_name, en_text, failed_lang_codes, pending_states
+                ):
+                    made_any_change = True
+                flush_ok, flush_error = flush_active_translation_map_updates(
+                    key_name, "failed-language retries"
+                )
+                if not flush_ok:
+                    raise RuntimeError(
+                        f"translations.map batch save failed: {flush_error}"
+                    )
+
+            if executor is None and next_submit_index < total_chunks:
+                sleep_between_active_api_calls()
+    finally:
+        try:
+            flush_ok, flush_error = flush_active_translation_map_updates(
+                key_name, "operation finalization"
+            )
+            if not flush_ok:
+                final_batch_flush_error = flush_error
+                print(
+                    f"[{key_name}] ERROR: Final translations.map batch save failed: {flush_error}"
+                )
+        finally:
+            end_translation_map_update_batch(map_update_batch)
+            if executor is not None:
+                executor.shutdown(wait=True)
+
+    if final_batch_flush_error:
+        raise RuntimeError(
+            f"Final translations.map batch save failed: {final_batch_flush_error}"
+        )
 
     remaining_languages = sorted(pending_states.keys())
     if remaining_languages:
@@ -7929,7 +13980,6 @@ def complete_key_translations(key_name, en_text, target_langs, batch_size):
         "had_pending_languages": True,
     }
 
-
 def process_translation_pass(
     keys_list,
     global_fill_only_missing=False,
@@ -7938,6 +13988,8 @@ def process_translation_pass(
     specific_keys=None,
     update_resume_point=True,
     stop_on_error=False,
+    force_review_existing=False,
+    preserve_existing_text=False,
 ):
     specific_key_mode = specific_keys is not None
     specific_keys_set = set(specific_keys) if specific_keys is not None else set()
@@ -7988,17 +14040,15 @@ def process_translation_pass(
             processed_keys_seen.add(k_name)
 
         key_start_time = time.time()
-        en_len = len(en_text) if len(en_text) > 0 else 1
-        batch_size = max(1, 10000 // en_len)
-        batch_size = min(
-            batch_size,
-            LOCAL_API_MAX_LANGUAGES_PER_BATCH
-            if resolve_backend_selection()
-            else CLOUD_API_MAX_LANGUAGES_PER_BATCH,
-        )
+        batch_size = calculate_translation_batch_size(en_text)
 
         key_result = complete_key_translations(
-            k_name, en_text, target_langs, batch_size
+            k_name,
+            en_text,
+            target_langs,
+            batch_size,
+            force_review_existing=(force_review_existing and not fill_only_missing),
+            preserve_existing_text=(preserve_existing_text and not fill_only_missing),
         )
         if key_result["remaining_languages"]:
             unresolved_keys[k_name] = key_result["remaining_languages"]
@@ -8022,7 +14072,7 @@ def process_translation_pass(
             with open(RESUME_POINT_FILE, "w", encoding="utf-8") as wf:
                 wf.write(k_name)
 
-        time.sleep(API_DELAY_SEC)
+        sleep_between_active_api_calls()
 
     return {
         "processed_keys": processed_keys,
@@ -8033,7 +14083,12 @@ def process_translation_pass(
 
 
 def process_translation_key_item(
-    key_name, key_languages, fill_only_missing=False, stop_on_error=False
+    key_name,
+    key_languages,
+    fill_only_missing=False,
+    stop_on_error=False,
+    force_review_existing=False,
+    preserve_existing_text=False,
 ):
     en_text = key_languages.get("en", "")
     if not en_text:
@@ -8056,16 +14111,16 @@ def process_translation_key_item(
             return {"processed": False, "remaining_languages": []}
 
     key_start_time = time.time()
-    en_len = len(en_text) if len(en_text) > 0 else 1
-    batch_size = max(1, 10000 // en_len)
-    batch_size = min(
-        batch_size,
-        LOCAL_API_MAX_LANGUAGES_PER_BATCH
-        if resolve_backend_selection()
-        else CLOUD_API_MAX_LANGUAGES_PER_BATCH,
-    )
+    batch_size = calculate_translation_batch_size(en_text)
 
-    key_result = complete_key_translations(key_name, en_text, target_langs, batch_size)
+    key_result = complete_key_translations(
+        key_name,
+        en_text,
+        target_langs,
+        batch_size,
+        force_review_existing=(force_review_existing and not fill_only_missing),
+        preserve_existing_text=(preserve_existing_text and not fill_only_missing),
+    )
     if key_result["remaining_languages"]:
         handle_operation_error(
             f"[{key_name}] Unresolved languages remain: {', '.join(key_result['remaining_languages'])}",
@@ -8080,7 +14135,7 @@ def process_translation_key_item(
             f"[{key_name}] No translations could be applied for the remaining language(s): {', '.join(key_result['remaining_languages'])}"
         )
     print(f"[{key_name}] Elapsed time: {format_elapsed_time(time.time() - key_start_time)}")
-    time.sleep(API_DELAY_SEC)
+    sleep_between_active_api_calls()
 
     return {
         "processed": True,
@@ -8107,7 +14162,13 @@ def prepare_translation_round_resume_state(
     save_resume_state(resume_state)
 
 
-def process_translation_round_with_resume(resume_state, keys_list, stop_on_error=False):
+def process_translation_round_with_resume(
+    resume_state,
+    keys_list,
+    stop_on_error=False,
+    force_review_existing=False,
+    preserve_existing_text=False,
+):
     progress = resume_state.setdefault("progress", {})
     pass_keys = list(progress.get("pass_keys", []))
     next_index = max(0, int(progress.get("next_index", 0)))
@@ -8144,6 +14205,8 @@ def process_translation_round_with_resume(resume_state, keys_list, stop_on_error
             item["langs"],
             fill_only_missing=fill_only_missing,
             stop_on_error=stop_on_error,
+            force_review_existing=force_review_existing,
+            preserve_existing_text=preserve_existing_text,
         )
         if key_result["processed"] and key_name not in round_processed_keys_seen:
             round_processed_keys.append(key_name)
@@ -8225,12 +14288,23 @@ def collect_local_cleanup_updates(en_text, lang_dict):
     return updates
 
 
-def build_prompt_lang_dict(en_text, lang_dict, placeholder_pairs):
+def build_prompt_lang_dict(
+    en_text, lang_dict, placeholder_pairs, preserve_existing_text=False
+):
     prompt_lang_dict = {}
     if not isinstance(lang_dict, dict):
         return prompt_lang_dict
 
     for lang, text in lang_dict.items():
+        if preserve_existing_text:
+            if not isinstance(text, str):
+                prompt_lang_dict[lang] = ""
+                continue
+            prompt_lang_dict[lang] = apply_protected_placeholders(
+                text, placeholder_pairs
+            )
+            continue
+
         cleaned_text = cleanup_translated_text(en_text, text, placeholder_pairs, lang)
         if (
             has_escape_or_punctuation_leak_issue(en_text, text, placeholder_pairs)
@@ -8248,7 +14322,7 @@ def build_prompt_lang_dict(en_text, lang_dict, placeholder_pairs):
 
 def normalize_backend_setting(value):
     if isinstance(value, bool):
-        return API_BACKEND_LOCAL if value else API_BACKEND_CLOUD
+        return API_BACKEND_LOCAL if value else API_BACKEND_GEMINI
 
     if isinstance(value, str):
         normalized_value = value.strip().lower()
@@ -8256,10 +14330,12 @@ def normalize_backend_setting(value):
             return API_BACKEND_ASK
         if normalized_value in (API_BACKEND_LOCAL, "local api", "local_api"):
             return API_BACKEND_LOCAL
-        if normalized_value in (API_BACKEND_CLOUD, "cloud api", "cloud_api"):
-            return API_BACKEND_CLOUD
+        if normalized_value in (API_BACKEND_GEMINI, "gemini api", "gemini_api"):
+            return API_BACKEND_GEMINI
+        if normalized_value in (API_BACKEND_DEEPSEEK, "deepseek api", "deepseek_api"):
+            return API_BACKEND_DEEPSEEK
 
-    raise ValueError('API_TYPE must be set to "ask", "local", or "cloud".')
+    raise ValueError('API_TYPE must be set to "ask", "local", "gemini", or "deepseek".')
 
 
 def render_backend_selection(selected_index):
@@ -8552,41 +14628,288 @@ def resolve_backend_selection(prompt_user=False):
     else:
         API_TYPE = backend_setting
 
-    return backend_setting == API_BACKEND_LOCAL
+    return backend_setting
+
+
+def is_local_backend():
+    return resolve_backend_selection() == API_BACKEND_LOCAL
+
+
+def is_deepseek_backend():
+    return resolve_backend_selection() == API_BACKEND_DEEPSEEK
+
+
+_LOCAL_HOSTED_MODEL_CACHE = {
+    "expires_at": 0.0,
+    "base_url": "",
+    "model_id": "",
+    "family": LOCAL_MODEL_FAMILY_GENERIC,
+}
+
+
+def detect_local_model_family(model_name):
+    model_key = str(model_name or "").strip().casefold()
+    if "qwen" in model_key and ("a3b" in model_key or "moe" in model_key):
+        return LOCAL_MODEL_FAMILY_QWEN_MOE
+    if "qwen" in model_key:
+        return LOCAL_MODEL_FAMILY_QWEN
+    if "gemma" in model_key:
+        return LOCAL_MODEL_FAMILY_GEMMA
+    return LOCAL_MODEL_FAMILY_GENERIC
+
+
+def is_qwen36_model_name(model_name):
+    model_key = str(model_name or "").strip().casefold()
+    return bool(re.search(r"(?:^|[^0-9])qwen[-_ ]?3\.6(?:[^0-9]|$)", model_key))
+
+
+def get_local_hosted_model_info(api_base_url=None, api_key=None):
+    base_url = (api_base_url or LOCAL_API_BASE_URL).rstrip("/")
+    now = time.time()
+    if (
+        _LOCAL_HOSTED_MODEL_CACHE.get("base_url") == base_url
+        and _LOCAL_HOSTED_MODEL_CACHE.get("expires_at", 0.0) > now
+    ):
+        return dict(_LOCAL_HOSTED_MODEL_CACHE)
+
+    model_id = ""
+    headers = {"Content-Type": "application/json"}
+    effective_api_key = LOCAL_API_KEY if api_key is None else api_key
+    if effective_api_key:
+        headers["Authorization"] = f"Bearer {effective_api_key}"
+
+    try:
+        req = urllib.request.Request(f"{base_url}/models", headers=headers, method="GET")
+        with urllib.request.urlopen(req, timeout=LOCAL_MODEL_DISCOVERY_TIMEOUT_SEC) as response:
+            resp_json = json.loads(response.read().decode("utf-8"))
+            for item in resp_json.get("data", []):
+                if not isinstance(item, dict):
+                    continue
+                candidate_id = str(item.get("id", "")).strip()
+                if candidate_id:
+                    model_id = candidate_id
+                    break
+    except Exception:
+        model_id = ""
+
+    if not model_id:
+        model_id = LOCAL_MODEL_NAME
+
+    _LOCAL_HOSTED_MODEL_CACHE.update(
+        {
+            "expires_at": now + LOCAL_MODEL_DISCOVERY_CACHE_TTL_SEC,
+            "base_url": base_url,
+            "model_id": model_id,
+            "family": detect_local_model_family(model_id),
+        }
+    )
+    return dict(_LOCAL_HOSTED_MODEL_CACHE)
+
+
+def get_local_hosted_model_name():
+    return get_local_hosted_model_info().get("model_id", "")
+
+
+def get_local_model_family():
+    return get_local_hosted_model_info().get("family", LOCAL_MODEL_FAMILY_GENERIC)
+
+
+def is_local_qwen_family():
+    return get_local_model_family() in {
+        LOCAL_MODEL_FAMILY_QWEN,
+        LOCAL_MODEL_FAMILY_QWEN_MOE,
+    }
+
+
+def should_use_deepseek_compatible_local_flow():
+    return is_local_backend()
+
+
+def is_deepseek_compatible_backend():
+    return is_deepseek_backend() or is_local_backend()
+
+
+def is_local_gemma_compatibility_flow():
+    return False
+
+
+def get_local_max_languages_per_batch():
+    return LOCAL_API_MAX_LANGUAGES_PER_BATCH
 
 
 def get_active_backend_label():
-    return "Local API" if resolve_backend_selection() else "Cloud API"
+    backend_key = resolve_backend_selection()
+    if backend_key == API_BACKEND_LOCAL:
+        return "Local API"
+    if backend_key == API_BACKEND_GEMINI:
+        return "Gemini API"
+    if backend_key == API_BACKEND_DEEPSEEK:
+        return "DeepSeek API"
+    return "Unknown API"
 
 
 def get_active_model_name():
-    return LOCAL_MODEL_NAME if resolve_backend_selection() else CLOUD_MODEL_NAME
+    backend_key = resolve_backend_selection()
+    if backend_key == API_BACKEND_LOCAL:
+        return get_local_hosted_model_name() or LOCAL_MODEL_NAME
+    if backend_key == API_BACKEND_GEMINI:
+        return GEMINI_MODEL_NAME
+    if backend_key == API_BACKEND_DEEPSEEK:
+        return DEEPSEEK_MODEL_NAME
+    return ""
 
 
 def get_active_retry_delay_sec():
-    return (
-        LOCAL_API_RETRY_DELAY_SEC
-        if resolve_backend_selection()
-        else CLOUD_API_RETRY_DELAY_SEC
-    )
+    backend_key = resolve_backend_selection()
+    if backend_key == API_BACKEND_LOCAL:
+        return LOCAL_API_RETRY_DELAY_SEC
+    if backend_key == API_BACKEND_DEEPSEEK:
+        return DEEPSEEK_API_RETRY_DELAY_SEC
+    return GEMINI_API_RETRY_DELAY_SEC
 
 
-def format_cloud_retry_attempt(attempt_index):
-    if CLOUD_API_MAX_RETRY_COUNT > 0:
-        return f"{attempt_index}/{CLOUD_API_MAX_RETRY_COUNT}"
+def get_active_max_languages_per_batch():
+    backend_key = resolve_backend_selection()
+    if backend_key == API_BACKEND_LOCAL:
+        return get_local_max_languages_per_batch()
+    if backend_key == API_BACKEND_DEEPSEEK:
+        return DEEPSEEK_API_MAX_LANGUAGES_PER_BATCH
+    return GEMINI_API_MAX_LANGUAGES_PER_BATCH
+
+
+def get_active_source_chars_per_language_batch():
+    backend_key = resolve_backend_selection()
+    if backend_key == API_BACKEND_LOCAL:
+        return LOCAL_API_SOURCE_CHARS_PER_LANGUAGE_BATCH
+    if backend_key == API_BACKEND_DEEPSEEK:
+        return DEEPSEEK_API_SOURCE_CHARS_PER_LANGUAGE_BATCH
+    return GEMINI_API_SOURCE_CHARS_PER_LANGUAGE_BATCH
+
+
+def get_active_inter_call_delay_sec():
+    backend_key = resolve_backend_selection()
+    if backend_key == API_BACKEND_LOCAL:
+        return LOCAL_API_INTER_CALL_DELAY_SEC
+    if backend_key == API_BACKEND_DEEPSEEK:
+        return DEEPSEEK_API_INTER_CALL_DELAY_SEC
+    return GEMINI_API_INTER_CALL_DELAY_SEC
+
+
+def sleep_between_active_api_calls():
+    delay_sec = get_active_inter_call_delay_sec()
+    if delay_sec > 0:
+        time.sleep(delay_sec)
+
+
+def should_pipeline_translation_chunks(total_chunks):
+    if total_chunks < TRANSLATION_PIPELINE_MIN_CHUNKS:
+        return False
+    backend_key = resolve_backend_selection()
+    if backend_key == API_BACKEND_LOCAL:
+        return bool(LOCAL_API_PIPELINE_CHUNKS)
+    if backend_key == API_BACKEND_DEEPSEEK:
+        return bool(DEEPSEEK_API_PIPELINE_CHUNKS)
+    return bool(GEMINI_API_PIPELINE_CHUNKS)
+
+
+def get_active_complex_source_limits():
+    backend_key = resolve_backend_selection()
+    if backend_key == API_BACKEND_LOCAL:
+        return {
+            "complex_chars": LOCAL_COMPLEX_SOURCE_CHAR_THRESHOLD,
+            "very_complex_chars": LOCAL_VERY_COMPLEX_SOURCE_CHAR_THRESHOLD,
+            "complex_placeholders": LOCAL_COMPLEX_SOURCE_PLACEHOLDER_THRESHOLD,
+            "complex_max_batch": LOCAL_COMPLEX_SOURCE_MAX_LANGUAGES_PER_BATCH,
+            "very_complex_max_batch": LOCAL_VERY_COMPLEX_SOURCE_MAX_LANGUAGES_PER_BATCH,
+        }
+    if backend_key == API_BACKEND_DEEPSEEK:
+        return {
+            "complex_chars": DEEPSEEK_API_COMPLEX_SOURCE_CHAR_THRESHOLD,
+            "very_complex_chars": DEEPSEEK_API_VERY_COMPLEX_SOURCE_CHAR_THRESHOLD,
+            "complex_placeholders": DEEPSEEK_API_COMPLEX_SOURCE_PLACEHOLDER_THRESHOLD,
+            "complex_max_batch": DEEPSEEK_API_COMPLEX_SOURCE_MAX_LANGUAGES_PER_BATCH,
+            "very_complex_max_batch": DEEPSEEK_API_VERY_COMPLEX_SOURCE_MAX_LANGUAGES_PER_BATCH,
+        }
+    return {
+        "complex_chars": GEMINI_API_COMPLEX_SOURCE_CHAR_THRESHOLD,
+        "very_complex_chars": GEMINI_API_VERY_COMPLEX_SOURCE_CHAR_THRESHOLD,
+        "complex_placeholders": GEMINI_API_COMPLEX_SOURCE_PLACEHOLDER_THRESHOLD,
+        "complex_max_batch": GEMINI_API_COMPLEX_SOURCE_MAX_LANGUAGES_PER_BATCH,
+        "very_complex_max_batch": GEMINI_API_VERY_COMPLEX_SOURCE_MAX_LANGUAGES_PER_BATCH,
+    }
+
+
+def calculate_translation_batch_size(en_text):
+    visible_text = build_visible_prompt_text(en_text)
+    visible_len = len(visible_text)
+    effective_len = visible_len if visible_len > 0 else 1
+    batch_size = max(1, get_active_source_chars_per_language_batch() // effective_len)
+    batch_size = min(batch_size, get_active_max_languages_per_batch())
+
+    limits = get_active_complex_source_limits()
+    protected_term_count = len(extract_protected_terms(en_text))
+    line_count = max(1, len(re.split(r"\r\n|\n|\r|\r\n|\n|\r", str(en_text))))
+
+    if (
+        visible_len >= limits["complex_chars"]
+        or protected_term_count >= limits["complex_placeholders"]
+        or line_count >= 4
+    ):
+        batch_size = min(batch_size, limits["complex_max_batch"])
+    if visible_len >= limits["very_complex_chars"] or line_count >= 8:
+        batch_size = min(batch_size, limits["very_complex_max_batch"])
+
+    return max(1, batch_size)
+
+
+def format_api_retry_attempt(attempt_index, default_max_retry_count, max_retry_count=None):
+    effective_max_retry_count = default_max_retry_count if max_retry_count is None else int(max_retry_count)
+    if effective_max_retry_count > 0:
+        return f"{attempt_index}/{effective_max_retry_count}"
     return f"{attempt_index}/unbounded"
 
 
-def has_cloud_retry_attempts_remaining(attempt_index):
-    return CLOUD_API_MAX_RETRY_COUNT <= 0 or attempt_index < CLOUD_API_MAX_RETRY_COUNT
+def has_api_retry_attempts_remaining(attempt_index, default_max_retry_count, max_retry_count=None):
+    effective_max_retry_count = default_max_retry_count if max_retry_count is None else int(max_retry_count)
+    return effective_max_retry_count <= 0 or attempt_index < effective_max_retry_count
 
 
-def should_retry_cloud_http_error(status_code):
+def should_retry_remote_http_error(status_code):
     return status_code in {408, 429, 500, 502, 503, 504}
 
 
-def call_cloud_api(api_key, model_name, prompt, plain_text=False):
-    url = CLOUD_API_URL.format(model_name=model_name, api_key=api_key)
+def format_deepseek_usage_summary(resp_json):
+    if not isinstance(resp_json, dict):
+        return ""
+
+    usage = resp_json.get("usage", {})
+    if not isinstance(usage, dict):
+        return ""
+
+    parts = []
+    for key_name in ("prompt_tokens", "completion_tokens", "total_tokens"):
+        value = usage.get(key_name)
+        if value is not None:
+            parts.append(f"{key_name}={value}")
+
+    details = usage.get("completion_tokens_details", {})
+    if isinstance(details, dict):
+        reasoning_tokens = details.get("reasoning_tokens")
+        if reasoning_tokens is not None:
+            parts.append(f"reasoning_tokens={reasoning_tokens}")
+
+    return ", ".join(parts)
+
+
+def call_gemini_api(
+    api_key,
+    model_name,
+    prompt,
+    plain_text=False,
+    request_timeout_sec=None,
+    timeout_retry_count=None,
+):
+    url = GEMINI_API_URL.format(model_name=model_name, api_key=api_key)
     headers = {"Content-Type": "application/json"}
 
     data = {
@@ -8606,9 +14929,19 @@ def call_cloud_api(api_key, model_name, prompt, plain_text=False):
     attempt_index = 0
     while True:
         attempt_index += 1
-        attempt_label = format_cloud_retry_attempt(attempt_index)
+        attempt_label = format_api_retry_attempt(
+            attempt_index, GEMINI_API_MAX_RETRY_COUNT
+        )
+        timeout_attempt_label = format_api_retry_attempt(
+            attempt_index, GEMINI_API_MAX_RETRY_COUNT, timeout_retry_count
+        )
+        effective_timeout_sec = (
+            GEMINI_API_REQUEST_TIMEOUT_SEC
+            if request_timeout_sec is None
+            else int(request_timeout_sec)
+        )
         try:
-            with urllib.request.urlopen(req, timeout=CLOUD_API_REQUEST_TIMEOUT_SEC) as response:
+            with urllib.request.urlopen(req, timeout=effective_timeout_sec) as response:
                 response_data = response.read().decode("utf-8")
                 resp_json = json.loads(response_data)
                 candidates = resp_json.get("candidates", [])
@@ -8630,7 +14963,7 @@ def call_cloud_api(api_key, model_name, prompt, plain_text=False):
                     return None
                 content = parts[0].get("text", "")
                 append_ai_log(
-                    f"Cloud API | Model={model_name} | PlainText={plain_text}",
+                    f"Gemini API | Model={model_name} | PlainText={plain_text}",
                     prompt=prompt,
                     response=content,
                 )
@@ -8638,134 +14971,482 @@ def call_cloud_api(api_key, model_name, prompt, plain_text=False):
         except urllib.error.HTTPError as e:
             error_body = e.read().decode("utf-8", errors="replace")
             append_ai_log(
-                f"Cloud API HTTP Error | Model={model_name} | Status={e.code} | Attempt={attempt_label}",
+                f"Gemini API HTTP Error | Model={model_name} | Status={e.code} | Attempt={attempt_label}",
                 prompt=prompt,
                 response=error_body,
             )
             print(f"API HTTP Error: {e.code} - {error_body}")
-            if not should_retry_cloud_http_error(e.code) or not has_cloud_retry_attempts_remaining(attempt_index):
+            if not should_retry_remote_http_error(e.code) or not has_api_retry_attempts_remaining(attempt_index, GEMINI_API_MAX_RETRY_COUNT):
                 return None
             print(
-                f"Waiting {CLOUD_API_RETRY_DELAY_SEC} seconds before retrying ({attempt_label})..."
+                f"Waiting {GEMINI_API_RETRY_DELAY_SEC} seconds before retrying ({attempt_label})..."
             )
-            time.sleep(CLOUD_API_RETRY_DELAY_SEC)
+            time.sleep(GEMINI_API_RETRY_DELAY_SEC)
         except urllib.error.URLError as e:
             append_ai_log(
-                f"Cloud API URL Error | Model={model_name} | Attempt={attempt_label}",
+                f"Gemini API URL Error | Model={model_name} | Attempt={attempt_label}",
                 prompt=prompt,
                 response=str(e),
             )
             print(f"API URL Error: {e}")
-            if not has_cloud_retry_attempts_remaining(attempt_index):
+            if not has_api_retry_attempts_remaining(attempt_index, GEMINI_API_MAX_RETRY_COUNT):
                 return None
             print(
-                f"Waiting {CLOUD_API_RETRY_DELAY_SEC} seconds before retrying ({attempt_label})..."
+                f"Waiting {GEMINI_API_RETRY_DELAY_SEC} seconds before retrying ({attempt_label})..."
             )
-            time.sleep(CLOUD_API_RETRY_DELAY_SEC)
+            time.sleep(GEMINI_API_RETRY_DELAY_SEC)
         except TimeoutError:
             append_ai_log(
-                f"Cloud API Timeout | Model={model_name} | Attempt={attempt_label}",
+                f"Gemini API Timeout | Model={model_name} | Attempt={timeout_attempt_label}",
                 prompt=prompt,
-                response=f"timeout after {CLOUD_API_REQUEST_TIMEOUT_SEC} seconds",
+                response=f"timeout after {effective_timeout_sec} seconds",
             )
-            print(f"API Call Error: timeout after {CLOUD_API_REQUEST_TIMEOUT_SEC} seconds")
-            if not has_cloud_retry_attempts_remaining(attempt_index):
+            print(f"API Call Error: timeout after {effective_timeout_sec} seconds")
+            if not has_api_retry_attempts_remaining(attempt_index, GEMINI_API_MAX_RETRY_COUNT, timeout_retry_count):
                 return None
             print(
-                f"Waiting {CLOUD_API_RETRY_DELAY_SEC} seconds before retrying ({attempt_label})..."
+                f"Waiting {GEMINI_API_RETRY_DELAY_SEC} seconds before retrying ({timeout_attempt_label})..."
             )
-            time.sleep(CLOUD_API_RETRY_DELAY_SEC)
+            time.sleep(GEMINI_API_RETRY_DELAY_SEC)
         except Exception as e:
             append_ai_log(
-                f"Cloud API Call Error | Model={model_name} | Attempt={attempt_label}",
+                f"Gemini API Call Error | Model={model_name} | Attempt={attempt_label}",
                 prompt=prompt,
                 response=str(e),
             )
             print(f"API Call Error: {e}")
-            if not has_cloud_retry_attempts_remaining(attempt_index):
+            if not has_api_retry_attempts_remaining(attempt_index, GEMINI_API_MAX_RETRY_COUNT):
                 return None
             print(
-                f"Waiting {CLOUD_API_RETRY_DELAY_SEC} seconds before retrying ({attempt_label})..."
+                f"Waiting {GEMINI_API_RETRY_DELAY_SEC} seconds before retrying ({attempt_label})..."
             )
-            time.sleep(CLOUD_API_RETRY_DELAY_SEC)
+            time.sleep(GEMINI_API_RETRY_DELAY_SEC)
 
 
-def call_local_api(api_base_url, api_key, model_name, prompt, plain_text=False):
-    base_url = api_base_url.rstrip("/")
-    url = f"{base_url}/chat/completions"
-    headers = {"Content-Type": "application/json"}
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
-
-    data = {
+def build_openai_compatible_chat_payload(
+    model_name,
+    prompt,
+    max_tokens=None,
+    strict_text_response_controls=False,
+    qwen_template_kwargs=False,
+    stream_response=False,
+):
+    payload = {
         "messages": [
             {"role": "system", "content": SHARED_API_SYSTEM_PROMPT},
             {"role": "user", "content": prompt},
         ],
         "temperature": 0.1,
-        "max_tokens": LOCAL_API_MAX_COMPLETION_TOKENS,
-        "stream": False,
+        "stream": bool(stream_response),
     }
     if model_name:
-        data["model"] = model_name
+        payload["model"] = model_name
+    if max_tokens is not None:
+        payload["max_tokens"] = max_tokens
+    if strict_text_response_controls:
+        payload["thinking"] = {"type": "disabled"}
+        payload["response_format"] = {"type": "text"}
+    if qwen_template_kwargs:
+        payload["chat_template_kwargs"] = {
+            "enable_thinking": False,
+            "preserve_thinking": False,
+        }
+    return payload
 
-    req = urllib.request.Request(url, json.dumps(data).encode("utf-8"), headers)
-    try:
-        with urllib.request.urlopen(
-            req, timeout=LOCAL_API_REQUEST_TIMEOUT_SEC
-        ) as response:
-            response_data = response.read().decode("utf-8")
-            resp_json = json.loads(response_data)
-            choices = resp_json.get("choices", [])
-            if not choices:
-                print(f"API Returned no choices: {resp_json}")
-                return None
 
-            message = choices[0].get("message", {})
-            content = message.get("content", "")
-            append_ai_log(
-                f"Local API | Model={model_name or '(default)'} | PlainText={plain_text}",
-                prompt=prompt,
-                response=content
-                if isinstance(content, str)
-                else json.dumps(content, ensure_ascii=False),
-            )
-            if not isinstance(content, str) or not content.strip():
-                finish_reason = choices[0].get("finish_reason", "UNKNOWN")
-                print(
-                    f"API Returned empty content: finishReason={finish_reason} ({resp_json})"
-                )
-                return None
+def strip_local_reasoning_blocks(content):
+    if not isinstance(content, str):
+        return content
 
-            return content.strip() if plain_text else content
-    except urllib.error.HTTPError as e:
-        print(
-            f"API HTTP Error: {e.code} - {e.read().decode('utf-8', errors='replace')}"
+    cleaned = re.sub(
+        r"^\s*<think>.*?</think>\s*",
+        "",
+        content,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    return cleaned.strip()
+
+
+def read_openai_compatible_stream_response(response, stream_stop_checker=None):
+    content_parts = []
+    finish_reason = None
+    last_payload = {}
+    stopped_early = False
+
+    for raw_line in response:
+        line = raw_line.decode("utf-8", errors="replace").strip()
+        if not line or not line.startswith("data:"):
+            continue
+
+        data_line = line[5:].strip()
+        if data_line == "[DONE]":
+            break
+
+        try:
+            chunk = json.loads(data_line)
+        except Exception:
+            continue
+
+        last_payload = chunk
+        choices = chunk.get("choices", [])
+        if not choices:
+            continue
+
+        choice = choices[0]
+        delta = choice.get("delta", {})
+        appended_content = False
+        if isinstance(delta, dict):
+            delta_content = delta.get("content", "")
+            if isinstance(delta_content, str) and delta_content:
+                content_parts.append(delta_content)
+                appended_content = True
+
+        chunk_finish_reason = choice.get("finish_reason")
+        if chunk_finish_reason is not None:
+            finish_reason = chunk_finish_reason
+
+        if appended_content and stream_stop_checker is not None:
+            try:
+                if stream_stop_checker("".join(content_parts)):
+                    stopped_early = True
+                    finish_reason = "stop"
+                    break
+            except Exception:
+                pass
+
+    content = "".join(content_parts)
+    if finish_reason is None:
+        finish_reason = "stop" if content else "UNKNOWN"
+    return content, finish_reason, last_payload, stopped_early
+
+
+def call_openai_compatible_chat_api(
+    api_label,
+    api_url,
+    api_key,
+    model_name,
+    prompt,
+    plain_text=False,
+    request_timeout_sec=None,
+    timeout_retry_count=None,
+    request_timeout_default_sec=120,
+    max_retry_count=0,
+    retry_delay_sec=30,
+    max_completion_tokens=None,
+    max_token_limit=None,
+    strict_text_response_controls=False,
+    qwen_template_kwargs=False,
+    strip_reasoning_blocks=False,
+    require_auth_header=False,
+    strict_finish_reason=True,
+    stream_response=False,
+    stream_stop_checker=None,
+):
+    url = f"{api_url.rstrip('/')}/chat/completions"
+    headers = {"Content-Type": "application/json"}
+    if api_key or require_auth_header:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    current_max_tokens = max_completion_tokens
+    effective_max_token_limit = max_token_limit
+    if effective_max_token_limit is None:
+        effective_max_token_limit = max_completion_tokens
+    attempt_index = 0
+    while True:
+        attempt_index += 1
+        attempt_label = format_api_retry_attempt(attempt_index, max_retry_count)
+        timeout_attempt_label = format_api_retry_attempt(
+            attempt_index, max_retry_count, timeout_retry_count
         )
-        return None
-    except urllib.error.URLError as e:
-        print(f"API URL Error: {e}")
-        return None
-    except TimeoutError:
-        print(f"API Call Error: timeout after {LOCAL_API_REQUEST_TIMEOUT_SEC} seconds")
-        return None
-    except Exception as e:
-        print(f"API Call Error: {e}")
-        return None
+        effective_timeout_sec = (
+            request_timeout_default_sec
+            if request_timeout_sec is None
+            else int(request_timeout_sec)
+        )
+        data = build_openai_compatible_chat_payload(
+            model_name,
+            prompt,
+            max_tokens=current_max_tokens,
+            strict_text_response_controls=strict_text_response_controls,
+            qwen_template_kwargs=qwen_template_kwargs,
+            stream_response=stream_response,
+        )
+        req = urllib.request.Request(url, json.dumps(data).encode("utf-8"), headers)
+        try:
+            with urllib.request.urlopen(req, timeout=effective_timeout_sec) as response:
+                if stream_response:
+                    content, finish_reason, resp_json, stopped_early = read_openai_compatible_stream_response(
+                        response, stream_stop_checker=stream_stop_checker
+                    )
+                    message = {"content": content}
+                else:
+                    response_data = response.read().decode("utf-8")
+                    resp_json = json.loads(response_data)
+                    choices = resp_json.get("choices", [])
+                    if not choices:
+                        print(f"API Returned no choices: {resp_json}")
+                        return None
+
+                    choice = choices[0]
+                    message = choice.get("message", {})
+                    content = message.get("content", "")
+                    finish_reason = choice.get("finish_reason", "UNKNOWN")
+
+                if strip_reasoning_blocks:
+                    content = strip_local_reasoning_blocks(content)
+
+                usage_summary = format_deepseek_usage_summary(resp_json)
+                append_ai_log(
+                    f"{api_label} | Model={model_name or '(default)'} | PlainText={plain_text}",
+                    prompt=prompt,
+                    response=content
+                    if isinstance(content, str)
+                    else json.dumps(content, ensure_ascii=False),
+                )
+                if strict_finish_reason:
+                    if finish_reason == "length":
+                        if (
+                            current_max_tokens is not None
+                            and effective_max_token_limit is not None
+                            and current_max_tokens < effective_max_token_limit
+                        ):
+                            doubled = min(current_max_tokens * 2, effective_max_token_limit)
+                            print(
+                                f"API returned truncated content (finishReason=length, max_tokens={current_max_tokens}). "
+                                f"Retrying with max_tokens={doubled}..."
+                                + (f" ({usage_summary})" if usage_summary else "")
+                            )
+                            current_max_tokens = doubled
+                            time.sleep(1)
+                            continue
+                        print(
+                            f"API Returned truncated content: finishReason={finish_reason}"
+                            + (f" ({usage_summary})" if usage_summary else "")
+                        )
+                        return None
+                    if finish_reason not in ("stop", None):
+                        print(
+                            f"API Returned non-final content: finishReason={finish_reason}"
+                            + (f" ({usage_summary})" if usage_summary else "")
+                        )
+                        return None
+                if not isinstance(content, str) or not content.strip():
+                    reasoning_content = message.get("reasoning_content", "")
+                    reasoning_note = "reasoning_content present" if reasoning_content else "no reasoning_content"
+                    print(
+                        f"API Returned empty content: finishReason={finish_reason}, {reasoning_note}"
+                        + (f" ({usage_summary})" if usage_summary else "")
+                    )
+                    return None
+
+                return content.strip() if plain_text else content
+        except urllib.error.HTTPError as e:
+            error_body = e.read().decode("utf-8", errors="replace")
+            append_ai_log(
+                f"{api_label} HTTP Error | Model={model_name or '(default)'} | Status={e.code} | Attempt={attempt_label}",
+                prompt=prompt,
+                response=error_body,
+            )
+            print(f"API HTTP Error: {e.code} - {error_body}")
+            if not should_retry_remote_http_error(e.code) or not has_api_retry_attempts_remaining(attempt_index, max_retry_count):
+                return None
+            print(
+                f"Waiting {retry_delay_sec} seconds before retrying ({attempt_label})..."
+            )
+            time.sleep(retry_delay_sec)
+        except urllib.error.URLError as e:
+            append_ai_log(
+                f"{api_label} URL Error | Model={model_name or '(default)'} | Attempt={attempt_label}",
+                prompt=prompt,
+                response=str(e),
+            )
+            print(f"API URL Error: {e}")
+            if not has_api_retry_attempts_remaining(attempt_index, max_retry_count):
+                return None
+            print(
+                f"Waiting {retry_delay_sec} seconds before retrying ({attempt_label})..."
+            )
+            time.sleep(retry_delay_sec)
+        except TimeoutError:
+            append_ai_log(
+                f"{api_label} Timeout | Model={model_name or '(default)'} | Attempt={timeout_attempt_label}",
+                prompt=prompt,
+                response=f"timeout after {effective_timeout_sec} seconds",
+            )
+            print(f"API Call Error: timeout after {effective_timeout_sec} seconds")
+            if not has_api_retry_attempts_remaining(attempt_index, max_retry_count, timeout_retry_count):
+                return None
+            print(
+                f"Waiting {retry_delay_sec} seconds before retrying ({timeout_attempt_label})..."
+            )
+            time.sleep(retry_delay_sec)
+        except Exception as e:
+            append_ai_log(
+                f"{api_label} Call Error | Model={model_name or '(default)'} | Attempt={attempt_label}",
+                prompt=prompt,
+                response=str(e),
+            )
+            print(f"API Call Error: {e}")
+            if not has_api_retry_attempts_remaining(attempt_index, max_retry_count):
+                return None
+            print(
+                f"Waiting {retry_delay_sec} seconds before retrying ({attempt_label})..."
+            )
+            time.sleep(retry_delay_sec)
 
 
-def call_active_api(prompt, plain_text=False):
-    if resolve_backend_selection():
+def call_local_api(
+    api_base_url,
+    api_key,
+    model_name,
+    prompt,
+    plain_text=False,
+    request_timeout_sec=None,
+    timeout_retry_count=None,
+    stream_stop_checker=None,
+    max_completion_tokens=None,
+    max_token_limit=None,
+):
+    model_info = get_local_hosted_model_info(api_base_url, api_key)
+    effective_model_name = model_info.get("model_id", "") or model_name
+    qwen_family = model_info.get("family") in {
+        LOCAL_MODEL_FAMILY_QWEN,
+        LOCAL_MODEL_FAMILY_QWEN_MOE,
+    }
+    effective_prompt = prompt
+    if (
+        qwen_family
+        and not is_qwen36_model_name(effective_model_name)
+        and isinstance(effective_prompt, str)
+        and "/no_think" not in effective_prompt
+    ):
+        effective_prompt = f"/no_think\n{effective_prompt}"
+    effective_max_completion_tokens = (
+        LOCAL_API_MAX_COMPLETION_TOKENS
+        if max_completion_tokens is None
+        else max_completion_tokens
+    )
+    effective_max_token_limit = (
+        max_token_limit
+        if max_token_limit is not None
+        else (
+            LOCAL_API_MAX_TOKEN_LIMIT
+            if max_completion_tokens is None
+            else max_completion_tokens
+        )
+    )
+    return call_openai_compatible_chat_api(
+        "Local API",
+        api_base_url,
+        api_key,
+        effective_model_name,
+        effective_prompt,
+        plain_text=plain_text,
+        request_timeout_sec=request_timeout_sec,
+        timeout_retry_count=timeout_retry_count,
+        request_timeout_default_sec=LOCAL_API_REQUEST_TIMEOUT_SEC,
+        max_retry_count=LOCAL_API_MAX_RETRY_COUNT,
+        retry_delay_sec=LOCAL_API_RETRY_DELAY_SEC,
+        max_completion_tokens=effective_max_completion_tokens,
+        max_token_limit=effective_max_token_limit,
+        strict_text_response_controls=True,
+        qwen_template_kwargs=qwen_family,
+        strip_reasoning_blocks=True,
+        strict_finish_reason=True,
+        stream_response=LOCAL_API_STREAM_RESPONSE,
+        stream_stop_checker=stream_stop_checker,
+    )
+
+
+def call_deepseek_api(
+    api_url,
+    api_key,
+    model_name,
+    prompt,
+    plain_text=False,
+    request_timeout_sec=None,
+    timeout_retry_count=None,
+    max_completion_tokens=None,
+    max_token_limit=None,
+):
+    effective_max_completion_tokens = (
+        DEEPSEEK_API_MAX_COMPLETION_TOKENS
+        if max_completion_tokens is None
+        else max_completion_tokens
+    )
+    effective_max_token_limit = (
+        max_token_limit
+        if max_token_limit is not None
+        else (
+            DEEPSEEK_API_MAX_TOKEN_LIMIT
+            if max_completion_tokens is None
+            else max_completion_tokens
+        )
+    )
+    return call_openai_compatible_chat_api(
+        "DeepSeek API",
+        api_url,
+        api_key,
+        model_name,
+        prompt,
+        plain_text=plain_text,
+        request_timeout_sec=request_timeout_sec,
+        timeout_retry_count=timeout_retry_count,
+        request_timeout_default_sec=DEEPSEEK_API_REQUEST_TIMEOUT_SEC,
+        max_retry_count=DEEPSEEK_API_MAX_RETRY_COUNT,
+        retry_delay_sec=DEEPSEEK_API_RETRY_DELAY_SEC,
+        max_completion_tokens=effective_max_completion_tokens,
+        max_token_limit=effective_max_token_limit,
+        strict_text_response_controls=True,
+        require_auth_header=True,
+    )
+
+
+def call_active_api(
+    prompt,
+    plain_text=False,
+    request_timeout_sec=None,
+    timeout_retry_count=None,
+    stream_stop_checker=None,
+    max_completion_tokens=None,
+    max_token_limit=None,
+):
+    backend_key = resolve_backend_selection()
+    if backend_key == API_BACKEND_LOCAL:
         return call_local_api(
             LOCAL_API_BASE_URL,
             LOCAL_API_KEY,
             LOCAL_MODEL_NAME,
             prompt,
             plain_text=plain_text,
+            request_timeout_sec=request_timeout_sec,
+            timeout_retry_count=timeout_retry_count,
+            stream_stop_checker=stream_stop_checker,
+            max_completion_tokens=max_completion_tokens,
+            max_token_limit=max_token_limit,
         )
-    return call_cloud_api(
-        CLOUD_API_KEY, CLOUD_MODEL_NAME, prompt, plain_text=plain_text
-    )
+    if backend_key == API_BACKEND_GEMINI:
+        return call_gemini_api(
+            GEMINI_API_KEY,
+            GEMINI_MODEL_NAME,
+            prompt,
+            plain_text=plain_text,
+            request_timeout_sec=request_timeout_sec,
+            timeout_retry_count=timeout_retry_count,
+        )
+    if backend_key == API_BACKEND_DEEPSEEK:
+        return call_deepseek_api(
+            DEEPSEEK_API_URL,
+            DEEPSEEK_API_KEY,
+            DEEPSEEK_MODEL_NAME,
+            prompt,
+            plain_text=plain_text,
+            request_timeout_sec=request_timeout_sec,
+            timeout_retry_count=timeout_retry_count,
+            max_completion_tokens=max_completion_tokens,
+            max_token_limit=max_token_limit,
+        )
+    raise RuntimeError(f"Unsupported API backend: {backend_key}")
 
 
 def sanitize_model_json_text(result_text):
@@ -8877,6 +15558,7 @@ def preprocess_line_response_text(result_text, expected_lang_codes=None):
     normalized = result_text.replace("\r\n", "\n").replace("\r", "\n").strip()
     if not normalized:
         return normalized
+    normalized = re.sub(r"<\s*TAB\s*>", "\t", normalized, flags=re.IGNORECASE)
 
     if "<channel|>" in normalized:
         normalized = normalized.rsplit("<channel|>", 1)[-1].strip()
@@ -8929,7 +15611,7 @@ def parse_line_based_updates_response(
     def cleanup_parsed_translation(value):
         if not isinstance(value, str):
             return ""
-        cleaned = value.strip().rstrip(",")
+        cleaned = unwrap_single_quoted_container(value)
         if len(cleaned) >= 2 and cleaned[0] == cleaned[-1] and cleaned[0] in ('"', "'"):
             cleaned = cleaned[1:-1].strip()
         cleaned = cleaned.replace("\\t", "	").replace('\\"', '"')
@@ -8948,14 +15630,60 @@ def parse_line_based_updates_response(
         nested_lang = nested_match.group(1)
         return not expected_lang_codes or nested_lang in expected_lang_codes
 
+    def is_usable_parsed_translation(value):
+        return bool(
+            value
+            and not looks_like_nested_language_line(value)
+            and not is_response_artifact_text(value)
+            and not detect_unexpected_arrow_rewrite_artifact(en_text, value)
+        )
+
     def parse_lang_translation_line(raw_line):
         stripped = raw_line.strip()
+        if expected_lang_codes:
+            def normalize_expected_language_label(raw_label):
+                if raw_label in expected_lang_codes:
+                    return raw_label
+                if (
+                    isinstance(raw_label, str)
+                    and raw_label.startswith("_")
+                    and raw_label[1:] in expected_lang_codes
+                ):
+                    return raw_label[1:]
+                return ""
+
+            label_match = re.match(
+                r"^([A-Za-z_][A-Za-z0-9_-]*)\s*(?:\t|\\t)\s*(.+)$", stripped
+            )
+            normalized_label = (
+                normalize_expected_language_label(label_match.group(1))
+                if label_match
+                else ""
+            )
+            if label_match and normalized_label:
+                candidate = cleanup_parsed_translation(label_match.group(2))
+                if is_usable_parsed_translation(candidate):
+                    return normalized_label, candidate
+
+            json_label_match = re.match(
+                r'^"?([A-Za-z_][A-Za-z0-9_-]*)"?\s*:\s*(.+?)\s*,?$', stripped
+            )
+            normalized_json_label = (
+                normalize_expected_language_label(json_label_match.group(1))
+                if json_label_match
+                else ""
+            )
+            if json_label_match and normalized_json_label:
+                candidate = cleanup_parsed_translation(json_label_match.group(2))
+                if is_usable_parsed_translation(candidate):
+                    return normalized_json_label, candidate
+
         direct_match = re.match(
             r"^([A-Za-z]{2,3}(?:-[A-Za-z0-9]+)*)\s*(?:\t|\\t)\s*(.+)$", stripped
         )
         if direct_match:
             candidate = cleanup_parsed_translation(direct_match.group(2))
-            if candidate and not looks_like_nested_language_line(candidate):
+            if is_usable_parsed_translation(candidate):
                 return direct_match.group(1), candidate
             return None, None
 
@@ -8964,7 +15692,7 @@ def parse_line_based_updates_response(
         )
         if json_line_match:
             candidate = cleanup_parsed_translation(json_line_match.group(2))
-            if candidate and not looks_like_nested_language_line(candidate):
+            if is_usable_parsed_translation(candidate):
                 return json_line_match.group(1), candidate
             return None, None
 
@@ -8973,11 +15701,7 @@ def parse_line_based_updates_response(
         )
         if loose_match:
             candidate = cleanup_parsed_translation(loose_match.group(2))
-            if (
-                candidate
-                and not looks_like_source_echo_line(candidate, en_text)
-                and not looks_like_nested_language_line(candidate)
-            ):
+            if is_usable_parsed_translation(candidate):
                 return loose_match.group(1), candidate
         return None, None
 
@@ -9000,9 +15724,6 @@ def parse_line_based_updates_response(
                 if is_ignorable_line(lookahead_line):
                     lookahead_idx += 1
                     continue
-                if looks_like_source_echo_line(lookahead_line, en_text):
-                    lookahead_idx += 1
-                    continue
                 next_lang_code, next_translation = parse_lang_translation_line(
                     lookahead_line
                 )
@@ -9022,15 +15743,19 @@ def parse_line_based_updates_response(
         translation = cleanup_parsed_translation(translation)
         if expected_lang_codes and lang_code not in expected_lang_codes:
             continue
-        if not re.fullmatch(LANGUAGE_CODE_PATTERN, lang_code):
+        if not expected_lang_codes and not re.fullmatch(LANGUAGE_CODE_PATTERN, lang_code):
             continue
         if not translation:
-            continue
-        if looks_like_source_echo_line(translation, en_text):
             continue
         if translation.startswith("{") and translation.endswith("}"):
             continue
         if looks_like_nested_language_line(translation):
+            continue
+        if is_response_artifact_text(translation):
+            continue
+        if lang_code in updates:
+            if updates[lang_code] == translation:
+                continue
             continue
         updates[lang_code] = translation
 
@@ -9038,6 +15763,99 @@ def parse_line_based_updates_response(
         return updates
 
     raise ValueError("Could not parse model line response")
+
+
+def build_local_line_stream_stop_checker(key_name, en_text, expected_lang_codes):
+    if not (is_local_backend() and LOCAL_API_STREAM_RESPONSE):
+        return None
+
+    expected_lang_codes = {
+        lang_code
+        for lang_code in expected_lang_codes or []
+        if isinstance(lang_code, str) and lang_code
+    }
+    if not expected_lang_codes:
+        return None
+
+    def is_complete(result_text):
+        if not isinstance(result_text, str) or not result_text.strip():
+            return False
+        if not result_text.endswith(("\n", "\r")):
+            return False
+        try:
+            parsed = parse_line_based_updates_response(
+                result_text, en_text, expected_lang_codes
+            )
+        except Exception:
+            return False
+        if not expected_lang_codes.issubset(set(parsed.keys())):
+            return False
+
+        country_code = get_standard_ipgeo_country_code_for_source(key_name, en_text)
+        country_proper_name_code = get_ipgeo_proper_name_country_code(
+            key_name, en_text
+        )
+        for lang_code in expected_lang_codes:
+            candidate_text = parsed.get(lang_code, "")
+            extended_name_error = detect_extended_ipgeo_translation_truncation(
+                key_name, en_text, candidate_text, lang_code
+            )
+            if extended_name_error:
+                return False
+            if country_code:
+                country_error = detect_suspicious_country_name_candidate(
+                    country_code, en_text, candidate_text, lang_code
+                )
+                if country_error:
+                    return False
+            placeholder_pairs = build_protected_placeholders(
+                en_text, {lang_code: candidate_text}
+            )
+            cleaned_text = cleanup_translated_text(
+                en_text, candidate_text, placeholder_pairs, lang_code
+            )
+            is_valid, _ = validate_translation_text(
+                en_text,
+                cleaned_text,
+                placeholder_pairs,
+                lang_code,
+                country_code=country_code,
+                country_proper_name_code=country_proper_name_code,
+            )
+            if not is_valid:
+                return False
+        return True
+
+    return is_complete
+
+
+def build_country_name_translation_rule(key_name, en_text, rule_number="7a"):
+    country_code = get_standard_ipgeo_country_code_for_source(key_name, en_text)
+    if not country_code:
+        return ""
+    return (
+        f"{rule_number}. CRITICAL COUNTRY NAME RULE: This key is the ISO country or territory display name for `{country_code}`. "
+        "Return the complete conventional short country name used in each target language. "
+        "A correct target-language country name may be spelled exactly the same as the English source; that is valid and must not be shortened or altered merely to make it look different. "
+        "Never return a prefix, first syllable, isolated character, or partial country name. "
+        "A conventional acronym such as `USA` is valid when that is the normal short country name in the target language. "
+        "A complete conventional target-language name may legitimately be much shorter than the English name; this country-name rule overrides generic length-ratio guidance. "
+        f"The complete English reference name is `{en_text.strip()}`.\n"
+    )
+
+
+def build_extended_ipgeo_display_name_rule(key_name, en_text, rule_number="7b"):
+    if not is_extended_ipgeo_display_name(key_name, en_text):
+        return ""
+    country_code = get_standard_ipgeo_country_code(key_name)
+    return (
+        f"{rule_number}. CRITICAL EXTENDED TERRITORY LABEL RULE: This key uses ISO code `{country_code}`, "
+        "but the English source is an extended project-specific display label, not the ordinary short country name. "
+        "Translate every descriptive component completely and preserve the full meaning. "
+        "A country or territory proper-name component may keep its conventional target-language spelling, including the same spelling as English when natural. "
+        "Never replace the whole label with only the localized short country name. "
+        f"The complete source label is `{en_text.strip()}`.\n"
+    )
 
 
 def build_translation_batch_prompt(
@@ -9050,6 +15868,7 @@ def build_translation_batch_prompt(
     extra_requirements,
     authoritative_phrase_map_requirements,
     language_specific_requirements,
+    locked_placeholder_count_requirements="",
     response_mode="lines",
 ):
     response_rules = (
@@ -9062,10 +15881,44 @@ def build_translation_batch_prompt(
     )
     placeholder_quote_rule = build_placeholder_format_rule(en_text, rule_number="15")
     literal_percent_rule = build_literal_percent_format_rule(en_text, rule_number="17")
+    rate_unit_rule = build_source_rate_unit_format_rule(en_text, rule_number="17a")
+    source_format_rule = build_source_format_preservation_rule(en_text, rule_number="5")
+    source_line_break_rule = build_source_line_break_translation_rule(en_text, rule_number="14")
+    partial_english_leadin_rule = build_partial_english_leadin_rule(en_text, rule_number="12")
+    no_english_gloss_rule = build_no_english_gloss_rule(en_text, rule_number="13")
+    locked_term_rule = build_locked_term_prompt_rule(protected_placeholders_json, rule_number="11")
+    locked_term_punctuation_rule = build_locked_term_punctuation_rule(protected_placeholders_json, rule_number="15")
     batch_focus_requirements = build_batch_focus_requirements(en_text, prompt_lang_dict)
 
     known_phrase_requirements = build_known_phrase_translation_requirements(
         en_text, prompt_lang_dict
+    )
+    country_name_rule = build_country_name_translation_rule(
+        key_name, en_text, rule_number="7a"
+    )
+    extended_ipgeo_rule = build_extended_ipgeo_display_name_rule(
+        key_name, en_text, rule_number="7b"
+    )
+    extended_proper_name_words = set()
+    if extended_ipgeo_rule:
+        extended_country_code = get_ipgeo_proper_name_country_code(
+            key_name, en_text
+        )
+        extended_proper_name_words = get_country_proper_name_source_words(
+            en_text, country_code=extended_country_code
+        )
+    source_word_policy_requirements = (
+        ""
+        if country_name_rule
+        else build_batch_source_word_policy_requirements(
+            en_text,
+            prompt_lang_dict,
+            rule_number="7c" if extended_ipgeo_rule else "7b",
+            excluded_words=extended_proper_name_words,
+        )
+    )
+    locked_adjacent_word_requirements = build_locked_placeholder_adjacent_word_requirements(
+        en_text, rule_number="15a"
     )
 
     single_language_rule = ""
@@ -9081,13 +15934,58 @@ def build_translation_batch_prompt(
         )
 
     local_model_rules = ""
-    if resolve_backend_selection():
+    if is_local_gemma_compatibility_flow():
         local_model_rules = (
             "18. LOCAL MODEL OUTPUT RULES: Never reveal internal reasoning. Never output self-corrections, analysis, checklists, bullets, or commentary. "
             "Never output internal channel tags such as <|channel>thought or <channel|>. "
             "Never output LaTeX, arrows like -> or $\\rightarrow$, or mixed-script garbage. "
             "Never output HTML fragments. Return only final translation lines in the exact requested format.\n"
         ) + build_local_single_language_guidance(en_text, prompt_lang_dict)
+
+    deepseek_model_rules = ""
+    if is_deepseek_compatible_backend():
+        if country_name_rule:
+            deepseek_model_rules = (
+                "18. DEEPSEEK OUTPUT RULES: Thinking mode is disabled for this request. Do not output reasoning, analysis, alternatives, notes, or partial drafts. "
+                "For every target language whose existing value is empty or invalid, return exactly one final line for that language. "
+                "Return the complete conventional country name and never truncate it. Exact English-source spelling is allowed when it is also the normal target-language country name.\n"
+            )
+        else:
+            deepseek_model_rules = (
+                "18. DEEPSEEK OUTPUT RULES: Thinking mode is disabled for this request. Do not output reasoning, analysis, alternatives, notes, or partial drafts. "
+                "For every target language whose existing value is empty or invalid, return exactly one final line for that language. "
+                "Complete every single translation line fully, including sentence-final punctuation. Never let a line end mid-sentence. "
+                "Do not stop after a partial subset of the requested languages. Do not leave ordinary English source words or descriptive UI feature names untranslated.\n"
+            )
+
+    non_english_source_rule = (
+        "7a. For every non-English language, use the complete conventional target-language country name. "
+        "Exact source spelling is allowed when that is the normal country name in the target language.\n"
+        if country_name_rule
+        else "7a. For every non-English language, never return the English source line unchanged. "
+        "Translate all ordinary words and keep only locked placeholders, strict acronyms, brands, file/path literals, "
+        "placeholders, digits, and required punctuation unchanged.\n"
+    )
+
+    translation_prompt_requirements = (
+        placeholder_quote_rule
+        + literal_percent_rule
+        + rate_unit_rule
+        + locked_placeholder_count_requirements
+        + single_language_rule
+        + batch_focus_requirements
+        + ok_translation_guidance
+        + country_name_rule
+        + extended_ipgeo_rule
+        + source_word_policy_requirements
+        + known_phrase_requirements
+        + locked_adjacent_word_requirements
+        + authoritative_phrase_map_requirements
+        + extra_requirements
+        + language_specific_requirements
+        + local_model_rules
+        + deepseek_model_rules
+    )
 
     return f"""
 You are a professional translator and translation quality controller for the eMule software.
@@ -9099,17 +15997,14 @@ Your task is to check and, if necessary, correct or translate each language in t
 Rules:
 1. If the existing translation for a target language is completely missing (empty or exactly the same as the English original), translate it correctly and completely into the target language.
 2. If the existing translation has errors, grammatical mistakes, or English leftovers, fix them.
-3. The translations should be close in length to the original English line. In particular, consider translations shorter than 2/3 of the English line as faulty and translate them completely!
+3. Translate every source sentence and clause completely, including the final sentence. Never stop early or omit a sentence because an earlier sentence contains similar words or numbers. The translations should be close in length to the original English line. In particular, consider translations shorter than 2/3 of the English line as faulty and translate them completely!
 4. CRITICAL RULE FOR FEATURES AND ACRONYMS: Translate ALL feature names, descriptive phrases, sentences, and UI text elements IN FULL, even if they are enclosed in double quotes (like "Find As You Type" or "Adjust NTFS daylight..."). Do NOT leave English phrases untranslated in other languages. Keep strict system names, brand names, product names, and all-uppercase acronyms from the source in English. However, common translatable abbreviations (like mt for meter, sec for second) MUST be translated to the target language's equivalent.
-5. You MUST strictly preserve all placeholders (%s, %i, %u, %lu, etc.), backslash escape sequences (\\n, \\r, \\\\), and literal percent formatting so they match the ORIGINAL ENGLISH TEXT exactly. If English uses a single literal `%`, keep a single `%`. If English uses `%%`, keep `%%`.
+{source_format_rule}
 6. If the existing translation is already correct, skip it (do not include it in the output).
 7. If the language code is "en", NEVER modify it.
-{response_rules}11. LOCKED TERM RULE: If you see placeholders like __LOCKED_TERM_0__, these represent protected special terms and acronyms. Never translate, never transliterate, never inflect, never remove, and never alter these placeholders. Keep them exactly unchanged in output strings.
-12. NEVER keep a partial English lead-in at the beginning of any translated paragraph or line. If the source segment starts with English words like "Do", "Do you", "Please", or "Use", translate them fully instead of leaving them in English.
-13. IMPORTANT: Do NOT keep the English original in parentheses after you translate a quoted UI label, mode name, menu item, or option name. Translate it once naturally into the target language and omit the English copy.
-14. IMPORTANT: If the source string contains escaped line breaks such as \\n, \\r\\n, or \\r, the next word begins a new translated line or paragraph. For example, `Found.\\n\\nDo you want...` means the `Do you want...` sentence must also be translated fully.
-15. IMPORTANT: Locked placeholders protect only the special term itself, not the punctuation around it. If English has a pattern like `MaxMind.\\n\\nCopy...`, the period ends the sentence, but it does NOT have to stay immediately after the protected term in the target language if the sentence structure changes.
-{placeholder_quote_rule}{literal_percent_rule}{single_language_rule}{batch_focus_requirements}{ok_translation_guidance}{known_phrase_requirements}{authoritative_phrase_map_requirements}{extra_requirements}{language_specific_requirements}{local_model_rules}{response_examples}
+{non_english_source_rule}{response_rules}{locked_term_rule}
+{partial_english_leadin_rule}{no_english_gloss_rule}{source_line_break_rule}{locked_term_punctuation_rule}
+{translation_prompt_requirements}{response_examples}
 LOCKED PLACEHOLDERS JSON:
 {protected_placeholders_json}
 
@@ -9132,12 +16027,18 @@ def build_translation_failure_signature(candidate_text, error_message):
 
 
 def get_translation_completion_limits(batch_size, en_text="", lang_count=0):
-    if resolve_backend_selection():
+    if is_local_backend():
         return get_local_effective_batch_size(batch_size, en_text, lang_count)
-    return min(batch_size, CLOUD_API_MAX_LANGUAGES_PER_BATCH)
+    return min(batch_size, get_active_max_languages_per_batch())
 
 
-def check_and_translate_with_cloud(key_name, en_text, lang_dict, error_context=""):
+def check_and_translate_with_active_api(
+    key_name,
+    en_text,
+    lang_dict,
+    error_context="",
+    preserve_existing_text=False,
+):
     global \
         LAST_BATCH_LANGUAGE_ERRORS, \
         LAST_BATCH_LANGUAGE_CANDIDATES, \
@@ -9160,10 +16061,16 @@ def check_and_translate_with_cloud(key_name, en_text, lang_dict, error_context="
         "ORIGINAL ENGLISH TEXT", en_text, prompt_en_text
     )
     prompt_lang_dict = build_prompt_lang_dict(
-        en_text, lang_dict, protected_placeholders
+        en_text,
+        lang_dict,
+        protected_placeholders,
+        preserve_existing_text=preserve_existing_text,
     )
     protected_placeholders_json = get_protected_placeholders_prompt_block(
         protected_placeholders
+    )
+    locked_placeholder_count_requirements = build_locked_placeholder_count_requirements(
+        prompt_en_text, protected_placeholders
     )
     ok_translation_guidance = ""
     if re.search(r"(?<![A-Za-z0-9_])OK(?![A-Za-z0-9_])", en_text):
@@ -9196,20 +16103,42 @@ def check_and_translate_with_cloud(key_name, en_text, lang_dict, error_context="
                     continue
 
                 restored_text = restore_protected_placeholders(
-                    t_text, protected_placeholders
+                    t_text, protected_placeholders, prompt_en_text
                 )
-                if (
-                    restored_text == en_text
-                    and not is_invariant_translation_source(en_text)
-                ):
-                    continue
+                restored_text = normalize_doubled_map_escape_sequences(
+                    en_text, restored_text
+                )
                 cleaned_restored_text = cleanup_translated_text(
                     en_text, restored_text, protected_placeholders, lang
                 )
                 LAST_BATCH_LANGUAGE_CANDIDATES[lang] = cleaned_restored_text
-                is_valid, validation_error = validate_translation_text(
-                    en_text, cleaned_restored_text, protected_placeholders, lang
+                country_code = get_standard_ipgeo_country_code_for_source(key_name, en_text)
+                country_proper_name_code = get_ipgeo_proper_name_country_code(
+                    key_name, en_text
                 )
+                extended_name_error = detect_extended_ipgeo_translation_truncation(
+                    key_name, en_text, cleaned_restored_text, lang
+                )
+                country_validation_error = (
+                    detect_suspicious_country_name_candidate(
+                        country_code, en_text, cleaned_restored_text, lang
+                    )
+                    if country_code
+                    else ""
+                )
+                if extended_name_error:
+                    is_valid, validation_error = False, extended_name_error
+                elif country_validation_error:
+                    is_valid, validation_error = False, country_validation_error
+                else:
+                    is_valid, validation_error = validate_translation_text(
+                        en_text,
+                        cleaned_restored_text,
+                        protected_placeholders,
+                        lang,
+                        country_code=country_code,
+                        country_proper_name_code=country_proper_name_code,
+                    )
                 if not is_valid:
                     repaired_success, repaired_text, repaired_error = (
                         repair_candidate_text_for_validation(
@@ -9217,18 +16146,23 @@ def check_and_translate_with_cloud(key_name, en_text, lang_dict, error_context="
                             cleaned_restored_text,
                             en_text,
                             validation_error=validation_error,
+                            key_name=key_name,
                         )
                     )
                     if repaired_success:
                         LAST_BATCH_LANGUAGE_CANDIDATES[lang] = repaired_text
                         clean_t = re.sub(r"(\\n|\n|\s)+$", "", repaired_text)
                         cleaned_updates[lang] = clean_t + en_trailing
-                        print(
-                            f"[{key_name}] Info: [{lang}] Candidate auto-repaired after validation failure."
-                        )
+                        if repaired_text != cleaned_restored_text:
+                            print(
+                                f"[{key_name}] Info: [{lang}] Candidate auto-repaired after validation failure."
+                            )
                         continue
 
-                    LAST_BATCH_LANGUAGE_ERRORS[lang] = repaired_error or validation_error
+                    reported_error = repaired_error or validation_error
+                    if validation_error and repaired_error and validation_error not in repaired_error:
+                        reported_error = f"{validation_error}; {repaired_error}"
+                    LAST_BATCH_LANGUAGE_ERRORS[lang] = reported_error
                     print(
                         f"[{key_name}] Warning: [{lang}] {LAST_BATCH_LANGUAGE_ERRORS[lang]}. Skipping this language update."
                     )
@@ -9237,6 +16171,28 @@ def check_and_translate_with_cloud(key_name, en_text, lang_dict, error_context="
                 clean_t = re.sub(r"(\\n|\n|\s)+$", "", cleaned_restored_text)
                 cleaned_updates[lang] = clean_t + en_trailing
         return cleaned_updates
+
+    if is_local_gemma_compatibility_flow() and len(prompt_lang_dict) == 1:
+        segmented_lang_code = next(iter(prompt_lang_dict.keys()))
+        segmented_text, segmented_error = translate_segmented_single_language_source(
+            key_name, segmented_lang_code, en_text
+        )
+        if isinstance(segmented_text, str) and segmented_text.strip():
+            normalized_segmented_updates = normalize_updates(
+                {segmented_lang_code: segmented_text}
+            )
+            if normalized_segmented_updates:
+                LAST_BATCH_RESULT_STATUS = "success"
+                return normalized_segmented_updates
+        if (
+            isinstance(segmented_error, str)
+            and segmented_error.strip()
+            and "not needed" not in segmented_error
+        ):
+            extra_requirements += (
+                "16. IMPORTANT: A previous segmented local translation attempt failed validation. "
+                f"Do not repeat this problem: {segmented_error.strip()}\n"
+            )
 
     line_prompt = build_translation_batch_prompt(
         key_name,
@@ -9248,10 +16204,17 @@ def check_and_translate_with_cloud(key_name, en_text, lang_dict, error_context="
         extra_requirements,
         authoritative_phrase_map_requirements,
         language_specific_requirements,
+        locked_placeholder_count_requirements,
         response_mode="lines",
     )
 
-    result_text = call_active_api(line_prompt, plain_text=True)
+    result_text = call_active_api(
+        line_prompt,
+        plain_text=True,
+        stream_stop_checker=build_local_line_stream_stop_checker(
+            key_name, en_text, set(lang_dict.keys())
+        ),
+    )
     if not result_text:
         LAST_BATCH_RESULT_STATUS = "call_failure"
         print(
@@ -9283,7 +16246,7 @@ def check_and_translate_with_cloud(key_name, en_text, lang_dict, error_context="
         return None
 
 
-def fix_translation_with_cloud(
+def fix_translation_with_active_api(
     key_name, lang_code, faulty_text, error_message, en_text, extra_requirements=""
 ):
     initial_placeholders = build_protected_placeholders(
@@ -9316,13 +16279,67 @@ def fix_translation_with_cloud(
     known_phrase_requirements = build_known_phrase_translation_requirements(
         en_text, {lang_code: sanitized_faulty_text}
     )
+    locked_adjacent_word_requirements = build_locked_placeholder_adjacent_word_requirements(
+        en_text, rule_number="15a"
+    )
+    authoritative_phrase_map_requirements = build_authoritative_ui_phrase_map_requirements(
+        en_text, {lang_code: sanitized_faulty_text}
+    )
     local_fix_guidance = (
-        build_local_single_language_guidance(
+        build_local_no_reasoning_rule(rule_number="15")
+        + build_local_single_language_guidance(
             en_text, {lang_code: sanitized_faulty_text}
         )
-        if resolve_backend_selection()
+        if is_local_gemma_compatibility_flow()
         else ""
     )
+    deepseek_fix_guidance = (
+        "IMPORTANT: Complete the full corrected translation in one line. Do not truncate mid-sentence. Ensure terminal punctuation is present.\n"
+        if is_deepseek_compatible_backend()
+        else ""
+    )
+    compiler_percent_requirements = build_compiler_percent_fix_requirements(
+        en_text, sanitized_faulty_text
+    )
+    if (
+        compiler_percent_requirements
+        and compiler_percent_requirements not in extra_requirements
+    ):
+        extra_requirements += compiler_percent_requirements
+    allowed_scripts = sorted(build_allowed_script_families_for_lang(lang_code, en_text))
+    script_rule = ""
+    if allowed_scripts:
+        if len(allowed_scripts) == 1:
+            script_rule = (
+                f"IMPORTANT SCRIPT RULE: Write the corrected translation using only the `{allowed_scripts[0]}` script for normal letters. "
+                "Do NOT switch to Latin or a neighboring script unless the exact source token is a protected brand, acronym, placeholder, or file name copied unchanged from the source.\n"
+            )
+        else:
+            script_rule = (
+                "IMPORTANT SCRIPT RULE: Write the corrected translation using only these script families for normal letters: "
+                f"{', '.join(allowed_scripts)}. "
+                "Do NOT use letters from any other scripts unless the exact source token is a protected brand, acronym, placeholder, or file name copied unchanged from the source.\n"
+            )
+
+    protected_count_guidance = ""
+    protected_count_mismatches = get_protected_term_count_mismatches(
+        en_text, sanitized_faulty_text, protected_placeholders
+    )
+    if protected_count_mismatches:
+        lines = "\n".join(
+            f"- `{term}` must appear exactly {expected_count} time(s) in the final translation."
+            for term, expected_count, _ in protected_count_mismatches[:8]
+        )
+        protected_count_guidance = (
+            "PROTECTED TERM COUNT REPAIR: The final translation must preserve each protected term exactly the same number of times as the English source. "
+            "Do not omit protected terms and do not duplicate them. Do not use an extra protected placeholder as the translation of any surrounding ordinary English word; translate that surrounding word naturally instead. "
+            "A value placeholder such as `%s` is not a label that needs another protected term beside it. "
+            "Add a protected placeholder near a value placeholder only when that protected placeholder occurrence already exists in the English source context.\n"
+            f"{lines}\n"
+            + build_locked_placeholder_occurrence_context_text(
+                prompt_en_text, protected_placeholders
+            )
+        )
 
     prompt = f"""
 You are a professional translator and translation quality controller for the eMule software.
@@ -9340,20 +16357,26 @@ Fix the translation so it doesn't cause this error.
 Rules:
 1. Preserve all placeholders (%s, %i, %u, %lu, etc.) EXACTLY as they are in the English text.
 2. Preserve all backslash escape sequences (\n, \r, \\) and literal percent formatting exactly as the English source uses them. If English uses a single literal `%`, keep a single `%`. If English uses `%%`, keep `%%`.
-3. If there are placeholders like __LOCKED_TERM_0__, they are protected special terms/acronyms. Keep them exactly unchanged.
+3. If there are placeholders like __LOCKED_TERM_0__, they are protected special terms/acronyms. Keep the placeholder token itself exactly unchanged. Do NOT replace it with the real term shown in the JSON block, and do NOT attach target-language prefixes or suffixes to it. English words immediately before or after a locked placeholder are not locked unless they are also inside a placeholder; translate those ordinary surrounding words normally. If two locked placeholders are separated by a space, slash, hyphen, or punctuation in the source string, preserve that separator; never concatenate two locked placeholders into one token. For Latin-script surrounding words, leave a visible separator around each locked placeholder; do not output forms like `i__LOCKED_TERM_0__`, `ku__LOCKED_TERM_0__`, or `__LOCKED_TERM_0__only`.
 4. Never keep a partial English lead-in at the beginning of any translated paragraph or line. If the source starts with phrases like "Do", "Do you", "Please", or "Use", translate them fully instead of leaving them in English.
 5. If the source string contains escaped line breaks such as \n, \r\n, or \r, treat them as real line or paragraph boundaries and translate the first word after each boundary too.
 6. Punctuation around a locked placeholder is NOT locked. If a protected term is followed by sentence-ending punctuation in English, move that punctuation to the natural sentence-ending position in the target language when needed.
 7. RETURN ONLY the corrected translation as a single plain text line in this format: `corrected_translation<TAB>your_fixed_translation_string_here`. The separator must be a real TAB character, not the two characters `\t`.
-8. Do NOT return JSON, Markdown, explanations, numbering, bullet points, or comments. Return pure plain text only.
-9. Use a neutral UI status-message tone. Do NOT use first-person wording equivalent to 'I renamed' or 'we changed'.
-10. Do NOT leave raw English words like filename, source, sources, majority, or renamed in the corrected translation unless they are protected terms.
-11. If you translate a quoted UI label or mode name, do NOT append the original English label in parentheses or as a gloss after the translated label.
-{ok_translation_guidance}{known_phrase_requirements}{extra_requirements}{language_specific_requirements}{local_fix_guidance}{build_placeholder_format_rule(en_text, rule_number="11")}{build_literal_percent_format_rule(en_text, rule_number="12")}
+8. The first column must be the literal text `corrected_translation`. Do NOT put the translated sentence before the TAB.
+9. Do NOT return JSON, Markdown, explanations, numbering, bullet points, or comments. Return pure plain text only.
+10. Use a neutral UI status-message tone. Do NOT use first-person wording equivalent to 'I renamed' or 'we changed'.
+11. Do NOT leave raw English words like filename, source, sources, majority, or renamed in the corrected translation unless they are protected terms.
+12. If you translate a quoted UI label or mode name, do NOT append the original English label in parentheses or as a gloss after the translated label.
+{script_rule}{protected_count_guidance}{ok_translation_guidance}{known_phrase_requirements}{locked_adjacent_word_requirements}{authoritative_phrase_map_requirements}{extra_requirements}{language_specific_requirements}{local_fix_guidance}{deepseek_fix_guidance}{build_placeholder_format_rule(en_text, rule_number="13")}{build_literal_percent_format_rule(en_text, rule_number="14")}{build_source_rate_unit_format_rule(en_text, rule_number="14a")}
 LOCKED PLACEHOLDERS JSON:
 {protected_placeholders_json}
 """
-    result_text = call_active_api(prompt, plain_text=True)
+    result_text = call_active_api(
+        prompt,
+        plain_text=True,
+        request_timeout_sec=API_REPAIR_REQUEST_TIMEOUT_SEC,
+        timeout_retry_count=API_REPAIR_TIMEOUT_RETRY_COUNT,
+    )
     if not result_text:
         return None
 
@@ -9375,7 +16398,10 @@ LOCKED PLACEHOLDERS JSON:
         en_trailing = en_trailing_match.group(0) if en_trailing_match else ""
 
         corrected_restored = restore_protected_placeholders(
-            corrected, protected_placeholders
+            corrected, protected_placeholders, prompt_en_text
+        )
+        corrected_restored = normalize_doubled_map_escape_sequences(
+            en_text, corrected_restored
         )
         corrected_cleaned = cleanup_translated_text(
             en_text, corrected_restored, protected_placeholders, lang_code
@@ -9477,7 +16503,7 @@ def clean_then_translate_line_numbers_logic(
                 raw_input_text = read_cli_or_prompt_value(
                     None,
                     "Enter line numbers (comma-separated, extra spaces allowed): ",
-                    "Line numbers must be provided for operation 4 when stdin is not interactive.",
+                    "Line numbers must be provided for operation 5 when stdin is not interactive.",
                 )
             raw_input_text = raw_input_text.strip()
             if not raw_input_text:
@@ -9600,16 +16626,32 @@ def clean_then_translate_line_numbers_logic(
             save_resume_state(resume_state)
             continue
 
+        repaired_success, repaired_text, _ = repair_candidate_text_for_validation(
+            lang_code, translated, en_text, key_name=key_name
+        )
+        if repaired_success and isinstance(repaired_text, str) and repaired_text.strip():
+            translated = repaired_text
+
         success, msg = update_translation_via_compiler(
             key_name, lang_code, translated, en_text
         )
         if not success:
-            print(f"  Update failed: {msg}")
-            error_count += 1
-            handle_operation_error(
-                f"[Line {target_line_num}] Failed to update the translated text: {msg}",
-                stop_on_error,
+            repaired_success, repaired_text, repaired_msg = try_phrase_only_repair(
+                key_name, lang_code, translated, en_text
             )
+            if repaired_success:
+                processed_count += 1
+                print(
+                    f"  Candidate auto-repaired after update failure: {repaired_text[:80]}{'...' if len(repaired_text) > 80 else ''}"
+                )
+            else:
+                final_error = select_repair_failure_message(msg, repaired_msg)
+                print(f"  Update failed: {final_error}")
+                error_count += 1
+                handle_operation_error(
+                    f"[Line {target_line_num}] Failed to update the translated text: {final_error}",
+                    stop_on_error,
+                )
         else:
             processed_count += 1
             print(
@@ -9643,7 +16685,7 @@ def clean_then_translate_specific_key_languages_logic(
                 raw_input_text = read_cli_or_prompt_value(
                     None,
                     "Enter alternating KEY and language code values (comma-separated, extra spaces allowed): ",
-                    "KEY/language pairs must be provided for operation 5 when stdin is not interactive.",
+                    "KEY/language pairs must be provided for operation 6 when stdin is not interactive.",
                 )
             raw_input_text = raw_input_text.strip()
             if not raw_input_text:
@@ -9778,16 +16820,32 @@ def clean_then_translate_specific_key_languages_logic(
             save_resume_state(resume_state)
             continue
 
+        repaired_success, repaired_text, _ = repair_candidate_text_for_validation(
+            lang_code, translated, en_text, key_name=key_name
+        )
+        if repaired_success and isinstance(repaired_text, str) and repaired_text.strip():
+            translated = repaired_text
+
         success, msg = update_translation_via_compiler(
             key_name, lang_code, translated, en_text
         )
         if not success:
-            print(f"[{key_name}/{lang_code}] Update failed: {msg}")
-            error_count += 1
-            handle_operation_error(
-                f"[{key_name}/{lang_code}] Failed to update the translated text: {msg}",
-                stop_on_error,
+            repaired_success, repaired_text, repaired_msg = try_phrase_only_repair(
+                key_name, lang_code, translated, en_text
             )
+            if repaired_success:
+                processed_count += 1
+                print(
+                    f"[{key_name}/{lang_code}] Candidate auto-repaired after update failure: {repaired_text[:80]}{'...' if len(repaired_text) > 80 else ''}"
+                )
+            else:
+                final_error = select_repair_failure_message(msg, repaired_msg)
+                print(f"[{key_name}/{lang_code}] Update failed: {final_error}")
+                error_count += 1
+                handle_operation_error(
+                    f"[{key_name}/{lang_code}] Failed to update the translated text: {final_error}",
+                    stop_on_error,
+                )
         else:
             processed_count += 1
             print(
@@ -9805,12 +16863,62 @@ def clean_then_translate_specific_key_languages_logic(
     return error_count
 
 
-def translate_single_line(key_name, lang_code, en_text):
+def translate_single_line(
+    key_name,
+    lang_code,
+    en_text,
+    request_timeout_sec=None,
+    timeout_retry_count=None,
+):
     if not key_name or not lang_code or not en_text:
         return None
 
     language_name = get_language_name_for_code(lang_code)
     language_label = language_name if language_name else f"language code {lang_code}"
+    placeholder_pairs = build_protected_placeholders(en_text, {lang_code: ""})
+    prompt_en_text = apply_protected_placeholders(en_text, placeholder_pairs)
+    prompt_en_text_block = build_prompt_text_block(
+        "Source text (English)", en_text, prompt_en_text
+    )
+    protected_placeholders_json = get_protected_placeholders_prompt_block(
+        placeholder_pairs
+    )
+    known_phrase_requirements = build_known_phrase_translation_requirements(
+        en_text, {lang_code: ""}
+    )
+    authoritative_phrase_map_requirements = (
+        build_authoritative_ui_phrase_map_requirements(en_text, {lang_code: ""})
+    )
+    locked_adjacent_word_requirements = build_locked_placeholder_adjacent_word_requirements(
+        en_text, rule_number="9a"
+    )
+    language_specific_requirements = build_language_specific_requirements(lang_code)
+    source_word_translation_rule = build_unprotected_source_word_translation_rule(
+        en_text,
+        lang_code,
+        rule_number="9",
+        priority_words=collect_arrow_path_source_words(en_text),
+    )
+    local_single_language_guidance = (
+        build_local_no_reasoning_rule(rule_number="10")
+        + build_local_single_language_guidance(en_text, {lang_code: ""})
+        if is_local_gemma_compatibility_flow()
+        else ""
+    )
+    allowed_scripts = sorted(build_allowed_script_families_for_lang(lang_code, en_text))
+    script_rule = ""
+    if allowed_scripts:
+        if len(allowed_scripts) == 1:
+            script_rule = (
+                f"8. Write the translation using only the `{allowed_scripts[0]}` script for normal letters. "
+                "Do NOT switch to Latin or a neighboring script unless the exact source token is a protected brand, acronym, placeholder, or file name copied unchanged from the source.\n"
+            )
+        else:
+            script_rule = (
+                "8. Write the translation using only these script families for normal letters: "
+                f"{', '.join(allowed_scripts)}. "
+                "Do NOT use letters from any other scripts unless the exact source token is a protected brand, acronym, placeholder, or file name copied unchanged from the source.\n"
+            )
 
     prompt = f"""
 You are a professional translator for the eMule software.
@@ -9818,18 +16926,25 @@ Target language code: '{lang_code}'
 Target language name: '{language_label}'
 Translate the following English UI text into the target language.
 
-Source text (English):
-{en_text}
+{prompt_en_text_block}
 
 Rules:
 1. Return ONLY one plain text line with your translation.
 2. Do NOT return the English source text unchanged.
 3. Do NOT return JSON, Markdown, explanations, or extra lines.
 4. Translate into {language_label}, not into English and not into a neighboring language.
-5. Preserve all placeholders, escape sequences, and protected terms from the source exactly.
+5. Preserve all placeholders, escape sequences, and protected terms from the source exactly. If the source contains a locked placeholder such as __LOCKED_TERM_0__, output that placeholder token itself; do NOT replace it with the real term shown in the JSON block or attach target-language prefixes or suffixes. English words immediately before or after a locked placeholder are not locked unless they are also inside a placeholder; translate those ordinary surrounding words normally. If two locked placeholders are separated by a space, slash, hyphen, or punctuation in the source string, preserve that separator; never concatenate two locked placeholders into one token. For Latin-script surrounding words, leave a visible separator around each locked placeholder; do not output forms like `i__LOCKED_TERM_0__`, `ku__LOCKED_TERM_0__`, or `__LOCKED_TERM_0__only`.
+{source_word_translation_rule}{locked_adjacent_word_requirements}{script_rule}{build_placeholder_format_rule(en_text, rule_number="6")}{build_literal_percent_format_rule(en_text, rule_number="7")}{build_source_rate_unit_format_rule(en_text, rule_number="7a")}{known_phrase_requirements}{authoritative_phrase_map_requirements}{language_specific_requirements}{local_single_language_guidance}
+LOCKED PLACEHOLDERS JSON:
+{protected_placeholders_json}
 """
 
-    result_text = call_active_api(prompt, plain_text=True)
+    result_text = call_active_api(
+        prompt,
+        plain_text=True,
+        request_timeout_sec=request_timeout_sec,
+        timeout_retry_count=timeout_retry_count,
+    )
     if not result_text:
         return None
 
@@ -9837,9 +16952,20 @@ Rules:
         result_text.strip(), en_text
     )
     if not cleaned or not cleaned.strip():
-        return None
+        same_spelling_candidate = cleanup_single_translation_candidate_value(
+            en_text, result_text.strip()
+        )
+        if is_same_spelling_translation_review_candidate(
+            lang_code, en_text, same_spelling_candidate
+        ):
+            cleaned = same_spelling_candidate
+        else:
+            return None
 
-    return cleaned
+    restored = restore_protected_placeholders(
+        cleaned, placeholder_pairs, prompt_en_text
+    )
+    return cleanup_translated_text(en_text, restored, placeholder_pairs, lang_code)
 
 
 def run_multi_key_translation_operation(
@@ -9849,11 +16975,19 @@ def run_multi_key_translation_operation(
     stop_on_error=False,
     resume_state=None,
     runtime_settings=None,
+    force_review_existing=None,
+    preserve_existing_text=None,
 ):
-    specific_key_mode = choice in ("2", "3")
+    specific_key_mode = choice in ("2", "4")
+    if force_review_existing is None:
+        force_review_existing = choice == "2"
+    if preserve_existing_text is None:
+        preserve_existing_text = choice == "2"
 
     if resume_state is None:
         params = {
+            "force_review_existing": bool(force_review_existing),
+            "preserve_existing_text": bool(preserve_existing_text),
             "specific_keys": list(specific_keys or []),
             "stop_on_error": bool(stop_on_error),
             "translation_round_count": int(translation_round_count),
@@ -9870,7 +17004,7 @@ def run_multi_key_translation_operation(
             "prepared_keys": [],
             "round_processed_keys": [],
         }
-        if choice == "3":
+        if choice == "4":
             progress["phase"] = RESUME_PHASE_PREPARE_KEYS
         else:
             progress["phase"] = RESUME_PHASE_TRANSLATION_ROUND
@@ -9881,21 +17015,29 @@ def run_multi_key_translation_operation(
     else:
         choice = normalize_menu_choice(resume_state.get("operation", {}).get("choice"))
         params = resume_state.get("params", {})
+        force_review_existing = bool(
+            params.get("force_review_existing", choice == "2")
+        )
+        preserve_existing_text = bool(
+            params.get("preserve_existing_text", choice == "2")
+        )
         specific_keys = list(params.get("specific_keys", []))
         translation_round_count = int(params.get("translation_round_count", 1))
         stop_on_error = bool(params.get("stop_on_error", stop_on_error))
-        specific_key_mode = choice in ("2", "3")
+        specific_key_mode = choice in ("2", "4")
         print(
             f"Info: Resuming saved {MENU_OPTION_LABELS.get(choice, 'translation')} job."
         )
 
     params = resume_state.setdefault("params", {})
     progress = resume_state.setdefault("progress", {})
+    params["force_review_existing"] = bool(force_review_existing)
+    params["preserve_existing_text"] = bool(preserve_existing_text)
     params["translation_round_count"] = int(translation_round_count)
     params["stop_on_error"] = bool(stop_on_error)
     params["specific_keys"] = list(specific_keys or params.get("specific_keys", []))
 
-    if choice == "3" and progress.get("phase") == RESUME_PHASE_PREPARE_KEYS:
+    if choice == "4" and progress.get("phase") == RESUME_PHASE_PREPARE_KEYS:
         source_keys = list(params.get("specific_keys", []))
         prepared_keys = list(progress.get("prepared_keys", []))
         next_index = max(0, int(progress.get("next_index", 0)))
@@ -9952,7 +17094,7 @@ def run_multi_key_translation_operation(
 
     current_round = max(1, int(progress.get("current_round", 1)))
     total_rounds = max(1, int(params.get("translation_round_count", 1)))
-    if choice not in ("1", "2", "3"):
+    if choice not in ("1", "2", "4"):
         total_rounds = 1
 
     while current_round <= total_rounds:
@@ -9968,7 +17110,7 @@ def run_multi_key_translation_operation(
                 elif choice == "2":
                     pass_keys = list(params.get("specific_keys", []))
                     fill_only_missing = False
-                elif choice == "3":
+                elif choice == "4":
                     pass_keys = list(progress.get("prepared_keys", []))
                     fill_only_missing = False
                 else:
@@ -9992,7 +17134,11 @@ def run_multi_key_translation_operation(
             print(f"\n====== Translation round {current_round}/{total_rounds} ======")
 
         round_result = process_translation_round_with_resume(
-            resume_state, keys_list, stop_on_error=stop_on_error
+            resume_state,
+            keys_list,
+            stop_on_error=stop_on_error,
+            force_review_existing=bool(params.get("force_review_existing", False)),
+            preserve_existing_text=bool(params.get("preserve_existing_text", False)),
         )
         progress = resume_state["progress"]
         progress["found_specific_keys"] = list(round_result["found_specific_keys"])
@@ -10069,27 +17215,34 @@ def execute_menu_operation(
         stop_on_error = False
     runtime_settings = None
 
-    if choice == "8":
-        error_count = remove_unused_keys_logic(stop_on_error=stop_on_error)
+    if choice == "3":
+        error_count = clean_non_english_specific_keys_logic(
+            raw_input_text=cli_args.keys if use_cli_values and cli_args else None,
+            stop_on_error=stop_on_error,
+        )
         print_total_elapsed_time()
         return error_count
     if choice == "9":
+        error_count = remove_unused_keys_logic(stop_on_error=stop_on_error)
+        print_total_elapsed_time()
+        return error_count
+    if choice == "10":
         error_count = find_missing_translations_logic(
             start_line=cli_args.start_line if use_cli_values and cli_args else None,
             limit=cli_args.limit if use_cli_values and cli_args else None,
         )
         print_total_elapsed_time()
         return error_count
-    if choice == "10":
+    if choice == "11":
         error_count = fix_translations_map_logic(stop_on_error=stop_on_error)
         print_total_elapsed_time()
         return error_count
-    if choice in {"11", "12", "13", "14", "15", "16", "17"}:
+    if choice in {"12", "13", "14", "15", "16", "17"}:
         error_count = run_map_toolkit_menu_operation(choice)
         print_total_elapsed_time()
         return error_count
 
-    if choice == "6":
+    if choice == "7":
         resume_state = load_resume_state()
         if resume_state is None:
             print("Info: Resume file not found. There is no interrupted translation job to continue.")
@@ -10109,6 +17262,8 @@ def execute_menu_operation(
             return error_count
 
         apply_runtime_override_settings(resume_state.get("runtime", {}))
+        if use_cli_values and cli_args:
+            apply_command_line_overrides(cli_args)
         ensure_translation_backend_ready(prompt_user=True)
         resumed_choice = normalize_menu_choice(
             resume_state.get("operation", {}).get("choice")
@@ -10118,15 +17273,15 @@ def execute_menu_operation(
         )
         print_active_backend_info()
 
-        if resumed_choice in ("1", "2", "3", "7"):
+        if resumed_choice in ("1", "2", "4", "8"):
             error_count = run_multi_key_translation_operation(
                 resumed_choice, resume_state=resume_state
             )
-        elif resumed_choice == "4":
+        elif resumed_choice == "5":
             error_count = clean_then_translate_line_numbers_logic(
                 resume_state=resume_state
             )
-        elif resumed_choice == "5":
+        elif resumed_choice == "6":
             error_count = clean_then_translate_specific_key_languages_logic(
                 resume_state=resume_state
             )
@@ -10137,7 +17292,7 @@ def execute_menu_operation(
         delete_resume_state_file()
         return error_count
 
-    if choice in {"1", "2", "3", "4", "5", "7"}:
+    if choice in {"1", "2", "4", "5", "6", "8"}:
         ensure_translation_backend_ready(prompt_user=True)
         print_active_backend_info()
         runtime_settings = collect_runtime_override_settings(
@@ -10175,43 +17330,43 @@ def execute_menu_operation(
             stop_on_error=stop_on_error,
             runtime_settings=runtime_settings,
         )
-    elif choice == "3":
+    elif choice == "4":
         raw_keys_input = read_cli_or_prompt_value(
             cli_args.keys if use_cli_values and cli_args else None,
             "Enter the KEY or comma-separated KEY list to clean and translate: ",
-            "KEY list must be provided for operation 3 when stdin is not interactive.",
+            "KEY list must be provided for operation 4 when stdin is not interactive.",
         )
         specific_keys = parse_specific_keys_input(raw_keys_input)
         if not specific_keys:
             print("Invalid KEY input.")
-            handle_operation_error("Invalid KEY input for operation 3.", stop_on_error)
+            handle_operation_error("Invalid KEY input for operation 4.", stop_on_error)
             return 1
         translation_round_count = prompt_translation_round_count(
             cli_args.rounds if use_cli_values and cli_args else None
         )
         error_count = run_multi_key_translation_operation(
-            "3",
+            "4",
             specific_keys=specific_keys,
             translation_round_count=translation_round_count,
             stop_on_error=stop_on_error,
             runtime_settings=runtime_settings,
         )
-    elif choice == "4":
+    elif choice == "5":
         error_count = clean_then_translate_line_numbers_logic(
             raw_input_text=cli_args.line_numbers if use_cli_values and cli_args else None,
             stop_on_error=stop_on_error,
             runtime_settings=runtime_settings,
         )
-    elif choice == "5":
+    elif choice == "6":
         error_count = clean_then_translate_specific_key_languages_logic(
             raw_input_text=cli_args.key_lang_pairs if use_cli_values and cli_args else None,
             stop_on_error=stop_on_error,
             runtime_settings=runtime_settings,
         )
-    elif choice == "7":
+    elif choice == "8":
         print("Info: Ignoring resume point. Starting from the beginning.")
         error_count = run_multi_key_translation_operation(
-            "7",
+            "8",
             translation_round_count=1,
             stop_on_error=stop_on_error,
             runtime_settings=runtime_settings,
@@ -10236,7 +17391,7 @@ def print_top_level_command_help():
     print(f"  python {script_name} map --help")
     print("\nExamples:")
     print(
-        f"  python {script_name} translate missing-only --backend cloud --loop true --stop-on-error true"
+        f"  python {script_name} translate missing-only --backend gemini --loop true --stop-on-error true"
     )
     print(
         f"  python {script_name} translate clean-key-languages --pairs KEYA,tr,KEYB,ar --backend local"

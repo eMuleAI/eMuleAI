@@ -23,6 +23,8 @@
 #include "KnownFileList.h"
 #include "SharedFileList.h"
 #include "UploadQueue.h"
+#include "DownloadQueue.h"
+#include "PartFile.h"
 #include "emuledlg.h"
 #include "SharedFilesWnd.h"
 #include "eMuleAI/DarkMode.h"
@@ -50,6 +52,25 @@ namespace
 		if (pSharedFilesWnd != NULL)
 			pSharedFilesWnd->RequestDetailsPanelHeightAdjustment();
 	}
+
+	bool IsLiveStatisticsFilePointer(const CKnownFile *pFile)
+	{
+		if (pFile == NULL)
+			return false;
+		const UINT_PTR uPointerValue = reinterpret_cast<UINT_PTR>(pFile);
+		if (uPointerValue == static_cast<UINT_PTR>(-1) || uPointerValue < 0x10000 || !AfxIsValidAddress(pFile, sizeof(CObject), FALSE))
+			return false;
+		if (theApp.downloadqueue != NULL && theApp.downloadqueue->IsPartFile(pFile))
+			return true;
+		if (theApp.sharedfiles != NULL && theApp.sharedfiles->IsFilePtrInList(pFile))
+			return true;
+		return theApp.knownfiles != NULL && theApp.knownfiles->IsFilePtrInList(pFile);
+	}
+
+	void MakeStatisticsProgressOpaque(CProgressCtrlX& rCtrl)
+	{
+		rCtrl.ModifyStyleEx(WS_EX_TRANSPARENT, 0, SWP_FRAMECHANGED);
+	}
 }
 
 IMPLEMENT_DYNAMIC(CFileDetailDlgStatistics, CResizablePage)
@@ -57,6 +78,7 @@ IMPLEMENT_DYNAMIC(CFileDetailDlgStatistics, CResizablePage)
 BEGIN_MESSAGE_MAP(CFileDetailDlgStatistics, CResizablePage)
 	ON_MESSAGE(UM_DATA_CHANGED, OnDataChanged)
 	ON_WM_DESTROY()
+	ON_WM_ERASEBKGND()
 	ON_WM_SYSCOLORCHANGE()
 	ON_WM_TIMER()
 END_MESSAGE_MAP()
@@ -88,6 +110,13 @@ BOOL CFileDetailDlgStatistics::OnInitDialog()
 {
 	CResizablePage::OnInitDialog();
 	InitWindowStyles(this);
+
+	MakeStatisticsProgressOpaque(pop_bar);
+	MakeStatisticsProgressOpaque(pop_baraccept);
+	MakeStatisticsProgressOpaque(pop_bartrans);
+	MakeStatisticsProgressOpaque(pop_bar2);
+	MakeStatisticsProgressOpaque(pop_baraccept2);
+	MakeStatisticsProgressOpaque(pop_bartrans2);
 
 	AddOrReplaceAnchor(this, pop_bar, TOP_LEFT, TOP_RIGHT);
 	AddOrReplaceAnchor(this, pop_baraccept, TOP_LEFT, TOP_RIGHT);
@@ -142,6 +171,7 @@ BOOL CFileDetailDlgStatistics::OnSetActive()
 		m_hRefreshTimer = SetTimer(REFRESH_TIMER_ID, SEC2MS(3), NULL);
 		m_bDataChanged = true;
 	}
+	RedrawWindow(NULL, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
 	return TRUE;
 }
 
@@ -167,24 +197,20 @@ void CFileDetailDlgStatistics::RefreshData()
 	uint64 uTransferred = 0;
 	uint64 uAllTimeTransferred = 0;
 	const CKnownFile *pTheFile = NULL;
+	CSimpleArray<CObject*> aLiveFiles;
 	int iFiles = 0;
 	UINT uRequests = 0;
 	UINT uAccepted = 0;
 	UINT uAllTimeRequests = 0;
 	UINT uAllTimeAccepted = 0;
 	for (int i = m_paFiles->GetSize(); --i >= 0;) {
-		// Validate memory address to avoid dangling pointer crash then check type only after confirming the object is valid
-		CObject* pObj = (*m_paFiles)[i];
-		if (!pObj || !AfxIsValidAddress(pObj, sizeof(CObject), FALSE) || !pObj->IsKindOf(RUNTIME_CLASS(CKnownFile))) 
-			continue;
-
-		// Ensure the file is still in the shared files list
-		const CKnownFile* pFile = static_cast<const CKnownFile*>(pObj);
-		if (theApp.sharedfiles && theApp.sharedfiles->GetFileByIdentifier(pFile->GetFileIdentifierC(), true) == NULL)
+		const CKnownFile* pFile = static_cast<const CKnownFile*>((*m_paFiles)[i]);
+		if (!IsLiveStatisticsFilePointer(pFile))
 			continue;
 
 		if (!iFiles)
 			pTheFile = pFile;
+		aLiveFiles.Add(const_cast<CKnownFile*>(pFile));
 		++iFiles;
 
 		uTransferred += pFile->statistic.GetTransferred();
@@ -228,11 +254,11 @@ void CFileDetailDlgStatistics::RefreshData()
 		SetDlgItemInt(IDC_SREQUESTED2, uAllTimeRequests, FALSE);
 		SetDlgItemInt(IDC_SACCEPTED2, uAllTimeAccepted, FALSE);
 
-		uint32 nQueueCount = theApp.uploadqueue->GetWaitingUserForFileCount(*m_paFiles, !m_bDataChanged);
+		uint32 nQueueCount = theApp.uploadqueue->GetWaitingUserForFileCount(aLiveFiles, !m_bDataChanged);
 		if (nQueueCount != _UI32_MAX)
 			SetDlgItemInt(IDC_FS_ONQUEUE_VAL, nQueueCount, FALSE);
 
-		SetDlgItemText(IDC_FS_UPLOADING_VAL, CastItoXBytes(theApp.uploadqueue->GetDatarateForFile(*m_paFiles), false, true));
+		SetDlgItemText(IDC_FS_UPLOADING_VAL, CastItoXBytes(theApp.uploadqueue->GetDatarateForFile(aLiveFiles), false, true));
 
 
 		if (iFiles == 1) {
@@ -277,6 +303,17 @@ void CFileDetailDlgStatistics::OnDestroy()
 		m_hRefreshTimer = 0;
 	}
 	CResizablePage::OnDestroy();
+}
+
+BOOL CFileDetailDlgStatistics::OnEraseBkgnd(CDC* pDC)
+{
+	if (pDC == NULL)
+		return CResizablePage::OnEraseBkgnd(pDC);
+
+	CRect rcClient;
+	GetClientRect(&rcClient);
+	pDC->FillSolidRect(&rcClient, GetCustomSysColor(IsDarkModeEnabled() ? COLOR_WINDOW : COLOR_3DFACE));
+	return TRUE;
 }
 
 void CFileDetailDlgStatistics::Localize()

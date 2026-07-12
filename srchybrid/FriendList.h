@@ -48,6 +48,7 @@ private:
 	CTypedPtrList<CPtrList, CFriend*>	m_listFriends;
 	CFriendListCtrl						*m_wndOutput;
 	DWORD								m_nLastSaved;
+	volatile LONG						m_lFriendListSaveGeneration;
 
 public:
 	bool		IsAlreadyFriend(uchar userHash[]) const;

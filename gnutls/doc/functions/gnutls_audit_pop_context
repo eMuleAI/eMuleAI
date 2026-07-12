@@ -1,0 +1,12 @@
+
+
+
+
+@deftypefun {void} {gnutls_audit_pop_context} ( @var{void})
+
+Pop the current crypto-auditing context from the thread-local
+context stack. This is useful for the applications that define
+their own probe points for application level protocols.
+
+@strong{Since:} 3.8.11
+@end deftypefun

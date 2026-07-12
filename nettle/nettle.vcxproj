@@ -1,0 +1,91 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" ToolsVersion="14.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|ARM64">
+      <Configuration>Debug</Configuration>
+      <Platform>ARM64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Debug|Win32">
+      <Configuration>Debug</Configuration>
+      <Platform>Win32</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|ARM64">
+      <Configuration>Release</Configuration>
+      <Platform>ARM64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|Win32">
+      <Configuration>Release</Configuration>
+      <Platform>Win32</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <Keyword>Win32Proj</Keyword>
+    <ProjectGuid>{4BDBDC69-A8D2-44D6-BBC9-58230BA4F1D9}</ProjectGuid>
+    <ProjectName>nettle</ProjectName>
+    <RootNamespace>nettle</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Label="Configuration">
+    <ConfigurationType>StaticLibrary</ConfigurationType>
+    <CharacterSet>Unicode</CharacterSet>
+    <PlatformToolset>v145</PlatformToolset>
+    <SpectreMitigation>false</SpectreMitigation>
+    <UseOfMfc>Static</UseOfMfc>
+  </PropertyGroup>
+  <PropertyGroup Label="Configuration" Condition="'$(Configuration)'=='Debug'">
+    <UseDebugLibraries>true</UseDebugLibraries>
+  </PropertyGroup>
+  <PropertyGroup Label="Configuration" Condition="'$(Configuration)'=='Release'">
+    <UseDebugLibraries>false</UseDebugLibraries>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ImportGroup Label="ExtensionSettings" />
+  <ImportGroup Label="PropertySheets">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <PropertyGroup Label="UserMacros">
+    <EmuleAiRootDir>$(MSBuildProjectDirectory)\..\</EmuleAiRootDir>
+    <EmuleAiBuildDir>$(EmuleAiRootDir)_Build\</EmuleAiBuildDir>
+  </PropertyGroup>
+  <Import Project="..\eMuleAI.props" Condition="exists('..\eMuleAI.props')" />
+  <PropertyGroup>
+    <OutDir>$(EmuleAiBuildDir)$(ProjectName)\$(Configuration)\$(Platform)\</OutDir>
+    <IntDir>$(EmuleAiBuildDir)$(ProjectName)\$(Configuration)\$(Platform)\Intermediate\</IntDir>
+  </PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <WarningLevel>Level3</WarningLevel>
+      <PreprocessorDefinitions>HAVE_CONFIG_H;NETTLE_USE_MINI_GMP=1;MINI_GMP_LIMB_TYPE=long;_CRT_SECURE_NO_WARNINGS;_CRT_NONSTDC_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>$(EmuleAiBuildDir)nettle\Generated\nettle;$(EmuleAiBuildDir)nettle\Generated;..\gmp\mini-gmp;.;..;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <CompileAs>CompileAsC</CompileAs>
+      <ExceptionHandling>false</ExceptionHandling>
+      <LanguageStandard_C>stdc17</LanguageStandard_C>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <AdditionalOptions>/FS %(AdditionalOptions)</AdditionalOptions>
+      <DisableSpecificWarnings>4146;4267;4244;4310;4334;4701;4018;5286;5287;%(DisableSpecificWarnings)</DisableSpecificWarnings>
+    </ClCompile>
+    <Lib>
+      <OutputFile>$(OutDir)nettle.lib</OutputFile>
+    </Lib>
+    <PreBuildEvent>
+      <Command>python "$(MSBuildProjectDirectory)\prepare_generated.py" -ProjectDir "$(MSBuildProjectDirectory)" -GeneratedDir "$(EmuleAiBuildDir)nettle\Generated" -ToolDir "$(IntDir)GeneratedTools"</Command>
+    </PreBuildEvent>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="*.c" Exclude="aesdata.c;desdata.c;eccdata.c;fat-arm.c;fat-arm64.c;fat-ppc.c;fat-s390x.c;fat-x86_64.c;getopt.c;getopt1.c;mini-gmp.c;non-nettle.c;sha-example.c;shadata.c;twofishdata.c" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="prepare_generated.py" />
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <ImportGroup Label="ExtensionTargets" />
+</Project>

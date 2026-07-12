@@ -9,7 +9,9 @@ typedef struct
 
 
 // predefined treeview image list indices
+#define	TREEOPTSCTRLIMG_COMMAND	10
 #define	TREEOPTSCTRLIMG_EDIT	11
+#define	TREEOPTSCTRLIMG_GROUP	13
 
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -21,6 +23,9 @@ public:
 	explicit CTreeOptionsCtrlEx(UINT uImageListColorFlags = ILC_COLOR);
 
 	void SetEditLabel(HTREEITEM hItem, const CString &rstrLabel);
+	HTREEITEM InsertGroup(LPCTSTR lpszItem, int nImage, HTREEITEM hParent = TVI_ROOT, HTREEITEM hAfter = TVI_LAST, DWORD dwItemData = _UI32_MAX);
+	HTREEITEM InsertCommandButton(LPCTSTR lpszItem, HTREEITEM hParent, HTREEITEM hAfter = TVI_LAST, DWORD dwItemData = _UI32_MAX);
+	BOOL IsCommandButton(HTREEITEM hItem);
 	void UpdateCheckBoxGroup(HTREEITEM hItem);
 	void SetImageListColorFlags(UINT uImageListColorFlags);
 
@@ -32,11 +37,24 @@ public:
 
 protected:
 	UINT m_uImageListColorFlags;
+	HTREEITEM m_hHotCommandButton;
+	HTREEITEM m_hPressedCommandButton;
+	BOOL m_bTrackingCommandButtonMouse;
 
 	virtual void HandleCheckBox(HTREEITEM hItem, BOOL bCheck);
+	HTREEITEM HitTestCommandButton(CPoint point);
+	void InvalidateCommandButton(HTREEITEM hItem);
+	CRect GetCommandButtonRect(HTREEITEM hItem);
+	void DrawCommandButton(CDC &dc, HTREEITEM hItem);
 
 	DECLARE_MESSAGE_MAP()
 	afx_msg void OnDestroy();
+	afx_msg void OnLButtonDown(UINT nFlags, CPoint point);
+	afx_msg void OnLButtonUp(UINT nFlags, CPoint point);
+	afx_msg void OnMouseMove(UINT nFlags, CPoint point);
+	afx_msg void OnMouseLeave();
+	afx_msg void OnCaptureChanged(CWnd *pWnd);
+	afx_msg BOOL OnCustomDraw(LPNMHDR pNMHDR, LRESULT *pResult);
 };
 
 //Dialog Data exchange support

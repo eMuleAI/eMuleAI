@@ -41,7 +41,11 @@ static char THIS_FILE[] = __FILE__;
 
 bool IsValidSearchResultClientIPPort(uint32 nIP, uint16 nPort)
 {
-	return	(nIP & 0xFF) && nPort;
+	if (nIP == 0 || nPort == 0)
+		return false;
+
+	// LowID values are server-assigned IDs, not IPv4 addresses. Their low byte may legitimately be zero.
+	return ::IsLowID(nIP) || (nIP & 0xFF) != 0;
 }
 
 namespace
@@ -213,6 +217,7 @@ CSearchFile::CSearchFile(const CSearchFile *copyfrom)
 	m_bServerUDPAnswer = copyfrom->m_bServerUDPAnswer;
 	m_nSpamRating = copyfrom->GetSpamRating();
 	m_bAutomaticBlacklisted = copyfrom->GetAutomaticBlacklisted();
+	m_bAutomaticBlacklistEvaluated = copyfrom->HasAutomaticBlacklistEvaluation();
 	m_bManualBlacklisted = copyfrom->GetManualBlacklisted();
 	m_nKadPublishInfo = copyfrom->GetKadPublishInfo();
 	m_bMultipleAICHFound = copyfrom->m_bMultipleAICHFound;
@@ -233,6 +238,7 @@ CSearchFile::CSearchFile(CFileDataIO &in_data, bool bOptUTF8, uint32 nSearchID, 
 	, m_nKadPublishInfo()
 	, m_nSpamRating()
 	, m_bAutomaticBlacklisted()
+	, m_bAutomaticBlacklistEvaluated()
 	, m_bManualBlacklisted()
 	, m_list_childcount()
 	, m_list_parent()

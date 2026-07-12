@@ -127,6 +127,12 @@ void CFriend::LoadFromFile(CFileDataIO &file)
 			ASSERT(newtag->IsHash());
 			if (newtag->IsHash())
 				md4cpy(m_abyKadID, newtag->GetHash());
+			break;
+		case FF_FRIENDSLOT:
+			ASSERT(newtag->IsInt());
+			if (newtag->IsInt())
+				m_friendSlot = newtag->GetInt() != 0;
+			break;
 		}
 		delete newtag;
 	}
@@ -159,6 +165,11 @@ void CFriend::WriteToFile(CFileDataIO &file)
 		tag.WriteNewEd2kTag(file);
 		++uTagCount;
 	}
+	if (m_friendSlot) {
+		CTag tag(FF_FRIENDSLOT, static_cast<uint64>(1));
+		tag.WriteNewEd2kTag(file);
+		++uTagCount;
+	}
 
 	file.Seek(uTagCountFilePos, CFile::begin);
 	file.WriteUInt32(uTagCount);
@@ -185,17 +196,14 @@ void CFriend::SetFriendSlot(bool newValue)
 
 bool CFriend::GetFriendSlot() const
 {
-	return GetLinkedClient() ? m_LinkedClient->GetFriendSlot() : m_friendSlot;
+	return m_friendSlot;
 }
 
 void CFriend::SetLinkedClient(CUpDownClient *linkedClient)
 {
 	if (linkedClient != m_LinkedClient) {
 		if (linkedClient != NULL) {
-			if (m_LinkedClient == NULL)
-				linkedClient->SetFriendSlot(m_friendSlot);
-			else
-				linkedClient->SetFriendSlot(m_LinkedClient->GetFriendSlot());
+			linkedClient->SetFriendSlot(m_friendSlot);
 
 			m_dwLastSeen = time(NULL);
 			m_LastUsedIP = linkedClient->GetConnectIP();
@@ -204,8 +212,7 @@ void CFriend::SetLinkedClient(CUpDownClient *linkedClient)
 			md4cpy(m_abyUserhash, linkedClient->GetUserHash());
 
 			linkedClient->m_Friend = this;
-		} else if (m_LinkedClient != NULL)
-			m_friendSlot = m_LinkedClient->GetFriendSlot();
+		}
 
 		if (m_LinkedClient != NULL) {
 			// the old client is no longer friend, since it is no longer the linked client

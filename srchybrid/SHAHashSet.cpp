@@ -28,12 +28,151 @@
 #include "DownloadQueue.h"
 #include "partfile.h"
 #include "Log.h"
+#include "OtherFunctions.h"
 
 #ifdef _DEBUG
 #define new DEBUG_NEW
 #undef THIS_FILE
 static char THIS_FILE[] = __FILE__;
 #endif
+
+namespace
+{
+	enum EKnown2AICHMutationReadiness
+	{
+		Known2AICHMutationReady,
+		Known2AICHMutationDeferred,
+		Known2AICHMutationRejected
+	};
+
+	struct SDeferredAICHHashSetSave
+	{
+		SDeferredAICHHashSetSave()
+			: m_Hash()
+			, m_nHashCount(0)
+			, m_aLowestLevelHashes()
+			, m_bStoredInSpoolFile(false)
+			, m_nSpoolOffset(0)
+			, m_uLowestLevelHashBytes(0)
+		{
+		}
+
+		CAICHHash m_Hash;
+		uint32 m_nHashCount;
+		CArray<BYTE, BYTE> m_aLowestLevelHashes;
+		bool m_bStoredInSpoolFile;
+		ULONGLONG m_nSpoolOffset;
+		UINT m_uLowestLevelHashBytes;
+	};
+
+	const ULONGLONG MAX_DEFERRED_AICH_RAM_BYTES = 100ull * 1024ull * 1024ull;
+	LPCTSTR DEFERRED_AICH_SPOOL_FILENAME = _T("known2_64.met.deferred");
+
+	CCriticalSection s_csDeferredAICHHashSetSaves;
+	CCriticalSection s_csFlushDeferredAICHHashSetSaves;
+	CList<SDeferredAICHHashSetSave*, SDeferredAICHHashSetSave*> s_liDeferredAICHHashSetSaves;
+	ULONGLONG s_nDeferredAICHHashSetMemoryBytes = 0;
+	bool s_bDeferredAICHSpoolFileInitialized = false;
+
+	uint32 GetKnown2LowestLevelHashCount(uint64 nDataSize)
+	{
+		uint32 nHashCount = (uint32)((PARTSIZE / EMBLOCKSIZE + static_cast<uint64>(PARTSIZE % EMBLOCKSIZE != 0)) * (nDataSize / PARTSIZE));
+		if (nDataSize % PARTSIZE != 0)
+			nHashCount += (uint32)((nDataSize % PARTSIZE) / EMBLOCKSIZE + static_cast<uint64>((nDataSize % PARTSIZE) % EMBLOCKSIZE != 0));
+		return nHashCount;
+	}
+
+	CString GetDeferredAICHSpoolFilePath()
+	{
+		return thePrefs.GetMuleDirectory(EMULE_CONFIGDIR) + DEFERRED_AICH_SPOOL_FILENAME;
+	}
+
+	void DeleteDeferredAICHSpoolFileNoLock()
+	{
+		::DeleteFile(GetDeferredAICHSpoolFilePath());
+		s_bDeferredAICHSpoolFileInitialized = false;
+	}
+
+	void ReleaseDeferredHashSetSaveNoLock(SDeferredAICHHashSetSave *pDeferredSave)
+	{
+		if (pDeferredSave == NULL)
+			return;
+
+		if (!pDeferredSave->m_bStoredInSpoolFile) {
+			const ULONGLONG nHashBytes = (ULONGLONG)pDeferredSave->m_aLowestLevelHashes.GetSize();
+			if (s_nDeferredAICHHashSetMemoryBytes >= nHashBytes)
+				s_nDeferredAICHHashSetMemoryBytes -= nHashBytes;
+			else
+				s_nDeferredAICHHashSetMemoryBytes = 0;
+		}
+		delete pDeferredSave;
+	}
+
+	void ClearDeferredHashSetSavesNoLock()
+	{
+		while (!s_liDeferredAICHHashSetSaves.IsEmpty())
+			ReleaseDeferredHashSetSaveNoLock(s_liDeferredAICHHashSetSaves.RemoveHead());
+		s_nDeferredAICHHashSetMemoryBytes = 0;
+		DeleteDeferredAICHSpoolFileNoLock();
+	}
+
+	bool ReadDeferredHashSetFromSpoolFile(const SDeferredAICHHashSetSave &deferredSave, CArray<BYTE, BYTE> &payload)
+	{
+		payload.RemoveAll();
+		if (!deferredSave.m_bStoredInSpoolFile)
+			return false;
+		if (deferredSave.m_uLowestLevelHashBytes == 0)
+			return true;
+
+		CFile file;
+		CFileException fex;
+		if (!file.Open(GetDeferredAICHSpoolFilePath(), CFile::modeRead | CFile::typeBinary | CFile::shareDenyNone, &fex)) {
+			theApp.QueueDebugLogLine(true, _T("Failed to read spooled deferred AICH HashSet: %s"), (LPCTSTR)EscPercent(CExceptionStr(fex)));
+			return false;
+		}
+
+		try {
+			if (file.GetLength() < deferredSave.m_nSpoolOffset + deferredSave.m_uLowestLevelHashBytes) {
+				theApp.QueueDebugLogLine(true, _T("Failed to read spooled deferred AICH HashSet: spool file is shorter than expected."));
+				return false;
+			}
+			file.Seek(deferredSave.m_nSpoolOffset, CFile::begin);
+			payload.SetSize((INT_PTR)deferredSave.m_uLowestLevelHashBytes);
+			const UINT uRead = file.Read(payload.GetData(), deferredSave.m_uLowestLevelHashBytes);
+			if (uRead != deferredSave.m_uLowestLevelHashBytes) {
+				payload.RemoveAll();
+				theApp.QueueDebugLogLine(true, _T("Failed to read spooled deferred AICH HashSet: short read."));
+				return false;
+			}
+		}
+		catch (CFileException *ex) {
+			payload.RemoveAll();
+			theApp.QueueDebugLogLine(true, _T("Failed to read spooled deferred AICH HashSet: %s"), (LPCTSTR)EscPercent(CExceptionStr(*ex)));
+			ex->Delete();
+			return false;
+		}
+		return true;
+	}
+
+	EKnown2AICHMutationReadiness GetKnown2AICHMutationReadiness(LPCTSTR pszOperation)
+	{
+		if (theApp.Known2IndexReady())
+			return Known2AICHMutationReady;
+		if (theApp.IsClosing())
+			return Known2AICHMutationRejected;
+
+		const CemuleApp::SStartupMetadataLoadState state = theApp.GetStartupMetadataLoadState(CemuleApp::StartupMetadataKnown2Index);
+		if (state.m_eState == CemuleApp::StartupMetadataStateReady)
+			return Known2AICHMutationReady;
+		if (state.m_eState == CemuleApp::StartupMetadataStateFailed || state.m_eState == CemuleApp::StartupMetadataStateCancelled) {
+			AddDebugLogLine(DLP_LOW, false, _T("AICH %s skipped because known2 index startup state is %s. error=%lu reason=%s\n"), pszOperation != NULL ? pszOperation : _T("mutation"), theApp.GetStartupMetadataStateName(state.m_eState), state.m_dwLastError, (LPCTSTR)state.m_strReason);
+			return Known2AICHMutationRejected;
+		}
+
+		AddDebugLogLine(DLP_LOW, false, _T("AICH %s deferred because known2 index startup state is %s. reason=%s\n"), pszOperation != NULL ? pszOperation : _T("mutation"), theApp.GetStartupMetadataStateName(state.m_eState), (LPCTSTR)state.m_strReason);
+		return Known2AICHMutationDeferred;
+	}
+}
 
 
 // for this version the limits are set very high, they might be lowered later
@@ -704,17 +843,232 @@ bool CAICHRecoveryHashSet::ReadRecoveryData(uint64 nPartStartPos, CSafeMemFile &
 	return false;
 }
 
-// this function is only allowed to be called right after successfully calculating the hashset (!)
-// will delete the hashset, after saving to free the memory
-bool CAICHRecoveryHashSet::SaveHashSet()
+bool CAICHRecoveryHashSet::QueueDeferredHashSetSave()
 {
-	if (m_eStatus != AICH_HASHSETCOMPLETE
-		|| !m_pHashTree.m_bHashValid
-		|| m_pHashTree.m_nDataSize != m_pOwner->GetFileSize())
-	{
-		ASSERT(0);
+	SDeferredAICHHashSetSave *pDeferredSave = new SDeferredAICHHashSetSave;
+	pDeferredSave->m_Hash = m_pHashTree.m_Hash;
+	pDeferredSave->m_nHashCount = GetKnown2LowestLevelHashCount(m_pHashTree.m_nDataSize);
+
+	const ULONGLONG nExpectedHashBytes = (ULONGLONG)pDeferredSave->m_nHashCount * HASHSIZE;
+	if (nExpectedHashBytes > (ULONGLONG)UINT_MAX) {
+		delete pDeferredSave;
+		theApp.QueueDebugLogLine(true, _T("Failed to defer AICH HashSet: Hashset is too large for this process."));
 		return false;
 	}
+#ifndef _WIN64
+	if (nExpectedHashBytes > INT_MAX) {
+		delete pDeferredSave;
+		theApp.QueueDebugLogLine(true, _T("Failed to defer AICH HashSet: Hashset is too large for this process."));
+		return false;
+	}
+#endif
+	pDeferredSave->m_uLowestLevelHashBytes = (UINT)nExpectedHashBytes;
+
+	bool bStoredInSpoolFile = false;
+	{
+		CSingleLock lockDeferred(&s_csDeferredAICHHashSetSaves, TRUE);
+		for (POSITION pos = s_liDeferredAICHHashSetSaves.GetHeadPosition(); pos != NULL;) {
+			const SDeferredAICHHashSetSave *pExistingSave = s_liDeferredAICHHashSetSaves.GetNext(pos);
+			if (pExistingSave != NULL && pExistingSave->m_Hash == pDeferredSave->m_Hash) {
+				delete pDeferredSave;
+				FreeHashSet();
+				return true;
+			}
+		}
+
+		if (s_nDeferredAICHHashSetMemoryBytes + nExpectedHashBytes <= MAX_DEFERRED_AICH_RAM_BYTES) {
+			CSafeMemFile hashData(1024);
+			if (!m_pHashTree.WriteLowestLevelHashes(hashData, 0, true, true)) {
+				delete pDeferredSave;
+				theApp.QueueDebugLogLine(true, _T("Failed to defer AICH HashSet: WriteLowestLevelHashes() failed!"));
+				return false;
+			}
+
+			const ULONGLONG nHashBytes = hashData.GetLength();
+			if (nHashBytes != nExpectedHashBytes) {
+				delete pDeferredSave;
+				theApp.QueueDebugLogLine(true, _T("Failed to defer AICH HashSet: Calculated and memory size of hashset differ!"));
+				return false;
+			}
+
+			pDeferredSave->m_aLowestLevelHashes.SetSize((INT_PTR)nHashBytes);
+			if (nHashBytes != 0)
+				memcpy(pDeferredSave->m_aLowestLevelHashes.GetData(), hashData.GetBuffer(), (size_t)nHashBytes);
+			s_nDeferredAICHHashSetMemoryBytes += nHashBytes;
+		}
+		else {
+			CSafeFile file;
+			CFileException fex;
+			UINT uOpenFlags = CFile::modeCreate | CFile::modeWrite | CFile::typeBinary | CFile::shareDenyWrite;
+			if (s_bDeferredAICHSpoolFileInitialized)
+				uOpenFlags |= CFile::modeNoTruncate;
+
+			if (!file.Open(GetDeferredAICHSpoolFilePath(), uOpenFlags, &fex)) {
+				delete pDeferredSave;
+				theApp.QueueDebugLogLine(true, _T("Failed to spool deferred AICH HashSet: %s"), (LPCTSTR)EscPercent(CExceptionStr(fex)));
+				return false;
+			}
+
+			try {
+				file.SeekToEnd();
+				const ULONGLONG nSpoolOffset = file.GetPosition();
+				if (!m_pHashTree.WriteLowestLevelHashes(file, 0, true, true)) {
+					file.SetLength(nSpoolOffset);
+					delete pDeferredSave;
+					theApp.QueueDebugLogLine(true, _T("Failed to spool deferred AICH HashSet: WriteLowestLevelHashes() failed!"));
+					return false;
+				}
+				if (file.GetPosition() != nSpoolOffset + nExpectedHashBytes) {
+					file.SetLength(nSpoolOffset);
+					delete pDeferredSave;
+					theApp.QueueDebugLogLine(true, _T("Failed to spool deferred AICH HashSet: Calculated and written size of hashset differ!"));
+					return false;
+				}
+				file.Flush();
+				file.Close();
+
+				pDeferredSave->m_bStoredInSpoolFile = true;
+				pDeferredSave->m_nSpoolOffset = nSpoolOffset;
+				pDeferredSave->m_uLowestLevelHashBytes = (UINT)nExpectedHashBytes;
+				s_bDeferredAICHSpoolFileInitialized = true;
+				bStoredInSpoolFile = true;
+			}
+			catch (CFileException *ex) {
+				delete pDeferredSave;
+				theApp.QueueDebugLogLine(true, _T("Failed to spool deferred AICH HashSet: %s"), (LPCTSTR)EscPercent(CExceptionStr(*ex)));
+				ex->Delete();
+				return false;
+			}
+		}
+
+		s_liDeferredAICHHashSetSaves.AddTail(pDeferredSave);
+	}
+
+	theApp.QueueDebugLogLine(false, _T("Deferred AICH Hashset save until known2 index is ready - %s (%u bytes, %s)"), (LPCTSTR)pDeferredSave->m_Hash.GetString(), pDeferredSave->m_uLowestLevelHashBytes, bStoredInSpoolFile ? _T("spooled") : _T("memory"));
+	FreeHashSet();
+	return true;
+}
+
+bool CAICHRecoveryHashSet::SaveDeferredHashSetToKnown2File(const CAICHHash &Hash, uint32 nHashCount, const BYTE *pLowestLevelHashes, UINT uLowestLevelHashBytes)
+{
+	CSingleLock lockKnown2Met(&m_mutKnown2File);
+	lockKnown2Met.Lock();
+
+	CSafeFile file;
+	CFileException fex;
+	if (!file.Open(thePrefs.GetMuleDirectory(EMULE_CONFIGDIR) + KNOWN2_MET_FILENAME
+		, CFile::modeCreate | CFile::modeReadWrite | CFile::modeNoTruncate | CFile::osSequentialScan | CFile::typeBinary | CFile::shareDenyNone, &fex))
+	{
+		if (fex.m_cause != CFileException::fileNotFound)
+				theApp.QueueLogLine(true, GetResString(_T("KNOWN2_MET_LOAD_FAILED")), KNOWN2_MET_FILENAME, (LPCTSTR)EscPercent(CExceptionStrDash(fex)));
+		return false;
+	}
+	try {
+		if (file.GetLength() <= 0)
+			file.WriteUInt8(KNOWN2_MET_VERSION);
+		else if (file.ReadUInt8() != KNOWN2_MET_VERSION)
+			AfxThrowFileException(CFileException::endOfFile, 0, file.GetFileName());
+
+		if (m_mapAICHHashsStored.PLookup(Hash)) {
+			theApp.QueueDebugLogLine(false, _T("Deferred AICH Hashset to write should be already present in known2.met - %s"), (LPCTSTR)Hash.GetString());
+			return true;
+		}
+
+		const ULONGLONG nExistingSize = file.GetLength();
+		file.SeekToEnd();
+		const ULONGLONG nHashSetWritePosition = file.GetPosition();
+		Hash.Write(file);
+		file.WriteUInt32(nHashCount);
+		if (uLowestLevelHashBytes != 0)
+			file.Write(pLowestLevelHashes, uLowestLevelHashBytes);
+		if (file.GetLength() != nExistingSize + (nHashCount + 1ull) * HASHSIZE + 4) {
+			file.SetLength(nExistingSize);
+			theApp.QueueDebugLogLine(true, _T("Failed to save deferred HashSet: Calculated and real size of hashset differ!"));
+			return false;
+		}
+		CAICHRecoveryHashSet::AddStoredAICHHash(Hash, nHashSetWritePosition);
+		theApp.QueueDebugLogLine(false, _T("Successfully saved deferred AICH Hashset, %u Hashes + 1 Masterhash written"), nHashCount);
+		file.Flush();
+		file.Close();
+	} catch (CFileException *ex) {
+		if (ex->m_cause == CFileException::endOfFile)
+			theApp.QueueLogLine(true, GetResString(_T("ERR_MET_BAD")), KNOWN2_MET_FILENAME);
+		else
+			theApp.QueueLogLine(true, GetResString(_T("ERR_SERVERMET_UNKNOWN")), (LPCTSTR)EscPercent(CExceptionStr(*ex)));
+		ex->Delete();
+		return false;
+	}
+	return true;
+}
+
+UINT CAICHRecoveryHashSet::FlushDeferredHashSetSaves()
+{
+	if (!theApp.Known2IndexReady() || theApp.IsClosing())
+		return 0;
+
+	CSingleLock lockFlush(&s_csFlushDeferredAICHHashSetSaves, TRUE);
+	UINT uSaved = 0;
+	for (;;) {
+		SDeferredAICHHashSetSave *pDeferredSave = NULL;
+		{
+			CSingleLock lockDeferred(&s_csDeferredAICHHashSetSaves, TRUE);
+			if (s_liDeferredAICHHashSetSaves.IsEmpty())
+				break;
+			pDeferredSave = s_liDeferredAICHHashSetSaves.RemoveHead();
+		}
+
+		if (theApp.IsClosing()) {
+			CSingleLock lockDeferred(&s_csDeferredAICHHashSetSaves, TRUE);
+			s_liDeferredAICHHashSetSaves.AddHead(pDeferredSave);
+			break;
+		}
+
+		CArray<BYTE, BYTE> spooledPayload;
+		const BYTE *pLowestLevelHashes = NULL;
+		UINT uLowestLevelHashBytes = pDeferredSave->m_uLowestLevelHashBytes;
+		bool bPayloadReady = true;
+		if (pDeferredSave->m_bStoredInSpoolFile) {
+			bPayloadReady = ReadDeferredHashSetFromSpoolFile(*pDeferredSave, spooledPayload);
+			if (bPayloadReady && uLowestLevelHashBytes != 0)
+				pLowestLevelHashes = spooledPayload.GetData();
+		}
+		else if (uLowestLevelHashBytes != 0)
+			pLowestLevelHashes = pDeferredSave->m_aLowestLevelHashes.GetData();
+
+		if (!bPayloadReady) {
+			CSingleLock lockDeferred(&s_csDeferredAICHHashSetSaves, TRUE);
+			s_liDeferredAICHHashSetSaves.AddTail(pDeferredSave);
+			break;
+		}
+
+		if (SaveDeferredHashSetToKnown2File(pDeferredSave->m_Hash, pDeferredSave->m_nHashCount, pLowestLevelHashes, uLowestLevelHashBytes)) {
+			++uSaved;
+			CSingleLock lockDeferred(&s_csDeferredAICHHashSetSaves, TRUE);
+			ReleaseDeferredHashSetSaveNoLock(pDeferredSave);
+		}
+		else {
+			CSingleLock lockDeferred(&s_csDeferredAICHHashSetSaves, TRUE);
+			s_liDeferredAICHHashSetSaves.AddTail(pDeferredSave);
+		}
+	}
+
+	{
+		CSingleLock lockDeferred(&s_csDeferredAICHHashSetSaves, TRUE);
+		if (s_liDeferredAICHHashSetSaves.IsEmpty())
+			DeleteDeferredAICHSpoolFileNoLock();
+	}
+	return uSaved;
+}
+
+void CAICHRecoveryHashSet::ClearDeferredHashSetSaves()
+{
+	CSingleLock lockFlush(&s_csFlushDeferredAICHHashSetSaves, TRUE);
+	CSingleLock lockDeferred(&s_csDeferredAICHHashSetSaves, TRUE);
+	ClearDeferredHashSetSavesNoLock();
+}
+
+bool CAICHRecoveryHashSet::SaveHashSetToKnown2File()
+{
 	CSingleLock lockKnown2Met(&m_mutKnown2File);
 	// Using a timer was causing "Failed to save AICH Hashset" error here since we return false here and this error thrown
 	// after calculating hashset, which is a waste of resources and time. Since SaveHashSet only called from CAddFileThread
@@ -727,7 +1081,7 @@ bool CAICHRecoveryHashSet::SaveHashSet()
 		, CFile::modeCreate | CFile::modeReadWrite | CFile::modeNoTruncate | CFile::osSequentialScan | CFile::typeBinary | CFile::shareDenyNone, &fex))
 	{
 		if (fex.m_cause != CFileException::fileNotFound)
-			theApp.QueueLogLine(true, _T("%s%s"), _T("Failed to load ") KNOWN2_MET_FILENAME, (LPCTSTR)EscPercent(CExceptionStrDash(fex)));
+				theApp.QueueLogLine(true, GetResString(_T("KNOWN2_MET_LOAD_FAILED")), KNOWN2_MET_FILENAME, (LPCTSTR)EscPercent(CExceptionStrDash(fex)));
 		return false;
 	}
 	try {
@@ -748,9 +1102,7 @@ bool CAICHRecoveryHashSet::SaveHashSet()
 		file.SeekToEnd();
 		ULONGLONG nHashSetWritePosition = file.GetPosition();
 		m_pHashTree.m_Hash.Write(file);
-		uint32 nHashCount = (uint32)((PARTSIZE / EMBLOCKSIZE + static_cast<uint64>(PARTSIZE % EMBLOCKSIZE != 0)) * (m_pHashTree.m_nDataSize / PARTSIZE));
-		if (m_pHashTree.m_nDataSize % PARTSIZE != 0)
-			nHashCount += (uint32)((m_pHashTree.m_nDataSize % PARTSIZE) / EMBLOCKSIZE + static_cast<uint64>((m_pHashTree.m_nDataSize % PARTSIZE) % EMBLOCKSIZE != 0));
+		uint32 nHashCount = GetKnown2LowestLevelHashCount(m_pHashTree.m_nDataSize);
 		file.WriteUInt32(nHashCount);
 		if (!m_pHashTree.WriteLowestLevelHashes(file, 0, true, true)) {
 			// that's bad... really
@@ -781,6 +1133,52 @@ bool CAICHRecoveryHashSet::SaveHashSet()
 	return true;
 }
 
+// this function is only allowed to be called right after successfully calculating the hashset (!)
+// will delete the hashset, after saving to free the memory
+bool CAICHRecoveryHashSet::SaveHashSet()
+{
+	if (m_eStatus != AICH_HASHSETCOMPLETE
+		|| !m_pHashTree.m_bHashValid
+		|| m_pHashTree.m_nDataSize != m_pOwner->GetFileSize())
+	{
+		ASSERT(0);
+		return false;
+	}
+
+	switch (GetKnown2AICHMutationReadiness(_T("save"))) {
+		case Known2AICHMutationReady:
+			FlushDeferredHashSetSaves();
+			return SaveHashSetToKnown2File();
+		case Known2AICHMutationDeferred:
+			return QueueDeferredHashSetSave();
+		case Known2AICHMutationRejected:
+			return false;
+	}
+	return false;
+}
+
+bool CAICHRecoveryHashSet::SaveHashSetForFileSize(EMFileSize nFileSize)
+{
+	if (m_eStatus != AICH_HASHSETCOMPLETE
+		|| !m_pHashTree.m_bHashValid
+		|| m_pHashTree.m_nDataSize != nFileSize)
+	{
+		ASSERT(0);
+		return false;
+	}
+
+	switch (GetKnown2AICHMutationReadiness(_T("save"))) {
+		case Known2AICHMutationReady:
+			FlushDeferredHashSetSaves();
+			return SaveHashSetToKnown2File();
+		case Known2AICHMutationDeferred:
+			return QueueDeferredHashSetSave();
+		case Known2AICHMutationRejected:
+			return false;
+	}
+	return false;
+}
+
 
 bool CAICHRecoveryHashSet::LoadHashSet()
 {
@@ -792,13 +1190,14 @@ bool CAICHRecoveryHashSet::LoadHashSet()
 		ASSERT(0);
 		return false;
 	}
+	CSingleLock lockKnown2Met(&m_mutKnown2File, TRUE);
 	CSafeFile file;
 	CFileException fex;
 	if (!file.Open(thePrefs.GetMuleDirectory(EMULE_CONFIGDIR) + KNOWN2_MET_FILENAME
 		, CFile::modeCreate | CFile::modeRead | CFile::modeNoTruncate | CFile::osSequentialScan | CFile::typeBinary | CFile::shareDenyNone, &fex))
 	{
 		if (fex.m_cause != CFileException::fileNotFound)
-			theApp.QueueLogLine(true, _T("%s%s"), _T("Failed to load ") KNOWN2_MET_FILENAME, (LPCTSTR)EscPercent(CExceptionStrDash(fex)));
+				theApp.QueueLogLine(true, GetResString(_T("KNOWN2_MET_LOAD_FAILED")), KNOWN2_MET_FILENAME, (LPCTSTR)EscPercent(CExceptionStrDash(fex)));
 		return false;
 	}
 	try {
@@ -840,19 +1239,19 @@ bool CAICHRecoveryHashSet::LoadHashSet()
 					nExpectedCount += (uint32)((m_pHashTree.m_nDataSize % PARTSIZE) / EMBLOCKSIZE + static_cast<uint64>((m_pHashTree.m_nDataSize % PARTSIZE) % EMBLOCKSIZE != 0));
 				nHashCount = file.ReadUInt32();
 				if (nHashCount != nExpectedCount) {
-					theApp.QueueDebugLogLine(true, _T("Failed to load HashSet: Available hashes and expected hash count differ!"));
+					theApp.QueueDebugLogLine(false, _T("Failed to load HashSet: Available hashes and expected hash count differ!"));
 					return false;
 				}
 				if (!m_pHashTree.LoadLowestLevelHashes(file)) {
-					theApp.QueueDebugLogLine(true, _T("Failed to load HashSet: LoadLowestLevelHashes failed!"));
+					theApp.QueueDebugLogLine(false, _T("Failed to load HashSet: LoadLowestLevelHashes failed!"));
 					return false;
 				}
 				if (!ReCalculateHash(false)) {
-					theApp.QueueDebugLogLine(true, _T("Failed to load HashSet: Calculating loaded hashes failed!"));
+					theApp.QueueDebugLogLine(false, _T("Failed to load HashSet: Calculating loaded hashes failed!"));
 					return false;
 				}
 				if (CurrentHash != m_pHashTree.m_Hash) {
-					theApp.QueueDebugLogLine(true, _T("Failed to load HashSet: Calculated Masterhash differs from given Masterhash - hashset corrupt!"));
+					theApp.QueueDebugLogLine(false, _T("Failed to load HashSet: Calculated Masterhash differs from given Masterhash - hashset corrupt!"));
 					return false;
 				}
 				return true;
@@ -864,7 +1263,7 @@ bool CAICHRecoveryHashSet::LoadHashSet()
 			// skip the rest of this hashset
 			file.Seek(nHashCount * (LONGLONG)HASHSIZE, CFile::current);
 		}
-		theApp.QueueDebugLogLine(true, _T("Failed to load HashSet: HashSet not found!"));
+		theApp.QueueDebugLogLine(false, _T("Failed to load HashSet: HashSet not found!"));
 	} catch (CFileException *ex) {
 		if (ex->m_cause == CFileException::endOfFile)
 			theApp.QueueLogLine(true, GetResString(_T("ERR_MET_BAD")), KNOWN2_MET_FILENAME);
@@ -939,7 +1338,8 @@ void CAICHRecoveryHashSet::UntrustedHashReceived(const CAICHHash &Hash, const CA
 	if (!bFound) {
 		for (INT_PTR i = 0; i < m_aUntrustedHashes.GetCount(); ++i) {
 			if (!m_aUntrustedHashes[i].AddSigningIP(dwFromIP, true)) {
-				AddDebugLogLine(DLP_LOW, false, _T("Received different AICH hashes for file %s from IP/20 %s, ignored"), m_pOwner ? (LPCTSTR)EscPercent(m_pOwner->GetFileName()) : EMPTY, (LPCTSTR)ipstr(dwFromIP));
+				const CString strFileName = (m_pOwner != NULL) ? EscPercent(m_pOwner->GetFileName()) : CString(EMPTY);
+				AddDebugLogLine(DLP_LOW, false, _T("Received different AICH hashes for file %s from IP/20 %s, ignored"), (LPCTSTR)strFileName, (LPCTSTR)ipstr(dwFromIP));
 				// nothing changed, so we can return early without any rechecks
 				return;
 			}
@@ -989,6 +1389,11 @@ void CAICHRecoveryHashSet::UntrustedHashReceived(const CAICHHash &Hash, const CA
 
 void CAICHRecoveryHashSet::ClientAICHRequestFailed(CUpDownClient *pClient)
 {
+	if (!theApp.GuardModelMutation(CemuleApp::ModelMutationUpDownClient, _T("CAICHRecoveryHashSet::ClientAICHRequestFailed"))
+		|| !theApp.GuardModelMutation(CemuleApp::ModelMutationPartFile, _T("CAICHRecoveryHashSet::ClientAICHRequestFailed"))
+		|| !theApp.GuardModelMutation(CemuleApp::ModelMutationDownloadQueue, _T("CAICHRecoveryHashSet::ClientAICHRequestFailed")))
+		return;
+
 	pClient->SetReqFileAICHHash(NULL);
 	CAICHRequestedData data = GetAICHReqDetails(pClient);
 	RemoveClientAICHRequest(pClient);

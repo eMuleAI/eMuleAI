@@ -383,6 +383,8 @@ public:
 		DateTimeCtrl,
 		IPAddressCtrl,
 		OpaqueBrowser,
+		CommandButton,
+		HeightSpacer,
 	};
 
 	//Data
@@ -464,6 +466,8 @@ public:
 	BOOL IsDateTimeItem(HTREEITEM hItem) const;
 	BOOL IsIPAddressItem(HTREEITEM hItem) const;
 	BOOL IsOpaqueItem(HTREEITEM hItem) const;
+	BOOL IsItemHeightSpacer(HTREEITEM hItem) const;
+	BOOL SetItemMinHeight(HTREEITEM hItem, int iMinHeight);
 
 	//Setting / Getting combo states
 	BOOL SetCheckBox(HTREEITEM hItem, BOOL bCheck);
@@ -560,6 +564,8 @@ protected:
 	virtual BOOL SetEnabledSemiCheckBox(HTREEITEM hItem, BOOL bSemi);
 	virtual BOOL GetSemiCheckBox(HTREEITEM hItem, BOOL &bSemi) const;
 	virtual int  GetIndentPostion(HTREEITEM hItem) const;
+	HTREEITEM InsertHeightSpacer(HTREEITEM hParent, HTREEITEM hAfter = TVI_LAST);
+	CRect GetItemReservedRect(HTREEITEM hItem);
 	virtual void MemDeleteAllItems(HTREEITEM hParent);
 
 	virtual void PreSubclassWindow();

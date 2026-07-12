@@ -87,7 +87,7 @@ void CColorButton::SetColor(COLORREF dwColor)
 	m_Color = dwColor;
 
 	if (::IsWindow(m_hWnd))
-		RedrawWindow();
+		Invalidate(FALSE);
 }
 
 

@@ -55,7 +55,7 @@ static void GetLocaleNamesCompat(LPCTSTR code, CString &localized, CString &nati
 	}
 
 	if (localized.IsEmpty() || localized == code) {
-		localized = native.IsEmpty() ? code : native;
+		localized = native.IsEmpty() ? CString(code) : native;
 	}
 	if (native.IsEmpty()) {
 		native = localized;

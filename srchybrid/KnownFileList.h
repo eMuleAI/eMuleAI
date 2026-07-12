@@ -1,4 +1,4 @@
-//This file is part of eMule AI
+﻿//This file is part of eMule AI
 //Copyright (C)2002-2026 Merkur ( strEmail.Format("%s@%s", "devteam", "emule-project.net") / https://www.emule-project.net )
 //Copyright (C)2026 eMule AI
 //
@@ -21,12 +21,20 @@
 #include "SHAHashset.h"
 #include <list>
 #include <unordered_map>
+#include <unordered_set>
+#include <vector>
 
 class CKnownFile;
+class CSafeMemFile;
 typedef CMap<CCKey, const CCKey&, CKnownFile*, CKnownFile*> CKnownFilesMap;
 typedef CMap<CSKey, const CSKey&, int, int> CancelledFilesMap;
 typedef CMap<CAICHHash, const CAICHHash&, const CKnownFile*, const CKnownFile*> KnonwFilesByAICHMap;
+typedef CMap<CSKey, const CSKey&, uint32, uint32> DuplicateHashCountMap;
 typedef std::unordered_multimap<uint64, CKnownFile*> SizeIndexMap;
+typedef std::unordered_multimap<uint64, CKnownFile*> KnownFileIdentityIndexMap;
+typedef std::unordered_set<uint64> KnownFileIdentityIndexedSizeSet;
+typedef std::vector<CKnownFile*> CStartupKnownFilesRecords;
+typedef std::vector<CSKey> CStartupCancelledFilesRecords;
 
 class CKnownFileList
 {
@@ -36,21 +44,41 @@ class CKnownFileList
 
 	SizeIndexMap m_sizeIndex;
 	SizeIndexMap m_dupFileSizeIndex;
+	KnownFileIdentityIndexMap m_identityIndex;
+	KnownFileIdentityIndexMap m_dupFileIdentityIndex;
+	KnownFileIdentityIndexedSizeSet m_identityIndexedSizes;
+	KnownFileIdentityIndexedSizeSet m_dupIdentityIndexedSizes;
+	DuplicateHashCountMap m_dupHashCounts;
 
 public:
-	CKnownFileList();
+	CKnownFileList(bool bLoadImmediately = true);
 	~CKnownFileList();
 
-	bool	SafeAddKFile(CKnownFile *toadd);
+	bool	SafeAddKFile(CKnownFile *toadd, bool bUpdateDownloadValidator = true, bool bLogDuplicateDetails = true);
 	bool	Init();
+	bool	LoadStartupKnownFilesRecords(CStartupKnownFilesRecords& knownRecords, CStartupCancelledFilesRecords& cancelledRecords, uint32& dwCancelledFilesSeed, LONG lGeneration = 0, uint64 uCancellationToken = 0);
+	bool	LoadStartupKnownFilesForWorker(LONG lGeneration = 0, uint64 uCancellationToken = 0);
+	bool	ParseStartupKnownFilesLoadChunk(CStartupKnownFilesRecords* pKnownRecords, std::vector<CKnownFile*>& parsedFiles, std::vector<uint32>* pWorkUnits, uint64* puTotalWorkUnits, size_t& uNextRecord, size_t uMaxRecords);
+	bool	AttachStartupKnownFilesLoadChunk(std::vector<CKnownFile*>& parsedFiles, size_t& uNextParsedFile, size_t uMaxFiles, const std::vector<uint32>* pWorkUnits = NULL, uint64* puAppliedWorkUnits = NULL);
+	bool	ApplyStartupKnownFilesCompletionChunk(CStartupCancelledFilesRecords* pCancelledRecords, uint32 dwCancelledFilesSeed, bool& bStarted, size_t& uNextCancelledRecord, size_t uMaxRecords, UINT& uApplied, INT_PTR& iRemaining);
+	void	CompleteStartupKnownFilesLoadApply(CStartupCancelledFilesRecords* pCancelledRecords, uint32 dwCancelledFilesSeed);
+	static void	DeleteStartupKnownFilesRecords(CStartupKnownFilesRecords* pKnownRecords, CStartupCancelledFilesRecords* pCancelledRecords);
+	static void	DeleteStartupKnownFilesParsedFiles(std::vector<CKnownFile*>& parsedFiles);
 	void	Save();
+	bool	ProcessKnownMetSaveJob();
+	void	DeferKnownMetSaveJob();
+	bool	HasKnownMetSaveJobPending() const { return m_pKnownMetSaveJob != NULL; }
+	LONG	NextKnownMetSaveGeneration() { return InterlockedIncrement(&m_lKnownMetSaveGeneration); }
+	LONG	GetKnownMetSaveGeneration() const { return InterlockedCompareExchange(const_cast<volatile LONG*>(&m_lKnownMetSaveGeneration), 0, 0); }
 	void	Clear();
 	void	Process();
 
 	CKnownFile* FindKnownFile(LPCTSTR filename, time_t date, uint64 size);
+	CKnownFile* FindKnownFileForSharedScan(LPCTSTR filename, time_t date, uint64 size);
 	CKnownFile* FindKnownFileByID(const uchar* hash) const;
 	CKnownFile* FindKnownFileByPath(const CString& sFilePath) const;
 	bool	IsKnownFile(const CKnownFile *file) const;
+	void	ReindexKnownFile(CKnownFile* file, LPCTSTR oldFileName, uint64 oldSize);
 	bool	IsFilePtrInList(const CKnownFile *file) const;
 
 	void	AddCancelledFileID(const uchar *hash);
@@ -66,11 +94,13 @@ public:
 	uint32	m_nRequestedTotal;
 	uint32	m_nAcceptedTotal;
 
-	bool	RemoveKnownFile(CKnownFile* toRemove);
+	bool	RemoveKnownFile(CKnownFile* toRemove, bool bNotifySharedFilesList = true);
 	int		GetCount() { return m_Files_map.GetCount(); }
 	void	ClearHistory();
 
 	uint32	DuplicatesCount(const uchar* hash);
+	CKnownFile*	PromoteDuplicateForSharedFile(CKnownFile* pOldPrimary);
+	CKnownFile*	IsOnDuplicatesForSharedScan(const LPCTSTR filename, time_t in_date, uint64 in_size);
 	CKnownFile*	IsOnDuplicates(const LPCTSTR filename, time_t in_date, uint64 in_size);
 	void PurgeDuplicateFile(CKnownFile* file);
 
@@ -95,11 +125,63 @@ private:
 	DWORD	m_nLastSaved;
 	uint16	requested;
 	uint16	accepted;
+	volatile LONG m_lKnownMetSaveGeneration;
+	volatile LONG m_lCancelledMetSaveGeneration;
 
+	struct SKnownMetFileIdentity
+	{
+		SKnownMetFileIdentity();
+
+		CSKey m_hash;
+		CString m_strFileName;
+		time_t m_tUtcFileDate;
+		uint64 m_uFileSize;
+	};
+
+	struct SKnownMetSaveJob
+	{
+		SKnownMetSaveJob();
+
+		LONG m_lGeneration;
+		CString m_strConfDir;
+		std::vector<CSKey> m_vecKnownHashes;
+		std::vector<SKnownMetFileIdentity> m_vecDuplicateFiles;
+		size_t m_uNextKnownIndex;
+		size_t m_uNextDuplicateIndex;
+		INT_PTR m_iRecordsNumber;
+		DWORD m_dwStartedTick;
+		DWORD m_dwLastProgressTick;
+		std::vector<BYTE> m_vecHeader;
+		std::vector<std::vector<BYTE> > m_vecChunks;
+	};
+
+	SKnownMetSaveJob* m_pKnownMetSaveJob;
+	bool m_bKnownMetSaveRerunRequested;
+	bool m_bKnownMetSaveEventPending;
+	bool m_bClearingKnownFiles;
+
+	LONG NextCancelledMetSaveGeneration() { return InterlockedIncrement(&m_lCancelledMetSaveGeneration); }
+	void StartKnownMetSaveJob();
+	void QueueKnownMetSaveSlice();
+	void ClearKnownMetSaveJob();
+	bool WriteKnownMetRecord(const CSKey& hash, CSafeMemFile& chunkData, INT_PTR& iRecordsNumber);
+	bool WriteKnownMetDuplicateRecord(const SKnownMetFileIdentity& identity, CSafeMemFile& chunkData, INT_PTR& iRecordsNumber);
+	bool FinishKnownMetSaveJob();
+	void SaveCancelledFiles();
+
+	uint64 BuildIdentityIndexKey(LPCTSTR filename, uint64 size) const;
+	void PrepareKnownFileLoadCapacity(uint32 uRecordsNumber);
 	void AddSizeIndex(CKnownFile* file);
 	void RemoveSizeIndex(CKnownFile* file);
 	bool KnownFileMatches(const CKnownFile* file, LPCTSTR filename, time_t date, uint64 size) const;
+	CKnownFile* FindKnownFileInIndex(const KnownFileIdentityIndexMap& index, LPCTSTR filename, time_t date, uint64 size) const;
+	CKnownFile* FindKnownFileInSizeIndex(const SizeIndexMap& index, LPCTSTR filename, time_t date, uint64 size) const;
+	CKnownFile* FindKnownFileInSizeIndexLimited(const SizeIndexMap& index, LPCTSTR filename, time_t date, uint64 size, size_t uMaxCandidates) const;
+	void BuildIdentityIndexForSizeLocked(uint64 size);
+	void BuildDuplicateIdentityIndexForSize(uint64 size);
 
 	void AddDupSizeIndex(CKnownFile* file);
 	void RemoveDupSizeIndex(CKnownFile* file);
+	void IncrementDuplicateHashCount(const uchar* hash);
+	void DecrementDuplicateHashCount(const uchar* hash);
 };

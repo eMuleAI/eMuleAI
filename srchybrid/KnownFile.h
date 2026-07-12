@@ -28,8 +28,16 @@ class CAICHRecoveryHashSet;
 class CCollection;
 class CAICHHashAlgo;
 class CSafeMemFile;
+class CPartFile;
 
 typedef CTypedPtrList<CPtrList, CUpDownClient*> CUpDownClientPtrList;
+
+struct SFileHashProgressContext
+{
+	CPartFile* pPartFile;
+	DWORD dwRuntimeID;
+	uchar abyFileHash[16];
+};
 
 class CKnownFile : public CShareableFile
 {
@@ -41,10 +49,11 @@ public:
 
 	virtual void SetFileName(LPCTSTR pszFileName, bool bReplaceInvalidFileSystemChars = false, bool bRemoveControlChars = false); // 'bReplaceInvalidFileSystemChars' is set to 'false' for backward compatibility!
 
-	bool	CreateFromFile(LPCTSTR directory, LPCTSTR filename, LPVOID pvProgressParam); // create date, hashset and tags from a file
-	bool	LoadFromFile(CFileDataIO &file);	//load date, hashset and tags from a .met file
+	bool	CreateFromFile(LPCTSTR directory, LPCTSTR filename, const SFileHashProgressContext* pProgressContext); // create date, hashset and tags from a file
+	bool	LoadFromFile(CFileDataIO &file, bool bLoadCachedAICHPartHashSet = true);	//load date, hashset and tags from a .met file
 	bool	WriteToFile(CFileDataIO &file);
 	bool	CreateAICHHashSetOnly();
+	static bool CreateAICHHashSetFromFile(LPCTSTR pszFilePath, EMFileSize nFileSize, CAICHRecoveryHashSet &rAICHHashSet);
 
 	// last file modification time in (DST corrected, if NTFS) real UTC format
 	// NOTE: this value can *not* be compared with NT's version of the UTC time
@@ -119,6 +128,7 @@ public:
 	virtual void GrabbingFinished(HBITMAP *imgResults, uint8 nFramesGrabbed, void *pSender);
 
 	bool	ImportParts();
+	bool	ImportPartsFromFile(LPCTSTR pszImportPath);
 
 	// Display / Info / Strings
 	virtual CString	GetInfoSummary(bool bNoFormatCommands = false) const;
@@ -197,7 +207,7 @@ public:
 protected:
 	//preview
 	bool	GrabImage(const CString &strFileName, uint8 nFramesToGrab, double dStartTime, bool bReduceColor, uint16 nMaxWidth, void *pSender);
-	bool	LoadTagsFromFile(CFileDataIO &file);
+	bool	LoadTagsFromFile(CFileDataIO &file, bool bLoadCachedAICHPartHashSet);
 	bool	LoadDateFromFile(CFileDataIO &file);
 	virtual void CalcPartSpread(CArray<uint64, uint64> &partspread, CUpDownClient *client);
 	static void	CreateHash(CFile *pFile, uint64 Length, uchar *pucHash, CAICHHashTree *pShaHashOut = NULL);

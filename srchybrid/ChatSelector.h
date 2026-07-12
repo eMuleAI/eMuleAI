@@ -34,6 +34,8 @@ public:
 	~CChatItem();
 
 	CUpDownClient	*client;
+	DWORD			runtimeID;
+	LONG			runtimeGeneration;
 	CHTRichEditCtrl	*log;
 	CString			strMessagePending;
 	CStringArray	history;
@@ -55,11 +57,14 @@ public:
 	void		Init(CChatWnd *pParent);
 	CChatItem*	StartSession(CUpDownClient *client, bool show = true);
 	void		EndSession(CUpDownClient *client = NULL);
+	void		EndSessionByRuntime(DWORD uRuntimeID, LONG lRuntimeGeneration);
 	int			GetTabByClient(CUpDownClient *client);
+	int			GetTabByRuntime(DWORD uRuntimeID, LONG lRuntimeGeneration);
 	CChatItem*	GetItemByClient(CUpDownClient *client);
+	CChatItem*	GetItemByRuntime(DWORD uRuntimeID, LONG lRuntimeGeneration);
 	CChatItem*	GetItemByIndex(int index);
 	void		ProcessMessage(CUpDownClient *sender, const CString &message);
-	void		ShowCaptchaRequest(CUpDownClient *sender, HBITMAP bmpCaptcha);
+	bool		ShowCaptchaRequest(CUpDownClient *sender, HBITMAP bmpCaptcha);
 	void		ShowCaptchaResult(CUpDownClient *sender, const CString &strResult);
 	bool		SendText(const CString &rstrText);
 	void		DeleteAllItems();

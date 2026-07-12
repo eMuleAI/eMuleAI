@@ -442,7 +442,7 @@ void CMetaDataDlg::RefreshData()
 				lvi.iItem = iItem;
 
 				// intentionally left blank as it's not a real meta tag
-				lvi.pszText = _T("");
+				lvi.pszText = const_cast<LPTSTR>(_T(""));
 				lvi.iSubItem = META_DATA_COL_TYPE;
 				m_tags.SetItem(&lvi);
 
@@ -516,7 +516,6 @@ void CMetaDataDlg::RefreshData()
 
 void CMetaDataDlg::OnCopyTags()
 {
-	CWaitCursor curWait;
 	int iSelected = 0;
 	CString strData;
 	for (POSITION pos = m_tags.GetFirstSelectedItemPosition(); pos != NULL;) {

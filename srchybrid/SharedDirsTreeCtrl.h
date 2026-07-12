@@ -76,6 +76,9 @@ public:
 	void			EditSharedDirectories(const CDirectoryItem *pDir, bool bAdd, bool bSubDirectories);
 	void			Reload(bool bForce = false);
 	void			OnVolumesChanged();
+	void			RefreshVisibleFileSystemBranches(const CStringArray& changedDirs);
+	bool			RefreshVisibleFileSystemBranchesIfNeeded();
+	void			RefreshVisibleSharedBranches(const CStringArray& changedDirs);
 	void			FileSystemTreeUpdateBoldState(const CDirectoryItem *pDir = NULL);
 	bool			ShowFileSystemDirectory(const CString &strDir);
 	bool			ShowSharedDirectory(const CString &strDir);
@@ -96,6 +99,7 @@ protected:
 
 	DECLARE_MESSAGE_MAP()
 	afx_msg void	OnSysColorChange();
+	afx_msg BOOL	OnEraseBkgnd(CDC* pDC);
 	afx_msg void	OnContextMenu(CWnd*, CPoint point);
 	afx_msg	void	OnRButtonDown(UINT, CPoint point);
 	afx_msg	void	OnLButtonUp(UINT nFlags, CPoint point);

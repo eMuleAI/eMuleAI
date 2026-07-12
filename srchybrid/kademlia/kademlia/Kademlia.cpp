@@ -34,12 +34,10 @@ their client on the eMule forum.
 #include "stdafx.h"
 #include "emule.h"
 #include "preferences.h"
-#include "emuledlg.h"
 #include "opcodes.h"
 #include "Log.h"
 #include "MD4.h"
 #include "StringConversion.h"
-#include "kademliawnd.h"
 #include "kademlia/kademlia/Kademlia.h"
 #include "kademlia/kademlia/defines.h"
 #include "kademlia/kademlia/Prefs.h"
@@ -66,15 +64,20 @@ namespace
 {
 	EventMap* g_pKadEventMap = NULL;
 
-	EventMap& BB_GetKadEventMap()
+	EventMap& GetKadEventMapStorage()
 	{
 		if (g_pKadEventMap == NULL)
 			g_pKadEventMap = new EventMap;
 		return *g_pKadEventMap;
 	}
+
+	bool HasExplicitP2PBindTarget()
+	{
+		return thePrefs.HasExplicitBindSelection();
+	}
 }
 
-#define m_mapEvents BB_GetKadEventMap()
+#define m_mapEvents GetKadEventMapStorage()
 
 CKademlia	*CKademlia::m_pInstance = NULL;
 clock_t		CKademlia::m_clkNextSearchJumpStart;
@@ -111,6 +114,11 @@ void CKademlia::Start()
 void CKademlia::Start(CPrefs *pPrefs)
 {
 	try {
+		if (theApp.IsNetworkActivityBlockedByBind()) {
+			delete pPrefs;
+			return;
+		}
+
 		// If we already have an instance, something is wrong.
 		if (m_pInstance) {
 			delete pPrefs;
@@ -137,9 +145,8 @@ void CKademlia::Start(CPrefs *pPrefs)
 		// First Firewall check is done on connect, init next check.
 		m_tNextFirewallCheck = tNow + HR2S(1);
 		m_tNextUPnPCheck = m_tNextFirewallCheck - MIN2S(1);
-		// Find a serving buddy after the first 5 mins of starting the client.
-		// We wait just in case it takes a bit for the client to determine firewall status.
-		m_tNextFindServingBuddy = tNow + MIN2S(5);
+		// Start the first serving buddy search soon after firewall state settles.
+		m_tNextFindServingBuddy = tNow + MIN2S(2);
 		// Init contact consolidate timer;
 		m_tConsolidate = tNow + MIN2S(45);
 		// Looking up our extern port
@@ -148,6 +155,12 @@ void CKademlia::Start(CPrefs *pPrefs)
 		m_tBootstrap = 0;
 		// Init our random seed.
 		// Create our Kad objects.
+		const uint32 dwPublicIPv4 = theApp.GetPublicIPv4();
+		if (dwPublicIPv4 != 0)
+			pPrefs->ForceIPAddress(htonl(dwPublicIPv4));
+		else if (HasExplicitP2PBindTarget())
+			pPrefs->ResetIPAddress();
+
 		m_pInstance = new CKademlia();
 		m_pInstance->m_pPrefs = pPrefs;
 		m_pInstance->m_pIndexed = new CIndexed();
@@ -236,7 +249,7 @@ void CKademlia::Process()
 	if (tNow >= m_tNextFirewallCheck)
 		RecheckFirewalled();
 	if (m_tNextUPnPCheck != 0 && tNow >= m_tNextUPnPCheck) {
-		theApp.emuledlg->RefreshUPnP();
+		theApp.QueueKadUiStatusRefreshEvent(CemuleApp::KadUiStatusUpnp, _T("kad-upnp-check"));
 		m_tNextUPnPCheck = 0; // will be reset on firewall check
 	}
 
@@ -296,7 +309,7 @@ void CKademlia::Process()
 		if (uMaxUsers != m_pInstance->m_pPrefs->GetKademliaUsers()) {
 			m_pInstance->m_pPrefs->SetKademliaUsers(uMaxUsers);
 			m_pInstance->m_pPrefs->SetKademliaFiles();
-			theApp.emuledlg->ShowUserCount();
+			theApp.QueueKadUiStatusRefreshEvent(CemuleApp::KadUiStatusUserCount, _T("kad-user-file-count"));
 		}
 	}
 
@@ -309,7 +322,7 @@ void CKademlia::Process()
 			const CUInt128 uTargetID(pContact->GetClientID());
 			m_pInstance->m_pUDPListener->Bootstrap(pContact->GetIPAddress(), pContact->GetUDPPort(), pContact->GetVersion(), &uTargetID);
 			delete pContact;
-			theApp.emuledlg->kademliawnd->StartUpdateContacts();
+			theApp.QueueKadUiStatusRefreshEvent(CemuleApp::KadUiStatusContactList, _T("kad-bootstrap-contact-refresh"));
 		} else if (m_bootstrapping) {
 			// failed to bootstrap
 			m_bootstrapping = false;
@@ -663,12 +676,12 @@ bool CKademlia::IsRunningInLANMode()
 			if (GetRoutingZone()->HasOnlyLANNodes()) {
 				if (!m_bLANMode) {
 					m_bLANMode = true;
-					theApp.emuledlg->ShowConnectionState();
+					theApp.QueueKadConnectionStateChangedEvent(_T("kad-lan-mode"));
 					DebugLog(_T("Kademlia: Activating LAN Mode"));
 				}
 			} else if (m_bLANMode) {
 				m_bLANMode = false;
-				theApp.emuledlg->ShowConnectionState();
+				theApp.QueueKadConnectionStateChangedEvent(_T("kad-lan-mode"));
 			}
 		}
 	}

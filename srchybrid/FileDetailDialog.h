@@ -47,6 +47,7 @@ protected:
 	CClosableTabCtrl		m_tabDark;
 
 	UINT m_uInvokePage;
+	CString m_strSnapshotTitleFileName;
 	static LPCTSTR m_pPshStartPage;
 
 	void UpdateTitle();

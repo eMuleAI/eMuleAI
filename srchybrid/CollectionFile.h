@@ -30,7 +30,7 @@ public:
 	explicit CCollectionFile(CFileDataIO &in_data);
 	explicit CCollectionFile(CAbstractFile *pAbstractFile);
 
-	bool	InitFromLink(const CString &sLink);
+	bool	InitFromLink(const CString &sLink, CString *pstrError = NULL, bool bLogError = true);
 	void	WriteCollectionInfo(CFileDataIO &out_data);
 	virtual void UpdateFileRatingCommentAvail(bool bForceUpdate = false);
 };

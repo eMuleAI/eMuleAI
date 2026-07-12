@@ -63,6 +63,7 @@ to tim.kosse@filezilla-project.org
 #include "stdafx.h"
 #include "AsyncSocketExLayer.h"
 
+#include "emule.h"
 #include "AsyncSocketEx.h"
 
 #ifdef _DEBUG
@@ -111,6 +112,11 @@ int CAsyncSocketExLayer::Receive(void *lpBuf, int nBufLen, int nFlags /*=0*/)
 
 int CAsyncSocketExLayer::Send(const void *lpBuf, int nBufLen, int nFlags /*=0*/)
 {
+	if (theApp.IsNetworkActivityBlockedByBind()) {
+		WSASetLastError(WSAENETDOWN);
+		return SOCKET_ERROR;
+	}
+
 	return SendNext(lpBuf, nBufLen, nFlags);
 }
 
@@ -158,7 +164,7 @@ void CAsyncSocketExLayer::OnClose(int nErrorCode)
 BOOL CAsyncSocketExLayer::TriggerEvent(long lEvent, int nErrorCode, BOOL bPassThrough /*=FALSE*/)
 {
 	ASSERT(m_pOwnerSocket);
-	if (m_pOwnerSocket->m_SocketData.hSocket == INVALID_SOCKET && !m_pOwnerSocket->HaveUtpLayer())
+	if (m_pOwnerSocket->m_SocketData.hSocket == INVALID_SOCKET && !m_pOwnerSocket->HaveNatTraversalLayer())
 		return FALSE;
 
 	if (!bPassThrough) {
@@ -229,6 +235,11 @@ BOOL CAsyncSocketExLayer::Connect(const LPSOCKADDR lpSockAddr, int nSockAddrLen)
 
 int CAsyncSocketExLayer::SendNext(const void *lpBuf, int nBufLen, int nFlags /*=0*/)
 {
+	if (theApp.IsNetworkActivityBlockedByBind()) {
+		WSASetLastError(WSAENETDOWN);
+		return SOCKET_ERROR;
+	}
+
 	if (m_nCriticalError) {
 		WSASetLastError(m_nCriticalError);
 		return SOCKET_ERROR;
@@ -275,6 +286,11 @@ int CAsyncSocketExLayer::ReceiveNext(void *lpBuf, int nBufLen, int nFlags /*=0*/
 
 bool CAsyncSocketExLayer::ConnectNext(const CString &sHostAddress, UINT nHostPort)
 {
+	if (theApp.IsNetworkActivityBlockedByBind()) {
+		WSASetLastError(WSAENETDOWN);
+		return false;
+	}
+
 	ASSERT(GetLayerState() == unconnected);
 	ASSERT(m_pOwnerSocket);
 	bool ret;
@@ -365,6 +381,11 @@ bool CAsyncSocketExLayer::ConnectNext(const CString &sHostAddress, UINT nHostPor
 
 BOOL CAsyncSocketExLayer::ConnectNext(const LPSOCKADDR lpSockAddr, int nSockAddrLen)
 {
+	if (theApp.IsNetworkActivityBlockedByBind()) {
+		WSASetLastError(WSAENETDOWN);
+		return FALSE;
+	}
+
 	ASSERT(GetLayerState() == unconnected);
 	ASSERT(m_pOwnerSocket);
 	BOOL ret;
@@ -575,6 +596,11 @@ bool CAsyncSocketExLayer::Create(UINT nSocketPort, int nSocketType
 
 bool CAsyncSocketExLayer::CreateNext(UINT nSocketPort, int nSocketType, long lEvent, const CString &sSocketAddress, ADDRESS_FAMILY nFamily /*=AF_INET*/, bool reusable /*=false*/)
 {
+	if (theApp.IsNetworkSocketCreationBlockedByBind()) {
+		WSASetLastError(WSAENETDOWN);
+		return false;
+	}
+
 	ASSERT(GetLayerState() == notsock);
 	bool ret;
 
@@ -731,6 +757,11 @@ bool CAsyncSocketExLayer::SetFamily(ADDRESS_FAMILY nFamily)
 
 bool CAsyncSocketExLayer::TryNextProtocol()
 {
+	if (theApp.IsNetworkActivityBlockedByBind()) {
+		WSASetLastError(WSAENETDOWN);
+		return false;
+	}
+
 	closesocket(m_pOwnerSocket->m_SocketData.hSocket);
 	m_pOwnerSocket->DetachHandle();
 

@@ -1,0 +1,1 @@
+@item @var{long} @ref{gnutls_audit_current_context} ( @var{void})

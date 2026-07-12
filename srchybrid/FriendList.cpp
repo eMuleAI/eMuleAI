@@ -27,6 +27,7 @@
 #include "emuledlg.h"
 #include "FriendListCtrl.h"
 #include "Log.h"
+#include "PartFileWriteThread.h"
 
 #ifdef _DEBUG
 #define new DEBUG_NEW
@@ -40,6 +41,7 @@ static char THIS_FILE[] = __FILE__;
 
 CFriendList::CFriendList()
 	: m_wndOutput()
+	, m_lFriendListSaveGeneration(0)
 {
 	LoadList();
 	m_nLastSaved = ::GetTickCount();
@@ -95,25 +97,29 @@ void CFriendList::SaveList()
 	m_nLastSaved = ::GetTickCount();
 
 	const CString& sConfDir(thePrefs.GetMuleDirectory(EMULE_CONFIGDIR));
-	CSafeBufferedFile file;
-	if (!CFileOpen(file
-		, sConfDir + EMFRIENDS_MET_FILENAME_TMP
-		, CFile::modeCreate | CFile::modeWrite | CFile::typeBinary | CFile::shareDenyWrite
-		, _T("Failed to save ") EMFRIENDS_MET_FILENAME_TMP))
-	{
-		return;
-	}
-	::setvbuf(file.m_pStream, NULL, _IOFBF, 16384);
-
+	const LONG lGeneration = ::InterlockedIncrement(&m_lFriendListSaveGeneration);
 	try {
+		CSafeMemFile file;
 		file.WriteUInt8(MET_HEADER);
 		file.WriteUInt32((uint32)m_listFriends.GetCount());
 		for (POSITION pos = m_listFriends.GetHeadPosition(); pos != NULL;)
 			m_listFriends.GetNext(pos)->WriteToFile(file);
-		CommitAndClose(file);
-		MoveFileEx(sConfDir + EMFRIENDS_MET_FILENAME_TMP, sConfDir + EMFRIENDS_MET_FILENAME, MOVEFILE_REPLACE_EXISTING);
+
+		AsyncDiskWriteData* pData = new AsyncDiskWriteData;
+		pData->lGeneration = lGeneration;
+		pData->plGeneration = &m_lFriendListSaveGeneration;
+		pData->strTempPath = sConfDir + EMFRIENDS_MET_FILENAME_TMP;
+		pData->strFinalPath = sConfDir + EMFRIENDS_MET_FILENAME;
+		pData->strLogName = EMFRIENDS_MET_FILENAME;
+		pData->strPayloadName = _T("friend-list");
+		pData->eConflictPolicy = AsyncDiskWriteConflictLastSnapshotWins;
+		pData->eReplacePolicy = AsyncDiskWriteReplaceFinal;
+		const ULONGLONG uLength = file.GetLength();
+		if (uLength != 0)
+			pData->data.assign(file.GetBuffer(), file.GetBuffer() + static_cast<size_t>(uLength));
+		CPartFileWriteThread::QueueOrWriteDiskSnapshot(pData);
 	} catch (CFileException *ex) {
-		LogError(LOG_STATUSBAR, _T("%s%s"), _T("Failed to save ") EMFRIENDS_MET_FILENAME, (LPCTSTR)CExceptionStrDash(*ex));
+		LogError(LOG_STATUSBAR, GetResString(_T("FAILED_TO_SAVE_FILE")), EMFRIENDS_MET_FILENAME, (LPCTSTR)CExceptionStrDash(*ex));
 		ex->Delete();
 	}
 }

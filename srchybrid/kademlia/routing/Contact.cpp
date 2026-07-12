@@ -46,7 +46,7 @@ their client on the eMule forum.
 #include "kademlia/kademlia/Prefs.h"
 #include "kademlia/routing/Contact.h"
 #include "kademlia/utils/MiscUtils.h"
-#include "eMuleAI/GeoLite2.h"
+#include "eMuleAI/IPGeolocation.h"
 #include "Preferences.h"
 
 #ifdef _DEBUG
@@ -146,7 +146,7 @@ void CContact::Copy(const CContact &fromContact)
 void CContact::InitContact()
 {
 	m_tCreated = m_tLastTypeSet = time(NULL);
-	ResetGeoLite2();
+	ResetIPGeolocation();
 }
 
 void Kademlia::CContact::GetClientID(CString &sId) const
@@ -181,7 +181,7 @@ void CContact::SetIPAddress(uint32 uIp)
 		SetIpVerified(false); // clear the verified flag since it is no longer valid for a different IP
 		m_uIp = uIp;
 		m_uNetIp = htonl(m_uIp);
-		ResetGeoLite2();
+		ResetIPGeolocation();
 	}
 }
 
@@ -265,13 +265,13 @@ void CContact::DecUse()
 }
 
 const CString CContact::GetGeolocationData() const {
-	return theApp.geolite2->GetGeolocationData(m_structContactGeolocationData);
+	return theApp.ipgeolocation->GetGeolocationData(m_structContactGeolocationData);
 }
 
 const int CContact::GetCountryFlagIndex() const {
 	return m_structContactGeolocationData.FlagIndex;
 }
 
-void CContact::ResetGeoLite2() {
-	m_structContactGeolocationData = theApp.geolite2->QueryGeolocationData(CAddress(GetNetIP(), false));
+void CContact::ResetIPGeolocation() {
+	m_structContactGeolocationData = theApp.ipgeolocation->QueryGeolocationData(CAddress(GetNetIP(), false));
 }

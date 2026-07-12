@@ -22,7 +22,7 @@
 #include "OtherFunctions.h"
 #include "Packets.h"
 #include "Preferences.h"
-#include "eMuleAI/GeoLite2.h"
+#include "eMuleAI/IPGeolocation.h"
 #include <Log.h>
 
 #ifdef _DEBUG
@@ -58,7 +58,7 @@ void CServer::init()
 	m_bstaticservermember = false;
 	m_bCryptPingReplyPending = false;
 	m_bTriedCryptOnce = false;
-	m_structServerGeolocationData = theApp.geolite2->QueryGeolocationData(CAddress(ip, false));
+	m_structServerGeolocationData = theApp.ipgeolocation->QueryGeolocationData(CAddress(ip, false));
 }
 
 CServer::CServer(const ServerMet_Struct *in_data)
@@ -112,7 +112,7 @@ CServer::CServer(const CServer *pOld)
 	m_bstaticservermember = pOld->IsStaticMember();
 	m_bCryptPingReplyPending = pOld->m_bCryptPingReplyPending;
 	m_bTriedCryptOnce = pOld->m_bTriedCryptOnce;
-	m_structServerGeolocationData = theApp.geolite2->QueryGeolocationData(CAddress(ip, false));
+	m_structServerGeolocationData = theApp.ipgeolocation->QueryGeolocationData(CAddress(ip, false));
 }
 
 bool CServer::AddTagFromFile(CFileDataIO &servermet)
@@ -254,7 +254,7 @@ bool CServer::AddTagFromFile(CFileDataIO &servermet)
 
 LPCTSTR CServer::GetAddress() const
 {
-	return m_strDynIP.IsEmpty() ? ipfull : m_strDynIP;
+	return m_strDynIP.IsEmpty() ? static_cast<LPCTSTR>(ipfull) : static_cast<LPCTSTR>(m_strDynIP);
 }
 
 void CServer::SetIP(uint32 newip)
@@ -285,13 +285,13 @@ void CServer::SetServerKeyUDP(uint32 dwServerKeyUDP)
 	m_dwIPServerKeyUDP = theApp.GetPublicIPv4();
 }
 const CString CServer::GetGeolocationData() const {
-	return theApp.geolite2->GetGeolocationData(m_structServerGeolocationData);
+	return theApp.ipgeolocation->GetGeolocationData(m_structServerGeolocationData);
 }
 
 const int CServer::GetCountryFlagIndex() const {
 	return m_structServerGeolocationData.FlagIndex;
 }
 
-void CServer::ResetGeoLite2() {
-	m_structServerGeolocationData = theApp.geolite2->QueryGeolocationData(CAddress(ip, false));
+void CServer::ResetIPGeolocation() {
+	m_structServerGeolocationData = theApp.ipgeolocation->QueryGeolocationData(CAddress(ip, false));
 }

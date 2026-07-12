@@ -123,6 +123,8 @@ void CSearchDlg::OnShowWindow(BOOL bShow, UINT nStatus)
 	if (m_wndParams.IsFloating()) {
 		DockParametersWnd(); // Too much bug reports about vanished search parameters window. Force to dock.
 	}
+	if (bShow && m_pwndResults != NULL)
+		m_pwndResults->EnsureActiveTabLoaded();
 }
 
 void CSearchDlg::OnSetFocus(CWnd *pOldWnd)
@@ -241,9 +243,9 @@ void CSearchDlg::DeleteSearch(uint32 nSearchID)
 	m_pwndResults->DeleteSearch(nSearchID);
 }
 
-void CSearchDlg::DownloadSelected(bool bPaused, bool bBypassDownloadChecker)
+void CSearchDlg::DownloadSelected(bool bPaused, bool bBypassDownloadValidator)
 {
-	m_pwndResults->DownloadSelected(bPaused, bBypassDownloadChecker);
+	m_pwndResults->DownloadSelected(bPaused, bBypassDownloadValidator);
 }
 
 void CSearchDlg::DownloadSelected()

@@ -1,4 +1,4 @@
-//This file is part of eMule AI
+﻿//This file is part of eMule AI
 //Copyright (C)2002-2026 Merkur ( strEmail.Format("%s@%s", "devteam", "emule-project.net") / https://www.emule-project.net )
 //Copyright (C)2026 eMule AI
 //
@@ -23,6 +23,7 @@
 #include "Kademlia/Kademlia/search.h"
 #include "Kademlia/Kademlia/searchmanager.h"
 #include "Kademlia/routing/contact.h"
+#include "Kademlia/routing/RoutingZone.h"
 #include "Kademlia/net/kademliaudplistener.h"
 #include "kademlia/kademlia/UDPFirewallTester.h"
 #include "kademlia/utils/UInt128.h"
@@ -38,6 +39,8 @@
 #include "emuledlg.h"
 #include "TransferDlg.h"
 #include "serverwnd.h"
+#include "FriendList.h"
+#include "Friend.h"
 #include <vector>
 #include "Log.h"
 #include "PartFile.h"
@@ -48,6 +51,7 @@
 #include <vector>
 #include "SharedFileList.h"
 #include "Server.h"
+#include "PartFileWriteThread.h"
 
 #ifdef _DEBUG
 #define new DEBUG_NEW
@@ -57,6 +61,13 @@ static char THIS_FILE[] = __FILE__;
 
 namespace
 {
+	const size_t kLargeMetFileBufferSize = 256 * 1024;
+
+	bool GuardClientListMutation(LPCTSTR pszEntryPoint)
+	{
+		return theApp.GuardModelMutation(CemuleApp::ModelMutationClientList, pszEntryPoint);
+	}
+
 	bool ShouldSkipClientPersistenceForManualLeakDump()
 	{
 #if defined(_DEBUG) && defined(DEBUGLEAKHELPER)
@@ -68,9 +79,17 @@ namespace
 #endif
 	}
 
+	Kademlia::CUInt128 MakeKadIDFromRawData(const uchar* pucKadID)
+	{
+		Kademlia::CUInt128 uKadID;
+		if (pucKadID != NULL)
+			md4cpy(uKadID.GetDataPtr(), pucKadID);
+		return uKadID;
+	}
+
 	CUpDownClient* AcquireArchivedClientForRuntimeLinkedUse(CUpDownClient* pClient)
 	{
-		if (pClient == NULL || pClient->m_bIsArchived || theApp.clientlist == NULL || !thePrefs.GetClientHistory())
+		if (pClient == NULL || pClient->m_bIsArchived || theApp.clientlist == NULL || !thePrefs.GetClientHistory() || !theApp.ClientHistoryReady())
 			return NULL;
 
 		CUpDownClient* pArchivedClient = pClient->AcquireArchivedClient();
@@ -95,6 +114,85 @@ namespace
 			&& ::InterlockedCompareExchange((LONG*)&pClient->m_lDeletePending, 0, 0) != 0
 			&& ::InterlockedCompareExchange((LONG*)&pClient->m_lRuntimeReferenceCount, 0, 0) == 0;
 	}
+
+	bool IsPendingDeleteRuntimeMapEntry(const CUpDownClient* pClient)
+	{
+		return pClient != NULL
+			&& ::InterlockedCompareExchange((LONG*)&pClient->m_lDeletePending, 0, 0) != 0
+			&& ::InterlockedCompareExchange((LONG*)&pClient->m_lDeleteFinalized, 0, 0) == 0;
+	}
+
+	bool IsCurrentED2KServer(uint32 dwServerIP, uint16 nServerPort)
+	{
+		return theApp.serverconnect != NULL
+			&& theApp.serverconnect->IsConnected()
+			&& theApp.serverconnect->GetCurrentServer() != NULL
+			&& dwServerIP != 0
+			&& nServerPort != 0
+			&& dwServerIP == theApp.serverconnect->GetCurrentServer()->GetIP()
+			&& nServerPort == theApp.serverconnect->GetCurrentServer()->GetPort();
+	}
+
+	bool IsEServerBuddyCandidateOnCurrentServer(const CUpDownClient* pClient)
+	{
+		if (pClient == NULL || theApp.serverconnect == NULL || !theApp.serverconnect->IsConnected() || theApp.serverconnect->GetCurrentServer() == NULL)
+			return false;
+
+		const uint32 dwCurrentServerIP = theApp.serverconnect->GetCurrentServer()->GetIP();
+		if (pClient->GetServerIP() != 0 && pClient->GetServerPort() != 0)
+			return IsCurrentED2KServer(pClient->GetServerIP(), pClient->GetServerPort());
+		if (pClient->GetServerIP() != 0 && pClient->GetServerIP() != dwCurrentServerIP)
+			return false;
+
+		const uint32 dwReportedServerIP = pClient->GetReportedServerIP();
+		if (dwReportedServerIP != 0)
+			return dwReportedServerIP == dwCurrentServerIP;
+		return pClient->GetServerIP() != 0 && pClient->GetServerIP() == dwCurrentServerIP;
+	}
+
+	void RefreshEServerMagicCandidateServerContext(CUpDownClient* pClient, uint32 dwUserID, uint16 nUserPort, uint32 dwServerIP, uint16 nServerPort)
+	{
+		if (pClient == NULL || dwServerIP == 0 || nServerPort == 0)
+			return;
+
+		const uint32 dwOldServerIP = pClient->GetServerIP();
+		const uint16 nOldServerPort = pClient->GetServerPort();
+		const uint32 dwOldReportedServerIP = pClient->GetReportedServerIP();
+		const uint16 nOldUserPort = pClient->GetUserPort();
+		const bool bContextChanged = dwOldServerIP != dwServerIP || nOldServerPort != nServerPort || dwOldReportedServerIP != dwServerIP;
+		const bool bPortChanged = nUserPort != 0 && nOldUserPort != nUserPort;
+
+		// Do not copy the magic-source user ID into UserIDHybrid here.
+		// The magic answer and CUpDownClient store the same IP with different byte-order conventions.
+		// Overwriting an existing client can make the next TCP connect target the byte-swapped IP.
+		if (nUserPort != 0 && nOldUserPort != nUserPort)
+			pClient->SetUserPort(nUserPort);
+
+		pClient->SetServerIP(dwServerIP);
+		pClient->SetServerPort(nServerPort);
+		pClient->SetReportedServerIP(dwServerIP);
+		pClient->SetLastEServerBuddyValidServerPing(0);
+		if (bContextChanged || bPortChanged) {
+			const DWORD dwRetryAfter = pClient->GetEServerBuddyRetryAfter();
+			if (dwRetryAfter != 0) {
+				const DWORD dwRetryLimit = ::GetTickCount() + ESERVERBUDDY_GENERIC_REJECT_RETRY + SEC2MS(5);
+				if ((INT)(dwRetryAfter - dwRetryLimit) <= 0)
+					pClient->ClearEServerBuddyRetryAfter();
+			}
+		}
+
+		if (thePrefs.GetLogNatTraversalEvents()
+			&& (dwOldServerIP != dwServerIP || nOldServerPort != nServerPort || dwOldReportedServerIP != dwServerIP || nOldUserPort != nUserPort))
+		{
+			DebugLog(_T("[eServerBuddy] Magic candidate refreshed server context: %s oldServer=%s:%u oldReported=%s newServer=%s:%u candidateID=%u oldPort=%u newPort=%u"),
+				(LPCTSTR)EscPercent(pClient->DbgGetClientInfo()),
+				(LPCTSTR)ipstr(dwOldServerIP), nOldServerPort,
+				(LPCTSTR)ipstr(dwOldReportedServerIP),
+				(LPCTSTR)ipstr(dwServerIP), nServerPort,
+				dwUserID,
+				nOldUserPort, nUserPort);
+		}
+	}
 }
 
 #define CLIENT_HISTORY_MET_FILENAME	_T("clienthistory.met")
@@ -106,6 +204,8 @@ CClientList::CClientList()
 	, m_nEServerBuddyStatus(Disconnected)
 	, m_pServingEServerBuddy(NULL)
 	, m_dwEServerBuddyServerIP(0)
+	, m_nEServerBuddyServerPort(0)
+	, m_dwEServerBuddyConnectStart(0)
 	, m_nMaxEServerBuddySlots(static_cast<uint8>(thePrefs.GetMaxEServerBuddySlots()))
 	, m_dwLastEServerBuddyMagicSearch(0)
 	, m_dwLastEServerBuddyMagicSearchSent(0)
@@ -116,6 +216,7 @@ CClientList::CClientList()
 	, m_bEServerBuddyMagicSearchInFlight(false)
 	, m_bEServerBuddyMagicSearchPrimed(false)
 	, m_bEServerBuddyMagicInFlightProbeValid(false)
+	, m_lClientHistorySaveGeneration(0)
 {
 	m_tLastBanCleanUp = m_tLastTrackedCleanUp = m_tLastClientCleanUp = time(NULL);
 	m_ActiveClientsByRuntimeID.reserve(2048);
@@ -125,11 +226,17 @@ CClientList::CClientList()
 	m_globDeadSourceList.Init(true);
 	m_dwLastEServerBuddyPing = 0;
 	m_dwLastEServerBuddyKeepAlive = 0;
+	m_dwLastEServerBuddyKadBridgeRequest = 0;
+	m_dwLastKadBuddyEServerBridgeRequest = 0;
+	m_dwLastKadBuddyDemandCheck = 0;
+	m_dwLastKadBuddyDemandSearch = 0;
 	md4clr(m_abyEServerBuddyMagicInFlightHash);
 }
 
 CClientList::~CClientList()
 {
+	CancelAutoQuerySharedFilesJob();
+	CancelClientHistorySaveJob();
 	RemoveAllTrackedClients();
 }
 
@@ -465,6 +572,9 @@ void CClientList::GetStatistics(uint32 &ruTotalClients
 
 void CClientList::AddClient(CUpDownClient *toadd, bool bSkipDupTest)
 {
+	if (!GuardClientListMutation(_T("CClientList::AddClient")))
+		return;
+
 	// skipping the check for duplicate list entries is only to be done for optimization purposes, if the calling
 	// function has ensured that this client instance is not already within the list -> there are never duplicate
 	// client instances in this list.
@@ -486,11 +596,15 @@ bool CClientList::GiveClientsForTraceRoute()
 
 void CClientList::RemoveClient(CUpDownClient *toremove, LPCTSTR pszReason)
 {
+	if (!GuardClientListMutation(_T("CClientList::RemoveClient")))
+		return;
+
 	if (toremove->m_bIsArchived)
 		return;
 
 	POSITION pos = list.Find(toremove);
 	if (pos) {
+		CancelAutoQuerySharedFilesJob();
 		theApp.emuledlg->transferwnd->GetClientList()->SaveArchive(toremove);
 		theApp.uploadqueue->RemoveFromUploadQueue(toremove, CString(_T("CClientList::RemoveClient: ")) + pszReason);
 		theApp.uploadqueue->RemoveFromWaitingQueue(toremove);
@@ -575,6 +689,7 @@ void CClientList::ServicePendingDeleteClients()
 
 void CClientList::DeleteAll()
 {
+	CancelAutoQuerySharedFilesJob();
 	theApp.uploadqueue->DeleteAll();
 	theApp.downloadqueue->DeleteAll();
 	while (!list.IsEmpty()) {
@@ -582,14 +697,11 @@ void CClientList::DeleteAll()
 		theApp.emuledlg->transferwnd->GetClientList()->SaveArchive(pClient);
 		CUpDownClient::SafeDelete(pClient); // recursive: this will call RemoveClient
 	}
-	{
-		CSingleLock runtimeMapLock(&m_csTrackedClientRuntimeMaps, TRUE);
-		m_ActiveClientsByRuntimeID.clear();
-		m_ArchivedClientsByRuntimeID.clear();
-	}
 	liMODsTypes.RemoveAll();
-	if (thePrefs.GetClientHistory())
-		SaveList();
+	if (thePrefs.GetClientHistory() && theApp.ClientHistoryReady()) {
+		CancelClientHistorySaveJob();
+		SaveListSynchronously();
+	}
 
 	std::vector<CUpDownClient*> aArchivedClients;
 	aArchivedClients.reserve(static_cast<size_t>(m_ArchivedClientsMap.GetCount()));
@@ -603,6 +715,43 @@ void CClientList::DeleteAll()
 	m_ArchivedClientsMap.RemoveAll();
 	for (size_t i = 0; i < aArchivedClients.size(); ++i)
 		CUpDownClient::SafeDelete(aArchivedClients[i]);
+}
+
+void CClientList::HandleNatTraversalProtocolModeChanged()
+{
+	std::vector<CUpDownClient*> aClients;
+	aClients.reserve(static_cast<size_t>(list.GetCount()));
+	for (POSITION pos = list.GetHeadPosition(); pos != NULL;)
+		aClients.push_back(list.GetNext(pos));
+
+	for (size_t i = 0; i < aClients.size(); ++i) {
+		CUpDownClient* pClient = aClients[i];
+		if (pClient == NULL || !IsValidClient(pClient))
+			continue;
+
+		pClient->ClearNatRendezvousTransportPin();
+		pClient->InvalidateDirectNatTraversalCaps();
+		CAddress peerIP = pClient->GetConnectIP();
+		uint16 peerPort = pClient->GetKadPort() != 0 ? pClient->GetKadPort() : pClient->GetUDPPort();
+		if (theApp.clientudp != NULL && !peerIP.IsNull() && peerPort != 0)
+			theApp.clientudp->RequestNatTraversalCaps(pClient, peerIP, peerPort);
+
+		if (pClient->socket != NULL && pClient->socket->HaveNatTraversalLayer() && !pClient->IsCurrentNatTraversalTransportCompatible()) {
+			const bool bActiveNatTraversalSession = pClient->socket->IsConnected()
+				&& (pClient->GetDownloadState() == DS_DOWNLOADING || pClient->GetUploadState() == US_UPLOADING);
+			if (bActiveNatTraversalSession) {
+				if (thePrefs.GetLogNatTraversalEvents()) {
+					AddDebugLogLine(DLP_LOW, false, _T("[NatTraversal] Protocol preference changed while transport is connected; preserving current session for %s"),
+						(LPCTSTR)EscPercent(pClient->DbgGetClientInfo()));
+				}
+				continue;
+			}
+
+			pClient->ResetNatTraversalSocketForTransportChange(_T("NAT-T transport protocol changed"), true);
+			if (IsValidClient(pClient) && pClient->GetRequestFile() != NULL)
+				pClient->TryToConnect(true, false, NULL, true);
+		}
+	}
 }
 
 bool CClientList::AttachToAlreadyKnown(CUpDownClient **client, CClientReqSocket *sender)
@@ -644,6 +793,8 @@ bool CClientList::AttachToAlreadyKnown(CUpDownClient **client, CClientReqSocket 
 
 	if (!found_client->GetNatTraversalSupport() && tocheck->GetNatTraversalSupport())
 		found_client->SetNatTraversalSupport(true);
+	if (!found_client->GetNatTraversalQuicSupport() && tocheck->GetNatTraversalQuicSupport())
+		found_client->SetNatTraversalQuicSupport(true);
 
 	if (!found_client->SupportsDirectUDPCallback() && tocheck->SupportsDirectUDPCallback())
 		found_client->SetDirectUDPCallbackSupport(true);
@@ -665,6 +816,9 @@ bool CClientList::AttachToAlreadyKnown(CUpDownClient **client, CClientReqSocket 
 				found_client->SetServingBuddyPort(tocheck->GetServingBuddyPort());
 		}
 	}
+
+	if (tocheck->HasValidEServerBuddyKadID() && !found_client->HasValidEServerBuddyKadID())
+		found_client->SetEServerBuddyKadID(tocheck->GetEServerBuddyKadID());
 
 	if (sender) {
 		if (found_client->socket) {
@@ -735,6 +889,21 @@ CUpDownClient* CClientList::FindClientByUserHash(const uchar *clienthash, const 
 	return pFound;
 }
 
+CUpDownClient* CClientList::FindClientByUserHashAndKadEndpoint(const uchar* clienthash, const CAddress& clientip, uint16 nKadPort) const
+{
+	if (clienthash == NULL || isnulmd4(clienthash) || clientip.IsNull() || nKadPort == 0)
+		return NULL;
+
+	for (POSITION pos = list.GetHeadPosition(); pos != NULL;) {
+		CUpDownClient* cur_client = list.GetNext(pos);
+		if (md4equ(cur_client->GetUserHash(), clienthash)
+			&& CompareClientIP(cur_client, clientip)
+			&& (cur_client->GetKadPort() == nKadPort || cur_client->GetUDPPort() == nKadPort))
+			return cur_client;
+	}
+	return NULL;
+}
+
 //CUpDownClient* CClientList::FindClientByIP(uint32 clientip) const
 CUpDownClient* CClientList::FindClientByIP(const CAddress& clientip) const
 {
@@ -788,6 +957,23 @@ CUpDownClient* CClientList::FindClientByIP_KadPort(const CAddress& clientip, uin
 			return cur_client;
 	}
 	return NULL;
+}
+
+bool CClientList::HasQuicNatTraversalLayerForEndpoint(const CUpDownClient* pExcept, const CAddress& clientip, uint16 nUDPport) const
+{
+	if (clientip.IsNull() || nUDPport == 0)
+		return false;
+
+	for (POSITION pos = list.GetHeadPosition(); pos != NULL;) {
+		CUpDownClient* cur_client = list.GetNext(pos);
+		if (cur_client == NULL || cur_client == pExcept || cur_client->socket == NULL || !cur_client->socket->HaveQuicNatLayer())
+			continue;
+		if (!CompareClientIP(cur_client, clientip))
+			continue;
+		if (cur_client->GetKadPort() == nUDPport || cur_client->GetUDPPort() == nUDPport)
+			return true;
+	}
+	return false;
 }
 
 CUpDownClient* CClientList::FindClientByServerID(uint32 uServerIP, uint32 uED2KUserID) const
@@ -854,7 +1040,7 @@ INT_PTR CClientList::GetBannedCount() const
 			RememberBanKey(pClient->GetConnectIP().ToStringC());
 	};
 
-	if (thePrefs.GetClientHistory()) {
+	if (thePrefs.GetClientHistory() && theApp.ClientHistoryReady()) {
 		for (POSITION pos = m_ArchivedClientsMap.GetStartPosition(); pos != NULL;) {
 			CString strHash;
 			CUpDownClient* pArchivedClient = NULL;
@@ -872,7 +1058,7 @@ INT_PTR CClientList::GetBannedCount() const
 			continue;
 
 		bool bAlreadyCountedByArchivedClient = false;
-		if (thePrefs.GetClientHistory() && !IsCorruptOrBadUserHash(pClient->GetUserHash())) {
+		if (thePrefs.GetClientHistory() && theApp.ClientHistoryReady() && !IsCorruptOrBadUserHash(pClient->GetUserHash())) {
 			CUpDownClient* pArchivedClient = NULL;
 			if (m_ArchivedClientsMap.Lookup(md4str(pClient->GetUserHash()), pArchivedClient) && pArchivedClient != NULL && pArchivedClient->IsBanned())
 				bAlreadyCountedByArchivedClient = true;
@@ -1050,6 +1236,7 @@ void CClientList::Process()
 
 	// servingBuddy is just a flag that is used to make sure we are still connected or connecting to a serving buddy.
 	servingBuddyState servingBuddy = Disconnected;
+	const DWORD dwKadProcessTick = ::GetTickCount();
 
 	for (POSITION pos = m_KadList.GetHeadPosition(); pos != NULL;) {
 		CUpDownClient *cur_client = m_KadList.GetNext(pos);
@@ -1092,9 +1279,15 @@ void CClientList::Process()
 			break;
 		case KS_INCOMING_SERVED_BUDDY:
 			//A firewalled client wants us to be his serving buddy.
-			// Served buddy capacity is reached, drop this entry now. Othewise, accept and wait for connection.
-			if (m_ServedBuddyMap.GetCount() >= thePrefs.GetMaxServedBuddies())
+			// Admission already reserved the slot. Release it if the expected inbound TCP handshake never arrives.
+			if ((cur_client->socket == NULL || !cur_client->socket->IsConnected())
+				&& (DWORD)(dwKadProcessTick - cur_client->GetIncomingServedBuddyRequestTick()) >= KAD_SERVED_BUDDY_PENDING_TIMEOUT) {
+				if (thePrefs.GetLogNatTraversalEvents())
+					AddDebugLogLine(DLP_LOW, false, _T("[Buddy]: Expiring incoming served buddy without TCP connection: %s"), (LPCTSTR)EscPercent(cur_client->DbgGetClientInfo()));
+				RemoveServedBuddy(cur_client);
+				cur_client->ClearIncomingServedBuddyWait();
 				cur_client->SetKadState(KS_NONE);
+			}
 			break;
 		case KS_QUEUED_SERVING_BUDDY:
 			//We are firewalled and want to request this client to be a serving buddy.
@@ -1135,6 +1328,10 @@ void CClientList::Process()
 					m_nServingBuddyStatus = Connected;
 					AddLogLine(false, GetResString(_T("KAD_SERVING_BUDDY_CONNECTED")), (LPCTSTR)EscPercent(cur_client->DbgGetClientInfo()));
 					RefreshConnectionStateIndicators();
+					m_dwLastKadBuddyEServerBridgeRequest = 0;
+					TryRequestEServerBuddyFromKadBuddy(true);
+					if (theApp.downloadqueue != NULL)
+						theApp.downloadqueue->TriggerPendingNatTraversalDownloads(_T("Kad serving buddy connected."));
 				}
 				if (m_pServingBuddy == cur_client && theApp.IsFirewalled() && cur_client->SendBuddyPingPong()) {
 					if (thePrefs.GetDebugClientTCPLevel() > 0)
@@ -1155,7 +1352,7 @@ void CClientList::Process()
 	if (servingBuddy == Disconnected) {
 		if (m_nServingBuddyStatus != Disconnected || m_pServingBuddy) {
 			if (m_pServingBuddy != NULL)
-				AddLogLine(false, GetResString(_T("KAD_SERVING_BUDDY_DISCONNECTED")), (LPCTSTR)EscPercent(m_pServingBuddy->DbgGetClientInfo()));
+				AddLogLine(true, GetResString(_T("KAD_SERVING_BUDDY_DISCONNECTED")), (LPCTSTR)EscPercent(m_pServingBuddy->DbgGetClientInfo()));
 			if (Kademlia::CKademlia::IsRunning() && theApp.IsFirewalled() && Kademlia::CUDPFirewallTester::IsFirewalledUDP(true)) {
 				//We are a lowID client and we just lost our serving buddy.
 				//Go ahead and instantly try to find a new serving buddy.
@@ -1168,6 +1365,25 @@ void CClientList::Process()
 	}
 
 	if (Kademlia::CKademlia::IsConnected()) {
+		const DWORD dwNow = ::GetTickCount();
+		if (Kademlia::CKademlia::IsFirewalled()
+			&& m_nServingBuddyStatus == Disconnected
+			&& !thePrefs.IsCryptLayerRequired()
+			&& !IsKadBuddySearchActive()
+			&& (m_dwLastKadBuddyDemandCheck == 0 || (DWORD)(dwNow - m_dwLastKadBuddyDemandCheck) >= SEC2MS(5)))
+		{
+			m_dwLastKadBuddyDemandCheck = dwNow;
+			if ((m_dwLastKadBuddyDemandSearch == 0 || (DWORD)(dwNow - m_dwLastKadBuddyDemandSearch) >= MIN2MS(5))
+				&& theApp.downloadqueue != NULL
+				&& theApp.downloadqueue->HasPendingNatTraversalBuddyDemand())
+			{
+				m_dwLastKadBuddyDemandSearch = dwNow;
+				Kademlia::CKademlia::GetPrefs()->SetFindServingBuddy();
+				if (thePrefs.GetLogNatTraversalEvents())
+					DebugLog(_T("[Buddy] Scheduled bounded Kad serving buddy search for pending NAT-T download"));
+			}
+		}
+
 		// We can leverage a Kad serving buddy in two cases:
 		// 1) Both TCP and UDP are firewalled: Direct UDP callback is unavailable, so a serving buddy is required as the relay for Kad callbacks.
 		//    NAT-T/uTP may still be attempted if enabled and outbound UDP is possible, but the serving buddy itself does not need any NAT-T awareness.
@@ -1219,8 +1435,16 @@ void CClientList::Process()
 	//
 	ProcessConnectingClientsList();
 
-	if (thePrefs.GetClientHistory() && time(NULL) >= m_tLastSaved + MIN2S(13)) // Saves Client History on every 13 minutes.
-		SaveList();
+	if (m_ClientHistorySaveJob.bActive)
+		ProcessClientHistorySaveJob();
+
+	if (m_AutoQuerySharedFilesJob.bActive)
+		ProcessAutoQuerySharedFilesJob();
+
+	if (thePrefs.GetClientHistory() && theApp.ClientHistoryReady() && time(NULL) >= m_tLastSaved + MIN2S(13)) { // Saves Client History on every 13 minutes.
+		if (!m_ClientHistorySaveJob.bActive && (theApp.sharedfiles == NULL || !theApp.sharedfiles->IsReloading()))
+			SaveList();
+	}
 
 	// eServer Buddy relay maintenance
 	CleanupExpiredEServerRelays();
@@ -1383,6 +1607,19 @@ CUpDownClient* CClientList::AcquireTrackedClientByRuntimeID(DWORD uRuntimeID) co
 	return NULL;
 }
 
+CUpDownClient* CClientList::AcquireTrackedClientByRuntimeIDAndGeneration(DWORD uRuntimeID, LONG lRuntimeGeneration) const
+{
+	CUpDownClient* pClient = AcquireTrackedClientByRuntimeID(uRuntimeID);
+	if (pClient == NULL)
+		return NULL;
+
+	if (pClient->IsRuntimeGenerationCurrent(lRuntimeGeneration))
+		return pClient;
+
+	pClient->ReleaseRuntimeReference();
+	return NULL;
+}
+
 CUpDownClient* CClientList::AcquireArchivedClientByUserHash(const uchar* clienthash) const
 {
 	if (clienthash == NULL || isnulmd4(clienthash) || IsCorruptOrBadUserHash(clienthash))
@@ -1419,8 +1656,17 @@ CUpDownClient* CClientList::FindArchivedClientByUserHash(const uchar* clienthash
 void CClientList::RebuildArchivedRuntimeMap() const
 {
 	CSingleLock runtimeMapLock(&m_csTrackedClientRuntimeMaps, TRUE);
+	std::vector<CUpDownClient*> aPendingDeleteClients;
+	aPendingDeleteClients.reserve(m_ArchivedClientsByRuntimeID.size());
+	for (auto it = m_ArchivedClientsByRuntimeID.begin(); it != m_ArchivedClientsByRuntimeID.end(); ++it) {
+		if (IsPendingDeleteRuntimeMapEntry(it->second))
+			aPendingDeleteClients.push_back(it->second);
+	}
+
 	m_ArchivedClientsByRuntimeID.clear();
-	m_ArchivedClientsByRuntimeID.reserve(static_cast<size_t>(m_ArchivedClientsMap.GetCount()) + 16);
+	m_ArchivedClientsByRuntimeID.reserve(static_cast<size_t>(m_ArchivedClientsMap.GetCount()) + aPendingDeleteClients.size() + 16);
+	for (size_t i = 0; i < aPendingDeleteClients.size(); ++i)
+		m_ArchivedClientsByRuntimeID[aPendingDeleteClients[i]->GetRuntimeID()] = aPendingDeleteClients[i];
 	for (POSITION pos = m_ArchivedClientsMap.GetStartPosition(); pos != NULL;) {
 		CString strHash;
 		CUpDownClient* pArchivedClient = NULL;
@@ -1488,17 +1734,24 @@ void CClientList::RequestServingBuddy(Kademlia::CContact *contact, uint8 byConne
 {
 	uint32 nContactIP = contact->GetNetIP();
 	// don't connect to ourself
-	if (theApp.serverconnect->GetLocalIP() == nContactIP && thePrefs.GetPort() == contact->GetTCPPort())
+	if (theApp.serverconnect->GetLocalIP() == nContactIP && thePrefs.GetPort() == contact->GetTCPPort()) {
+		if (thePrefs.GetLogNatTraversalEvents())
+			DebugLog(_T("[Buddy] Serving buddy candidate rejected: self endpoint %s:%u"), (LPCTSTR)ipstr(nContactIP), contact->GetTCPPort());
 		return;
+	}
 	if (!bForce && IsKadFirewallCheckIP(CAddress(nContactIP, false))) { // doing a kad firewall check with this IP, abort
-		DebugLogWarning(_T("[Buddy]: KAD TCP Firewall check / Serving buddy request collision for IP %s"), (LPCTSTR)ipstr(nContactIP));
+		if (thePrefs.GetLogNatTraversalEvents())
+			DebugLog(_T("[Buddy] Serving buddy candidate rejected: Kad firewall check collision for IP %s"), (LPCTSTR)ipstr(nContactIP));
 		return;
 	}
 	CUpDownClient *pNewClient = FindClientByIP(CAddress(nContactIP, false), contact->GetTCPPort());
 	if (!pNewClient)
 		pNewClient = new CUpDownClient(NULL, contact->GetTCPPort(), contact->GetIPAddress(), 0, 0, false); // IPv6-TODO: Check this
-	else if (pNewClient->GetKadState() != KS_NONE)
+	else if (pNewClient->GetKadState() != KS_NONE) {
+		if (thePrefs.GetLogNatTraversalEvents())
+			DebugLog(_T("[Buddy] Serving buddy candidate rejected: client busy with Kad state=%u, %s"), (unsigned)pNewClient->GetKadState(), (LPCTSTR)EscPercent(pNewClient->DbgGetClientInfo()));
 		return; // already busy with this client in some way (probably fw stuff), don't mess with it
+	}
 
 	// Add client to the lists to be processed.
 	// Seed connect and verified IP to ensure TCP attach uses the same instance.
@@ -1532,10 +1785,14 @@ bool CClientList::IncomingServedBuddy(Kademlia::CContact *contact, Kademlia::CUI
 	uint16  uTCPPort = contact->GetTCPPort();
 	uint16  uUDPPort = contact->GetUDPPort();
 #ifndef NATTTESTMODE
-	//If eMule already knows this client, abort this. It could cause conflicts.
-	//Although the odds of this happening is very small, it could still happen.
-	if (FindClientByIP(addrContact, uTCPPort))
-		return false;
+	// If eMule already knows this client, abort this except for the eServer buddy bridge.
+	// The bridge deliberately reuses the existing served eServer buddy TCP client as a Kad served buddy candidate.
+	if (CUpDownClient* pKnown = FindClientByIP(addrContact, uTCPPort)) {
+		if (!IsServedEServerBuddy(pKnown))
+			return false;
+		if (thePrefs.GetLogNatTraversalEvents())
+			DebugLog(_T("[eServerBuddy][KadBridge] Reusing served eServer buddy for incoming Kad serving buddy request: %s"), (LPCTSTR)EscPercent(pKnown->DbgGetClientInfo()));
+	}
 #endif
 
 	// If we are already serving this buddy, ignore duplicate requests.
@@ -1558,7 +1815,13 @@ bool CClientList::IncomingServedBuddy(Kademlia::CContact *contact, Kademlia::CUI
 	// Try to reuse an existing client object by IP:TCP if available.
 	if (CUpDownClient* pExisting = FindClientByIP(addrContact, uTCPPort)) {
 		pExisting->SetKadPort(uUDPPort);
-		pExisting->SetKadState(KS_INCOMING_SERVED_BUDDY);
+		if (pExisting->socket != NULL && pExisting->socket->IsConnected()) {
+			pExisting->ClearIncomingServedBuddyWait();
+			pExisting->SetKadState(KS_CONNECTED_BUDDY);
+		} else {
+			pExisting->StartIncomingServedBuddyWait();
+			pExisting->SetKadState(KS_INCOMING_SERVED_BUDDY);
+		}
 		pExisting->SetIP(addrContact); // Ensure verified IP is set so the TCP socket can attach to the same instance.
 		byte idTmp[16];
 		servedBuddyID->ToByteArray(idTmp);
@@ -1588,6 +1851,7 @@ bool CClientList::IncomingServedBuddy(Kademlia::CContact *contact, Kademlia::CUI
 	pNewClient->SetConnectIP(addrContact); // Seed connect address early to avoid 0.0.0.0 in UI and to allow address-based dedup.
 	pNewClient->SetIP(addrContact); // Also set verified IP to allow AttachToAlreadyKnown to match on IP.
 	pNewClient->SetKadPort(uUDPPort);
+	pNewClient->StartIncomingServedBuddyWait();
 	pNewClient->SetKadState(KS_INCOMING_SERVED_BUDDY);
 	byte ID[16];
 	contact->GetClientID().ToByteArray(ID);
@@ -1625,6 +1889,7 @@ void CClientList::RemoveFromKadList(CUpDownClient *torem)
 		m_KadList.RemoveAt(pos);
 	}
 
+	torem->ClearIncomingServedBuddyWait();
 	RemoveServedBuddy(torem);
 }
 
@@ -1667,6 +1932,17 @@ void CClientList::RemoveServedBuddy(const CUpDownClient* pClient)
 // Clear the entire served buddy list.
 void CClientList::ClearAllServedBuddies()
 {
+	POSITION pos = m_ServedBuddyMap.GetStartPosition();
+	while (pos != NULL) {
+		CUpDownClient* pKey = NULL;
+		CUpDownClient* pClient = NULL;
+		m_ServedBuddyMap.GetNextAssoc(pos, pKey, pClient);
+		if (pClient == NULL)
+			continue;
+		pClient->ClearIncomingServedBuddyWait();
+		if (pClient->GetKadState() == KS_INCOMING_SERVED_BUDDY || pClient->GetKadState() == KS_CONNECTED_BUDDY)
+			pClient->SetKadState(KS_NONE);
+	}
 	m_ServedBuddyMap.RemoveAll();
 }
 
@@ -1886,13 +2162,13 @@ bool CClientList::AllowCalbackRequest(CAddress IP) const
 	return true;
 }
 
-void CClientList::ResetGeoLite2()
+void CClientList::ResetIPGeolocation()
 {
 	CUpDownClient* cur_client;
 	for (POSITION pos = list.GetHeadPosition(); pos != NULL;) {
 		cur_client = list.GetNext(pos);
 		if (cur_client != NULL)
-			cur_client->ResetGeoLite2();
+			cur_client->ResetIPGeolocation();
 	}
 
 	for (POSITION pos = m_ArchivedClientsMap.GetStartPosition(); pos != NULL;) {
@@ -1900,7 +2176,7 @@ void CClientList::ResetGeoLite2()
 		CUpDownClient* cur_client = NULL;
 		m_ArchivedClientsMap.GetNextAssoc(pos, cur_hash, cur_client);
 		if (cur_client != NULL)
-			cur_client->ResetGeoLite2();
+			cur_client->ResetIPGeolocation();
 	}
 }
 
@@ -1990,14 +2266,21 @@ void CClientList::ReleaseModStatistics(CRBMap<uint32, CRBMap<CString, uint32>* >
 
 bool CClientList::LoadList()
 {
+	return LoadList(NULL, true, true);
+}
+
+bool CClientList::LoadList(CArchivedClientsMap* pTargetArchivedClients, bool bAssignCredits, bool bRebuildRuntimeMap)
+{
+	CArchivedClientsMap& archivedClients = pTargetArchivedClients != NULL ? *pTargetArchivedClients : m_ArchivedClientsMap;
 	const CString& strFileName(thePrefs.GetMuleDirectory(EMULE_CONFIGDIR) + CLIENT_HISTORY_MET_FILENAME);
 	CSafeBufferedFile file;
 	CFileException ex;
 	if (!file.Open(strFileName, CFile::modeRead | CFile::osSequentialScan | CFile::typeBinary | CFile::shareDenyWrite, &ex)) {
-		if (ex.m_cause != CFileException::fileNotFound) 
+		if (bAssignCredits && ex.m_cause != CFileException::fileNotFound) 
 			LogError(LOG_STATUSBAR, GetResString(_T("ERR_READEMFRIENDS")), (LPCTSTR)EscPercent(CExceptionStrDash(ex)));
 		return false;
 	}
+	::setvbuf(file.m_pStream, NULL, _IOFBF, kLargeMetFileBufferSize);
 
 	try {
 		uint8 header = file.ReadUInt8();
@@ -2007,7 +2290,7 @@ bool CClientList::LoadList()
 		}
 
 		int count = file.ReadUInt32(); //number of records
-		m_ArchivedClientsMap.InitHashTable(count + 5000); // TODO: should be prime number and 20% larger.
+		archivedClients.InitHashTable(count + 5000); // TODO: should be prime number and 20% larger.
 
 		for (int i = 0; i < count; ++i) { 
 			CUpDownClient* Record = new CUpDownClient();
@@ -2025,12 +2308,12 @@ bool CClientList::LoadList()
 				Record->m_uBadClientCategory = PR_NOTBADCLIENT;
 				Record->m_tPunishmentStartTime = 0;
 				Record->m_strPunishmentReason.Empty();
-			} else if (Record->IsBadClient() && Record->m_uPunishment <= P_USERHASHBAN) // If this client is already marked as IP or user hash banned, we need to set up its punishment and ban status 
+			} else if (bAssignCredits && Record->IsBadClient() && Record->m_uPunishment <= P_USERHASHBAN) // If this client is already marked as IP or user hash banned, we need to set up its punishment and ban status 
 				Record->Ban(Record->m_strPunishmentReason, Record->m_uBadClientCategory, Record->m_uPunishment, Record->m_tPunishmentStartTime);
 
 			CString cur_hash = md4str(Record->GetUserHash());
 			CUpDownClient* ArchivedClient = NULL;
-			if (m_ArchivedClientsMap.Lookup(cur_hash, ArchivedClient) && ArchivedClient) { // A copy of this client exists in the history. This is a duplicate entry case and we'll only update selected data conditionally.
+			if (archivedClients.Lookup(cur_hash, ArchivedClient) && ArchivedClient) { // A copy of this client exists in the history. This is a duplicate entry case and we'll only update selected data conditionally.
 				if (Record->tFirstSeen < ArchivedClient->tFirstSeen) // We'll keep the oldest dwFirstSeen
 					ArchivedClient->tFirstSeen = Record->tFirstSeen;
 				if (Record->tLastSeen > ArchivedClient->tLastSeen) // We'll keep the newest dwLastSeen
@@ -2044,16 +2327,17 @@ bool CClientList::LoadList()
 					ArchivedClient->m_tPunishmentStartTime = Record->m_tPunishmentStartTime;
 					ArchivedClient->m_strPunishmentReason = Record->m_strPunishmentReason;
 				}
-				if (thePrefs.GetClientHistoryLog())
+				if (bAssignCredits && thePrefs.GetClientHistoryLog())
 					AddDebugLogLine(false, _T("[CLIENT HISTORY]: Client in the history updated by LoadList -> Hash: %s | Name: %s"), md4str(ArchivedClient->GetUserHash()), (LPCTSTR)EscPercent(ArchivedClient->GetUserName()));
 				// Delete record since it is absolute now.
 				delete Record;
 				Record = NULL;
 				continue;
 			} else { // Client doesn't exist in the history. We can now insert Record to the map.
-				Record->credits = theApp.clientcredits->GetCredit(Record->GetUserHash(), false); // Find and set credits before adding.
-				m_ArchivedClientsMap[cur_hash] = Record; // Add this client to the history map.
-				if (thePrefs.GetClientHistoryLog())
+				if (bAssignCredits && theApp.clientcredits != NULL)
+					Record->credits = theApp.clientcredits->GetCredit(Record->GetUserHash(), false); // Find and set credits before adding.
+				archivedClients[cur_hash] = Record; // Add this client to the history map.
+				if (bAssignCredits && thePrefs.GetClientHistoryLog())
 					AddDebugLogLine(false, _T("[CLIENT HISTORY]: Client loaded -> Hash: %s | Name: %s"), md4str(Record->GetUserHash()), (LPCTSTR)EscPercent(Record->GetUserName()));
 			}
 
@@ -2064,38 +2348,845 @@ bool CClientList::LoadList()
 				Record->m_bAutoQuerySharedFiles = true;
 		}
 		file.Close();
-		RebuildArchivedRuntimeMap();
-		if(m_ArchivedClientsMap.GetCount())
-			AddLogLine(false, _T("%lu clients loaded from client history file"), m_ArchivedClientsMap.GetCount());
+		if (bRebuildRuntimeMap)
+			RebuildArchivedRuntimeMap();
+		if(bAssignCredits && archivedClients.GetCount())
+				AddLogLine(false, GetResString(_T("CLIENT_HISTORY_LOADED")), archivedClients.GetCount());
 		return true;
 	} catch (CFileException* ex) {
-		if (ex->m_cause == CFileException::endOfFile)
-			LogError(LOG_STATUSBAR, GetResString(_T("ERR_CLIENTHISTORYINVALID")));
-		else
-			LogError(LOG_STATUSBAR, GetResString(_T("ERR_READCLIENTHISTORY")), (LPCTSTR)EscPercent(CExceptionStrDash(*ex)));
+		if (bAssignCredits) {
+			if (ex->m_cause == CFileException::endOfFile)
+				LogError(LOG_STATUSBAR, GetResString(_T("ERR_CLIENTHISTORYINVALID")));
+			else
+				LogError(LOG_STATUSBAR, GetResString(_T("ERR_READCLIENTHISTORY")), (LPCTSTR)EscPercent(CExceptionStrDash(*ex)));
+		}
 		ex->Delete();
 	}
 	return false;
 }
 
-void CClientList::SaveList()
+CClientList::SClientHistoryRecord::SClientHistoryRecord()
+	: uLastSeen(0)
+	, uFirstSeen(static_cast<uint64>(time(NULL)))
+	, dwServerIP(0)
+	, nUserIDHybrid(0)
+	, nUserPort(0)
+	, nServerPort(0)
+	, nClientVersion(0)
+	, byEmuleVersion(0)
+	, bEmuleProtocol(false)
+	, bIsHybrid(false)
+	, nUDPPort(0)
+	, nKadPort(0)
+	, byUDPVer(0)
+	, byCompatibleClient(0)
+	, bIsML(false)
+	, bGPLEvildoer(false)
+	, cMessagesReceived(0)
+	, cMessagesSent(0)
+	, byKadVersion(0)
+	, bNoViewSharedFiles(false)
+	, uPunishment(P_NOPUNISHMENT)
+	, uBadClientCategory(PR_NOTBADCLIENT)
+	, uPunishmentStartTime(0)
+	, uSharedFilesStatus(S_NOT_QUERIED)
+	, uSharedFilesLastQueriedTime(0)
+	, uSharedFilesCount(0)
+	, bAutoQuerySharedFiles(false)
 {
+	md4clr(userHash);
+}
+
+CClientList::SClientHistorySaveSnapshot::SClientHistorySaveSnapshot()
+	: lGeneration(0)
+	, plGeneration(NULL)
+{
+}
+
+CClientList::SClientHistorySaveJob::SClientHistorySaveJob()
+	: bActive(false)
+	, eStage(ClientHistorySaveJobNone)
+	, lGeneration(0)
+	, uNextActiveClient(0)
+	, posNextArchivedClient(NULL)
+	, uActiveArchived(0)
+	, uRecordsBuilt(0)
+{
+}
+
+void CClientList::SClientHistorySaveJob::Reset()
+{
+	for (size_t i = 0; i < activeClients.size(); ++i) {
+		if (activeClients[i] != NULL) {
+			activeClients[i]->ReleaseRuntimeReference();
+			activeClients[i] = NULL;
+		}
+	}
+	bActive = false;
+	eStage = ClientHistorySaveJobNone;
+	lGeneration = 0;
+	strConfigDir.Empty();
+	activeClients.clear();
+	uNextActiveClient = 0;
+	posNextArchivedClient = NULL;
+	records.clear();
+	uActiveArchived = 0;
+	uRecordsBuilt = 0;
+}
+
+CClientList::SAutoQuerySharedFilesJob::SAutoQuerySharedFilesJob()
+	: bActive(false)
+	, bCandidatesSorted(false)
+	, eStage(AutoQuerySharedFilesJobNone)
+	, posNextArchivedClient(NULL)
+	, uNextActiveClient(0)
+	, uMaxQueries(0)
+	, uQueried(0)
+	, tNow(0)
+{
+}
+
+void CClientList::SAutoQuerySharedFilesJob::Reset()
+{
+	for (size_t i = 0; i < activeClients.size(); ++i) {
+		if (activeClients[i] != NULL)
+			activeClients[i]->ReleaseRuntimeReference();
+	}
+	for (size_t i = 0; i < candidates.size(); ++i) {
+		if (candidates[i] != NULL)
+			candidates[i]->ReleaseRuntimeReference();
+	}
+	bActive = false;
+	bCandidatesSorted = false;
+	eStage = AutoQuerySharedFilesJobNone;
+	posNextArchivedClient = NULL;
+	activeClients.clear();
+	uNextActiveClient = 0;
+	candidates.clear();
+	uMaxQueries = 0;
+	uQueried = 0;
+	tNow = 0;
+}
+
+bool CClientList::ReadStartupClientHistoryRecord(CFileDataIO& file, SClientHistoryRecord& record)
+{
+	file.ReadHash16(record.userHash);
+	record.uLastSeen = file.ReadUInt64();
+
+	for (uint32 tagcount = file.ReadUInt32(); tagcount > 0; --tagcount) {
+		const CTag tag(file, false);
+		switch (tag.GetNameID()) {
+		case CL_NAME:
+			if (tag.IsStr())
+				record.strUserName = tag.GetStr();
+			break;
+		case CL_CONNECTIP:
+			if (tag.IsStr())
+				record.connectIP.FromString(tag.GetStr(), false);
+			break;
+		case CL_USERIP:
+			if (tag.IsStr())
+				record.userIP.FromString(tag.GetStr(), false);
+			break;
+		case CL_SERVERIP:
+			if (tag.IsInt())
+				record.dwServerIP = tag.GetInt();
+			break;
+		case CL_USERIDHYBRID:
+			if (tag.IsInt())
+				record.nUserIDHybrid = tag.GetInt();
+			break;
+		case CL_USERPORT:
+			if (tag.IsInt())
+				record.nUserPort = static_cast<uint16>(tag.GetInt());
+			break;
+		case CL_SERVERPORT:
+			if (tag.IsInt())
+				record.nServerPort = static_cast<uint16>(tag.GetInt());
+			break;
+		case CL_CLIENTVERSION:
+			if (tag.IsInt())
+				record.nClientVersion = tag.GetInt();
+			break;
+		case CL_EMULEVERSION:
+			if (tag.IsInt())
+				record.byEmuleVersion = static_cast<uint8>(tag.GetInt());
+			break;
+		case CL_EMULEPROTOCOL:
+			if (tag.IsInt())
+				record.bEmuleProtocol = tag.GetInt() != 0;
+			break;
+		case CL_ISHYBRID:
+			if (tag.IsInt())
+				record.bIsHybrid = tag.GetInt() != 0;
+			break;
+		case CL_UDPPORT:
+			if (tag.IsInt())
+				record.nUDPPort = static_cast<uint16>(tag.GetInt());
+			break;
+		case CL_KADPORT:
+			if (tag.IsInt())
+				record.nKadPort = static_cast<uint16>(tag.GetInt());
+			break;
+		case CL_UDPVER:
+			if (tag.IsInt())
+				record.byUDPVer = static_cast<uint8>(tag.GetInt());
+			break;
+		case CL_COMPATIBLECLIENT:
+			if (tag.IsInt())
+				record.byCompatibleClient = static_cast<uint8>(tag.GetInt());
+			break;
+		case CL_ISML:
+			if (tag.IsInt())
+				record.bIsML = tag.GetInt() != 0;
+			break;
+		case CL_GPLEVILDOER:
+			if (tag.IsInt())
+				record.bGPLEvildoer = tag.GetInt() != 0;
+			break;
+		case CL_CLIENTSOFTWARE:
+			if (tag.IsStr())
+				record.strClientSoftware = tag.GetStr();
+			break;
+		case CL_MODVERSION:
+			if (tag.IsStr())
+				record.strModVersion = tag.GetStr();
+			break;
+		case CL_MESSAGESRECEIVED:
+			if (tag.IsInt())
+				record.cMessagesReceived = static_cast<uint8>(tag.GetInt());
+			break;
+		case CL_MESSAGESSENT:
+			if (tag.IsInt())
+				record.cMessagesSent = static_cast<uint8>(tag.GetInt());
+			break;
+		case CL_KADVERSION:
+			if (tag.IsInt())
+				record.byKadVersion = static_cast<uint8>(tag.GetInt());
+			break;
+		case CL_NOVIEWSHAREDFILES:
+			if (tag.IsInt())
+				record.bNoViewSharedFiles = tag.GetInt() != 0;
+			break;
+		case CL_FIRSTSEEN:
+			if (tag.IsInt64())
+				record.uFirstSeen = tag.GetInt64();
+			break;
+		case CL_PUNISHMENT:
+			if (tag.IsInt())
+				record.uPunishment = static_cast<uint8>(tag.GetInt());
+			break;
+		case CL_BADCLIENTCATEGORY:
+			if (tag.IsInt())
+				record.uBadClientCategory = static_cast<uint8>(tag.GetInt());
+			break;
+		case CL_PUNISHMENTSTARTIME:
+			if (tag.IsInt64())
+				record.uPunishmentStartTime = tag.GetInt64();
+			break;
+		case CL_PUNISHMENTREASON:
+			if (tag.IsStr())
+				record.strPunishmentReason = tag.GetStr();
+			break;
+		case CL_SHAREDFILESSTATUS:
+			if (tag.IsInt())
+				record.uSharedFilesStatus = static_cast<uint8>(tag.GetInt());
+			break;
+		case CL_SHAREDFILESLASTQUERIEDTIME:
+			if (tag.IsInt64())
+				record.uSharedFilesLastQueriedTime = tag.GetInt64();
+			break;
+		case CL_SHAREDFILESCOUNT:
+			if (tag.IsInt())
+				record.uSharedFilesCount = tag.GetInt();
+			break;
+		case CL_CLIENTNOTE:
+			if (tag.IsStr())
+				record.strClientNote = tag.GetStr();
+			break;
+		case CL_AUTOQUERYSHAREDFILES:
+			if (tag.IsInt())
+				record.bAutoQuerySharedFiles = tag.GetInt() != 0;
+			break;
+		}
+	}
+
+	return true;
+}
+
+uint8 CClientList::GetStartupClientHistoryRecordBadCategory(const SClientHistoryRecord& record)
+{
+	if (record.uBadClientCategory > PR_NOTBADCLIENT) {
+		const time_t tCurrTime = time(NULL);
+		const time_t tPunishmentStartTime = static_cast<time_t>(record.uPunishmentStartTime);
+		if (record.uPunishment <= P_USERHASHBAN) {
+			if (tCurrTime >= tPunishmentStartTime + thePrefs.GetClientBanTime())
+				return PR_NOTBADCLIENT;
+		}
+		else if (tCurrTime >= tPunishmentStartTime + thePrefs.GetClientScoreReducingTime())
+			return PR_NOTBADCLIENT;
+	}
+	return record.uBadClientCategory;
+}
+
+void CClientList::NormalizeStartupClientHistoryRecordPunishment(SClientHistoryRecord& record)
+{
+	if (GetStartupClientHistoryRecordBadCategory(record) != PR_NOTBADCLIENT)
+		return;
+	record.bGPLEvildoer = false;
+	record.uPunishment = P_NOPUNISHMENT;
+	record.uBadClientCategory = PR_NOTBADCLIENT;
+	record.uPunishmentStartTime = 0;
+	record.strPunishmentReason.Empty();
+}
+
+void CClientList::MergeStartupClientHistoryRecord(SClientHistoryRecord& target, const SClientHistoryRecord& source)
+{
+	if (source.uFirstSeen < target.uFirstSeen)
+		target.uFirstSeen = source.uFirstSeen;
+	if (source.uLastSeen > target.uLastSeen)
+		target.uLastSeen = source.uLastSeen;
+	if (GetStartupClientHistoryRecordBadCategory(source) != PR_NOTBADCLIENT &&
+		(((source.uPunishment < target.uPunishment) ||
+		(source.uPunishment == target.uPunishment && source.uPunishmentStartTime > target.uPunishmentStartTime)))) {
+		target.bGPLEvildoer = source.bGPLEvildoer;
+		target.uPunishment = source.uPunishment;
+		target.uBadClientCategory = source.uBadClientCategory;
+		target.uPunishmentStartTime = source.uPunishmentStartTime;
+		target.strPunishmentReason = source.strPunishmentReason;
+	}
+}
+
+bool CClientList::LoadStartupClientHistoryRecords(CStartupClientHistoryRecords& records, LONG lGeneration, uint64 uCancellationToken) const
+{
+	records.clear();
+	const CString& strFileName(thePrefs.GetMuleDirectory(EMULE_CONFIGDIR) + CLIENT_HISTORY_MET_FILENAME);
+	CSafeBufferedFile file;
+	CFileException ex;
+	if (!file.Open(strFileName, CFile::modeRead | CFile::osSequentialScan | CFile::typeBinary | CFile::shareDenyWrite, &ex))
+		return ex.m_cause == CFileException::fileNotFound;
+
+	try {
+		uint8 header = file.ReadUInt8();
+		if (header != MET_HEADER) {
+			file.Close();
+			return false;
+		}
+
+		const uint32 uCount = file.ReadUInt32();
+		records.reserve(static_cast<size_t>(uCount));
+		CMap<CString, LPCTSTR, INT_PTR, INT_PTR> recordIndexes;
+
+		if (lGeneration != 0 && uCancellationToken != 0)
+			theApp.PublishStartupMetadataLoadProgress(CemuleApp::StartupMetadataClientHistory, lGeneration, uCancellationToken, _T("read-client-history"), 0, static_cast<UINT>(uCount));
+
+		const uint64 uExpireSeconds = static_cast<uint64>(thePrefs.GetClientHistoryExpDays() < 1 ? 12960000 : thePrefs.GetClientHistoryExpDays() * 86400);
+		const uint64 uNow = static_cast<uint64>(time(NULL));
+		for (uint32 i = 0; i < uCount; ++i) {
+			if ((i & 0x3ff) == 0 && lGeneration != 0 && uCancellationToken != 0) {
+				theApp.PublishStartupMetadataLoadProgress(CemuleApp::StartupMetadataClientHistory, lGeneration, uCancellationToken, _T("read-client-history"), static_cast<UINT>(i), static_cast<UINT>(uCount));
+				if (theApp.IsStartupMetadataLoadCancelled(CemuleApp::StartupMetadataClientHistory, lGeneration, uCancellationToken)) {
+					file.Close();
+					records.clear();
+					return false;
+				}
+			}
+			SClientHistoryRecord record;
+			ReadStartupClientHistoryRecord(file, record);
+
+			if (uNow >= record.uLastSeen + uExpireSeconds)
+				continue;
+
+			NormalizeStartupClientHistoryRecordPunishment(record);
+
+			CString strHash = md4str(record.userHash);
+			INT_PTR iExistingIndex = -1;
+			if (recordIndexes.Lookup(strHash, iExistingIndex) && iExistingIndex >= 0 && static_cast<size_t>(iExistingIndex) < records.size()) {
+				MergeStartupClientHistoryRecord(records[static_cast<size_t>(iExistingIndex)], record);
+				continue;
+			}
+
+			records.push_back(record);
+			recordIndexes.SetAt(strHash, static_cast<INT_PTR>(records.size() - 1));
+		}
+		if (lGeneration != 0 && uCancellationToken != 0)
+			theApp.PublishStartupMetadataLoadProgress(CemuleApp::StartupMetadataClientHistory, lGeneration, uCancellationToken, _T("read-client-history"), static_cast<UINT>(uCount), static_cast<UINT>(uCount));
+		file.Close();
+		return true;
+	}
+	catch (CFileException* ex) {
+		ex->Delete();
+	}
+	records.clear();
+	return false;
+}
+
+CUpDownClient* CClientList::CreateArchivedClientFromStartupRecord(const SClientHistoryRecord& record)
+{
+	CUpDownClient* pClient = new CUpDownClient();
+	pClient->m_bIsArchived = true;
+	md4cpy(pClient->m_achUserHash, record.userHash);
+	pClient->tLastSeen = static_cast<time_t>(record.uLastSeen);
+	pClient->m_ConnectIP = record.connectIP;
+	pClient->m_UserIP = record.userIP;
+	pClient->m_dwServerIP = record.dwServerIP;
+	pClient->m_nUserIDHybrid = record.nUserIDHybrid;
+	pClient->m_nUserPort = record.nUserPort;
+	pClient->m_nServerPort = record.nServerPort;
+	pClient->m_nClientVersion = record.nClientVersion;
+	pClient->m_byEmuleVersion = record.byEmuleVersion;
+	pClient->m_bEmuleProtocol = record.bEmuleProtocol;
+	pClient->m_bIsHybrid = record.bIsHybrid;
+	pClient->m_nUDPPort = record.nUDPPort;
+	pClient->m_nKadPort = record.nKadPort;
+	pClient->m_byUDPVer = record.byUDPVer;
+	pClient->m_byCompatibleClient = record.byCompatibleClient;
+	pClient->m_bIsML = record.bIsML;
+	pClient->m_bGPLEvildoer = record.bGPLEvildoer;
+	if (!record.strUserName.IsEmpty())
+		pClient->SetUserName(record.strUserName);
+	pClient->m_strClientSoftware = record.strClientSoftware;
+	pClient->m_strModVersion = record.strModVersion;
+	pClient->m_cMessagesReceived = record.cMessagesReceived;
+	pClient->m_cMessagesSent = record.cMessagesSent;
+	pClient->m_byKadVersion = record.byKadVersion;
+	pClient->m_fNoViewSharedFiles = record.bNoViewSharedFiles ? 1 : 0;
+	pClient->tFirstSeen = static_cast<time_t>(record.uFirstSeen);
+	pClient->m_uPunishment = record.uPunishment;
+	pClient->m_uBadClientCategory = record.uBadClientCategory;
+	pClient->m_tPunishmentStartTime = static_cast<time_t>(record.uPunishmentStartTime);
+	pClient->m_strPunishmentReason = record.strPunishmentReason;
+	pClient->m_uSharedFilesStatus = record.uSharedFilesStatus;
+	pClient->m_tSharedFilesLastQueriedTime = static_cast<time_t>(record.uSharedFilesLastQueriedTime);
+	pClient->m_uSharedFilesCount = record.uSharedFilesCount;
+	pClient->m_strClientNote = record.strClientNote;
+	pClient->m_bAutoQuerySharedFiles = record.bAutoQuerySharedFiles;
+
+	CAddress clientIP(!pClient->m_UserIP.IsNull() ? pClient->m_UserIP : pClient->m_ConnectIP);
+	pClient->SetIP(clientIP);
+	pClient->InitClientSoftwareVersion();
+	return pClient;
+}
+
+void CClientList::DeleteArchivedClientMap(CArchivedClientsMap* pArchivedClients)
+{
+	if (pArchivedClients == NULL)
+		return;
+
+	std::vector<CUpDownClient*> oldClients;
+	oldClients.reserve(static_cast<size_t>(pArchivedClients->GetCount()));
+	for (POSITION pos = pArchivedClients->GetStartPosition(); pos != NULL;) {
+		CString strHash;
+		CUpDownClient* pClient = NULL;
+		pArchivedClients->GetNextAssoc(pos, strHash, pClient);
+		if (pClient != NULL)
+			oldClients.push_back(pClient);
+	}
+	pArchivedClients->RemoveAll();
+	delete pArchivedClients;
+
+	for (size_t i = 0; i < oldClients.size(); ++i)
+		CUpDownClient::SafeDelete(oldClients[i]);
+}
+
+void CClientList::DeleteStartupClientHistoryRecords(CStartupClientHistoryRecords* pLoadedRecords)
+{
+	delete pLoadedRecords;
+}
+
+bool CClientList::BuildClientHistoryRecordFromClient(const CUpDownClient* pClient, SClientHistoryRecord& record, bool bAllowArchived) const
+{
+	if (pClient == NULL || (!bAllowArchived && pClient->m_bIsArchived) || IsCorruptOrBadUserHash(pClient->GetUserHash()))
+		return false;
+
+	md4cpy(record.userHash, pClient->GetUserHash());
+	record.uLastSeen = static_cast<uint64>(pClient->tLastSeen != 0 ? pClient->tLastSeen : time(NULL));
+	record.uFirstSeen = static_cast<uint64>(pClient->tFirstSeen != 0 ? pClient->tFirstSeen : static_cast<time_t>(record.uLastSeen));
+	record.connectIP = pClient->m_ConnectIP;
+	record.userIP = pClient->m_UserIP;
+	record.dwServerIP = pClient->GetServerIP();
+	record.nUserIDHybrid = pClient->GetUserIDHybrid();
+	record.nUserPort = pClient->GetUserPort();
+	record.nServerPort = pClient->GetServerPort();
+	record.nClientVersion = pClient->GetVersion();
+	record.byEmuleVersion = pClient->GetMuleVersion();
+	record.bEmuleProtocol = pClient->ExtProtocolAvailable();
+	record.bIsHybrid = pClient->GetIsHybrid();
+	record.nUDPPort = pClient->GetUDPPort();
+	record.nKadPort = pClient->GetKadPort();
+	record.byUDPVer = pClient->GetUDPVersion();
+	record.byCompatibleClient = pClient->GetCompatibleClient();
+	record.bIsML = pClient->GetIsML();
+	record.bGPLEvildoer = pClient->GetGPLEvildoer();
+	record.strUserName = pClient->GetUserName();
+	record.strClientSoftware = pClient->GetClientSoftVer();
+	record.strModVersion = pClient->GetClientModVer();
+	record.cMessagesReceived = pClient->GetMessagesReceived();
+	record.cMessagesSent = pClient->GetMessagesSent();
+	record.byKadVersion = pClient->GetKadVersion();
+	record.bNoViewSharedFiles = !pClient->GetViewSharedFilesSupport();
+	record.uPunishment = pClient->m_uPunishment;
+	record.uBadClientCategory = pClient->m_uBadClientCategory;
+	record.uPunishmentStartTime = static_cast<uint64>(pClient->m_tPunishmentStartTime);
+	record.strPunishmentReason = pClient->m_strPunishmentReason;
+	record.uSharedFilesStatus = pClient->m_uSharedFilesStatus;
+	record.uSharedFilesLastQueriedTime = static_cast<uint64>(pClient->m_tSharedFilesLastQueriedTime);
+	record.uSharedFilesCount = pClient->m_uSharedFilesCount;
+	record.strClientNote = pClient->m_strClientNote;
+	record.bAutoQuerySharedFiles = pClient->m_bAutoQuerySharedFiles;
+	return true;
+}
+
+void CClientList::MergePendingClientHistoryRecord(const SClientHistoryRecord& record)
+{
+	const CString strHash(md4str(record.userHash));
+	for (size_t i = 0; i < m_PendingClientHistoryRecords.size(); ++i) {
+		SClientHistoryRecord& existingRecord = m_PendingClientHistoryRecords[i];
+		if (md4str(existingRecord.userHash) != strHash)
+			continue;
+		const uint64 uFirstSeen = existingRecord.uFirstSeen < record.uFirstSeen ? existingRecord.uFirstSeen : record.uFirstSeen;
+		const uint64 uLastSeen = existingRecord.uLastSeen > record.uLastSeen ? existingRecord.uLastSeen : record.uLastSeen;
+		if (record.uLastSeen >= existingRecord.uLastSeen)
+			existingRecord = record;
+		MergeStartupClientHistoryRecord(existingRecord, record);
+		existingRecord.uFirstSeen = uFirstSeen;
+		existingRecord.uLastSeen = uLastSeen;
+		return;
+	}
+	m_PendingClientHistoryRecords.push_back(record);
+}
+
+void CClientList::QueuePendingClientHistoryRecord(CUpDownClient* pClient)
+{
+	if (!GuardClientListMutation(_T("CClientList::QueuePendingClientHistoryRecord")))
+		return;
+
+	SClientHistoryRecord record;
+	if (!BuildClientHistoryRecordFromClient(pClient, record))
+		return;
+	MergePendingClientHistoryRecord(record);
+}
+
+void CClientList::ApplyClientHistoryRecordToArchive(const SClientHistoryRecord& record, std::vector<CUpDownClient*>& discardedClients)
+{
+	if (IsCorruptOrBadUserHash(record.userHash))
+		return;
+
+	CUpDownClient* pLoadedClient = CreateArchivedClientFromStartupRecord(record);
+	ApplyArchivedClientToArchive(pLoadedClient, discardedClients);
+}
+
+void CClientList::ApplyArchivedClientToArchive(CUpDownClient* pLoadedClient, std::vector<CUpDownClient*>& discardedClients)
+{
+	if (pLoadedClient == NULL)
+		return;
+	if (IsCorruptOrBadUserHash(pLoadedClient->GetUserHash())) {
+		discardedClients.push_back(pLoadedClient);
+		return;
+	}
+
+	CString strCanonicalHash(md4str(pLoadedClient->GetUserHash()));
+
+	CUpDownClient* pExistingClient = NULL;
+	if (m_ArchivedClientsMap.Lookup(strCanonicalHash, pExistingClient) && pExistingClient != NULL) {
+		pExistingClient->m_bIsArchived = true;
+		const bool bIncomingSnapshotIsNewer = pLoadedClient->tLastSeen >= pExistingClient->tLastSeen;
+		if (pLoadedClient->tFirstSeen < pExistingClient->tFirstSeen)
+			pExistingClient->tFirstSeen = pLoadedClient->tFirstSeen;
+		if (pLoadedClient->tLastSeen > pExistingClient->tLastSeen)
+			pExistingClient->tLastSeen = pLoadedClient->tLastSeen;
+		if (bIncomingSnapshotIsNewer) {
+			LPCTSTR pszLoadedUserName = pLoadedClient->GetUserName();
+			if (pszLoadedUserName != NULL && pszLoadedUserName[0] != _T('\0'))
+				pExistingClient->SetUserName(pszLoadedUserName);
+			if (!pLoadedClient->m_ConnectIP.IsNull())
+				pExistingClient->m_ConnectIP = pLoadedClient->m_ConnectIP;
+			if (!pLoadedClient->m_UserIP.IsNull())
+				pExistingClient->m_UserIP = pLoadedClient->m_UserIP;
+			if (pLoadedClient->GetServerIP())
+				pExistingClient->SetServerIP(pLoadedClient->GetServerIP());
+			if (pLoadedClient->GetUserIDHybrid())
+				pExistingClient->SetUserIDHybrid(pLoadedClient->GetUserIDHybrid());
+			if (pLoadedClient->GetUserPort())
+				pExistingClient->SetUserPort(pLoadedClient->GetUserPort());
+			pExistingClient->SetServerPort(pLoadedClient->GetServerPort());
+			pExistingClient->SetVersion(pLoadedClient->GetVersion());
+			pExistingClient->SetMuleVersion(pLoadedClient->GetMuleVersion());
+			pExistingClient->SetIsHybrid(pLoadedClient->GetIsHybrid());
+			if (pLoadedClient->GetUDPPort())
+				pExistingClient->SetUDPPort(pLoadedClient->GetUDPPort());
+			if (pLoadedClient->GetKadPort())
+				pExistingClient->SetKadPort(pLoadedClient->GetKadPort());
+			pExistingClient->SetUDPVersion(pLoadedClient->GetUDPVersion());
+			pExistingClient->SetCompatibleClient(pLoadedClient->GetCompatibleClient());
+			pExistingClient->SetIsML(pLoadedClient->GetIsML());
+			pExistingClient->SetEmuleProtocol(pLoadedClient->ExtProtocolAvailable());
+			pExistingClient->SetClientSoftVer(pLoadedClient->GetClientSoftVer());
+			pExistingClient->SetClientModVer(pLoadedClient->GetClientModVer());
+			pExistingClient->InitClientSoftwareVersion();
+			pExistingClient->SetMessagesSent(pLoadedClient->GetMessagesSent());
+			pExistingClient->SetMessagesReceived(pLoadedClient->GetMessagesReceived());
+			pExistingClient->SetKadVersion(pLoadedClient->GetKadVersion());
+			pExistingClient->SetViewSharedFilesSupport(pLoadedClient->GetViewSharedFilesSupport());
+			pExistingClient->m_uSharedFilesStatus = pLoadedClient->m_uSharedFilesStatus != S_NOT_QUERIED ? pLoadedClient->m_uSharedFilesStatus : pExistingClient->m_uSharedFilesStatus;
+			pExistingClient->m_uSharedFilesCount = pLoadedClient->m_uSharedFilesCount ? pLoadedClient->m_uSharedFilesCount : pExistingClient->m_uSharedFilesCount;
+			pExistingClient->m_tSharedFilesLastQueriedTime = pLoadedClient->m_tSharedFilesLastQueriedTime > pExistingClient->m_tSharedFilesLastQueriedTime ? pLoadedClient->m_tSharedFilesLastQueriedTime : pExistingClient->m_tSharedFilesLastQueriedTime;
+			pExistingClient->m_bAutoQuerySharedFiles = pLoadedClient->m_bAutoQuerySharedFiles;
+			pExistingClient->m_strClientNote = pLoadedClient->m_strClientNote.GetLength() ? pLoadedClient->m_strClientNote : pExistingClient->m_strClientNote;
+		}
+		if (pLoadedClient->IsBadClient() &&
+			(((pLoadedClient->m_uPunishment < pExistingClient->m_uPunishment) ||
+			(pLoadedClient->m_uPunishment == pExistingClient->m_uPunishment && pLoadedClient->m_tPunishmentStartTime > pExistingClient->m_tPunishmentStartTime)))) {
+			pExistingClient->SetGPLEvildoer(pLoadedClient->GetGPLEvildoer());
+			pExistingClient->m_uPunishment = pLoadedClient->m_uPunishment;
+			pExistingClient->m_uBadClientCategory = pLoadedClient->m_uBadClientCategory;
+			pExistingClient->m_tPunishmentStartTime = pLoadedClient->m_tPunishmentStartTime;
+			pExistingClient->m_strPunishmentReason = pLoadedClient->m_strPunishmentReason;
+		}
+		discardedClients.push_back(pLoadedClient);
+		return;
+	}
+
+	pLoadedClient->m_bIsArchived = true;
+	if (pLoadedClient->IsBadClient() && pLoadedClient->m_uPunishment <= P_USERHASHBAN)
+		pLoadedClient->Ban(pLoadedClient->m_strPunishmentReason, pLoadedClient->m_uBadClientCategory, pLoadedClient->m_uPunishment, pLoadedClient->m_tPunishmentStartTime);
+	if (theApp.clientcredits != NULL)
+		pLoadedClient->credits = theApp.clientcredits->GetCredit(pLoadedClient->GetUserHash(), false);
+	if (!pLoadedClient->m_bAutoQuerySharedFiles && pLoadedClient->m_uSharedFilesStatus == S_NOT_QUERIED && pLoadedClient->GetViewSharedFilesSupport() && pLoadedClient->credits &&
+		((thePrefs.GetRemoteSharedFilesSetAutoQueryDownload() && pLoadedClient->credits->GetDownloadedTotal() / 1048576 >= thePrefs.GetRemoteSharedFilesSetAutoQueryDownloadThreshold()) ||
+		(thePrefs.GetRemoteSharedFilesSetAutoQueryUpload() && pLoadedClient->credits->GetUploadedTotal() / 1048576 >= thePrefs.GetRemoteSharedFilesSetAutoQueryUploadThreshold())))
+		pLoadedClient->m_bAutoQuerySharedFiles = true;
+	if (theApp.friendlist != NULL) {
+		pLoadedClient->m_Friend = theApp.friendlist->SearchFriend(pLoadedClient->m_achUserHash, pLoadedClient->m_UserIP, pLoadedClient->m_nUserPort);
+		if (pLoadedClient->m_Friend != NULL)
+			pLoadedClient->m_Friend->SetLinkedClient(pLoadedClient);
+		else
+			pLoadedClient->SetFriendSlot(false);
+	}
+	CancelAutoQuerySharedFilesJob();
+	m_ArchivedClientsMap.SetAt(strCanonicalHash, pLoadedClient);
+}
+
+void CClientList::ApplyPendingClientHistoryRecords(std::vector<CUpDownClient*>& discardedClients)
+{
+	for (size_t i = 0; i < m_PendingClientHistoryRecords.size(); ++i)
+		ApplyClientHistoryRecordToArchive(m_PendingClientHistoryRecords[i], discardedClients);
+	m_PendingClientHistoryRecords.clear();
+}
+
+void CClientList::ApplyStartupClientHistoryLoad(CStartupClientHistoryRecords* pLoadedRecords)
+{
+	if (pLoadedRecords == NULL)
+		return;
+
+	size_t uNextRecord = 0;
+	if (!ApplyStartupClientHistoryLoadChunk(pLoadedRecords, uNextRecord, static_cast<size_t>(-1))) {
+		DeleteStartupClientHistoryRecords(pLoadedRecords);
+		return;
+	}
+	CompleteStartupClientHistoryLoadApply();
+	DeleteStartupClientHistoryRecords(pLoadedRecords);
+}
+
+bool CClientList::ApplyStartupClientHistoryLoadChunk(CStartupClientHistoryRecords* pLoadedRecords, size_t& uNextRecord, size_t uMaxRecords)
+{
+	if (pLoadedRecords == NULL || uNextRecord > pLoadedRecords->size())
+		return false;
+
+	if (!GuardClientListMutation(_T("CClientList::ApplyStartupClientHistoryLoadChunk")))
+		return false;
+
+	std::vector<CUpDownClient*> discardedClients;
+	const size_t uRemainingRecords = pLoadedRecords->size() - uNextRecord;
+	discardedClients.reserve(uRemainingRecords < uMaxRecords ? uRemainingRecords : uMaxRecords);
+
+	const DWORD dwSliceStart = ::GetTickCount();
+	size_t uProcessed = 0;
+	while (uNextRecord < pLoadedRecords->size() && uProcessed < uMaxRecords) {
+		ApplyClientHistoryRecordToArchive((*pLoadedRecords)[uNextRecord], discardedClients);
+		++uNextRecord;
+		++uProcessed;
+		if (uMaxRecords != static_cast<size_t>(-1) && uProcessed != 0 && theApp.IsTimeBudgetExceeded(dwSliceStart, CemuleApp::TimeBudgetPersistenceSave))
+			break;
+	}
+
+	for (size_t i = 0; i < discardedClients.size(); ++i)
+		CUpDownClient::SafeDelete(discardedClients[i]);
+	return true;
+}
+
+bool CClientList::ApplyStartupClientHistoryPendingRecordsChunk(size_t& uNextRecord, size_t uMaxRecords, UINT& uApplied, INT_PTR& iRemaining)
+{
+	uApplied = 0;
+	iRemaining = 0;
+	if (!GuardClientListMutation(_T("CClientList::ApplyStartupClientHistoryPendingRecordsChunk")))
+		return false;
+	if (uNextRecord > m_PendingClientHistoryRecords.size())
+		return false;
+
+	std::vector<CUpDownClient*> discardedClients;
+	const size_t uRemainingRecords = m_PendingClientHistoryRecords.size() - uNextRecord;
+	discardedClients.reserve(uRemainingRecords < uMaxRecords ? uRemainingRecords : uMaxRecords);
+
+	const DWORD dwSliceStart = ::GetTickCount();
+	size_t uProcessed = 0;
+	while (uNextRecord < m_PendingClientHistoryRecords.size() && uProcessed < uMaxRecords) {
+		ApplyClientHistoryRecordToArchive(m_PendingClientHistoryRecords[uNextRecord], discardedClients);
+		++uNextRecord;
+		++uProcessed;
+		++uApplied;
+		if (uMaxRecords != static_cast<size_t>(-1) && theApp.IsTimeBudgetExceeded(dwSliceStart, CemuleApp::TimeBudgetStartupApply))
+			break;
+	}
+
+	for (size_t i = 0; i < discardedClients.size(); ++i)
+		CUpDownClient::SafeDelete(discardedClients[i]);
+
+	if (uNextRecord < m_PendingClientHistoryRecords.size()) {
+		iRemaining = static_cast<INT_PTR>(m_PendingClientHistoryRecords.size() - uNextRecord);
+		return true;
+	}
+
+	m_PendingClientHistoryRecords.clear();
+	return true;
+}
+
+void CClientList::RebuildStartupClientHistoryRuntimeMap()
+{
+	RebuildArchivedRuntimeMap();
+}
+
+bool CClientList::RebuildStartupClientHistoryRuntimeMapChunk(std::vector<CUpDownClient*>& aPendingDeleteClients, size_t& uNextPendingDeleteClient, POSITION& posNextArchivedClient, bool& bStarted, UINT& uApplied, INT_PTR& iRemaining)
+{
+	uApplied = 0;
+	iRemaining = 0;
+	if (!GuardClientListMutation(_T("CClientList::RebuildStartupClientHistoryRuntimeMapChunk")))
+		return false;
+
+	const DWORD dwSliceStart = ::GetTickCount();
+	CSingleLock runtimeMapLock(&m_csTrackedClientRuntimeMaps, TRUE);
+	if (!bStarted) {
+		aPendingDeleteClients.clear();
+		aPendingDeleteClients.reserve(m_ArchivedClientsByRuntimeID.size());
+		for (auto it = m_ArchivedClientsByRuntimeID.begin(); it != m_ArchivedClientsByRuntimeID.end(); ++it) {
+			if (IsPendingDeleteRuntimeMapEntry(it->second))
+				aPendingDeleteClients.push_back(it->second);
+		}
+		m_ArchivedClientsByRuntimeID.clear();
+		m_ArchivedClientsByRuntimeID.reserve(static_cast<size_t>(m_ArchivedClientsMap.GetCount()) + aPendingDeleteClients.size() + 16);
+		uNextPendingDeleteClient = 0;
+		posNextArchivedClient = m_ArchivedClientsMap.GetStartPosition();
+		bStarted = true;
+	}
+
+	while (uNextPendingDeleteClient < aPendingDeleteClients.size()) {
+		CUpDownClient* pPendingDeleteClient = aPendingDeleteClients[uNextPendingDeleteClient++];
+		if (pPendingDeleteClient != NULL)
+			m_ArchivedClientsByRuntimeID[pPendingDeleteClient->GetRuntimeID()] = pPendingDeleteClient;
+		++uApplied;
+		if (theApp.IsTimeBudgetExceeded(dwSliceStart, CemuleApp::TimeBudgetStartupApply)) {
+			iRemaining = 1;
+			return true;
+		}
+	}
+
+	while (posNextArchivedClient != NULL) {
+		CString strHash;
+		CUpDownClient* pArchivedClient = NULL;
+		m_ArchivedClientsMap.GetNextAssoc(posNextArchivedClient, strHash, pArchivedClient);
+		if (pArchivedClient != NULL)
+			m_ArchivedClientsByRuntimeID[pArchivedClient->GetRuntimeID()] = pArchivedClient;
+		++uApplied;
+		if (theApp.IsTimeBudgetExceeded(dwSliceStart, CemuleApp::TimeBudgetStartupApply)) {
+			iRemaining = 1;
+			return true;
+		}
+	}
+
+	aPendingDeleteClients.clear();
+	return true;
+}
+
+bool CClientList::ApplyStartupClientHistoryActiveLinksChunk(POSITION& posNextClient, size_t uMaxClients, UINT& uApplied, INT_PTR& iRemaining)
+{
+	uApplied = 0;
+	iRemaining = 0;
+	if (!GuardClientListMutation(_T("CClientList::ApplyStartupClientHistoryActiveLinksChunk")))
+		return false;
+
+	if (posNextClient == NULL)
+		posNextClient = list.GetHeadPosition();
+
+	const DWORD dwSliceStart = ::GetTickCount();
+	while (posNextClient != NULL && uApplied < uMaxClients) {
+		CUpDownClient* pClient = list.GetNext(posNextClient);
+		if (pClient == NULL)
+			continue;
+		if (IsCorruptOrBadUserHash(pClient->GetUserHash())) {
+			pClient->ClearArchivedClientLink();
+			++uApplied;
+			continue;
+		}
+		CUpDownClient* pArchivedClient = NULL;
+		if (m_ArchivedClientsMap.Lookup(md4str(pClient->GetUserHash()), pArchivedClient) && pArchivedClient != NULL)
+			pClient->SetArchivedClientLink(pArchivedClient);
+		else
+			pClient->ClearArchivedClientLink();
+		++uApplied;
+		if (uMaxClients != static_cast<size_t>(-1) && theApp.IsTimeBudgetExceeded(dwSliceStart, CemuleApp::TimeBudgetStartupApply))
+			break;
+	}
+
+	if (posNextClient != NULL) {
+		iRemaining = 1;
+		return true;
+	}
+
+	return true;
+}
+
+void CClientList::FinalizeStartupClientHistoryLoadApply()
+{
+	m_tLastSaved = time(NULL);
+}
+
+void CClientList::CompleteStartupClientHistoryLoadApply()
+{
+	size_t uNextPendingRecord = 0;
+	UINT uApplied = 0;
+	INT_PTR iRemaining = 0;
+	do {
+		if (!ApplyStartupClientHistoryPendingRecordsChunk(uNextPendingRecord, static_cast<size_t>(-1), uApplied, iRemaining))
+			return;
+	} while (iRemaining > 0);
+	RebuildArchivedRuntimeMap();
+	POSITION posNextClient = list.GetHeadPosition();
+	do {
+		if (!ApplyStartupClientHistoryActiveLinksChunk(posNextClient, static_cast<size_t>(-1), uApplied, iRemaining))
+			return;
+	} while (iRemaining > 0);
+	FinalizeStartupClientHistoryLoadApply();
+}
+
+void CClientList::SaveListSynchronously()
+{
+	CancelAutoQuerySharedFilesJob();
+
 	if (ShouldSkipClientPersistenceForManualLeakDump())
 		return;
+	if (!theApp.ClientHistoryReady()) {
+		AddDebugLogLine(DLP_LOW, false, _T("Skipping client history save before startup client history load is ready.\n"));
+		return;
+	}
 
 	if (thePrefs.GetLogFileSaving())
 		AddDebugLogLine(false, _T("Saving client history file \"%s\""), CLIENT_HISTORY_MET_FILENAME);
 	m_tLastSaved = time(NULL);
 
 	const CString& sConfDir(thePrefs.GetMuleDirectory(EMULE_CONFIGDIR));
-	CSafeBufferedFile file;
-	CFileException ex;
-	if (!file.Open(sConfDir + CLIENT_HISTORY_MET_FILENAME_TMP, CFile::modeCreate | CFile::modeWrite | CFile::typeBinary | CFile::shareDenyWrite, &ex)) {
-		LogError(LOG_STATUSBAR, _T("Failed to save %s : %s"), CLIENT_HISTORY_MET_FILENAME_TMP, (LPCTSTR)EscPercent(CExceptionStrDash(ex)));
-		return;
-	}
-
-	::setvbuf(file.m_pStream, NULL, _IOFBF, 16384);
+	const LONG lGeneration = ::InterlockedIncrement(&m_lClientHistorySaveGeneration);
+	const UINT uClientHistoryGrowBytes = 1024 * 1024;
+	CSafeMemFile file(uClientHistoryGrowBytes);
 
 	try {
 		file.WriteUInt8(MET_HEADER);
@@ -2113,7 +3204,6 @@ void CClientList::SaveList()
 
 			// Unexpected case since we already handle this statuses on other places. But remove from the map if found any.
 			if (cur_client == NULL || IsCorruptOrBadUserHash(cur_client->m_achUserHash)) {
-				UnregisterArchivedClient(cur_client);
 				theApp.clientlist->m_ArchivedClientsMap.RemoveKey(cur_hash);
 				CUpDownClient::SafeDelete(cur_client);
 				pos = oldpos; // If removal is successful restore old position.
@@ -2129,113 +3219,603 @@ void CClientList::SaveList()
 		for (const CArchivedClientsMap::CPair* pair = m_ArchivedClientsMap.PGetFirstAssoc(); pair != NULL; pair = m_ArchivedClientsMap.PGetNextAssoc(pair))
 			pair->value->WriteToFile(file);
 
-		if (thePrefs.GetCommitFiles() >= 2 || (thePrefs.GetCommitFiles() >= 1 && theApp.IsClosing())) {
-			file.Flush(); // flush file stream buffers to disk buffers
-			if (_commit(_fileno(file.m_pStream)) != 0) // commit disk buffers to disk
-				AfxThrowFileException(CFileException::hardIO, ::GetLastError(), file.GetFileName());
-		}
-		file.Close();
-		MoveFileEx(sConfDir + CLIENT_HISTORY_MET_FILENAME_TMP, sConfDir + CLIENT_HISTORY_MET_FILENAME, MOVEFILE_REPLACE_EXISTING);
+		AsyncDiskWriteData* pData = new AsyncDiskWriteData;
+		pData->lGeneration = lGeneration;
+		pData->plGeneration = &m_lClientHistorySaveGeneration;
+		pData->strTempPath = sConfDir + CLIENT_HISTORY_MET_FILENAME_TMP;
+		pData->strFinalPath = sConfDir + CLIENT_HISTORY_MET_FILENAME;
+		pData->strLogName = CLIENT_HISTORY_MET_FILENAME;
+		pData->strPayloadName = _T("client-history");
+		pData->eConflictPolicy = AsyncDiskWriteConflictLastSnapshotWins;
+		pData->eReplacePolicy = AsyncDiskWriteReplaceFinal;
+		const ULONGLONG uLength = file.GetLength();
+		if (uLength != 0)
+			pData->data.assign(file.GetBuffer(), file.GetBuffer() + static_cast<size_t>(uLength));
+		CPartFileWriteThread::QueueOrWriteDiskSnapshot(pData);
 		if (m_ArchivedClientsMap.GetCount())
 			AddDebugLogLine(false, _T("%lu clients saved to client history file"), count);
 	} catch (CFileException *ex) {
-		LogError(LOG_STATUSBAR, _T("Failed to save %s: %s"), CLIENT_HISTORY_MET_FILENAME, (LPCTSTR)EscPercent(CExceptionStrDash(*ex)));
+			LogError(LOG_STATUSBAR, GetResString(_T("FAILED_TO_SAVE_FILE")), CLIENT_HISTORY_MET_FILENAME, (LPCTSTR)EscPercent(CExceptionStrDash(*ex)));
 		ex->Delete();
 	}
 }
 
+
+void CClientList::WriteClientHistoryRecordToFile(CFileDataIO& file, const SClientHistoryRecord& record)
+{
+	if (IsCorruptOrBadUserHash(record.userHash))
+		return;
+
+	file.WriteHash16(record.userHash);
+	file.WriteUInt64(record.uLastSeen);
+
+	uint32 uTagCount = 0;
+	ULONGLONG uTagCountFilePos = file.GetPosition();
+	file.WriteUInt32(0);
+
+	if (!record.strUserName.IsEmpty()) {
+		CTag nametag(CL_NAME, record.strUserName);
+		nametag.WriteTagToFile(file, UTF8strOptBOM);
+		++uTagCount;
+	}
+
+	CTag connnectiptag(CL_CONNECTIP, ipstr(record.connectIP));
+	connnectiptag.WriteTagToFile(file);
+	++uTagCount;
+
+	CTag useriptag(CL_USERIP, ipstr(record.userIP));
+	useriptag.WriteTagToFile(file);
+	++uTagCount;
+
+	CTag serveriptag(CL_SERVERIP, record.dwServerIP);
+	serveriptag.WriteTagToFile(file);
+	++uTagCount;
+
+	CTag useridhybridtag(CL_USERIDHYBRID, record.nUserIDHybrid);
+	useridhybridtag.WriteTagToFile(file);
+	++uTagCount;
+
+	CTag userporttag(CL_USERPORT, record.nUserPort);
+	userporttag.WriteTagToFile(file);
+	++uTagCount;
+
+	CTag serverporttag(CL_SERVERPORT, record.nServerPort);
+	serverporttag.WriteTagToFile(file);
+	++uTagCount;
+
+	CTag clientversiontag(CL_CLIENTVERSION, record.nClientVersion);
+	clientversiontag.WriteTagToFile(file);
+	++uTagCount;
+
+	CTag emuleversiontag(CL_EMULEVERSION, record.byEmuleVersion);
+	emuleversiontag.WriteTagToFile(file);
+	++uTagCount;
+
+	CTag emuleprotocoltag(CL_EMULEPROTOCOL, record.bEmuleProtocol);
+	emuleprotocoltag.WriteTagToFile(file);
+	++uTagCount;
+
+	CTag ishybridtag(CL_ISHYBRID, record.bIsHybrid);
+	ishybridtag.WriteTagToFile(file);
+	++uTagCount;
+
+	CTag isudpporttag(CL_UDPPORT, record.nUDPPort);
+	isudpporttag.WriteTagToFile(file);
+	++uTagCount;
+
+	CTag iskadporttag(CL_KADPORT, record.nKadPort);
+	iskadporttag.WriteTagToFile(file);
+	++uTagCount;
+
+	CTag udpvertag(CL_UDPVER, record.byUDPVer);
+	udpvertag.WriteTagToFile(file);
+	++uTagCount;
+
+	CTag compatibleclienttag(CL_COMPATIBLECLIENT, record.byCompatibleClient);
+	compatibleclienttag.WriteTagToFile(file);
+	++uTagCount;
+
+	CTag ismltag(CL_ISML, record.bIsML);
+	ismltag.WriteTagToFile(file);
+	++uTagCount;
+
+	CTag gplevildoertag(CL_GPLEVILDOER, record.bGPLEvildoer);
+	gplevildoertag.WriteTagToFile(file);
+	++uTagCount;
+
+	if (!record.strClientSoftware.IsEmpty()) {
+		CTag clientsoftwaretag(CL_CLIENTSOFTWARE, record.strClientSoftware);
+		clientsoftwaretag.WriteTagToFile(file, UTF8strOptBOM);
+		++uTagCount;
+	}
+
+	if (!record.strModVersion.IsEmpty()) {
+		CTag modversiontag(CL_MODVERSION, record.strModVersion);
+		modversiontag.WriteTagToFile(file, UTF8strOptBOM);
+		++uTagCount;
+	}
+
+	CTag messagesreceivedtag(CL_MESSAGESRECEIVED, record.cMessagesReceived);
+	messagesreceivedtag.WriteTagToFile(file);
+	++uTagCount;
+
+	CTag messagessenttag(CL_MESSAGESSENT, record.cMessagesSent);
+	messagessenttag.WriteTagToFile(file);
+	++uTagCount;
+
+	CTag kadversiontag(CL_KADVERSION, record.byKadVersion);
+	kadversiontag.WriteTagToFile(file);
+	++uTagCount;
+
+	CTag noviewsharedfilestag(CL_NOVIEWSHAREDFILES, record.bNoViewSharedFiles);
+	noviewsharedfilestag.WriteTagToFile(file);
+	++uTagCount;
+
+	CTag firstseentag(CL_FIRSTSEEN, record.uFirstSeen);
+	firstseentag.WriteTagToFile(file);
+	++uTagCount;
+
+	CTag punishmenttag(CL_PUNISHMENT, record.uPunishment);
+	punishmenttag.WriteTagToFile(file);
+	++uTagCount;
+
+	CTag badclientcategorytag(CL_BADCLIENTCATEGORY, record.uBadClientCategory);
+	badclientcategorytag.WriteTagToFile(file);
+	++uTagCount;
+
+	CTag punishedtimetag(CL_PUNISHMENTSTARTIME, record.uPunishmentStartTime);
+	punishedtimetag.WriteTagToFile(file);
+	++uTagCount;
+
+	if (!record.strPunishmentReason.IsEmpty()) {
+		CTag punishmentreasontag(CL_PUNISHMENTREASON, record.strPunishmentReason);
+		punishmentreasontag.WriteTagToFile(file, UTF8strOptBOM);
+		++uTagCount;
+	}
+
+	CTag sharedfilesstatustag(CL_SHAREDFILESSTATUS, record.uSharedFilesStatus);
+	sharedfilesstatustag.WriteTagToFile(file);
+	++uTagCount;
+
+	CTag sharedfileslastqueriedtimetag(CL_SHAREDFILESLASTQUERIEDTIME, record.uSharedFilesLastQueriedTime);
+	sharedfileslastqueriedtimetag.WriteTagToFile(file);
+	++uTagCount;
+
+	CTag sharedfilescounttag(CL_SHAREDFILESCOUNT, record.uSharedFilesCount);
+	sharedfilescounttag.WriteTagToFile(file);
+	++uTagCount;
+
+	if (!record.strClientNote.IsEmpty()) {
+		CTag clientnotetag(CL_CLIENTNOTE, record.strClientNote);
+		clientnotetag.WriteTagToFile(file, UTF8strOptBOM);
+		++uTagCount;
+	}
+
+	CTag autoquerysharedfiles(CL_AUTOQUERYSHAREDFILES, record.bAutoQuerySharedFiles);
+	autoquerysharedfiles.WriteTagToFile(file);
+	++uTagCount;
+
+	file.Seek(uTagCountFilePos, CFile::begin);
+	file.WriteUInt32(uTagCount);
+	file.Seek(0, CFile::end);
+}
+
+bool CClientList::SerializeClientHistorySnapshot(const SClientHistorySaveSnapshot& snapshot)
+{
+	if (snapshot.plGeneration != NULL && snapshot.lGeneration != InterlockedCompareExchange(snapshot.plGeneration, 0, 0))
+		return false;
+
+	const UINT uClientHistoryGrowBytes = 1024 * 1024;
+	CSafeMemFile file(uClientHistoryGrowBytes);
+
+	try {
+		file.WriteUInt8(MET_HEADER);
+		file.WriteUInt32(static_cast<uint32>(snapshot.records.size()));
+
+		for (size_t i = 0; i < snapshot.records.size(); ++i) {
+			if ((i & 0x3FF) == 0 && snapshot.plGeneration != NULL && snapshot.lGeneration != InterlockedCompareExchange(snapshot.plGeneration, 0, 0))
+				return false;
+			WriteClientHistoryRecordToFile(file, snapshot.records[i]);
+		}
+
+		AsyncDiskWriteData* pData = new AsyncDiskWriteData;
+		pData->lGeneration = snapshot.lGeneration;
+		pData->plGeneration = snapshot.plGeneration;
+		pData->strTempPath = snapshot.strConfigDir + CLIENT_HISTORY_MET_FILENAME_TMP;
+		pData->strFinalPath = snapshot.strConfigDir + CLIENT_HISTORY_MET_FILENAME;
+		pData->strLogName = CLIENT_HISTORY_MET_FILENAME;
+		pData->strPayloadName = _T("client-history");
+		pData->eConflictPolicy = AsyncDiskWriteConflictLastSnapshotWins;
+		pData->eReplacePolicy = AsyncDiskWriteReplaceFinal;
+		const ULONGLONG uLength = file.GetLength();
+		if (uLength != 0)
+			pData->data.assign(file.GetBuffer(), file.GetBuffer() + static_cast<size_t>(uLength));
+		return CPartFileWriteThread::QueueOrWriteDiskSnapshot(pData);
+	} catch (CFileException *ex) {
+		theApp.QueueLogLine(false, _T("Failed to save %s: %s"), CLIENT_HISTORY_MET_FILENAME, (LPCTSTR)EscPercent(CExceptionStrDash(*ex)));
+		ex->Delete();
+	} catch (...) {
+		theApp.QueueLogLine(false, _T("Failed to save %s"), CLIENT_HISTORY_MET_FILENAME);
+	}
+	return false;
+}
+
+UINT AFX_CDECL CClientList::ClientHistorySaveThreadProc(LPVOID pParam)
+{
+	DbgSetThreadName("ClientHistorySave");
+	SClientHistorySaveSnapshot* pSnapshot = static_cast<SClientHistorySaveSnapshot*>(pParam);
+	if (pSnapshot == NULL)
+		return 1;
+	const bool bResult = SerializeClientHistorySnapshot(*pSnapshot);
+	delete pSnapshot;
+	return bResult ? 0 : 1;
+}
+
+bool CClientList::QueueClientHistorySnapshotSave(SClientHistorySaveSnapshot* pSnapshot)
+{
+	if (pSnapshot == NULL)
+		return false;
+	if (theApp.IsClosing())
+		return false;
+	CWinThread* pThread = AfxBeginThread(ClientHistorySaveThreadProc, pSnapshot, THREAD_PRIORITY_BELOW_NORMAL);
+	return pThread != NULL;
+}
+
+bool CClientList::StartClientHistorySaveJob()
+{
+	CancelAutoQuerySharedFilesJob();
+
+	if (ShouldSkipClientPersistenceForManualLeakDump())
+		return false;
+	if (!theApp.ClientHistoryReady()) {
+		AddDebugLogLine(DLP_LOW, false, _T("Skipping client history save before startup client history load is ready.\n"));
+		return false;
+	}
+	if (m_ClientHistorySaveJob.bActive) {
+		m_tLastSaved = time(NULL);
+		return true;
+	}
+
+	if (thePrefs.GetLogFileSaving())
+		AddDebugLogLine(false, _T("Queueing client history file \"%s\" save"), CLIENT_HISTORY_MET_FILENAME);
+	m_tLastSaved = time(NULL);
+
+	m_ClientHistorySaveJob.Reset();
+	m_ClientHistorySaveJob.bActive = true;
+	m_ClientHistorySaveJob.eStage = ClientHistorySaveJobActiveClients;
+	m_ClientHistorySaveJob.lGeneration = ::InterlockedIncrement(&m_lClientHistorySaveGeneration);
+	m_ClientHistorySaveJob.strConfigDir = thePrefs.GetMuleDirectory(EMULE_CONFIGDIR);
+	m_ClientHistorySaveJob.activeClients.reserve(static_cast<size_t>(list.GetCount()));
+	for (POSITION pos = list.GetHeadPosition(); pos != NULL;) {
+		CUpDownClient* pClient = list.GetNext(pos);
+		if (pClient != NULL && pClient->TryAcquireRuntimeReference())
+			m_ClientHistorySaveJob.activeClients.push_back(pClient);
+	}
+
+	const INT_PTR iArchiveCount = m_ArchivedClientsMap.GetCount();
+	if (iArchiveCount > 0) {
+		const INT_PTR iReserveCount = iArchiveCount < 4096 ? iArchiveCount : 4096;
+		m_ClientHistorySaveJob.records.reserve(static_cast<size_t>(iReserveCount));
+	}
+	return ProcessClientHistorySaveJob();
+}
+
+bool CClientList::ProcessClientHistorySaveJob()
+{
+	if (!m_ClientHistorySaveJob.bActive)
+		return false;
+
+	const DWORD dwSliceStart = ::GetTickCount();
+	while (m_ClientHistorySaveJob.bActive) {
+		switch (m_ClientHistorySaveJob.eStage) {
+		case ClientHistorySaveJobActiveClients:
+			while (m_ClientHistorySaveJob.uNextActiveClient < m_ClientHistorySaveJob.activeClients.size()) {
+				CUpDownClient* pClient = m_ClientHistorySaveJob.activeClients[m_ClientHistorySaveJob.uNextActiveClient];
+				m_ClientHistorySaveJob.activeClients[m_ClientHistorySaveJob.uNextActiveClient] = NULL;
+				++m_ClientHistorySaveJob.uNextActiveClient;
+				if (pClient != NULL) {
+					if (!pClient->m_bIsArchived && !IsCorruptOrBadUserHash(pClient->GetUserHash())) {
+						theApp.emuledlg->transferwnd->GetClientList()->SaveArchive(pClient);
+						++m_ClientHistorySaveJob.uActiveArchived;
+					}
+					pClient->ReleaseRuntimeReference();
+				}
+				if (theApp.IsTimeBudgetExceeded(dwSliceStart, CemuleApp::TimeBudgetPersistenceSave))
+					return true;
+			}
+			m_ClientHistorySaveJob.activeClients.clear();
+			m_ClientHistorySaveJob.posNextArchivedClient = m_ArchivedClientsMap.GetStartPosition();
+			m_ClientHistorySaveJob.eStage = ClientHistorySaveJobArchivedClients;
+			break;
+
+		case ClientHistorySaveJobArchivedClients:
+			while (m_ClientHistorySaveJob.posNextArchivedClient != NULL) {
+				CString strHash;
+				CUpDownClient* pArchivedClient = NULL;
+				m_ArchivedClientsMap.GetNextAssoc(m_ClientHistorySaveJob.posNextArchivedClient, strHash, pArchivedClient);
+				SClientHistoryRecord record;
+				if (BuildClientHistoryRecordFromClient(pArchivedClient, record, true)) {
+					m_ClientHistorySaveJob.records.push_back(record);
+					++m_ClientHistorySaveJob.uRecordsBuilt;
+				}
+				if (theApp.IsTimeBudgetExceeded(dwSliceStart, CemuleApp::TimeBudgetPersistenceSave))
+					return true;
+			}
+			m_ClientHistorySaveJob.eStage = ClientHistorySaveJobQueueWorker;
+			break;
+
+		case ClientHistorySaveJobQueueWorker: {
+			SClientHistorySaveSnapshot* pSnapshot = new SClientHistorySaveSnapshot;
+			pSnapshot->strConfigDir = m_ClientHistorySaveJob.strConfigDir;
+			pSnapshot->lGeneration = m_ClientHistorySaveJob.lGeneration;
+			pSnapshot->plGeneration = &m_lClientHistorySaveGeneration;
+			pSnapshot->records.swap(m_ClientHistorySaveJob.records);
+			const size_t uSnapshotRecordCount = pSnapshot->records.size();
+			m_ClientHistorySaveJob.Reset();
+			if (!QueueClientHistorySnapshotSave(pSnapshot)) {
+				SClientHistorySaveSnapshot* pSyncSnapshot = pSnapshot;
+				(void)SerializeClientHistorySnapshot(*pSyncSnapshot);
+				delete pSyncSnapshot;
+			}
+			if (uSnapshotRecordCount != 0)
+				AddDebugLogLine(false, _T("%Iu clients queued for client history file save"), uSnapshotRecordCount);
+			return false;
+		}
+
+		case ClientHistorySaveJobNone:
+		default:
+			m_ClientHistorySaveJob.Reset();
+			return false;
+		}
+	}
+	return false;
+}
+
+void CClientList::CancelClientHistorySaveJob()
+{
+	if (m_ClientHistorySaveJob.bActive)
+		::InterlockedIncrement(&m_lClientHistorySaveGeneration);
+	m_ClientHistorySaveJob.Reset();
+}
+
+void CClientList::SaveList()
+{
+	if (theApp.IsClosing()) {
+		CancelClientHistorySaveJob();
+		SaveListSynchronously();
+		return;
+	}
+	StartClientHistorySaveJob();
+}
+
+void CClientList::ClearAutoQuerySharedFilesActiveSnapshot()
+{
+	for (size_t i = 0; i < m_AutoQuerySharedFilesJob.activeClients.size(); ++i) {
+		if (m_AutoQuerySharedFilesJob.activeClients[i] != NULL) {
+			m_AutoQuerySharedFilesJob.activeClients[i]->ReleaseRuntimeReference();
+			m_AutoQuerySharedFilesJob.activeClients[i] = NULL;
+		}
+	}
+	m_AutoQuerySharedFilesJob.activeClients.clear();
+	m_AutoQuerySharedFilesJob.uNextActiveClient = 0;
+}
+
+void CClientList::BeginAutoQuerySharedFilesActiveStage()
+{
+	ClearAutoQuerySharedFilesActiveSnapshot();
+	m_AutoQuerySharedFilesJob.eStage = AutoQuerySharedFilesJobActiveClients;
+	m_AutoQuerySharedFilesJob.activeClients.reserve(static_cast<size_t>(list.GetCount()));
+	for (POSITION pos = list.GetHeadPosition(); pos != NULL;) {
+		CUpDownClient* pClient = list.GetNext(pos);
+		if (pClient != NULL && pClient->TryAcquireRuntimeReference())
+			m_AutoQuerySharedFilesJob.activeClients.push_back(pClient);
+	}
+}
+
+bool CClientList::IsAutoQuerySharedFilesThresholdReached(const CUpDownClient* pClient) const
+{
+	return pClient != NULL && pClient->credits != NULL
+		&& ((thePrefs.GetRemoteSharedFilesSetAutoQueryDownload() && pClient->credits->GetDownloadedTotal() / 1048576 >= thePrefs.GetRemoteSharedFilesSetAutoQueryDownloadThreshold()) ||
+			(thePrefs.GetRemoteSharedFilesSetAutoQueryUpload() && pClient->credits->GetUploadedTotal() / 1048576 >= thePrefs.GetRemoteSharedFilesSetAutoQueryUploadThreshold()));
+}
+
+void CClientList::AddAutoQuerySharedFilesCandidate(CUpDownClient* pClient)
+{
+	if (pClient == NULL || m_AutoQuerySharedFilesJob.uMaxQueries == 0)
+		return;
+	if (std::find(m_AutoQuerySharedFilesJob.candidates.begin(), m_AutoQuerySharedFilesJob.candidates.end(), pClient) != m_AutoQuerySharedFilesJob.candidates.end())
+		return;
+
+	if (m_AutoQuerySharedFilesJob.candidates.size() < m_AutoQuerySharedFilesJob.uMaxQueries) {
+		if (pClient->TryAcquireRuntimeReference())
+			m_AutoQuerySharedFilesJob.candidates.push_back(pClient);
+		return;
+	}
+
+	size_t uWorstCandidate = 0;
+	for (size_t i = 1; i < m_AutoQuerySharedFilesJob.candidates.size(); ++i) {
+		if (SortFunc(m_AutoQuerySharedFilesJob.candidates[uWorstCandidate], m_AutoQuerySharedFilesJob.candidates[i]))
+			uWorstCandidate = i;
+	}
+
+	if (!SortFunc(pClient, m_AutoQuerySharedFilesJob.candidates[uWorstCandidate]))
+		return;
+	if (!pClient->TryAcquireRuntimeReference())
+		return;
+
+	m_AutoQuerySharedFilesJob.candidates[uWorstCandidate]->ReleaseRuntimeReference();
+	m_AutoQuerySharedFilesJob.candidates[uWorstCandidate] = pClient;
+	m_AutoQuerySharedFilesJob.bCandidatesSorted = false;
+}
+
+void CClientList::RemoveAutoQuerySharedFilesCandidate(CUpDownClient* pClient)
+{
+	if (pClient == NULL || m_AutoQuerySharedFilesJob.candidates.empty())
+		return;
+
+	for (std::vector<CUpDownClient*>::iterator it = m_AutoQuerySharedFilesJob.candidates.begin(); it != m_AutoQuerySharedFilesJob.candidates.end(); ++it) {
+		if (*it == pClient) {
+			(*it)->ReleaseRuntimeReference();
+			m_AutoQuerySharedFilesJob.candidates.erase(it);
+			return;
+		}
+	}
+}
+
+bool CClientList::StartAutoQuerySharedFilesJob()
+{
+#ifdef TESTMODE
+	const bool bCanRun = thePrefs.GetClientHistory();
+#else
+	const bool bCanRun = thePrefs.GetClientHistory() && thePrefs.CanSeeShares() == vsfaEverybody;
+#endif
+	if (!bCanRun)
+		return false;
+
+	if (m_ClientHistorySaveJob.bActive) {
+		CancelAutoQuerySharedFilesJob();
+		return false;
+	}
+
+	if (m_AutoQuerySharedFilesJob.bActive)
+		return ProcessAutoQuerySharedFilesJob();
+
+	const UINT uMaxQueries = thePrefs.GetRemoteSharedFilesAutoQueryMaxClients();
+	if (uMaxQueries == 0)
+		return false;
+
+	m_AutoQuerySharedFilesJob.Reset();
+	m_AutoQuerySharedFilesJob.bActive = true;
+	m_AutoQuerySharedFilesJob.uMaxQueries = uMaxQueries;
+	m_AutoQuerySharedFilesJob.tNow = time(NULL);
+	m_AutoQuerySharedFilesJob.candidates.reserve(static_cast<size_t>(uMaxQueries));
+	if (thePrefs.GetClientHistory() && theApp.ClientHistoryReady()) {
+		m_AutoQuerySharedFilesJob.eStage = AutoQuerySharedFilesJobArchivedClients;
+		m_AutoQuerySharedFilesJob.posNextArchivedClient = m_ArchivedClientsMap.GetStartPosition();
+	}
+	else
+		BeginAutoQuerySharedFilesActiveStage();
+	return ProcessAutoQuerySharedFilesJob();
+}
+
+bool CClientList::ProcessAutoQuerySharedFilesJob()
+{
+	if (!m_AutoQuerySharedFilesJob.bActive)
+		return false;
+	if (theApp.IsClosing() || m_ClientHistorySaveJob.bActive) {
+		m_AutoQuerySharedFilesJob.Reset();
+		return false;
+	}
+
+	const DWORD dwSliceStart = ::GetTickCount();
+	while (m_AutoQuerySharedFilesJob.bActive) {
+		switch (m_AutoQuerySharedFilesJob.eStage) {
+		case AutoQuerySharedFilesJobArchivedClients:
+			while (m_AutoQuerySharedFilesJob.posNextArchivedClient != NULL) {
+				CString cur_hash;
+				CUpDownClient* cur_client = NULL;
+				m_ArchivedClientsMap.GetNextAssoc(m_AutoQuerySharedFilesJob.posNextArchivedClient, cur_hash, cur_client);
+				if (cur_client != NULL) {
+					if (!cur_client->m_bAutoQuerySharedFiles && cur_client->m_uSharedFilesStatus == S_NOT_QUERIED && cur_client->GetViewSharedFilesSupport() && IsAutoQuerySharedFilesThresholdReached(cur_client))
+						cur_client->m_bAutoQuerySharedFiles = true;
+					if (cur_client->m_bAutoQuerySharedFiles && (m_AutoQuerySharedFilesJob.tNow - cur_client->m_tSharedFilesLastQueriedTime > thePrefs.GetRemoteSharedFilesAutoQueryClientPeriod() * 60))
+						AddAutoQuerySharedFilesCandidate(cur_client);
+				}
+				if (theApp.IsTimeBudgetExceeded(dwSliceStart, CemuleApp::TimeBudgetUploadTimerMaintenance))
+					return true;
+			}
+			BeginAutoQuerySharedFilesActiveStage();
+			break;
+
+		case AutoQuerySharedFilesJobActiveClients:
+			while (m_AutoQuerySharedFilesJob.uNextActiveClient < m_AutoQuerySharedFilesJob.activeClients.size()) {
+				CUpDownClient* cur_client = m_AutoQuerySharedFilesJob.activeClients[m_AutoQuerySharedFilesJob.uNextActiveClient];
+				m_AutoQuerySharedFilesJob.activeClients[m_AutoQuerySharedFilesJob.uNextActiveClient] = NULL;
+				++m_AutoQuerySharedFilesJob.uNextActiveClient;
+				if (cur_client != NULL && !cur_client->m_bQueryingSharedFiles) {
+					CUpDownClient* pArchivedClient = AcquireArchivedClientForRuntimeLinkedUse(cur_client);
+					if (pArchivedClient != NULL) {
+						RemoveAutoQuerySharedFilesCandidate(pArchivedClient);
+						pArchivedClient->ReleaseRuntimeReference();
+					}
+
+					if (!cur_client->m_bAutoQuerySharedFiles && cur_client->m_uSharedFilesStatus == S_NOT_QUERIED && cur_client->GetViewSharedFilesSupport() && IsAutoQuerySharedFilesThresholdReached(cur_client)) {
+						cur_client->m_bAutoQuerySharedFiles = true;
+						pArchivedClient = AcquireArchivedClientForRuntimeLinkedUse(cur_client);
+						if (pArchivedClient != NULL) {
+							pArchivedClient->m_bAutoQuerySharedFiles = false;
+							RemoveAutoQuerySharedFilesCandidate(pArchivedClient);
+							pArchivedClient->ReleaseRuntimeReference();
+						}
+					}
+
+					if (cur_client->m_bAutoQuerySharedFiles && (m_AutoQuerySharedFilesJob.tNow - cur_client->m_tSharedFilesLastQueriedTime > thePrefs.GetRemoteSharedFilesAutoQueryClientPeriod() * 60))
+						AddAutoQuerySharedFilesCandidate(cur_client);
+				}
+				if (cur_client != NULL)
+					cur_client->ReleaseRuntimeReference();
+				if (theApp.IsTimeBudgetExceeded(dwSliceStart, CemuleApp::TimeBudgetUploadTimerMaintenance))
+					return true;
+			}
+			m_AutoQuerySharedFilesJob.activeClients.clear();
+			m_AutoQuerySharedFilesJob.uNextActiveClient = 0;
+			m_AutoQuerySharedFilesJob.eStage = AutoQuerySharedFilesJobQueryCandidates;
+			break;
+
+		case AutoQuerySharedFilesJobQueryCandidates:
+			if (!m_AutoQuerySharedFilesJob.bCandidatesSorted) {
+				CombinedSort(m_AutoQuerySharedFilesJob.candidates.begin(), m_AutoQuerySharedFilesJob.candidates.end(), SortFunc);
+				m_AutoQuerySharedFilesJob.bCandidatesSorted = true;
+			}
+			while (!m_AutoQuerySharedFilesJob.candidates.empty() && m_AutoQuerySharedFilesJob.uQueried < m_AutoQuerySharedFilesJob.uMaxQueries) {
+				CUpDownClient* cur_client = m_AutoQuerySharedFilesJob.candidates.front();
+				m_AutoQuerySharedFilesJob.candidates.erase(m_AutoQuerySharedFilesJob.candidates.begin());
+				if (theApp.emuledlg != NULL && theApp.emuledlg->transferwnd != NULL && theApp.emuledlg->transferwnd->GetClientList() != NULL) {
+					CUpDownClient* pNewClient = theApp.emuledlg->transferwnd->GetClientList()->ArchivedToActive(cur_client);
+					if (pNewClient != NULL && (cur_client == pNewClient || IsValidClient(pNewClient))) {
+						pNewClient->RequestSharedFileList();
+						++m_AutoQuerySharedFilesJob.uQueried;
+					}
+				}
+				cur_client->ReleaseRuntimeReference();
+				if (theApp.IsTimeBudgetExceeded(dwSliceStart, CemuleApp::TimeBudgetUploadTimerMaintenance))
+					return true;
+			}
+			m_AutoQuerySharedFilesJob.Reset();
+			return false;
+
+		case AutoQuerySharedFilesJobNone:
+		default:
+			m_AutoQuerySharedFilesJob.Reset();
+			return false;
+		}
+	}
+	return false;
+}
+
+void CClientList::CancelAutoQuerySharedFilesJob()
+{
+	m_AutoQuerySharedFilesJob.Reset();
+}
+
 void CClientList::AutoQuerySharedFiles()
 {
-	CUpDownClient* cur_client;
-	int m_iQueriedClientCount = 0;
-	std::vector<CUpDownClient*> m_ClientsToQueryVector; // This vector is used to sort and iterate clients to be queried.
-	m_ClientsToQueryVector.reserve(list.GetCount());
-
-	// Clients in the history
-	if (thePrefs.GetClientHistory()) {
-		for (POSITION pos = theApp.clientlist->m_ArchivedClientsMap.GetStartPosition(); pos != NULL;) {
-			CString cur_hash = _T("00000000000000000000000000000000");
-			CUpDownClient* cur_client;
-			m_ArchivedClientsMap.GetNextAssoc(pos, cur_hash, cur_client);
-
-			if (!cur_client)
-				continue;
-
-			// Activate auto query if conditions are met
-			if (!cur_client->m_bAutoQuerySharedFiles && cur_client->m_uSharedFilesStatus == S_NOT_QUERIED && cur_client->GetViewSharedFilesSupport() && cur_client->credits &&
-				((thePrefs.GetRemoteSharedFilesSetAutoQueryDownload() && cur_client->credits->GetDownloadedTotal() / 1048576 >= thePrefs.GetRemoteSharedFilesSetAutoQueryDownloadThreshold()) ||	//1024*1024
-					(thePrefs.GetRemoteSharedFilesSetAutoQueryUpload() && cur_client->credits->GetUploadedTotal() / 1048576 >= thePrefs.GetRemoteSharedFilesSetAutoQueryUploadThreshold())))		//1024*1024
-				cur_client->m_bAutoQuerySharedFiles = true;
-
-			if (cur_client->m_bAutoQuerySharedFiles && (time(NULL) - cur_client->m_tSharedFilesLastQueriedTime > thePrefs.GetRemoteSharedFilesAutoQueryClientPeriod() * 60))
-				m_ClientsToQueryVector.push_back(cur_client);
-		}
-	}
-
-	// Current clients
-	for (POSITION pos = list.GetHeadPosition(); pos != NULL;) {
-		cur_client = list.GetNext(pos);
-
-		if (!cur_client || cur_client->m_bQueryingSharedFiles) // We'll skip this client since it's already being queried at the moment.
-			continue; 
-
-		CUpDownClient* pArchivedClient = AcquireArchivedClientForRuntimeLinkedUse(cur_client);
-		if (pArchivedClient != NULL) {
-			if (!m_ClientsToQueryVector.empty())
-				m_ClientsToQueryVector.erase(std::remove(m_ClientsToQueryVector.begin(), m_ClientsToQueryVector.end(), pArchivedClient), m_ClientsToQueryVector.end());
-			pArchivedClient->ReleaseRuntimeReference();
-		}
-
-		// Activate auto query if conditions are met
-		if (!cur_client->m_bAutoQuerySharedFiles && cur_client->m_uSharedFilesStatus == S_NOT_QUERIED && cur_client->GetViewSharedFilesSupport() && cur_client->credits &&
-			((thePrefs.GetRemoteSharedFilesSetAutoQueryDownload() && cur_client->credits->GetDownloadedTotal() / 1048576 >= thePrefs.GetRemoteSharedFilesSetAutoQueryDownloadThreshold()) ||	//1024*1024
-				(thePrefs.GetRemoteSharedFilesSetAutoQueryUpload() && cur_client->credits->GetUploadedTotal() / 1048576 >= thePrefs.GetRemoteSharedFilesSetAutoQueryUploadThreshold()))) {			//1024*1024
-			cur_client->m_bAutoQuerySharedFiles = true;
-			pArchivedClient = AcquireArchivedClientForRuntimeLinkedUse(cur_client);
-			if (pArchivedClient != NULL) { // Make sure that if this client has an archived version, its auto query is disabled.
-				pArchivedClient->m_bAutoQuerySharedFiles = false;
-				pArchivedClient->ReleaseRuntimeReference();
-			}
-		}
-
-		// Don't query a client more than once in the defined minutes. This is needed to prevent shared file query loops when getting SFS_NO_RESPONSE continuously.
-		if (cur_client->m_bAutoQuerySharedFiles && (time(NULL) - cur_client->m_tSharedFilesLastQueriedTime > thePrefs.GetRemoteSharedFilesAutoQueryClientPeriod() * 60))
-			m_ClientsToQueryVector.push_back(cur_client);
-	}
-
-	// Sort vector for the m_tSharedFilesLastQueriedTime value. This way we'll query 
-	CombinedSort(m_ClientsToQueryVector.begin(), m_ClientsToQueryVector.end(), SortFunc);
-
-	// Iterate through sorted clients and query them
-	for (int i = 0; i < m_ClientsToQueryVector.size(); i++) {
-		if (theApp.IsClosing())
-			return;
-
-		CUpDownClient* cur_client = m_ClientsToQueryVector[i];
-		CUpDownClient* NewClient = theApp.emuledlg->transferwnd->GetClientList()->ArchivedToActive(cur_client);
-		if (NewClient && (cur_client == NewClient || theApp.clientlist->IsValidClient(NewClient))) {
-			NewClient->RequestSharedFileList();
-			m_iQueriedClientCount++;
-		}
-
-		if (m_iQueriedClientCount >= thePrefs.GetRemoteSharedFilesAutoQueryMaxClients()) // Stop when we reach to the maximum allowed count.
-			return;
-	}
+	StartAutoQuerySharedFilesJob();
 }
 
 const bool CClientList::SortFunc(const CUpDownClient* first, const CUpDownClient* second)
 {
-	if (!first->m_bIsArchived && second->m_bIsArchived) // If only first client is an active client, return true to prioritize first client
-		return true; 
-	else if(first->m_bIsArchived && !second->m_bIsArchived) // If only second client is an active client, return false to prioritize second client
-		return false; 
-	else { // Otherwise prioritize the client with the least last queried time value (which means the most waiting time)
-		bool m_bLastQueriedTimeComparison = CompareUnsigned(first->m_tSharedFilesLastQueriedTime, second->m_tSharedFilesLastQueriedTime);
-		if (m_bLastQueriedTimeComparison = 0) // Last queried time values are equal, check last seen time.
-			return CompareUnsigned(first->tLastSeen, second->tLastSeen) > 0; // If the first client has a greater last seen time value (which means that this client is more recent) return true, otherwise return false.
-		 else
-			return m_bLastQueriedTimeComparison; // If the first client has a smaller last queried time value return true, otherwise return false.
-	}
+	if (first == NULL || second == NULL)
+		return first != NULL;
+	if (!first->m_bIsArchived && second->m_bIsArchived)
+		return true;
+	if (first->m_bIsArchived && !second->m_bIsArchived)
+		return false;
+
+	const int iLastQueriedCompare = CompareUnsigned(first->m_tSharedFilesLastQueriedTime, second->m_tSharedFilesLastQueriedTime);
+	if (iLastQueriedCompare != 0)
+		return iLastQueriedCompare < 0;
+	return CompareUnsigned(first->tLastSeen, second->tLastSeen) > 0;
 }
 
 // This feature also contains ideas and code from: Maella, Xman, Spike2, Xanatos
@@ -2305,7 +3885,8 @@ void CClientList::ServiceNatTraversalRetries()
 			continue;
 		if (c->IsNatTRetryDue(now)) {
 			c->DoNatTRetry();
-			c->ScheduleNextNatTRetry(now, jmin, jmax);
+			if (c->IsNatTRetryDue(now))
+				c->ScheduleNextNatTRetry(now, jmin, jmax);
 		}
 	}
 }
@@ -2324,14 +3905,14 @@ void CClientList::ServiceUtpConnectionTimeouts()
 		CUpDownClient* pClient = list.GetNext(pos);
 		if (pClient == NULL)
 			continue;
-		if (pClient->socket && pClient->socket->HaveUtpLayer() &&
+		if (pClient->socket && pClient->socket->HaveNatTraversalLayer() &&
 			pClient->GetUtpConnectionStartTick() != 0) {
 			
 			// Check if uTP handshake is taking unusually long (for logging only)
 			DWORD elapsed = now - pClient->GetUtpConnectionStartTick();
-			if ((int)elapsed >= (int)utpTimeoutMs) {
+			if ((int)elapsed >= (int)utpTimeoutMs && !pClient->socket->HaveQuicNatLayer()) {
 				if (thePrefs.GetLogNatTraversalEvents()) {
-					DebugLog(_T("[NatTraversal] uTP handshake in progress for %lu ms (monitoring), %s"), 
+					DebugLog(_T("[NatTraversal] NAT-T handshake in progress for %lu ms (monitoring), %s"), 
 						elapsed, (LPCTSTR)EscPercent(pClient->DbgGetClientInfo()));
 				}
 				
@@ -2341,11 +3922,24 @@ void CClientList::ServiceUtpConnectionTimeouts()
 			}
 		}
 		const EDownloadState eDlState = pClient->GetDownloadState();
-		// Treat only live uTP handshake/connected paths as active recovery.
+		// Treat only live NAT-T handshake/connected paths as active recovery.
 		// Pending retry budget alone is not enough and may keep sources in pseudo-connecting forever.
 		const bool bHasActiveNatTraversalRecovery =
-			(pClient->socket && pClient->socket->HaveUtpLayer()
+			(pClient->socket && pClient->socket->HaveNatTraversalLayer()
 				&& (pClient->socket->IsConnected() || pClient->IsHelloAnswerPending()));
+		const bool bExhaustedEServerRelay =
+			pClient->IsEServerRelayNatTGuardActive()
+			&& !pClient->HasPendingNatTRetry()
+			&& pClient->GetConnectingState() == CCS_SERVERCALLBACK
+			&& pClient->socket == NULL
+			&& !bHasActiveNatTraversalRecovery
+			&& (eDlState == DS_CONNECTING || eDlState == DS_WAITCALLBACK)
+			&& (int)(now - pClient->GetLastTriedToConnectTime()) >= (int)orphanConnectTimeoutMs;
+		if (bExhaustedEServerRelay) {
+			pClient->AbortEServerRelayNatTraversal(_T("Relay retry budget exhausted"));
+			continue;
+		}
+
 		const bool bOrphanConnectingState =
 			(eDlState == DS_CONNECTING || eDlState == DS_WAITCALLBACK || eDlState == DS_WAITCALLBACKKAD)
 			&& pClient->GetConnectingState() == CCS_NONE
@@ -2358,8 +3952,8 @@ void CClientList::ServiceUtpConnectionTimeouts()
 				continue;
 			}
 		}
-		// While servicing timeouts, also handle Hello resend fallback for uTP connections
-		if (pClient->socket && pClient->socket->HaveUtpLayer()) {
+		// While servicing timeouts, also handle Hello resend fallback for NAT-T connections
+		if (pClient->socket && pClient->socket->HaveNatTraversalLayer()) {
 			pClient->ResendHelloIfTimeout();
 		}
 	}
@@ -2367,14 +3961,14 @@ void CClientList::ServiceUtpConnectionTimeouts()
 
 void CClientList::ServiceUtpQueuedPackets()
 {
-	// Service queued packets for uTP connections - flush queue when socket is write-ready
+	// Service queued packets for NAT-T connections - flush queue when socket is write-ready
 	// Called from UploadQueue::UploadTimer every 100ms
 	// Each client connection is handled independently based on socket state
 	
 	POSITION pos = list.GetHeadPosition();
 	while (pos) {
 		CUpDownClient* pClient = list.GetNext(pos);
-		if (!pClient || !pClient->socket || !pClient->socket->HaveUtpLayer())
+		if (!pClient || !pClient->socket || !pClient->socket->HaveNatTraversalLayer())
 			continue;
 			
 		if (!pClient->socket->IsConnected())
@@ -2398,7 +3992,7 @@ void CClientList::ServiceUtpQueuedPackets()
 			continue;
 		
 		// Check if socket is in connected state - this is more reliable than timestamp
-		// For uTP, IsConnected() returns true only when connection is fully established
+		// For NAT-T, IsConnected() returns true only when connection is fully established
 		// and socket is ready for data transfer
 		const DWORD now = ::GetTickCount();
 		const DWORD elapsed = now - pClient->m_dwUtpQueuedPacketsTime;
@@ -2419,7 +4013,7 @@ void CClientList::ServiceUtpQueuedPackets()
 		
 		// Minimum safety delay: allow at least one UploadTimer cycle (100ms)
 		// This ensures socket has completed state transition from CONNECT to WRITABLE
-		// Without this, we might try to send before libutp internal buffers are ready
+		// Without this, we might try to send before NAT-T transport buffers are ready
 		if ((int)elapsed < 100) {
 			continue; // Wait for next cycle
 		}
@@ -2763,10 +4357,12 @@ bool CClientList::TryRequestEServerBuddyFromMagicCandidates()
 			AddClient(pCandidate);
 		}
 
+		RefreshEServerMagicCandidateServerContext(pCandidate, candidate.dwUserID, candidate.nUserPort, dwServerIP, nServerPort);
+
 		if (pCandidate->HasLowID())
 			continue;
 
-		if (pCandidate->GetReportedServerIP() != 0 && pCandidate->GetReportedServerIP() != dwServerIP)
+		if (!IsEServerBuddyCandidateOnCurrentServer(pCandidate))
 			continue;
 
 		const DWORD dwRetryAfter = pCandidate->GetEServerBuddyRetryAfter();
@@ -2777,6 +4373,8 @@ bool CClientList::TryRequestEServerBuddyFromMagicCandidates()
 		}
 
 			if (pCandidate->socket == NULL || !pCandidate->socket->IsConnected()) {
+				// Magic candidates are server-discovered helper peers. Do not let a stale explicit bind prevent the hello probe.
+				pCandidate->SetAllowAnyBindOnNextServerCallbackConnect(true);
 				pCandidate->TryToConnect(true, true);
 				++candidate.byAttempts;
 				if (candidate.byAttempts < ESERVERBUDDY_MAGIC_MAX_CANDIDATE_RETRIES) {
@@ -2804,21 +4402,22 @@ bool CClientList::TryRequestEServerBuddyFromMagicCandidates()
 					continue;
 				}
 
+				pCandidate->OnEServerBuddyProofRejected();
 				if (thePrefs.GetLogNatTraversalEvents()) {
-					DebugLog(_T("[eServerBuddy] Magic candidate skipped (no proof support): %s"),
+					DebugLog(_T("[eServerBuddy] Magic candidate skipped for 1 day (Old client with no proof support): %s"),
 						(LPCTSTR)EscPercent(pCandidate->DbgGetClientInfo()));
-				}
-				++candidate.byAttempts;
-				if (candidate.byAttempts < ESERVERBUDDY_MAGIC_MAX_CANDIDATE_RETRIES) {
-					candidate.dwNextTry = dwNow + ESERVERBUDDY_REASK_TIME;
-					m_lstEServerBuddyMagicCandidates.push_back(candidate);
 				}
 				continue;
 			}
 
-			if (pCandidate->SendEServerBuddyRequest()) {
+			if (!pCandidate->HasEServerBuddySlot() && thePrefs.GetLogNatTraversalEvents()) {
+				DebugLog(_T("[eServerBuddy] Magic candidate has stale cached no-slot flag, probing anyway: %s"),
+					(LPCTSTR)EscPercent(pCandidate->DbgGetClientInfo()));
+			}
+
+			if (pCandidate->SendEServerBuddyRequest(true)) {
 				SetServingEServerBuddy(pCandidate, Connecting);
-				AddLogLine(true, _T("[eServerBuddy] Buddy request sent to: %s"), (LPCTSTR)EscPercent(pCandidate->DbgGetClientInfo()));
+					AddLogLine(true, GetResString(_T("ESERVER_BUDDY_REQUEST_SENT_TO")), (LPCTSTR)EscPercent(pCandidate->DbgGetClientInfo()));
 			return true;
 		}
 
@@ -2854,7 +4453,7 @@ CUpDownClient* CClientList::FindEServerBuddy()
 
 	uint32 dwOurServerIP = theApp.serverconnect->GetCurrentServer()->GetIP();
 	INT_PTR nTotalClients = list.GetCount();
-	int nChecked = 0, nNoSupport = 0, nNoSlot = 0, nWrongServer = 0, nLowID = 0, nRetryWait = 0, nNoSocket = 0;
+	int nChecked = 0, nNoSupport = 0, nNoProof = 0, nNoSlot = 0, nWrongServer = 0, nLowID = 0, nRetryWait = 0, nNoSocket = 0;
 
 	CUpDownClient* pBestCandidate = NULL;
 
@@ -2865,26 +4464,46 @@ CUpDownClient* CClientList::FindEServerBuddy()
 		// Detailed diagnostics for each rejection reason
 		if (!pClient->SupportsEServerBuddy()) {
 			++nNoSupport;
+			if (thePrefs.GetLogNatTraversalEvents())
+				DebugLog(_T("[eServerBuddy] Candidate rejected: protocol unsupported, %s"), (LPCTSTR)EscPercent(pClient->DbgGetClientInfo()));
+			continue;
+		}
+		if (!pClient->SupportsEServerBuddyMagicProof()) {
+			++nNoProof;
+			if (thePrefs.GetLogNatTraversalEvents())
+				DebugLog(_T("[eServerBuddy] Candidate rejected: magic proof unavailable, %s"), (LPCTSTR)EscPercent(pClient->DbgGetClientInfo()));
+			if (pClient->GetInfoPacketsReceived() == IP_BOTH)
+				pClient->OnEServerBuddyProofRejected();
 			continue;
 		}
 		if (!pClient->HasEServerBuddySlot()) {
 			++nNoSlot;
+			if (thePrefs.GetLogNatTraversalEvents())
+				DebugLog(_T("[eServerBuddy] Candidate rejected: no serving slot, %s"), (LPCTSTR)EscPercent(pClient->DbgGetClientInfo()));
 			continue;
 		}
 		if (pClient->HasLowID()) {
 			++nLowID;
+			if (thePrefs.GetLogNatTraversalEvents())
+				DebugLog(_T("[eServerBuddy] Candidate rejected: LowID peer, %s"), (LPCTSTR)EscPercent(pClient->DbgGetClientInfo()));
 			continue;
 		}
-		if (pClient->GetReportedServerIP() != dwOurServerIP) {
+		if (!IsEServerBuddyCandidateOnCurrentServer(pClient)) {
 			++nWrongServer;
+			if (thePrefs.GetLogNatTraversalEvents())
+				DebugLog(_T("[eServerBuddy] Candidate rejected: different server, %s"), (LPCTSTR)EscPercent(pClient->DbgGetClientInfo()));
 			continue;
 		}
 		if (::GetTickCount() < pClient->GetEServerBuddyRetryAfter()) {
 			++nRetryWait;
+			if (thePrefs.GetLogNatTraversalEvents())
+				DebugLog(_T("[eServerBuddy] Candidate rejected: retry cooldown active, %s"), (LPCTSTR)EscPercent(pClient->DbgGetClientInfo()));
 			continue;
 		}
 		if (!pClient->socket || !pClient->socket->IsConnected()) {
 			++nNoSocket;
+			if (thePrefs.GetLogNatTraversalEvents())
+				DebugLog(_T("[eServerBuddy] Candidate rejected: no connected socket, %s"), (LPCTSTR)EscPercent(pClient->DbgGetClientInfo()));
 			continue;
 		}
 
@@ -2898,8 +4517,8 @@ CUpDownClient* CClientList::FindEServerBuddy()
 			DebugLog(_T("[eServerBuddy] FindEServerBuddy: Found candidate %s on server %s"),
 				(LPCTSTR)EscPercent(pBestCandidate->DbgGetClientInfo()), (LPCTSTR)ipstr(dwOurServerIP));
 		} else {
-			DebugLog(_T("[eServerBuddy] FindEServerBuddy: No candidate found. Total=%d Checked=%d NoSupport=%d NoSlot=%d LowID=%d WrongServer=%d RetryWait=%d NoSocket=%d OurServer=%s"),
-				(int)nTotalClients, nChecked, nNoSupport, nNoSlot, nLowID, nWrongServer, nRetryWait, nNoSocket, (LPCTSTR)ipstr(dwOurServerIP));
+			DebugLog(_T("[eServerBuddy] FindEServerBuddy: No candidate found. Total=%d Checked=%d NoSupport=%d NoProof=%d NoSlot=%d LowID=%d WrongServer=%d RetryWait=%d NoSocket=%d OurServer=%s"),
+				(int)nTotalClients, nChecked, nNoSupport, nNoProof, nNoSlot, nLowID, nWrongServer, nRetryWait, nNoSocket, (LPCTSTR)ipstr(dwOurServerIP));
 		}
 	}
 
@@ -2914,26 +4533,214 @@ void CClientList::SetServingEServerBuddy(CUpDownClient* pBuddy, uint8 nStatus)
 	const bool bBuddyChanged = (pOldBuddy != pBuddy) || (nOldStatus != nStatus);
 
 	if (nOldStatus == Connected && (nStatus != Connected || pBuddy == NULL) && pOldBuddy != NULL)
-		AddLogLine(false, GetResString(_T("ESERVER_BUDDY_DISCONNECTED")), (LPCTSTR)EscPercent(pOldBuddy->DbgGetClientInfo()));
+		AddLogLine(true, GetResString(_T("ESERVER_BUDDY_DISCONNECTED")), (LPCTSTR)EscPercent(pOldBuddy->DbgGetClientInfo()));
 	if (nOldStatus == Connected && nStatus != Connected)
 		ResetEServerBuddyMagicSearchState();
+	if (pOldBuddy != pBuddy || pBuddy == NULL || nStatus == Disconnected)
+		thePrefs.ClearEServerDiscoveredExternalUdpPort();
 
 	m_pServingEServerBuddy = pBuddy;
 	m_nEServerBuddyStatus = nStatus;
 
-	if (pBuddy && theApp.serverconnect && theApp.serverconnect->IsConnected())
+	if (pBuddy && theApp.serverconnect && theApp.serverconnect->IsConnected() && theApp.serverconnect->GetCurrentServer() != NULL) {
 		m_dwEServerBuddyServerIP = theApp.serverconnect->GetCurrentServer()->GetIP();
-	else
+		m_nEServerBuddyServerPort = theApp.serverconnect->GetCurrentServer()->GetPort();
+	} else {
 		m_dwEServerBuddyServerIP = 0;
+		m_nEServerBuddyServerPort = 0;
+	}
+
+	if (pBuddy != NULL && nStatus != Disconnected)
+		m_dwEServerBuddyConnectStart = ::GetTickCount();
+	else
+		m_dwEServerBuddyConnectStart = 0;
+
+	if (nStatus == Connecting && pBuddy != NULL)
+		pBuddy->SetLastEServerBuddyValidServerPing(0);
 
 	if (nStatus == Connected && pBuddy != NULL && (nOldStatus != Connected || pOldBuddy != pBuddy)) {
-		pBuddy->TouchEServerBuddyValidServerPing();
-		AddLogLine(false, GetResString(_T("ESERVER_BUDDY_CONNECTED")), (LPCTSTR)EscPercent(pBuddy->DbgGetClientInfo()));
+		AddLogLine(true, GetResString(_T("ESERVER_BUDDY_CONNECTED")), (LPCTSTR)EscPercent(pBuddy->DbgGetClientInfo()));
 		ResetEServerBuddyMagicSearchState();
+		m_dwLastEServerBuddyKadBridgeRequest = 0;
+		TryRequestKadBuddyFromEServerBuddy(true);
+		if (theApp.downloadqueue != NULL)
+			theApp.downloadqueue->TriggerPendingNatTraversalDownloads(_T("eServer serving buddy connected."));
 	}
 
 	if (bBuddyChanged)
 		RefreshConnectionStateIndicators();
+}
+
+bool CClientList::IsServingEServerBuddyRelayReady(const CUpDownClient* pBuddy) const
+{
+	if (pBuddy == NULL || pBuddy != m_pServingEServerBuddy || m_nEServerBuddyStatus != Connected)
+		return false;
+	if (pBuddy->socket == NULL || !pBuddy->socket->IsConnected())
+		return false;
+	if (theApp.serverconnect == NULL || !theApp.serverconnect->IsConnected() || theApp.serverconnect->GetCurrentServer() == NULL)
+		return false;
+
+	const uint32 dwCurrentServerIP = theApp.serverconnect->GetCurrentServer()->GetIP();
+	const uint16 nCurrentServerPort = theApp.serverconnect->GetCurrentServer()->GetPort();
+	if (m_dwEServerBuddyServerIP != dwCurrentServerIP || m_nEServerBuddyServerPort != nCurrentServerPort)
+		return false;
+
+	const DWORD dwLastValidServerPing = pBuddy->GetLastEServerBuddyValidServerPing();
+	if (dwLastValidServerPing == 0 || (DWORD)(::GetTickCount() - dwLastValidServerPing) >= ESERVERBUDDY_STALE_SERVER_GRACE_TIME)
+		return false;
+
+	if ((pBuddy->GetServerIP() != 0 || pBuddy->GetServerPort() != 0)
+		&& (pBuddy->GetServerIP() != dwCurrentServerIP || pBuddy->GetServerPort() != nCurrentServerPort))
+		return false;
+	if (pBuddy->GetReportedServerIP() != 0 && pBuddy->GetReportedServerIP() != dwCurrentServerIP)
+		return false;
+
+	return true;
+}
+
+bool CClientList::TryRequestKadBuddyFromEServerBuddy(bool bForce)
+{
+	if (m_pServingEServerBuddy == NULL || m_nEServerBuddyStatus != Connected)
+		return false;
+	if (!IsServingEServerBuddyRelayReady(m_pServingEServerBuddy))
+		return false;
+	if (m_pServingBuddy != NULL || m_nServingBuddyStatus != Disconnected)
+		return false;
+	if (thePrefs.IsCryptLayerRequired())
+		return false;
+	if (!theApp.IsFirewalled() || !Kademlia::CKademlia::IsRunning() || !Kademlia::CKademlia::IsConnected() || !Kademlia::CKademlia::IsFirewalled())
+		return false;
+
+	Kademlia::CPrefs* pKadPrefs = Kademlia::CKademlia::GetPrefs();
+	Kademlia::CKademliaUDPListener* pKadUDP = Kademlia::CKademlia::TryGetUDPListener();
+	Kademlia::CRoutingZone* pRoutingZone = Kademlia::CKademlia::TryGetRoutingZone();
+	if (pKadPrefs == NULL || pKadUDP == NULL)
+		return false;
+
+	CUpDownClient* pBuddy = m_pServingEServerBuddy;
+	if (pBuddy->HasLowID() || pBuddy->GetKadPort() == 0 || pBuddy->GetKadVersion() < KADEMLIA_VERSION2_47a)
+		return false;
+	if (pBuddy->socket == NULL || !pBuddy->socket->IsConnected())
+		return false;
+
+	CAddress addrBuddy = pBuddy->GetIP();
+	if (addrBuddy.IsNull())
+		addrBuddy = pBuddy->GetConnectIP();
+	if (addrBuddy.IsNull() || addrBuddy.GetType() != CAddress::IPv4)
+		return false;
+
+	const DWORD dwNow = ::GetTickCount();
+	if (!bForce && m_dwLastEServerBuddyKadBridgeRequest != 0 && (DWORD)(dwNow - m_dwLastEServerBuddyKadBridgeRequest) < ESERVERBUDDY_KAD_BRIDGE_RETRY)
+		return false;
+
+	CSafeMemFile fileIO(35);
+	Kademlia::CUInt128 servedBuddyID(pKadPrefs->GetKadID());
+	servedBuddyID.Xor(Kademlia::CUInt128(true));
+	fileIO.WriteUInt128(servedBuddyID);
+	fileIO.WriteUInt128(pKadPrefs->GetClientHash());
+	fileIO.WriteUInt16(thePrefs.GetPort());
+	fileIO.WriteUInt8(pKadPrefs->GetMyConnectOptions(true, true));
+
+	uint32 uDstIP = addrBuddy.ToUInt32(true);
+	uint16 uDstUDPPort = pBuddy->GetKadPort();
+	Kademlia::CContact* pKadContact = NULL;
+	Kademlia::CUInt128 uBuddyKadID;
+	const bool bHasBuddyKadID = pBuddy->HasValidEServerBuddyKadID() || pBuddy->HasValidServingBuddyID();
+	if (pBuddy->HasValidEServerBuddyKadID())
+		uBuddyKadID = MakeKadIDFromRawData(pBuddy->GetEServerBuddyKadID());
+	else if (pBuddy->HasValidServingBuddyID())
+		uBuddyKadID = MakeKadIDFromRawData(pBuddy->GetServingBuddyID());
+	if (pRoutingZone != NULL) {
+		if (bHasBuddyKadID)
+			pKadContact = pRoutingZone->GetContact(uBuddyKadID);
+		if (pKadContact == NULL)
+			pKadContact = pRoutingZone->GetContact(uDstIP, uDstUDPPort, false);
+		if (pKadContact == NULL && pBuddy->GetUserPort() != 0)
+			pKadContact = pRoutingZone->GetContact(uDstIP, pBuddy->GetUserPort(), true);
+	}
+
+	Kademlia::CUInt128 cryptTarget;
+	const Kademlia::CUInt128* pCryptTarget = NULL;
+	Kademlia::CKadUDPKey udpKey;
+	LPCTSTR pszSendMode = _T("legacy direct");
+	if (pKadContact != NULL && pKadContact->GetUDPPort() != 0) {
+		uDstIP = pKadContact->GetIPAddress();
+		uDstUDPPort = pKadContact->GetUDPPort();
+		if (pKadContact->GetVersion() >= KADEMLIA_VERSION6_49aBETA) {
+			udpKey = pKadContact->GetUDPKey();
+			cryptTarget = pKadContact->GetClientID();
+			pCryptTarget = &cryptTarget;
+		}
+		pszSendMode = _T("Kad contact");
+	}
+	else if (pBuddy->GetKadVersion() >= KADEMLIA_VERSION6_49aBETA) {
+		if (!bHasBuddyKadID) {
+			m_dwLastEServerBuddyKadBridgeRequest = dwNow;
+			if (thePrefs.GetLogNatTraversalEvents()) {
+				DebugLog(_T("[eServerBuddy][KadBridge] Delaying Kad buddy shortcut for connected eServer buddy without KadID/routing contact: %s:%u (%s)"),
+					(LPCTSTR)ipstr(htonl(uDstIP)), uDstUDPPort, (LPCTSTR)EscPercent(pBuddy->DbgGetClientInfo()));
+			}
+			return false;
+		}
+		cryptTarget = uBuddyKadID;
+		pCryptTarget = &cryptTarget;
+		pszSendMode = _T("KadID direct");
+	}
+
+	pKadUDP->SendPacket(fileIO, KADEMLIA_FINDSERVINGBUDDY_REQ, uDstIP, uDstUDPPort, udpKey, pCryptTarget);
+	pKadPrefs->SetFindServingBuddy(true);
+	m_dwLastEServerBuddyKadBridgeRequest = dwNow;
+
+	if (thePrefs.GetLogNatTraversalEvents()) {
+		DebugLog(_T("[eServerBuddy][KadBridge] Sent Kad serving buddy request via connected eServer buddy %s:%u (%s, %s)"),
+			(LPCTSTR)ipstr(htonl(uDstIP)), uDstUDPPort, pszSendMode, (LPCTSTR)EscPercent(pBuddy->DbgGetClientInfo()));
+	}
+
+	return true;
+}
+
+bool CClientList::TryRequestEServerBuddyFromKadBuddy(bool bForce)
+{
+	if (m_pServingBuddy == NULL || m_nServingBuddyStatus != Connected)
+		return false;
+	if (m_pServingEServerBuddy != NULL || m_nEServerBuddyStatus != Disconnected)
+		return false;
+	if (!theApp.serverconnect || !theApp.serverconnect->IsConnected() || !theApp.serverconnect->IsLowID())
+		return false;
+	if (!thePrefs.IsNatTraversalServiceEnabled() || thePrefs.IsCryptLayerRequired())
+		return false;
+	if (!Kademlia::CKademlia::IsRunning() || !Kademlia::CKademlia::IsConnected())
+		return false;
+
+	CUpDownClient* pBuddy = m_pServingBuddy;
+	if (pBuddy->HasLowID() || !pBuddy->SupportsEServerBuddy() || !pBuddy->SupportsEServerBuddyMagicProof() || !pBuddy->HasEServerBuddySlot())
+		return false;
+	if (pBuddy->socket == NULL || !pBuddy->socket->IsConnected())
+		return false;
+	if (!pBuddy->CanQueryEServerBuddySlot())
+		return false;
+
+	const DWORD dwNow = ::GetTickCount();
+	if (!bForce && m_dwLastKadBuddyEServerBridgeRequest != 0 && (DWORD)(dwNow - m_dwLastKadBuddyEServerBridgeRequest) < ESERVERBUDDY_KAD_BRIDGE_RETRY)
+		return false;
+
+	m_dwLastKadBuddyEServerBridgeRequest = dwNow;
+	if (!pBuddy->SendEServerBuddyRequest()) {
+		if (thePrefs.GetLogNatTraversalEvents()) {
+			DebugLog(_T("[eServerBuddy][KadBridge] Kad buddy was not accepted as an eServer buddy candidate: %s"),
+				(LPCTSTR)EscPercent(pBuddy->DbgGetClientInfo()));
+		}
+		return false;
+	}
+
+	SetServingEServerBuddy(pBuddy, Connecting);
+	AddLogLine(true, GetResString(_T("ESERVER_BUDDY_REQUEST_SENT_TO")), (LPCTSTR)EscPercent(pBuddy->DbgGetClientInfo()));
+	if (thePrefs.GetLogNatTraversalEvents()) {
+		DebugLog(_T("[eServerBuddy][KadBridge] Sent eServer buddy request via connected Kad buddy %s"),
+			(LPCTSTR)EscPercent(pBuddy->DbgGetClientInfo()));
+	}
+
+	return true;
 }
 
 // Add a LowID client we're serving as buddy
@@ -2947,6 +4754,8 @@ void CClientList::AddServedEServerBuddy(CUpDownClient* pClient)
 
 	pClient->TouchEServerBuddyValidServerPing();
 	m_lstServedEServerBuddies.AddTail(pClient);
+	if (theApp.downloadqueue != NULL)
+		theApp.downloadqueue->RebindSourceToServedEServerBuddy(pClient);
 }
 
 // Remove a LowID client from our served list
@@ -2992,12 +4801,15 @@ void CClientList::TryRequestEServerBuddy()
 					(LPCTSTR)EscPercent(m_pServingEServerBuddy->DbgGetClientInfo()));
 			SetServingEServerBuddy(m_pServingEServerBuddy, Connecting);
 			return;
-		} else {
-			if (thePrefs.GetLogNatTraversalEvents())
-				DebugLog(_T("[eServerBuddy] TryRequestEServerBuddy: Already have connected buddy: %s"),
-					(LPCTSTR)EscPercent(m_pServingEServerBuddy->DbgGetClientInfo()));
-			return;
 		}
+		if (IsServingEServerBuddyRelayReady(m_pServingEServerBuddy))
+			return;
+		if (m_dwEServerBuddyConnectStart != 0 && (DWORD)(::GetTickCount() - m_dwEServerBuddyConnectStart) < ESERVERBUDDY_STALE_SERVER_GRACE_TIME)
+			return;
+		if (thePrefs.GetLogNatTraversalEvents())
+			DebugLog(_T("[eServerBuddy] TryRequestEServerBuddy: Connected buddy is not server-verified, retrying search: %s"),
+				(LPCTSTR)EscPercent(m_pServingEServerBuddy->DbgGetClientInfo()));
+		SetServingEServerBuddy(NULL, Disconnected);
 	}
 
 	// Are we LowID and connected to server?
@@ -3014,14 +4826,37 @@ void CClientList::TryRequestEServerBuddy()
 		return;
 	}
 
-	// uTP/NAT-T must be enabled for eServer Buddy to be useful
+	// uTP/NAT-T must be enabled and locally reachable for eServer Buddy to be useful.
 	if (!thePrefs.IsNatTraversalServiceEnabled()) {
 		if (thePrefs.GetLogNatTraversalEvents())
 			DebugLog(_T("[eServerBuddy] TryRequestEServerBuddy: uTP/NAT-T disabled, skipping buddy search"));
 		return;
 	}
+	if (theApp.clientudp == NULL || !theApp.clientudp->EnsureNatTraversalEndpointReady(_T("eServer buddy search"))) {
+		if (thePrefs.GetLogNatTraversalEvents())
+			DebugLog(_T("[eServerBuddy] TryRequestEServerBuddy: local UDP endpoint is not ready, skipping buddy search"));
+		return;
+	}
 
-	if (m_nEServerBuddyStatus == Connecting && m_pServingEServerBuddy != NULL && m_pServingEServerBuddy->socket != NULL && m_pServingEServerBuddy->socket->IsConnected())
+	if (m_nEServerBuddyStatus == Connecting && m_pServingEServerBuddy != NULL) {
+		const bool bAckTimedOut = m_dwEServerBuddyConnectStart != 0
+			&& (DWORD)(::GetTickCount() - m_dwEServerBuddyConnectStart) >= ESERVERBUDDY_CONNECTING_TIMEOUT;
+		const bool bServerChanged = theApp.serverconnect != NULL && theApp.serverconnect->IsConnected() && theApp.serverconnect->GetCurrentServer() != NULL
+			&& m_dwEServerBuddyServerIP != 0
+			&& (m_dwEServerBuddyServerIP != theApp.serverconnect->GetCurrentServer()->GetIP()
+				|| m_nEServerBuddyServerPort != theApp.serverconnect->GetCurrentServer()->GetPort());
+		if (!bAckTimedOut && !bServerChanged && m_pServingEServerBuddy->socket != NULL && m_pServingEServerBuddy->socket->IsConnected())
+			return;
+		if (bAckTimedOut || bServerChanged) {
+			if (thePrefs.GetLogNatTraversalEvents())
+				DebugLog(_T("[eServerBuddy] TryRequestEServerBuddy: Connecting buddy expired or server changed (timeout=%u serverChanged=%u): %s"),
+					bAckTimedOut ? 1u : 0u, bServerChanged ? 1u : 0u, (LPCTSTR)EscPercent(m_pServingEServerBuddy->DbgGetClientInfo()));
+			m_pServingEServerBuddy->OnEServerBuddyRejectedGeneric();
+			SetServingEServerBuddy(NULL, Disconnected);
+		}
+	}
+
+	if (TryRequestEServerBuddyFromKadBuddy(false))
 		return;
 
 	const DWORD dwNow = ::GetTickCount();
@@ -3087,7 +4922,7 @@ void CClientList::TryRequestEServerBuddy()
 
 	if (pCandidate->SendEServerBuddyRequest()) {
 		SetServingEServerBuddy(pCandidate, Connecting);
-		AddLogLine(true, _T("[eServerBuddy] Buddy request sent to: %s"), (LPCTSTR)EscPercent(pCandidate->DbgGetClientInfo()));
+			AddLogLine(true, GetResString(_T("ESERVER_BUDDY_REQUEST_SENT_TO")), (LPCTSTR)EscPercent(pCandidate->DbgGetClientInfo()));
 		if (thePrefs.GetLogNatTraversalEvents())
 			DebugLog(_T("[eServerBuddy] TryRequestEServerBuddy: Fallback request sent successfully"));
 	} else {
@@ -3112,13 +4947,13 @@ CUpDownClient* CClientList::FindServedEServerBuddyByHash(const uchar* pHash) con
 	return NULL;
 }
 
-CUpDownClient* CClientList::FindServedEServerBuddyByLowID(uint32 dwServerIP, uint32 dwTargetLowID) const
+CUpDownClient* CClientList::FindServedEServerBuddyByLowID(uint32 dwServerIP, uint16 nServerPort, uint32 dwTargetLowID) const
 {
 	if (dwTargetLowID == 0)
 		return NULL;
 
 	const uint32 dwHybridLowID = htonl(dwTargetLowID);
-	CUpDownClient* pFallback = NULL;
+	CUpDownClient* pFallbackUnknownServer = NULL;
 	for (POSITION pos = m_lstServedEServerBuddies.GetHeadPosition(); pos != NULL;) {
 		CUpDownClient* pClient = m_lstServedEServerBuddies.GetNext(pos);
 		if (pClient == NULL)
@@ -3126,14 +4961,84 @@ CUpDownClient* CClientList::FindServedEServerBuddyByLowID(uint32 dwServerIP, uin
 		const uint32 dwClientLowID = pClient->GetUserIDHybrid();
 		if (dwClientLowID != dwHybridLowID && dwClientLowID != dwTargetLowID)
 			continue;
+
+		const bool bClientServerKnown = pClient->GetServerIP() != 0 && pClient->GetServerPort() != 0;
+		if (dwServerIP != 0 && nServerPort != 0) {
+			if (bClientServerKnown) {
+				if (pClient->GetServerIP() == dwServerIP && pClient->GetServerPort() == nServerPort)
+					return pClient;
+				continue;
+			}
+			if (pFallbackUnknownServer == NULL)
+				pFallbackUnknownServer = pClient;
+			continue;
+		}
+
 		if (dwServerIP != 0 && pClient->GetServerIP() == dwServerIP)
 			return pClient;
-		// Served buddies are scoped to the current server session; tolerate missing/stale server tags here.
-		if (pFallback == NULL)
-			pFallback = pClient;
+		if (dwServerIP == 0 && pFallbackUnknownServer == NULL)
+			pFallbackUnknownServer = pClient;
 	}
 
-	return pFallback;
+	return pFallbackUnknownServer;
+}
+
+static void GetCurrentEServerRelayServerContext(uint32& dwServerIP, uint16& nServerPort)
+{
+	dwServerIP = 0;
+	nServerPort = 0;
+	if (theApp.serverconnect != NULL && theApp.serverconnect->IsConnected() && theApp.serverconnect->GetCurrentServer() != NULL) {
+		dwServerIP = theApp.serverconnect->GetCurrentServer()->GetIP();
+		nServerPort = theApp.serverconnect->GetCurrentServer()->GetPort();
+	}
+}
+
+static void InitEServerRelayRequest(EServerRelayRequest& req, CUpDownClient* pRequester, uint32 dwTargetLowID, uint32 dwIP, uint16 nPort, const uchar* pFileHash)
+{
+	req.pRequester = pRequester;
+	if (pRequester != NULL && pRequester->HasValidHash())
+		md4cpy(req.requesterHash, pRequester->GetUserHash());
+	else
+		md4clr(req.requesterHash);
+	md4clr(req.targetHash);
+	req.dwTargetLowID = dwTargetLowID;
+	GetCurrentEServerRelayServerContext(req.dwTargetServerIP, req.nTargetServerPort);
+	req.dwRequesterIP = dwIP;
+	req.nRequesterKadPort = nPort;
+	req.dwTargetPublicIP = 0;
+	req.nTargetKadPort = 0;
+	req.bAwaitingTargetExtPort = false;
+	req.dwTargetExtPortWaitStart = 0;
+	req.dwRequestTime = ::GetTickCount();
+	if (pFileHash != NULL && !isnulmd4(pFileHash))
+		md4cpy(req.fileHash, pFileHash);
+	else
+		md4clr(req.fileHash);
+}
+
+static bool EServerRelayOptionalHashEquals(const uchar* pStoredHash, const uchar* pIncomingHash)
+{
+	const bool bStoredEmpty = pStoredHash == NULL || isnulmd4(pStoredHash);
+	const bool bIncomingEmpty = pIncomingHash == NULL || isnulmd4(pIncomingHash);
+	if (bStoredEmpty || bIncomingEmpty)
+		return bStoredEmpty && bIncomingEmpty;
+	return md4equ(pStoredHash, pIncomingHash);
+}
+
+static bool EServerRelayRequesterMatches(const EServerRelayRequest& req, const CUpDownClient* pRequester)
+{
+	if (req.pRequester == pRequester)
+		return true;
+	if (pRequester == NULL || !pRequester->HasValidHash() || isnulmd4(req.requesterHash))
+		return false;
+	return md4equ(req.requesterHash, pRequester->GetUserHash());
+}
+
+static bool EServerRelayServerContextMatches(const EServerRelayRequest& req, uint32 dwServerIP, uint16 nServerPort)
+{
+	if (req.dwTargetServerIP == 0 || req.nTargetServerPort == 0 || dwServerIP == 0 || nServerPort == 0)
+		return true;
+	return req.dwTargetServerIP == dwServerIP && req.nTargetServerPort == nServerPort;
 }
 
 // Add a pending relay request (using hash)
@@ -3146,27 +5051,24 @@ void CClientList::AddPendingEServerRelay(CUpDownClient* pRequester, const uchar*
 	}
 
 	EServerRelayRequest req;
-	req.pRequester = pRequester;
-	if (targetHash)
+	InitEServerRelayRequest(req, pRequester, 0, dwIP, nPort, NULL);
+	if (targetHash != NULL)
 		md4cpy(req.targetHash, targetHash);
-	else
-		md4clr(req.targetHash);
-	req.dwTargetLowID = 0;	// Hash-based lookup
-	req.dwRequesterIP = dwIP;
-	req.nRequesterKadPort = nPort;
-	req.dwTargetPublicIP = 0;
-	req.nTargetKadPort = 0;
-	req.bAwaitingTargetExtPort = false;
-	req.dwRequestTime = ::GetTickCount();
 
 	m_lstPendingEServerRelays.push_back(req);
 }
 
 // Add a pending relay request (using LowID - preferred for server callback flow)
-void CClientList::AddPendingEServerRelayByLowID(CUpDownClient* pRequester, uint32 dwTargetLowID, uint32 dwIP, uint16 nPort, const uchar* pFileHash)
+bool CClientList::AddPendingEServerRelayByLowID(CUpDownClient* pRequester, uint32 dwTargetLowID, uint32 dwIP, uint16 nPort, const uchar* pFileHash)
 {
+	uint32 dwTargetServerIP = 0;
+	uint16 nTargetServerPort = 0;
+	GetCurrentEServerRelayServerContext(dwTargetServerIP, nTargetServerPort);
+
 	for (auto& req : m_lstPendingEServerRelays) {
 		if (req.dwTargetLowID != dwTargetLowID || dwTargetLowID == 0)
+			continue;
+		if (!EServerRelayServerContextMatches(req, dwTargetServerIP, nTargetServerPort))
 			continue;
 
 		const bool bRequesterInClientList = req.pRequester != NULL && list.Find(req.pRequester) != NULL;
@@ -3174,46 +5076,28 @@ void CClientList::AddPendingEServerRelayByLowID(CUpDownClient* pRequester, uint3
 			&& IsServedEServerBuddy(req.pRequester)
 			&& req.pRequester->socket != NULL
 			&& req.pRequester->socket->IsConnected();
-		const bool bSameRequesterPtr = (req.pRequester == pRequester);
-		bool bSameRequesterHash = false;
-		if (!bSameRequesterPtr
-			&& bRequesterInClientList
-			&& pRequester != NULL
-			&& req.pRequester->HasValidHash()
-			&& pRequester->HasValidHash()
-			&& md4equ(req.pRequester->GetUserHash(), pRequester->GetUserHash())) {
-			bSameRequesterHash = true;
-		}
+		const bool bSameRequester = EServerRelayRequesterMatches(req, pRequester);
+		const bool bSameFile = EServerRelayOptionalHashEquals(req.fileHash, pFileHash);
 
-		if (bExistingRequesterUsable && !bSameRequesterPtr && !bSameRequesterHash) {
-			AddDebugLogLine(false, _T("[eServerBuddy] AddPendingEServerRelayByLowID: Keeping original relay owner for LowID=%u (existing=%s incoming=%s)"),
+		if (bExistingRequesterUsable && (!bSameRequester || !bSameFile)) {
+			AddDebugLogLine(false, _T("[eServerBuddy] AddPendingEServerRelayByLowID: Rejecting overlapping relay for LowID=%u (existing=%s incoming=%s existingFile=%s incomingFile=%s)"),
 				dwTargetLowID,
 				req.pRequester != NULL ? (LPCTSTR)EscPercent(req.pRequester->DbgGetClientInfo()) : _T("NULL"),
-				pRequester != NULL ? (LPCTSTR)EscPercent(pRequester->DbgGetClientInfo()) : _T("NULL"));
-			return;
+				pRequester != NULL ? (LPCTSTR)EscPercent(pRequester->DbgGetClientInfo()) : _T("NULL"),
+				!isnulmd4(req.fileHash) ? (LPCTSTR)md4str(req.fileHash) : _T("NULL"),
+				(pFileHash != NULL && !isnulmd4(pFileHash)) ? (LPCTSTR)md4str(pFileHash) : _T("NULL"));
+			return false;
 		}
 		if (!bExistingRequesterUsable) {
 			AddDebugLogLine(false, _T("[eServerBuddy] AddPendingEServerRelayByLowID: Replacing stale relay owner for LowID=%u"),
 				dwTargetLowID);
 		}
 
-		req.pRequester = pRequester;
-		md4clr(req.targetHash);		// No hash available yet
-		req.dwRequesterIP = dwIP;
-		req.nRequesterKadPort = nPort;
-		req.dwTargetPublicIP = 0;
-		req.nTargetKadPort = 0;
-		req.bAwaitingTargetExtPort = false;
-		req.dwRequestTime = ::GetTickCount();
-		if (pFileHash && !isnulmd4(pFileHash))
-			md4cpy(req.fileHash, pFileHash);
-		else
-			md4clr(req.fileHash);
-
-		AddDebugLogLine(false, _T("[eServerBuddy] AddPendingEServerRelayByLowID: Updated relay for LowID=%u IP=%s Port=%u FileHash=%s"),
-			dwTargetLowID, (LPCTSTR)ipstr(htonl(dwIP)), nPort,
+		InitEServerRelayRequest(req, pRequester, dwTargetLowID, dwIP, nPort, pFileHash);
+		AddDebugLogLine(false, _T("[eServerBuddy] AddPendingEServerRelayByLowID: Updated relay for LowID=%u Server=%s:%u IP=%s Port=%u FileHash=%s"),
+			dwTargetLowID, (LPCTSTR)ipstr(req.dwTargetServerIP), req.nTargetServerPort, (LPCTSTR)ipstr(dwIP), nPort,
 			!isnulmd4(req.fileHash) ? (LPCTSTR)md4str(req.fileHash) : _T("NULL"));
-		return;
+		return true;
 	}
 
 	// Limit pending relays to prevent memory exhaustion
@@ -3223,26 +5107,14 @@ void CClientList::AddPendingEServerRelayByLowID(CUpDownClient* pRequester, uint3
 	}
 
 	EServerRelayRequest req;
-	req.pRequester = pRequester;
-	md4clr(req.targetHash);		// No hash available yet
-	req.dwTargetLowID = dwTargetLowID;
-	req.dwRequesterIP = dwIP;
-	req.nRequesterKadPort = nPort;
-	req.dwTargetPublicIP = 0;
-	req.nTargetKadPort = 0;
-	req.bAwaitingTargetExtPort = false;
-	req.dwRequestTime = ::GetTickCount();
-	// Store file hash for download context
-	if (pFileHash && !isnulmd4(pFileHash))
-		md4cpy(req.fileHash, pFileHash);
-	else
-		md4clr(req.fileHash);
+	InitEServerRelayRequest(req, pRequester, dwTargetLowID, dwIP, nPort, pFileHash);
 
-	AddDebugLogLine(false, _T("[eServerBuddy] AddPendingEServerRelayByLowID: Stored relay for LowID=%u IP=%s Port=%u FileHash=%s"),
-		dwTargetLowID, (LPCTSTR)ipstr(htonl(dwIP)), nPort,
+	AddDebugLogLine(false, _T("[eServerBuddy] AddPendingEServerRelayByLowID: Stored relay for LowID=%u Server=%s:%u IP=%s Port=%u FileHash=%s"),
+		dwTargetLowID, (LPCTSTR)ipstr(req.dwTargetServerIP), req.nTargetServerPort, (LPCTSTR)ipstr(dwIP), nPort,
 		!isnulmd4(req.fileHash) ? (LPCTSTR)md4str(req.fileHash) : _T("NULL"));
 
 	m_lstPendingEServerRelays.push_back(req);
+	return true;
 }
 
 void CClientList::UpdatePendingEServerRelayRequesterPort(const CUpDownClient* pRequester, uint16 nPort)
@@ -3280,11 +5152,11 @@ bool CClientList::TrySendPendingEServerRelayResponseForTarget(CUpDownClient* pTa
 	if (dwTargetLowID == 0)
 		return false;
 
-	EServerRelayRequest* pReq = FindPendingEServerRelayByLowID(dwTargetLowID);
+	EServerRelayRequest* pReq = FindPendingEServerRelayForTarget(pTarget);
 	if (pReq == NULL)
 		return false;
 	if (pReq->pRequester == NULL) {
-		RemovePendingEServerRelayByLowID(dwTargetLowID);
+		RemovePendingEServerRelayRequest(pReq);
 		return false;
 	}
 	if (!IsServedEServerBuddy(pReq->pRequester)) {
@@ -3296,13 +5168,39 @@ bool CClientList::TrySendPendingEServerRelayResponseForTarget(CUpDownClient* pTa
 				bRequesterInClientList ? 1u : 0u,
 				(UINT)dwRelayAge,
 				dwTargetLowID);
-			RemovePendingEServerRelayByLowID(dwTargetLowID);
+			RemovePendingEServerRelayRequest(pReq);
 		} else {
 			AddDebugLogLine(false, _T("[eServerBuddy] TrySendPendingEServerRelayResponseForTarget: Requester temporarily not served (age=%u ms), keeping relay for LowID=%u"),
 				(UINT)dwRelayAge,
 				dwTargetLowID);
 		}
 		return false;
+	}
+
+	if (pReq->bAwaitingTargetExtPort && !pTarget->HasFreshObservedExternalUdpPort()) {
+		if (pReq->dwTargetExtPortWaitStart == 0)
+			pReq->dwTargetExtPortWaitStart = pReq->dwRequestTime;
+		const DWORD dwWaitAge = (DWORD)(::GetTickCount() - pReq->dwTargetExtPortWaitStart);
+		if (dwWaitAge < ESERVER_EXT_UDP_PORT_WAIT_TIME) {
+			if (thePrefs.GetLogNatTraversalEvents()) {
+				AddDebugLogLine(false, _T("[eServerBuddy] Waiting for target external UDP port before final relay response (LowID=%u age=%u/%u ms)"),
+					dwTargetLowID, (UINT)dwWaitAge, (UINT)ESERVER_EXT_UDP_PORT_WAIT_TIME);
+			}
+			return false;
+		}
+		pReq->bAwaitingTargetExtPort = false;
+		pReq->dwTargetExtPortWaitStart = 0;
+		if (thePrefs.GetLogNatTraversalEvents()) {
+			AddDebugLogLine(false, _T("[eServerBuddy] Falling back to target reported/local UDP port after external probe wait expired (LowID=%u wait=%u ms)"),
+				dwTargetLowID, (UINT)dwWaitAge);
+		}
+	} else if (pReq->bAwaitingTargetExtPort) {
+		pReq->bAwaitingTargetExtPort = false;
+		pReq->dwTargetExtPortWaitStart = 0;
+		if (thePrefs.GetLogNatTraversalEvents()) {
+			AddDebugLogLine(false, _T("[eServerBuddy] Target external UDP probe received before fallback (LowID=%u port=%u)"),
+				dwTargetLowID, (UINT)pTarget->GetObservedExternalUdpPort());
+		}
 	}
 
 	if (pReq->nTargetKadPort == 0 && pReq->dwTargetPublicIP == 0)
@@ -3334,6 +5232,16 @@ bool CClientList::TrySendPendingEServerRelayResponseForTarget(CUpDownClient* pTa
 	if (dwFinalTargetIP == 0)
 		return false;
 
+	CAddress finalAddr(dwFinalTargetIP, false);
+	if (finalAddr.IsNull() || !finalAddr.IsPublicIP()) {
+		if (thePrefs.GetLogNatTraversalEvents()) {
+			AddDebugLogLine(false, _T("[eServerBuddy] TrySendPendingEServerRelayResponseForTarget: rejecting invalid final endpoint %s:%u for LowID=%u"),
+				(LPCTSTR)ipstr(finalAddr), nTargetPort, dwTargetLowID);
+		}
+		return false;
+	}
+
+	const uint8 byTargetConnectOptions = pTarget->GetConnectOptions(true, true, true);
 	CSafeMemFile data_resp(27);
 	data_resp.WriteUInt32(dwFinalTargetIP);                       // Target Public IP
 	data_resp.WriteUInt16(nTargetPort);                           // Target KadPort
@@ -3346,20 +5254,21 @@ bool CClientList::TrySendPendingEServerRelayResponseForTarget(CUpDownClient* pTa
 	theStats.AddUpDataOverheadOther(reply->size);
 	pReq->pRequester->socket->SendPacket(reply, true, 0, true);
 
-	CAddress finalAddr(dwFinalTargetIP, false);
 	if (thePrefs.GetLogNatTraversalEvents()) {
-		AddDebugLogLine(false, _T("[eServerBuddy] Final relay response (deferred) - Target=%s:%u LowID=%u FileHash=%s"),
+		AddDebugLogLine(false, _T("[eServerBuddy] Final relay response (deferred) - Target=%s:%u LowID=%u FileHash=%s TargetOptions=0x%02X Wire=legacy direct-caps"),
 			(LPCTSTR)ipstr(finalAddr), nTargetPort, dwTargetLowID,
-			!isnulmd4(pReq->fileHash) ? (LPCTSTR)md4str(pReq->fileHash) : _T("NULL"));
+			!isnulmd4(pReq->fileHash) ? (LPCTSTR)md4str(pReq->fileHash) : _T("NULL"), byTargetConnectOptions);
 	}
 
-	RemovePendingEServerRelayByLowID(dwTargetLowID);
+	RemovePendingEServerRelayRequest(pReq);
 	return true;
 }
 
 // Find pending relay request by target hash
 EServerRelayRequest* CClientList::FindPendingEServerRelay(const uchar* targetHash)
 {
+	if (targetHash == NULL)
+		return NULL;
 	for (auto& req : m_lstPendingEServerRelays) {
 		if (md4equ(req.targetHash, targetHash))
 			return &req;
@@ -3377,9 +5286,64 @@ EServerRelayRequest* CClientList::FindPendingEServerRelayByLowID(uint32 dwTarget
 	return NULL;
 }
 
+EServerRelayRequest* CClientList::FindPendingEServerRelayForTarget(const CUpDownClient* pTarget)
+{
+	if (pTarget == NULL || !pTarget->HasLowID())
+		return NULL;
+
+	const uint32 dwTargetLowID = pTarget->GetUserIDHybrid();
+	if (dwTargetLowID == 0)
+		return NULL;
+
+	uint32 dwTargetServerIP = pTarget->GetServerIP();
+	uint16 nTargetServerPort = pTarget->GetServerPort();
+	if (dwTargetServerIP == 0 || nTargetServerPort == 0)
+		GetCurrentEServerRelayServerContext(dwTargetServerIP, nTargetServerPort);
+
+	EServerRelayRequest* pFallbackUnknownServer = NULL;
+	for (auto& req : m_lstPendingEServerRelays) {
+		if (req.dwTargetLowID != dwTargetLowID)
+			continue;
+		if (req.dwTargetServerIP != 0 && req.nTargetServerPort != 0 && dwTargetServerIP != 0 && nTargetServerPort != 0) {
+			if (req.dwTargetServerIP == dwTargetServerIP && req.nTargetServerPort == nTargetServerPort)
+				return &req;
+			continue;
+		}
+		if (pFallbackUnknownServer == NULL)
+			pFallbackUnknownServer = &req;
+	}
+	return pFallbackUnknownServer;
+}
+
+// Find the only recent outbound relay target for a legacy response without identity.
+CUpDownClient* CClientList::FindUniqueRecentEServerRelayTargetForBuddy(const CUpDownClient* pBuddy, bool* pbAmbiguous)
+{
+	if (pbAmbiguous != NULL)
+		*pbAmbiguous = false;
+	if (pBuddy == NULL)
+		return NULL;
+
+	const DWORD kResponseMatchWindow = ESERVERBUDDY_RELAY_TIMEOUT + ESERVERBUDDY_RELAY_REASK_TIME;
+	CUpDownClient* pMatch = NULL;
+	for (POSITION pos = list.GetHeadPosition(); pos != NULL;) {
+		CUpDownClient* pClient = list.GetNext(pos);
+		if (pClient == NULL || pClient == pBuddy || !pClient->HasRecentEServerRelayRequestToBuddy(pBuddy, kResponseMatchWindow))
+			continue;
+		if (pMatch != NULL && pMatch != pClient) {
+			if (pbAmbiguous != NULL)
+				*pbAmbiguous = true;
+			return NULL;
+		}
+		pMatch = pClient;
+	}
+	return pMatch;
+}
+
 // Remove pending relay request by hash
 void CClientList::RemovePendingEServerRelay(const uchar* targetHash)
 {
+	if (targetHash == NULL)
+		return;
 	for (auto it = m_lstPendingEServerRelays.begin(); it != m_lstPendingEServerRelays.end(); ++it) {
 		if (md4equ(it->targetHash, targetHash)) {
 			m_lstPendingEServerRelays.erase(it);
@@ -3399,12 +5363,112 @@ void CClientList::RemovePendingEServerRelayByLowID(uint32 dwTargetLowID)
 	}
 }
 
+void CClientList::RemovePendingEServerRelayRequest(const EServerRelayRequest* pReq)
+{
+	if (pReq == NULL)
+		return;
+	for (auto it = m_lstPendingEServerRelays.begin(); it != m_lstPendingEServerRelays.end(); ++it) {
+		if (&(*it) == pReq) {
+			m_lstPendingEServerRelays.erase(it);
+			break;
+		}
+	}
+}
+
+static bool ClientMatchesPendingRelayTarget(const CUpDownClient* pClient, const EServerRelayRequest& req)
+{
+	if (pClient == NULL || !pClient->HasLowID() || req.dwTargetLowID == 0)
+		return false;
+	if (pClient->GetUserIDHybrid() != req.dwTargetLowID)
+		return false;
+	if (req.dwTargetServerIP == 0 || req.nTargetServerPort == 0)
+		return true;
+	if (pClient->GetServerIP() == 0 || pClient->GetServerPort() == 0)
+		return true;
+	return pClient->GetServerIP() == req.dwTargetServerIP && pClient->GetServerPort() == req.nTargetServerPort;
+}
+
+void CClientList::ProcessPendingEServerRelayExtPortWaits()
+{
+	struct ReadyRelayKey
+	{
+		uint32 dwLowID;
+		uint32 dwServerIP;
+		uint16 nServerPort;
+	};
+	std::vector<ReadyRelayKey> aReadyRelays;
+	const DWORD dwNow = ::GetTickCount();
+
+	for (auto& req : m_lstPendingEServerRelays) {
+		if (!req.bAwaitingTargetExtPort || req.dwTargetLowID == 0)
+			continue;
+		if (req.dwTargetExtPortWaitStart == 0)
+			req.dwTargetExtPortWaitStart = req.dwRequestTime;
+		if ((DWORD)(dwNow - req.dwTargetExtPortWaitStart) >= ESERVER_EXT_UDP_PORT_WAIT_TIME) {
+			ReadyRelayKey key = { req.dwTargetLowID, req.dwTargetServerIP, req.nTargetServerPort };
+			aReadyRelays.push_back(key);
+		}
+	}
+
+	for (const ReadyRelayKey& key : aReadyRelays) {
+		EServerRelayRequest* pReq = NULL;
+		for (auto& req : m_lstPendingEServerRelays) {
+			if (req.dwTargetLowID == key.dwLowID
+				&& req.dwTargetServerIP == key.dwServerIP
+				&& req.nTargetServerPort == key.nServerPort) {
+				pReq = &req;
+				break;
+			}
+		}
+		if (pReq == NULL || !pReq->bAwaitingTargetExtPort)
+			continue;
+
+		CUpDownClient* pTarget = NULL;
+		for (POSITION pos = list.GetHeadPosition(); pos != NULL;) {
+			CUpDownClient* pClient = list.GetNext(pos);
+			if (ClientMatchesPendingRelayTarget(pClient, *pReq)) {
+				pTarget = pClient;
+				break;
+			}
+		}
+
+		if (pTarget != NULL)
+			TrySendPendingEServerRelayResponseForTarget(pTarget);
+	}
+}
+
+static bool NotifyExpiredEServerRelayRequester(const EServerRelayRequest& req)
+{
+	CUpDownClient* pRequester = req.pRequester;
+	if (pRequester == NULL || pRequester->socket == NULL || !pRequester->socket->IsConnected())
+		return false;
+	if (theApp.clientlist == NULL || !theApp.clientlist->IsServedEServerBuddy(pRequester))
+		return false;
+
+	CSafeMemFile data_resp(7);
+	data_resp.WriteUInt32(0);
+	data_resp.WriteUInt16(0);
+	data_resp.WriteUInt8(ESERVERBUDDY_STATUS_REJECTED);
+	AppendEServerExternalPortTailForRequester(data_resp, pRequester);
+	Packet* reply = new Packet(data_resp, OP_EMULEPROT, OP_ESERVER_RELAY_RESPONSE);
+	theStats.AddUpDataOverheadOther(reply->size);
+	pRequester->socket->SendPacket(reply, true, 0, true);
+	return true;
+}
+
 // Cleanup expired relay requests
 void CClientList::CleanupExpiredEServerRelays()
 {
+	ProcessPendingEServerRelayExtPortWaits();
+
 	DWORD dwNow = ::GetTickCount();
 	for (auto it = m_lstPendingEServerRelays.begin(); it != m_lstPendingEServerRelays.end();) {
 		if (dwNow - it->dwRequestTime > ESERVERBUDDY_RELAY_TIMEOUT) {
+			const bool bNotified = NotifyExpiredEServerRelayRequester(*it);
+			if (thePrefs.GetLogNatTraversalEvents()) {
+				AddDebugLogLine(false, _T("[eServerBuddy] Pending relay expired for LowID=%u Server=%s:%u notified=%u"),
+					it->dwTargetLowID, (LPCTSTR)ipstr(it->dwTargetServerIP), it->nTargetServerPort, bNotified ? 1u : 0u);
+			}
 			it = m_lstPendingEServerRelays.erase(it);
 		} else {
 			++it;
@@ -3417,19 +5481,23 @@ void CClientList::ProcessEServerBuddyPings()
 {
 	DWORD dwNow = ::GetTickCount();
 	uint32 dwOurServerIP = 0;
-	if (theApp.serverconnect && theApp.serverconnect->IsConnected() && theApp.serverconnect->GetCurrentServer())
+	uint16 nOurServerPort = 0;
+	if (theApp.serverconnect && theApp.serverconnect->IsConnected() && theApp.serverconnect->GetCurrentServer()) {
 		dwOurServerIP = theApp.serverconnect->GetCurrentServer()->GetIP();
+		nOurServerPort = theApp.serverconnect->GetCurrentServer()->GetPort();
+	}
 
 	auto SendKeepAlivePing = [&](CUpDownClient* pClient, LPCTSTR pszRole) {
 		if (pClient == NULL || pClient->socket == NULL || !pClient->socket->IsConnected())
 			return;
 
-		CSafeMemFile data(5);
+		CSafeMemFile data(7);
 		uint8 byPingFlags = 0;
 		if (theApp.serverconnect && theApp.serverconnect->IsConnected() && !theApp.serverconnect->IsLowID())
 			byPingFlags |= ESERVERBUDDY_PING_FLAG_HIGHID;
 		data.WriteUInt32(dwOurServerIP);
 		data.WriteUInt8(byPingFlags);
+		data.WriteUInt16(nOurServerPort);
 
 		Packet* ping = new Packet(data, OP_EMULEPROT, OP_ESERVER_BUDDY_PING);
 		theStats.AddUpDataOverheadOther(ping->size);
@@ -3460,6 +5528,9 @@ void CClientList::ProcessEServerBuddyPings()
 		}
 	}
 
+	TryRequestKadBuddyFromEServerBuddy(false);
+	TryRequestEServerBuddyFromKadBuddy(false);
+
 	// Keep cleanup expensive operations on the old long interval.
 	if (dwNow - m_dwLastEServerBuddyPing < ESERVERBUDDY_PING_TIME)
 		return;
@@ -3468,8 +5539,40 @@ void CClientList::ProcessEServerBuddyPings()
 	CleanupExpiredEServerRelays();
 }
 
+
+static bool PendingRelayContextHasIdentity(const PendingRelayContext& ctx)
+{
+	return ctx.dwTargetLowID != 0 || !isnulmd4(ctx.targetHash);
+}
+
+static bool PendingRelayContextMatchesIdentity(const PendingRelayContext& ctx, const CUpDownClient* pClient)
+{
+	if (pClient == NULL)
+		return false;
+
+	if (!isnulmd4(ctx.targetHash)) {
+		if (!pClient->HasValidHash() || !md4equ(pClient->GetUserHash(), ctx.targetHash))
+			return false;
+	}
+
+	if (ctx.dwTargetLowID != 0) {
+		if (!pClient->HasLowID())
+			return false;
+		const uint32 dwClientLowID = pClient->GetUserIDHybrid();
+		if (dwClientLowID != ctx.dwTargetLowID && dwClientLowID != htonl(ctx.dwTargetLowID))
+			return false;
+	}
+
+	if (ctx.dwTargetServerIP != 0 && ctx.nTargetServerPort != 0 && pClient->GetServerIP() != 0 && pClient->GetServerPort() != 0) {
+		if (pClient->GetServerIP() != ctx.dwTargetServerIP || pClient->GetServerPort() != ctx.nTargetServerPort)
+			return false;
+	}
+
+	return true;
+}
+
 // Add pending relay context (to restore reqfile if client recreated during connection)
-void CClientList::AddPendingRelayContext(uint32 dwIP, uint16 nPort, const uchar* pFileHash)
+void CClientList::AddPendingRelayContext(uint32 dwIP, uint16 nPort, const uchar* pFileHash, uint32 dwTargetLowID, uint32 dwTargetServerIP, uint16 nTargetServerPort, const uchar* pTargetHash)
 {
 	PendingRelayContext ctx;
 	ctx.dwIP = dwIP;
@@ -3478,13 +5581,20 @@ void CClientList::AddPendingRelayContext(uint32 dwIP, uint16 nPort, const uchar*
 		md4cpy(ctx.fileHash, pFileHash);
 	else
 		md4clr(ctx.fileHash);
+	ctx.dwTargetLowID = dwTargetLowID;
+	ctx.dwTargetServerIP = dwTargetServerIP;
+	ctx.nTargetServerPort = nTargetServerPort;
+	if (pTargetHash)
+		md4cpy(ctx.targetHash, pTargetHash);
+	else
+		md4clr(ctx.targetHash);
 	ctx.dwInserted = ::GetTickCount();
 
 	m_lstPendingRelayContexts.push_back(ctx);
 
 	if (thePrefs.GetLogNatTraversalEvents()) {
 		AddDebugLogLine(false, _T("[eServerBuddy] AddPendingRelayContext: IP=%s Port=%u FileHash=%s"),
-			(LPCTSTR)ipstr(htonl(dwIP)), nPort, !isnulmd4(ctx.fileHash) ? (LPCTSTR)md4str(ctx.fileHash) : _T("NULL"));
+			(LPCTSTR)ipstr(dwIP), nPort, !isnulmd4(ctx.fileHash) ? (LPCTSTR)md4str(ctx.fileHash) : _T("NULL"));
 	}
 
 	// Check immediately if a matching client already exists (handles race condition)
@@ -3505,20 +5615,19 @@ void CClientList::AddPendingRelayContext(uint32 dwIP, uint16 nPort, const uchar*
 		CONNECTINGCLIENT& cc = m_liConnectingClients.GetNext(pos);
 		if (cc.pClient) {
 			uint32 ccIP = cc.pClient->GetIP().ToUInt32(false);
-			// Only check IP here, ApplyPendingRelayContext will check port
 			if (ccIP == dwIP) {
 				if (thePrefs.GetLogNatTraversalEvents()) {
 					AddDebugLogLine(false, _T("[eServerBuddy] Found existing client in Connecting List: %s"), (LPCTSTR)EscPercent(cc.pClient->DbgGetClientInfo()));
 				}
-				
-				// Update UDP/Kad port if it mismatches relay context (context has authoritative UDP port)
-				if (thePrefs.GetLogNatTraversalEvents()) {
-					AddDebugLogLine(false, _T("[eServerBuddy] Updating client UDP/Kad port to %u for IP=0x%08X"), nPort, dwIP);
+
+				if (!PendingRelayContextHasIdentity(ctx) || PendingRelayContextMatchesIdentity(ctx, cc.pClient)) {
+					// Update UDP/Kad port only after identity is compatible with the pending relay context.
+					if (thePrefs.GetLogNatTraversalEvents())
+						AddDebugLogLine(false, _T("[eServerBuddy] Updating client UDP/Kad port to %u for IP=0x%08X"), nPort, dwIP);
 					cc.pClient->SetKadPort(nPort);
 					cc.pClient->SetUDPPort(nPort);
-				} else {
-					cc.pClient->SetKadPort(nPort);
-					cc.pClient->SetUDPPort(nPort);
+				} else if (thePrefs.GetLogNatTraversalEvents()) {
+					AddDebugLogLine(false, _T("[eServerBuddy] Pending relay context skipped connecting client due to identity mismatch: %s"), (LPCTSTR)EscPercent(cc.pClient->DbgGetClientInfo()));
 				}
 
 				if (ApplyPendingRelayContext(cc.pClient)) return;
@@ -3548,6 +5657,13 @@ bool CClientList::ApplyPendingRelayContext(CUpDownClient* pClient)
 	// Try to match against either KadPort or UserPort
 	for (auto it = m_lstPendingRelayContexts.begin(); it != m_lstPendingRelayContexts.end(); ++it) {
 		if (it->dwIP == dwClientIP) {
+			if (PendingRelayContextHasIdentity(*it) && !PendingRelayContextMatchesIdentity(*it, pClient)) {
+				if (thePrefs.GetLogNatTraversalEvents()) {
+					AddDebugLogLine(false, _T("[eServerBuddy] DEBUG: IP Matched (0x%08X) but pending relay identity mismatched for %s"),
+						dwClientIP, (LPCTSTR)EscPercent(pClient->DbgGetClientInfo()));
+				}
+				continue;
+			}
 			// IP Matches. Check Ports.
 			const bool bNoUdpInfo = (nKadPort == 0 && nUDPPort == 0);
 			const bool bPortMatch = (it->nPort == nKadPort) || (nUDPPort != 0 && it->nPort == nUDPPort) || (bNoUdpInfo && it->nPort == nUserPort);

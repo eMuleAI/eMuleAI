@@ -1,4 +1,4 @@
-//This file is part of eMule AI
+﻿//This file is part of eMule AI
 //Copyright (C)2002-2026 Merkur ( strEmail.Format("%s@%s", "devteam", "emule-project.net") / https://www.emule-project.net )
 //Copyright (C)2026 eMule AI
 //
@@ -17,11 +17,8 @@
 //Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 #pragma once
 #include "MuleListCtrl.h"
-namespace Kademlia
-{
-	class CSearch;
-	class CLookupHistory;
-}
+#include "kademlia/kademlia/Search.h"
+#include <set>
 
 class CIni;
 
@@ -41,6 +38,7 @@ public:
 	void	UpdateKadSearchCount();
 
 	Kademlia::CLookupHistory* FetchAndSelectActiveSearch(bool bMark);
+	Kademlia::CLookupHistory* GetLookupHistoryForItem(int iItem) const;
 
 private:
 	enum ECols
@@ -57,7 +55,12 @@ private:
 
 protected:
 	void UpdateSearch(int iItem, const Kademlia::CSearch *search);
+	void RequestSearchRowRedraw(int iItem);
+	bool IsSearchPointerTracked(const Kademlia::CSearch *search) const;
+	bool TryGetSearchSortKey(const Kademlia::CSearch *search, int iSubItem, CString& strSortKey) const;
 	void SetAllIcons();
+
+	std::set<const Kademlia::CSearch*> m_liveSearches;
 
 	static int CALLBACK SortProc(const LPARAM lParam1, const LPARAM lParam2, const LPARAM lParamSort);
 

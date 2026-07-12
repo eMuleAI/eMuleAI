@@ -29,12 +29,282 @@ static char THIS_FILE[] = __FILE__;
 
 BEGIN_MESSAGE_MAP(CTreeOptionsCtrlEx, CTreeOptionsCtrl)
 	ON_WM_DESTROY()
+	ON_WM_LBUTTONDOWN()
+	ON_WM_LBUTTONUP()
+	ON_WM_MOUSEMOVE()
+	ON_WM_MOUSELEAVE()
+	ON_WM_CAPTURECHANGED()
+	ON_NOTIFY_REFLECT_EX(NM_CUSTOMDRAW, OnCustomDraw)
 END_MESSAGE_MAP()
 
 CTreeOptionsCtrlEx::CTreeOptionsCtrlEx(UINT uImageListColorFlags)
+	: m_hHotCommandButton(NULL)
+	, m_hPressedCommandButton(NULL)
+	, m_bTrackingCommandButtonMouse(FALSE)
 {
 	m_uImageListColorFlags = uImageListColorFlags;
 	SetToggleOverIconOnly(TRUE);
+}
+
+HTREEITEM CTreeOptionsCtrlEx::InsertGroup(LPCTSTR lpszItem, int nImage, HTREEITEM hParent, HTREEITEM hAfter, DWORD dwItemData)
+{
+	if (nImage <= 9)
+		nImage = TREEOPTSCTRLIMG_GROUP;
+	return CTreeOptionsCtrl::InsertGroup(lpszItem, nImage, hParent, hAfter, dwItemData);
+}
+
+HTREEITEM CTreeOptionsCtrlEx::InsertCommandButton(LPCTSTR lpszItem, HTREEITEM hParent, HTREEITEM hAfter, DWORD dwItemData)
+{
+	ASSERT((hParent == TVI_ROOT) || IsGroup(hParent) || IsCheckBox(hParent));
+
+	HTREEITEM hItem = InsertItem(lpszItem, TREEOPTSCTRLIMG_COMMAND, TREEOPTSCTRLIMG_COMMAND, hParent, hAfter);
+	CTreeOptionsItemData *pItemData = new CTreeOptionsItemData;
+	pItemData->m_pRuntimeClass1 = NULL;
+	pItemData->m_Type = CTreeOptionsItemData::CommandButton;
+	pItemData->m_dwItemData = dwItemData;
+	SetItemData(hItem, (DWORD_PTR)pItemData);
+
+	int iDpiY = 96;
+	CDC *pDC = GetDC();
+	if (pDC != NULL) {
+		iDpiY = pDC->GetDeviceCaps(LOGPIXELSY);
+		ReleaseDC(pDC);
+	}
+	SetItemMinHeight(hItem, MulDiv(23, iDpiY, 96));
+
+	return hItem;
+}
+
+BOOL CTreeOptionsCtrlEx::IsCommandButton(HTREEITEM hItem)
+{
+	CTreeOptionsItemData *pItemData = hItem != NULL ? reinterpret_cast<CTreeOptionsItemData*>(GetItemData(hItem)) : NULL;
+	return pItemData != NULL && pItemData->m_Type == CTreeOptionsItemData::CommandButton;
+}
+
+HTREEITEM CTreeOptionsCtrlEx::HitTestCommandButton(CPoint point)
+{
+	for (HTREEITEM hVisible = GetFirstVisibleItem(); hVisible != NULL; hVisible = GetNextVisibleItem(hVisible)) {
+		if (IsCommandButton(hVisible)) {
+			CRect rcButton = GetCommandButtonRect(hVisible);
+			if (rcButton.PtInRect(point))
+				return hVisible;
+		}
+
+		CRect rcItem;
+		if (GetItemRect(hVisible, rcItem, FALSE) && rcItem.top > point.y)
+			break;
+	}
+
+	return NULL;
+}
+
+void CTreeOptionsCtrlEx::InvalidateCommandButton(HTREEITEM hItem)
+{
+	if (hItem == NULL)
+		return;
+
+	CRect rcButton = GetCommandButtonRect(hItem);
+	if (!rcButton.IsRectEmpty())
+		InvalidateRect(rcButton, FALSE);
+}
+
+CRect CTreeOptionsCtrlEx::GetCommandButtonRect(HTREEITEM hItem)
+{
+	CRect rcText;
+	if (hItem == NULL || !GetItemRect(hItem, rcText, TRUE))
+		return CRect(0, 0, 0, 0);
+
+	CRect rcItem = GetItemReservedRect(hItem);
+	if (rcItem.IsRectEmpty())
+		return CRect(0, 0, 0, 0);
+
+	CString strText = GetItemText(hItem);
+	int iButtonWidth = 80;
+	CDC *pDC = GetDC();
+	if (pDC != NULL) {
+		CFont *pFont = GetFont();
+		CFont *pOldFont = pFont != NULL ? pDC->SelectObject(pFont) : NULL;
+		CSize sizeText = pDC->GetTextExtent(strText, strText.GetLength());
+		iButtonWidth = sizeText.cx + 22;
+		if (pOldFont != NULL)
+			pDC->SelectObject(pOldFont);
+		ReleaseDC(pDC);
+	}
+
+	int iButtonLeft = rcText.left - static_cast<int>(GetIndent());
+	if (iButtonLeft < rcItem.left)
+		iButtonLeft = rcItem.left;
+	if (iButtonLeft > rcText.left)
+		iButtonLeft = rcText.left;
+
+	int iDpiY = 96;
+	CDC *pDCHeight = GetDC();
+	if (pDCHeight != NULL) {
+		iDpiY = pDCHeight->GetDeviceCaps(LOGPIXELSY);
+		ReleaseDC(pDCHeight);
+	}
+
+	const int iMinButtonHeight = MulDiv(23, iDpiY, 96);
+	int iButtonHeight = min(iMinButtonHeight, rcItem.Height() - 2);
+	if (iButtonHeight < 1)
+		iButtonHeight = rcItem.Height();
+
+	CRect rcButton(iButtonLeft, rcItem.top + 1, iButtonLeft + iButtonWidth, rcItem.top + 1 + iButtonHeight);
+	if (rcButton.bottom > rcItem.bottom - 1)
+		rcButton.bottom = rcItem.bottom - 1;
+	if (rcButton.right > rcItem.right - 2)
+		rcButton.right = rcItem.right - 2;
+	return rcButton;
+}
+
+void CTreeOptionsCtrlEx::DrawCommandButton(CDC &dc, HTREEITEM hItem)
+{
+	CRect rcButton = GetCommandButtonRect(hItem);
+	if (rcButton.IsRectEmpty())
+		return;
+
+	const bool bDarkMode = IsDarkModeEnabled();
+	const bool bSelected = (GetItemState(hItem, TVIS_SELECTED) & TVIS_SELECTED) != 0;
+	const COLORREF crItemBackground = bDarkMode ? GetCustomSysColor(bSelected ? COLOR_HIGHLIGHT : COLOR_WINDOW) : GetSysColor(bSelected ? COLOR_HIGHLIGHT : COLOR_WINDOW);
+	const bool bHot = hItem == m_hHotCommandButton;
+	const bool bPressed = hItem == m_hPressedCommandButton;
+	const bool bEnabled = IsWindowEnabled() != FALSE;
+	const COLORREF crText = bDarkMode ? GetCustomSysColor(bEnabled ? COLOR_BTNTEXT : COLOR_GRAYTEXT, true) : GetSysColor(bEnabled ? COLOR_BTNTEXT : COLOR_GRAYTEXT);
+
+	CRect rcItemText;
+	CRect rcItem = GetItemReservedRect(hItem);
+	if (GetItemRect(hItem, rcItemText, TRUE) && !rcItem.IsRectEmpty()) {
+		CRect rcErase(rcButton.left, rcItem.top, max(rcButton.right, rcItemText.right + 2), rcItem.bottom);
+		dc.FillSolidRect(rcErase, crItemBackground);
+	}
+
+	const int iStateId = !bEnabled ? PBS_DISABLED : bPressed ? PBS_PRESSED : bHot ? PBS_HOT : PBS_NORMAL;
+	bool bDrawn = false;
+	if (IsThemeActive() && IsAppThemed()) {
+		HTHEME hTheme = OpenThemeData(m_hWnd, L"BUTTON");
+		if (hTheme != NULL) {
+			if (IsThemeBackgroundPartiallyTransparent(hTheme, BP_PUSHBUTTON, iStateId))
+				DrawThemeParentBackground(m_hWnd, dc.GetSafeHdc(), &rcButton);
+			DrawThemeBackground(hTheme, dc.GetSafeHdc(), BP_PUSHBUTTON, iStateId, &rcButton, NULL);
+			CloseThemeData(hTheme);
+			bDrawn = true;
+		}
+	}
+
+	if (!bDrawn) {
+		const COLORREF crFill = bDarkMode ? GetCustomSysColor(bPressed ? COLOR_3DLIGHT : bHot ? COLOR_BTNHIGHLIGHT : COLOR_BTNFACE, true) : GetSysColor(bPressed ? COLOR_3DLIGHT : bHot ? COLOR_BTNHIGHLIGHT : COLOR_BTNFACE);
+		const COLORREF crBorder = bDarkMode ? GetCustomSysColor(bEnabled ? COLOR_GRAYTEXT : COLOR_INACTIVEBORDER, true) : GetSysColor(bEnabled ? COLOR_GRAYTEXT : COLOR_INACTIVEBORDER);
+		CBrush brFill(crFill);
+		CPen penBorder(PS_SOLID, 1, crBorder);
+		CBrush *pOldBrush = dc.SelectObject(&brFill);
+		CPen *pOldPen = dc.SelectObject(&penBorder);
+		dc.RoundRect(rcButton, CPoint(4, 4));
+		if (pOldPen != NULL)
+			dc.SelectObject(pOldPen);
+		if (pOldBrush != NULL)
+			dc.SelectObject(pOldBrush);
+	}
+
+	CRect rcButtonText(rcButton);
+	rcButtonText.DeflateRect(2, 1);
+	dc.SetBkMode(TRANSPARENT);
+	dc.SetTextColor(crText);
+	CString strText = GetItemText(hItem);
+	dc.DrawText(strText, rcButtonText, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+}
+
+void CTreeOptionsCtrlEx::OnLButtonDown(UINT nFlags, CPoint point)
+{
+	HTREEITEM hItem = HitTestCommandButton(point);
+	if (IsCommandButton(hItem)) {
+		SelectItem(hItem);
+		SetFocus();
+		m_hPressedCommandButton = hItem;
+		SetCapture();
+		InvalidateCommandButton(hItem);
+		return;
+	}
+
+	CTreeOptionsCtrl::OnLButtonDown(nFlags, point);
+}
+
+void CTreeOptionsCtrlEx::OnLButtonUp(UINT nFlags, CPoint point)
+{
+	if (m_hPressedCommandButton != NULL) {
+		HTREEITEM hPressed = m_hPressedCommandButton;
+		m_hPressedCommandButton = NULL;
+		if (GetCapture() == this)
+			ReleaseCapture();
+
+		InvalidateCommandButton(hPressed);
+		if (hPressed == HitTestCommandButton(point))
+			NotifyParent(BN_CLICKED, hPressed);
+		return;
+	}
+
+	CTreeOptionsCtrl::OnLButtonUp(nFlags, point);
+}
+
+void CTreeOptionsCtrlEx::OnMouseMove(UINT nFlags, CPoint point)
+{
+	HTREEITEM hHot = HitTestCommandButton(point);
+	if (hHot != m_hHotCommandButton) {
+		HTREEITEM hOldHot = m_hHotCommandButton;
+		m_hHotCommandButton = hHot;
+		InvalidateCommandButton(hOldHot);
+		InvalidateCommandButton(m_hHotCommandButton);
+	}
+
+	if (!m_bTrackingCommandButtonMouse) {
+		TRACKMOUSEEVENT tme = { sizeof(TRACKMOUSEEVENT), TME_LEAVE, m_hWnd, 0 };
+		m_bTrackingCommandButtonMouse = ::TrackMouseEvent(&tme) != FALSE;
+	}
+
+	CTreeOptionsCtrl::OnMouseMove(nFlags, point);
+}
+
+void CTreeOptionsCtrlEx::OnMouseLeave()
+{
+	m_bTrackingCommandButtonMouse = FALSE;
+	HTREEITEM hOldHot = m_hHotCommandButton;
+	m_hHotCommandButton = NULL;
+	InvalidateCommandButton(hOldHot);
+	CTreeOptionsCtrl::OnMouseLeave();
+}
+
+void CTreeOptionsCtrlEx::OnCaptureChanged(CWnd *pWnd)
+{
+	HTREEITEM hPressed = m_hPressedCommandButton;
+	m_hPressedCommandButton = NULL;
+	InvalidateCommandButton(hPressed);
+	CTreeOptionsCtrl::OnCaptureChanged(pWnd);
+}
+
+BOOL CTreeOptionsCtrlEx::OnCustomDraw(LPNMHDR pNMHDR, LRESULT *pResult)
+{
+	BOOL bHandled = CTreeOptionsCtrl::OnCustomDraw(pNMHDR, pResult);
+	NMTVCUSTOMDRAW *pCustomDraw = reinterpret_cast<NMTVCUSTOMDRAW*>(pNMHDR);
+	if (pCustomDraw == NULL)
+		return bHandled;
+
+	HTREEITEM hItem = reinterpret_cast<HTREEITEM>(pCustomDraw->nmcd.dwItemSpec);
+	if (pCustomDraw->nmcd.dwDrawStage == CDDS_ITEMPREPAINT && IsItemHeightSpacer(hItem)) {
+		HTREEITEM hPrev = GetPrevSiblingItem(hItem);
+		while (IsItemHeightSpacer(hPrev))
+			hPrev = GetPrevSiblingItem(hPrev);
+		if (IsCommandButton(hPrev)) {
+			CDC dc;
+			dc.Attach(pCustomDraw->nmcd.hdc);
+			DrawCommandButton(dc, hPrev);
+			dc.Detach();
+		}
+	} else if (pCustomDraw->nmcd.dwDrawStage == CDDS_ITEMPOSTPAINT && IsCommandButton(hItem)) {
+		CDC dc;
+		dc.Attach(pCustomDraw->nmcd.hdc);
+		DrawCommandButton(dc, hItem);
+		dc.Detach();
+	}
+	return bHandled;
 }
 
 void CTreeOptionsCtrlEx::HandleCheckBox(HTREEITEM hItem, BOOL bCheck)
@@ -253,7 +523,7 @@ void CTreeOptionsCtrlEx::OnCreateImageList()
 	if (pDCScreen) {
 		static const int iBmpWidth = 16;
 		static const int iBmpHeight = 16;
-		static const int iBitmaps = 13;
+		static const int iBitmaps = 14;
 		CBitmap bmpControls;
 
 		// Create a compatible bitmap large enough to hold all state images side by side
@@ -356,8 +626,7 @@ void CTreeOptionsCtrlEx::OnCreateImageList()
 							DrawThemeBackground(hTheme, dcMem, BP_CHECKBOX, CBS_MIXEDDISABLED, &rcCtrl, nullptr);
 					}
 
-					// ---------- Index 10: (unused/reserved) ----------
-					// Leave empty or implement original logic if needed
+					// ---------- Index 10: blank command placeholder ----------
 
 					// ---------- Index 11: Edit icon 'I' (original logic) ----------
 					{
@@ -383,6 +652,17 @@ void CTreeOptionsCtrlEx::OnCreateImageList()
 						CRect rcBmp(12 * iBmpWidth, 0, 13 * iBmpWidth, iBmpHeight);
 						CRect rcCtrl(rcBmp.left + iCtrlLeft, rcBmp.top + iCtrlTop, rcBmp.left + iCtrlLeft + iCtrlWidth, rcBmp.top + iCtrlTop + iCtrlHeight);
 						dcMem.DrawFrameControl(&rcCtrl, DFC_SCROLL, DFCS_SCROLLCOMBOBOX | DFCS_FLAT);
+					}
+
+					// ---------- Index 13: Branch group icon ----------
+					{
+						ASSERT(TREEOPTSCTRLIMG_GROUP == 13);
+						CRect rcBmp(13 * iBmpWidth, 0, 14 * iBmpWidth, iBmpHeight);
+						HICON hIcon = (HICON)::LoadImage(AfxGetResourceHandle(), _T("BRANCH"), IMAGE_ICON, iBmpWidth, iBmpHeight, LR_DEFAULTCOLOR);
+						if (hIcon != NULL) {
+							::DrawIconEx(dcMem.GetSafeHdc(), rcBmp.left, rcBmp.top, hIcon, iBmpWidth, iBmpHeight, 0, NULL, DI_NORMAL);
+							::DestroyIcon(hIcon);
+						}
 					}
 
 					// Restore original bitmap and add to image list with mask color

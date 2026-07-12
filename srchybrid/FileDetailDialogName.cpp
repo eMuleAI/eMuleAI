@@ -1,4 +1,4 @@
-﻿//This file is part of eMule AI
+//This file is part of eMule AI
 //Copyright (C)2002-2026 Merkur ( strEmail.Format("%s@%s", "devteam", "emule-project.net") / https://www.emule-project.net )
 //Copyright (C)2026 eMule AI
 //
@@ -20,6 +20,7 @@
 #include "FileDetailDialogName.h"
 #include "UserMsgs.h"
 #include "PartFile.h"
+#include "DownloadQueue.h"
 #include "UpDownClient.h"
 #include "eMuleAI/MenuXP.h"
 #include "MenuCmds.h"
@@ -33,6 +34,18 @@ static char THIS_FILE[] = __FILE__;
 #endif
 
 #define	IDT_REFRESH	301
+
+namespace
+{
+	CPartFile* GetLiveFileDetailPartFile(const CSimpleArray<CObject*>* paFiles)
+	{
+		if (paFiles == NULL || paFiles->GetSize() != 1 || theApp.downloadqueue == NULL)
+			return NULL;
+		CObject* pObject = (*paFiles)[0];
+		const CKnownFile* pKnownCandidate = static_cast<const CKnownFile*>(pObject);
+		return theApp.downloadqueue->IsPartFile(pKnownCandidate) ? static_cast<CPartFile*>(pObject) : NULL;
+	}
+}
 
 IMPLEMENT_DYNAMIC(CFileDetailDialogName, CResizablePage)
 
@@ -51,6 +64,7 @@ END_MESSAGE_MAP()
 CFileDetailDialogName::CFileDetailDialogName()
 	: CResizablePage(CFileDetailDialogName::IDD)
 	, m_paFiles()
+	, m_strSnapshotFileName()
 	, m_timer()
 	, m_aiColWidths()
 	, m_bDataChanged()
@@ -107,7 +121,9 @@ BOOL CFileDetailDialogName::OnSetActive()
 		return FALSE;
 	if (m_bDataChanged) {
 		m_bSelf = true;
-		SetDlgItemText(IDC_FILENAME, static_cast<CPartFile*>((*m_paFiles)[0])->GetFileName());
+		CPartFile* pFile = GetLiveFileDetailPartFile(m_paFiles);
+		CString strFileName(pFile != NULL ? pFile->GetFileName() : CString(m_strSnapshotFileName));
+		SetDlgItemText(IDC_FILENAME, strFileName);
 		m_bSelf = false;
 		RefreshData();
 		m_bDataChanged = false;
@@ -165,7 +181,14 @@ void CFileDetailDialogName::FillSourcenameList()
 		reinterpret_cast<FCtrlItem_Struct*>(m_listFileNames.GetItemData(i))->count = 0;
 
 	// update
-	const CPartFile *file = static_cast<CPartFile*>((*m_paFiles)[0]);
+	const CPartFile *file = GetLiveFileDetailPartFile(m_paFiles);
+	if (file == NULL) {
+		for (int i = m_listFileNames.GetItemCount(); --i >= 0;) {
+			delete reinterpret_cast<FCtrlItem_Struct*>(m_listFileNames.GetItemData(i));
+			m_listFileNames.DeleteItem(i);
+		}
+		return;
+	}
 	for (POSITION pos = file->srclist.GetHeadPosition(); pos != NULL;) {
 		CUpDownClient *cur_src = file->srclist.GetNext(pos);
 		if (cur_src->GetRequestFile() != file || cur_src->GetClientFilename().IsEmpty())
@@ -321,7 +344,9 @@ void CFileDetailDialogName::RenameFile()
 		CString strNewFileName;
 		GetDlgItemText(IDC_FILENAME, strNewFileName);
 		if (!strNewFileName.Trim().IsEmpty() && IsValidEd2kString(strNewFileName)) {
-			CPartFile *file = static_cast<CPartFile*>((*m_paFiles)[0]);
+			CPartFile *file = GetLiveFileDetailPartFile(m_paFiles);
+			if (file == NULL)
+				return;
 			file->SetAutoRenameToMajorityName(false);
 			file->SetFileName(strNewFileName, true);
 			file->UpdateDisplayedInfo();
@@ -333,8 +358,8 @@ void CFileDetailDialogName::RenameFile()
 
 bool CFileDetailDialogName::CanRenameFile() const
 {
-	const CPartFile *file = static_cast<CPartFile*>((*m_paFiles)[0]);
-	return (file->GetStatus() != PS_COMPLETE && file->GetStatus() != PS_COMPLETING);
+	const CPartFile *file = GetLiveFileDetailPartFile(m_paFiles);
+	return file != NULL && file->GetStatus() != PS_COMPLETE && file->GetStatus() != PS_COMPLETING;
 }
 
 void CFileDetailDialogName::OnEnChangeFilename()

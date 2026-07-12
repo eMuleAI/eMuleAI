@@ -112,9 +112,14 @@ static char THIS_FILE[] = __FILE__;
 #define TIMEOUT		SEC2MS(3)
 
 Pinger::Pinger()
-	: us(INVALID_SOCKET)
+	: hICMP(INVALID_HANDLE_VALUE)
+	, us(INVALID_SOCKET)
+	, is(INVALID_SOCKET)
 	, udpStarted()
 {
+	if (theApp.IsNetworkActivityBlockedByBind())
+		return;
+
 	// udp start
 	sockaddr_in sa;		// for UDP and raw sockets
 
@@ -165,7 +170,7 @@ Pinger::~Pinger()
 // UDPing reworked cleanup end <--
 
 	// Close the ICMP handle
-	if (!IcmpCloseHandle(hICMP)) {
+	if (hICMP != INVALID_HANDLE_VALUE && !IcmpCloseHandle(hICMP)) {
 		DWORD nErr = ::GetLastError();
 		CString sErr;
 		sErr.Format(_T("Closing ICMP handle failed, err: %lu "), nErr);
@@ -176,6 +181,13 @@ Pinger::~Pinger()
 
 PingStatus Pinger::Ping(uint32 lAddr, uint32 ttl, bool doLog, bool useUdp)
 {
+	if (theApp.IsNetworkActivityBlockedByBind() || hICMP == INVALID_HANDLE_VALUE) {
+		PingStatus returnValue;
+		returnValue.fDelay = TIMEOUT;
+		returnValue.error = WSAENETDOWN;
+		returnValue.bSuccess = false;
+		return returnValue;
+	}
 	return (useUdp && udpStarted) ? PingUDP(lAddr, ttl, doLog) : PingICMP(lAddr, ttl, doLog);
 }
 
@@ -404,15 +416,15 @@ void Pinger::PIcmpErr(LPCTSTR pszMsg, DWORD nICMPErr)
 
 	bool b = (nICMPErr >= IP_STATUS_BASE && nICMPErr < IP_STATUS_BASE + _countof(aszSendEchoErr));
 	theApp.QueueDebugLogLine(false, _T("%sPinger: %s")
-		, pszMsg ? pszMsg : EMPTY
-		, (LPCTSTR)(b ? aszSendEchoErr[nICMPErr - IP_STATUS_BASE] : GetErrorMessage(nICMPErr, 1)));
+		, pszMsg ? pszMsg : (LPCTSTR)EMPTY
+		, b ? aszSendEchoErr[nICMPErr - IP_STATUS_BASE] : (LPCTSTR)GetErrorMessage(nICMPErr, 1));
 #else
 	DWORD dwSize = 511;
 	CStringW sErr;
 	bool b = (GetIpErrorString(nICMPErr, sErr.GetBuffer(dwSize), &dwSize) == NO_ERROR);
 	sErr.ReleaseBuffer(); //the string has trailing spaces!
 	theApp.QueueDebugLogLine(false, _T("%sPinger: %s")
-		, pszMsg ? pszMsg : EMPTY
+		, pszMsg ? pszMsg : (LPCTSTR)EMPTY
 		, (LPCTSTR)(b ? (CString)sErr.Trim() : GetErrorMessage(nICMPErr, 1)));
 #endif
 }

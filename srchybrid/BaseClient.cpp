@@ -16,6 +16,7 @@
 //along with this program; if not, write to the Free Software
 //Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 #include "stdafx.h"
+#include "eMuleAI/QuicNatSocket.h"
 #ifdef _DEBUG
 #include "DebugHelpers.h"
 #endif
@@ -78,7 +79,55 @@
 static char THIS_FILE[] = __FILE__;
 #endif
 
+namespace
+{
+	const DWORD NAT_TRAVERSAL_RECENT_UTP_FILE_REQUEST_RETRY_WINDOW_MS = SEC2MS(15);
+
+	LONG DecrementRuntimeReferenceCountIfHeld(volatile LONG& rlReferenceCount)
+	{
+		LONG lCurrentRefs = ::InterlockedCompareExchange(&rlReferenceCount, 0, 0);
+		for (;;) {
+			if (lCurrentRefs <= 0) {
+				if (lCurrentRefs < 0)
+					::InterlockedExchange(&rlReferenceCount, 0);
+				return -1;
+			}
+
+			const LONG lRemainingRefs = lCurrentRefs - 1;
+			const LONG lObservedRefs = ::InterlockedCompareExchange(&rlReferenceCount, lRemainingRefs, lCurrentRefs);
+			if (lObservedRefs == lCurrentRefs)
+				return lRemainingRefs;
+
+			lCurrentRefs = lObservedRefs;
+		}
+	}
+}
+
 extern UINT g_uMainThreadId;
+
+namespace
+{
+	bool GuardUpDownClientMutation(LPCTSTR pszEntryPoint)
+	{
+		return theApp.GuardModelMutation(CemuleApp::ModelMutationUpDownClient, pszEntryPoint);
+	}
+
+	void AppendGhostModEvidenceTag(CString& strEvidenceTags, LPCTSTR pszTagName)
+	{
+		if (!strEvidenceTags.IsEmpty())
+			strEvidenceTags += _T(",");
+		strEvidenceTags += pszTagName;
+	}
+
+	bool HasReadableModVersionText(const CString& strModVersion)
+	{
+		for (int i = 0; i < strModVersion.GetLength(); ++i) {
+			if (_istalnum(strModVersion.GetAt(i)))
+				return true;
+		}
+		return false;
+	}
+}
 
 static ClientRuntimeID GetNextClientRuntimeID()
 {
@@ -178,9 +227,17 @@ void CUpDownClient::Init()
 	m_lastPartAsked = _UI16_MAX;
 	m_bAddNextConnect = false;
 	m_dwLastNatStallRecover = 0;
+	m_dwLastOutOfPartReqsResyncTick = 0;
 	m_uNatStallRecoverBurst = 0;
+	m_uNoPendingBlockReaskBurst = 0;
 	m_dwLastBlockReceived = 0;
+	m_dwHashsetRequestSent = 0;
 	m_dwLastNatKeepAliveSent = 0;
+	m_pNatTraversalSecureIdentLayer = NULL;
+	m_pLastNatTraversalFileRequestLayer = NULL;
+	m_dwLastNatTraversalFileRequestTick = 0;
+	md4clr(m_achLastNatTraversalFileRequestHash);
+	m_bNatFileRequestCloseRetryUsed = false;
 
 	m_cFailed = 0; // holds the failed connection attempts
 
@@ -189,6 +246,7 @@ void CUpDownClient::Init()
 	m_tSharedFilesLastQueriedTime = 0;
 	m_uSharedFilesCount = 0;
 	m_uRuntimeID = GetNextClientRuntimeID();
+	m_lRuntimeGeneration = 1;
 	m_lRuntimeReferenceCount = 0;
 	m_lDeletePending = 0;
 	m_lDeleteFinalized = 0;
@@ -260,12 +318,14 @@ void CUpDownClient::Init()
 	m_nServingBuddyPort = 0;
 
 	m_LastCallbackRequesterIP = CAddress();
+	m_bAllowAnyBindOnNextServerCallbackConnect = false;
 
 	m_byKadVersion = 0;
 	m_cCaptchasSent = 0;
 
 	SetLastBuddyPingPongTime();
 	SetServingBuddyID(NULL);
+	SetEServerBuddyKadID(NULL);
 
 	// eServer Buddy initialization
 	m_bSupportsEServerBuddy = false;
@@ -278,7 +338,15 @@ void CUpDownClient::Init()
 	m_dwEServerBuddyFirstRequest = 0;
 	m_nEServerRelayRequestCount = 0;
 	m_dwEServerRelayFirstRequest = 0;
+	m_nEServerPeerInfoCount = 0;
+	m_dwEServerPeerInfoFirstRequest = 0;
+	m_dwLastEServerRelayRequestSent = 0;
+	m_dwLastEServerRelayRequestTargetLowID = 0;
+	m_dwLastEServerRelayRequestBuddyIP = 0;
+	md4clr(m_achLastEServerRelayRequestFileHash);
 	m_pPendingEServerRelayTarget = NULL;
+	m_dwPendingEServerRelayTargetLowID = 0;
+	md4clr(m_achPendingEServerRelayFileHash);
 	m_dwEServerExtPortProbeToken = 0;
 	m_dwEServerExtPortProbeSent = 0;
 	m_nObservedExternalUdpPort = 0;
@@ -298,6 +366,9 @@ void CUpDownClient::Init()
 	m_eConnectingState = CCS_NONE;
 	m_uNattRetryLeft = 0;
 	m_dwNattNextRetryTick = 0;
+	m_dwNatTRendezvousStartTick = 0;
+	m_uNatTRendezvousAttempts = 0;
+	md4clr(m_achNatTRendezvousFileHash);
 	m_dwUtpConnectionStartTick = 0;
 	m_dwUtpQueuedPacketsTime = 0;
 	m_bUtpWritable = false;
@@ -312,9 +383,21 @@ void CUpDownClient::Init()
 	m_bAwaitingDirectCallback = false;
 	m_bAllowRendezvousAfterCallback = false;
 	m_dwDirectCallbackAttemptTick = 0;
+	m_dwIncomingServedBuddyRequestTick = 0;
 	m_bEServerRelayNatTGuardActive = false;
 	m_dwEServerRelayNatTWindowStart = 0;
 	m_uEServerRelayTransientErrors = 0;
+	m_bDirectNatTraversalCaps = false;
+	m_byDirectNatTraversalOptions = 0;
+	m_dwDirectNatTraversalCapsTick = 0;
+	m_dwDirectNatTraversalCapsProbeTick = 0;
+	m_DirectNatTraversalCapsProbeIP = CAddress();
+	m_uDirectNatTraversalCapsProbePort = 0;
+	m_bDirectNatTraversalCapsRefreshRequired = false;
+	m_bNatRendezvousUtpTransportPinned = false;
+	m_NatTraversalQuicFailedIP = CAddress();
+	m_uNatTraversalQuicFailedPort = 0;
+	m_dwNatTraversalQuicFailedTick = 0;
 	ResetUtpFlowControl();
 	ClearUtpQueuedPackets();
 
@@ -341,7 +424,9 @@ void CUpDownClient::Init()
 	m_dwDownStartTime = 0;
 	m_nLastBlockOffset = _UI64_MAX;
 	m_dwLastBlockReceived = 0;
+	m_dwLastOutOfPartReqsResyncTick = 0;
 	m_uNatStallRecoverBurst = 0;
+	m_uNoPendingBlockReaskBurst = 0;
 	m_nTotalUDPPackets = 0;
 	m_nFailedUDPPackets = 0;
 	m_nRemoteQueueRank = 0;
@@ -357,6 +442,11 @@ void CUpDownClient::Init()
 
 	m_nUpDatarate = 0;
 	m_nSumForAvgUpDataRate = 0;
+	m_dwLastHighBandwidthSlowUploadTick = 0;
+	m_dwLastHighBandwidthPayloadTick = 0;
+	m_dwHighBandwidthSlowUploadCooldownUntil = 0;
+	m_eHighBandwidthUploadCooldownReason = HBUCR_None;
+	m_uLastHighBandwidthPayloadUp = 0;
 
 	m_nDownDatarate = 0;
 	m_nDownDataRateMS = 0;
@@ -420,6 +510,8 @@ void CUpDownClient::Init()
 	tFirstSeen = time(NULL);
 	m_bAntiUploaderCaseThree = false;
 	m_bUploaderPunishmentPreventionActive = false; // => Uploader Punishment Prevention for Punish Donkeys without SUI - sFrQlXeRt
+	m_bUploaderPunishmentPrevented = false;
+	m_bFriendPunishmentPrevented = false;
 	m_faileddownloads = 0;
 	uhashsize = 16;		   // New United Community Detection [Xman] - Stulle
 	m_bUnitedComm = false; // New United Community Detection [Xman] - Stulle
@@ -430,7 +522,7 @@ void CUpDownClient::Init()
 	m_uTCPErrorCounter = 0;
 	m_dwTCPErrorFlooderIntervalStart = ::GetTickCount();
 
-	m_structClientGeolocationData = theApp.geolite2->QueryGeolocationData(m_UserIP);
+	m_structClientGeolocationData = theApp.ipgeolocation->QueryGeolocationData(m_UserIP);
 
 	m_abyIncPartStatus = NULL;
 	m_uIncompletepartVer = 0;
@@ -457,12 +549,10 @@ bool CUpDownClient::TryAcquireRuntimeReference(bool* pbNeedsFinalize)
 	if (::InterlockedCompareExchange(&m_lDeletePending, 0, 0) == 0)
 		return true;
 
-	const LONG lRemainingRefs = ::InterlockedDecrement(&m_lRuntimeReferenceCount);
+	const LONG lRemainingRefs = DecrementRuntimeReferenceCountIfHeld(m_lRuntimeReferenceCount);
 	ASSERT(lRemainingRefs >= 0);
-	if (lRemainingRefs < 0) {
-		::InterlockedExchange(&m_lRuntimeReferenceCount, 0);
+	if (lRemainingRefs < 0)
 		return false;
-	}
 
 	if (lRemainingRefs == 0 && pbNeedsFinalize != NULL)
 		*pbNeedsFinalize = true;
@@ -482,12 +572,10 @@ bool CUpDownClient::TryAcquirePendingDeleteFinalizeHold()
 	if (::InterlockedCompareExchange(&m_lDeletePending, 0, 0) != 0 && ::InterlockedCompareExchange(&m_lDeleteFinalized, 0, 0) == 0)
 		return true;
 
-	const LONG lRemainingRefs = ::InterlockedDecrement(&m_lRuntimeReferenceCount);
+	const LONG lRemainingRefs = DecrementRuntimeReferenceCountIfHeld(m_lRuntimeReferenceCount);
 	ASSERT(lRemainingRefs >= 0);
-	if (lRemainingRefs < 0) {
-		::InterlockedExchange(&m_lRuntimeReferenceCount, 0);
+	if (lRemainingRefs < 0)
 		return false;
-	}
 
 	return false;
 }
@@ -512,18 +600,23 @@ void CUpDownClient::TryFinalizePendingDelete()
 		return;
 	if (::InterlockedCompareExchange(&m_lRuntimeReferenceCount, 0, 0) != 0)
 		return;
-	if (GetCurrentThreadId() != g_uMainThreadId && !theApp.IsClosing() && theApp.emuledlg != NULL) {
-		const HWND hMainWnd = theApp.emuledlg->GetSafeHwnd();
-		if (hMainWnd != NULL && ::IsWindow(hMainWnd)) {
-			if (theApp.emuledlg->PostMessage(UM_FINALIZE_DELETE_PENDING_CLIENT, (WPARAM)m_uRuntimeID, 0))
-				return;
+	if (GetCurrentThreadId() != g_uMainThreadId) {
+		if (theApp.emuledlg != NULL) {
+			const HWND hMainWnd = theApp.emuledlg->GetSafeHwnd();
+			if (hMainWnd != NULL && ::IsWindow(hMainWnd)) {
+				if (theApp.emuledlg->PostMessage(UM_FINALIZE_DELETE_PENDING_CLIENT, (WPARAM)m_uRuntimeID, 0))
+					return;
 
-			DWORD_PTR dwMessageResult = 0;
-			if (::SendMessageTimeout(hMainWnd, UM_FINALIZE_DELETE_PENDING_CLIENT, (WPARAM)m_uRuntimeID, 0, SMTO_BLOCK | SMTO_ABORTIFHUNG, 5000, &dwMessageResult) != 0)
-				return;
+				DWORD_PTR dwMessageResult = 0;
+				if (::SendMessageTimeout(hMainWnd, UM_FINALIZE_DELETE_PENDING_CLIENT, (WPARAM)m_uRuntimeID, 0, SMTO_BLOCK | SMTO_ABORTIFHUNG, 5000, &dwMessageResult) != 0)
+					return;
 
-			return;
+				return;
+			}
 		}
+
+		AddDebugLogLine(DLP_LOW, false, _T("Deferring pending client delete on non-UI thread. runtimeID=%u closing=%u\n"), m_uRuntimeID, theApp.IsClosing() ? 1U : 0U);
+		return;
 	}
 	if (::InterlockedCompareExchange(&m_lDeleteFinalized, 1, 0) != 0)
 		return;
@@ -536,10 +629,14 @@ void CUpDownClient::TryFinalizePendingDelete()
 
 void CUpDownClient::ReleaseRuntimeReference()
 {
-	const LONG lRemainingRefs = ::InterlockedDecrement(&m_lRuntimeReferenceCount);
-	ASSERT(lRemainingRefs >= 0);
+	const LONG lRemainingRefs = DecrementRuntimeReferenceCountIfHeld(m_lRuntimeReferenceCount);
 	if (lRemainingRefs < 0) {
-		::InterlockedExchange(&m_lRuntimeReferenceCount, 0);
+		static volatile LONG s_lUnmatchedRuntimeReferenceReleaseLogCount = 0;
+		const LONG lLogCount = ::InterlockedIncrement(&s_lUnmatchedRuntimeReferenceReleaseLogCount);
+		if (lLogCount <= 16) {
+			AddDebugLogLine(DLP_LOW, false, _T("Ignoring unmatched client runtime reference release. runtimeID=%u deletePending=%ld deleteFinalized=%ld"),
+				m_uRuntimeID, ::InterlockedCompareExchange(&m_lDeletePending, 0, 0), ::InterlockedCompareExchange(&m_lDeleteFinalized, 0, 0));
+		}
 		return;
 	}
 
@@ -547,10 +644,18 @@ void CUpDownClient::ReleaseRuntimeReference()
 		TryFinalizePendingDelete();
 }
 
+void CUpDownClient::InvalidateRuntimeGeneration()
+{
+	const LONG lGeneration = ::InterlockedIncrement(&m_lRuntimeGeneration);
+	if (lGeneration != 0)
+		theApp.QueueClientRowUpdateEvent(m_uRuntimeID, lGeneration, _T("client-runtime-invalidated"));
+}
+
 void CUpDownClient::SafeDelete()
 {
 	if (::InterlockedCompareExchange(&m_lDeletePending, 1, 0) != 0)
 		return;
+	InvalidateRuntimeGeneration();
 	TryFinalizePendingDelete();
 }
 
@@ -640,6 +745,10 @@ void CUpDownClient::ClearHelloProperties()
 	m_fSupportsCaptcha = 0;
 	m_fDirectUDPCallback = 0;
 	m_fSupportsFileIdent = 0;
+	m_bSupportsEServerBuddy = false;
+	m_bHasEServerBuddySlot = false;
+	m_bSupportsEServerBuddyExtUdpPort = false;
+	m_bSupportsEServerBuddyMagicProof = false;
 	m_strModVersion.Empty();
 	m_uIncompletepartVer = 0;
 }
@@ -693,9 +802,9 @@ bool CUpDownClient::ProcessHelloAnswer(const uchar *pachPacket, uint32 nSize)
 		// - uTP packet loss and retransmission mechanisms
 		// - Connection establishment through intermediary peers
 		// Therefore, bypass aggressive check entirely for NAT-T/uTP connections
-		bool bHasUtpLayer = (socket && socket->HaveUtpLayer());
+		bool bHasNatTraversalLayer = (socket && socket->HaveNatTraversalLayer());
 		bool bHasKadPort = (GetKadPort() != 0);
-		bool bIsNatTraversalConnection = bHasUtpLayer || bHasKadPort;
+		bool bIsNatTraversalConnection = bHasNatTraversalLayer || bHasKadPort;
 		
 
 		
@@ -731,13 +840,8 @@ bool CUpDownClient::ProcessHelloAnswer(const uchar *pachPacket, uint32 nSize)
 		ClearPendingStartUploadReq();
 	}
 
-	// After hello is complete, trigger initial ED2K file request if we have a request context.
-	// This ensures uTP rendezvous flows do not stall before ED2K phase.
-	if (m_reqfile != NULL && GetDownloadState() == DS_CONNECTED) {
-		if (thePrefs.GetLogNatTraversalEvents())
-			DebugLog(_T("[NatTraversal] Hello complete -> calling SendFileRequest for %s via %s"), (LPCTSTR)EscPercent(DbgGetClientInfo()), (socket && socket->HaveUtpLayer()) ? _T("uTP") : _T("TCP"));
-		SendFileRequest();
-	}
+	// CClientReqSocket calls ConnectionEstablished() after OP_HELLOANSWER.
+	// Keep the initial file request centralized there to avoid duplicate OP_REQUESTFILENAME/OP_STARTUPLOADREQ on QUIC NAT-T.
 	return bIsMule;
 }
 bool CUpDownClient::ProcessHelloTypePacket(CSafeMemFile &data)
@@ -765,6 +869,7 @@ bool CUpDownClient::ProcessHelloTypePacket(CSafeMemFile &data)
 
 	bool m_bUnofficialOpcodes = false; //  Will be used to detect ghost mod
 	CString m_strUnknownOpcode; //Xman Anti-Leecher
+	CString m_strGhostModEvidenceTags;
 	bool m_bWrongTagOrder = false; //Xman Anti-Leecher
 	uint32 m_uHelloTagOrder = 1; //Xman Anti-Leecher
 	bool m_bWasUDPPortSent = false; //zz_fly Fake Shareaza Detection
@@ -905,7 +1010,8 @@ bool CUpDownClient::ProcessHelloTypePacket(CSafeMemFile &data)
 			}
 			break;
 		case CT_EMULE_SERVINGBUDDYID:
-			m_bUnofficialOpcodes = true; // Will be used to detect ghost mod
+			m_bUnofficialOpcodes = true; // Will be used to detect ghost mod if no mod version is sent.
+			AppendGhostModEvidenceTag(m_strGhostModEvidenceTags, _T("CT_EMULE_SERVINGBUDDYID"));
 			if (temptag.IsHash())
 			{
 				SetServingBuddyID(temptag.GetHash());
@@ -1020,7 +1126,8 @@ bool CUpDownClient::ProcessHelloTypePacket(CSafeMemFile &data)
 			}
 			break;
 		case ET_INCOMPLETEPARTS:
-			m_bUnofficialOpcodes = true; //  Will be used to detect ghost mod
+			m_bUnofficialOpcodes = true; // Will be used to detect ghost mod if no mod version is sent.
+			AppendGhostModEvidenceTag(m_strGhostModEvidenceTags, _T("ET_INCOMPLETEPARTS"));
 			if (temptag.IsInt()) {
 				m_uIncompletepartVer = (uint8)temptag.GetInt();
 				if (bDbgInfo)
@@ -1077,20 +1184,20 @@ bool CUpDownClient::ProcessHelloTypePacket(CSafeMemFile &data)
 			}
 			break;
 		case CT_MOD_MISCOPTIONS:
-			m_bUnofficialOpcodes = true; //  Will be used to detect ghost mod
+			m_bUnofficialOpcodes = true; // Will be used to detect ghost mod if no mod version is sent.
+			AppendGhostModEvidenceTag(m_strGhostModEvidenceTags, _T("CT_MOD_MISCOPTIONS"));
 			if (temptag.IsInt()) {
 				m_ModMiscOptions.Bits = temptag.GetInt();
 				if (bDbgInfo)
-					m_strHelloInfo.AppendFormat(L"\n  IPv6=%u  NatTraversal=%u  ExtendedXS=%u", m_ModMiscOptions.Fields.SupportsIPv6, m_ModMiscOptions.Fields.SupportsNatTraversal, m_ModMiscOptions.Fields.SupportsExtendedXS);
-				if (thePrefs.GetLogExtendedSXEvents && SupportsExtendedSourceExchange() && m_ModMiscOptions.Fields.SupportsExtendedXS)
+					m_strHelloInfo.AppendFormat(L"\n  IPv6=%u  NatTraversalUTP=%u  NatTraversalQUIC=%u  ExtendedXS=%u", m_ModMiscOptions.Fields.SupportsIPv6, m_ModMiscOptions.Fields.SupportsNatTraversal, m_ModMiscOptions.Fields.SupportsNatTraversalQuic, m_ModMiscOptions.Fields.SupportsExtendedXS);
+				if (thePrefs.GetLogExtendedSXEvents() && SupportsExtendedSourceExchange() && m_ModMiscOptions.Fields.SupportsExtendedXS)
 					DebugLog(_T("[ExtendedSX] ProcessHelloTypePacket: Client supports Extended Source Exchange, %s"), (LPCTSTR)DbgGetClientInfo());
-				if (thePrefs.GetLogNatTraversalEvents() && GetNatTraversalSupport() && m_ModMiscOptions.Fields.SupportsNatTraversal)
-					DebugLog(_T("[NatTraversal] ProcessHelloTypePacket: Client supports NatTraversal, %s"), (LPCTSTR)EscPercent(DbgGetClientInfo()));
+				if (thePrefs.GetLogNatTraversalEvents() && HasAnyNatTraversalSupport())
+					DebugLog(_T("[NatTraversal] ProcessHelloTypePacket: Client supports NatTraversal uTP=%u QUIC=%u, %s"), m_ModMiscOptions.Fields.SupportsNatTraversal, m_ModMiscOptions.Fields.SupportsNatTraversalQuic, (LPCTSTR)EscPercent(DbgGetClientInfo()));
 			} else if (bDbgInfo)
 				m_strHelloInfo.AppendFormat(_T("\n  ***UnkType=%s"), temptag.GetFullInfo());
 			break;
 		// RESERVED TAGS FOR THE FUTURE RELEASES OF THIS MOD -->
-		case CT_MOD_RESERVED_1:
 		case CT_MOD_RESERVED_2:
 		case CT_MOD_RESERVED_3:
 		case CT_MOD_RESERVED_4:
@@ -1109,7 +1216,8 @@ bool CUpDownClient::ProcessHelloTypePacket(CSafeMemFile &data)
 			m_bUnofficialOpcodes = true; //  Will be used to detect ghost mod
 			break;
 		case CT_ESERVER_BUDDY_FLAGS:
-			m_bUnofficialOpcodes = true;
+			m_bUnofficialOpcodes = true; // Will be used to detect ghost mod if no mod version is sent.
+			AppendGhostModEvidenceTag(m_strGhostModEvidenceTags, _T("CT_ESERVER_BUDDY_FLAGS"));
 			if (temptag.IsInt()) {
 				uint8 byFlags = static_cast<uint8>(temptag.GetInt());
 				m_bSupportsEServerBuddy = (byFlags & 0x01) != 0;
@@ -1119,6 +1227,18 @@ bool CUpDownClient::ProcessHelloTypePacket(CSafeMemFile &data)
 				if (bDbgInfo)
 					m_strHelloInfo.AppendFormat(_T("\n  EServerBuddy=%u Slot=%u"), m_bSupportsEServerBuddy ? 1 : 0, m_bHasEServerBuddySlot ? 1 : 0);
 			}
+			break;
+		case CT_ESERVER_BUDDY_KADID:
+			m_bUnofficialOpcodes = true; // Will be used to detect ghost mod if no mod version is sent.
+			AppendGhostModEvidenceTag(m_strGhostModEvidenceTags, _T("CT_ESERVER_BUDDY_KADID"));
+			if (temptag.IsHash()) {
+				SetEServerBuddyKadID(temptag.GetHash());
+				if (thePrefs.GetLogNatTraversalEvents())
+					DebugLog(_T("[eServerBuddy][KadBridge] Received peer KadID for eServer buddy bridge: %s from %s"), (LPCTSTR)md4str(temptag.GetHash()), (LPCTSTR)EscPercent(DbgGetClientInfo()));
+				if (bDbgInfo)
+					m_strHelloInfo.AppendFormat(_T("\n  EServerBuddyKadID"));
+			} else if (bDbgInfo)
+				m_strHelloInfo.AppendFormat(_T("\n  ***UnkType=%s"), temptag.GetFullInfo());
 			break;
 		case  CT_EMULECOMPAT_OPTIONS1: // This tag is used by official aMule, so it is safe.
 			break;
@@ -1179,7 +1299,7 @@ bool CUpDownClient::ProcessHelloTypePacket(CSafeMemFile &data)
 	SetIP(IP);
 
 	if (oldIP != m_UserIP)
-		m_structClientGeolocationData = theApp.geolite2->QueryGeolocationData(m_UserIP);
+		m_structClientGeolocationData = theApp.ipgeolocation->QueryGeolocationData(m_UserIP);
 
 	if (thePrefs.GetAddServersFromClients() && m_dwServerIP && m_nServerPort) {
 		CServer *addsrv = new CServer(m_nServerPort, ipstr(m_dwServerIP));
@@ -1252,11 +1372,8 @@ bool CUpDownClient::ProcessHelloTypePacket(CSafeMemFile &data)
 		md4cpy(GetFriend()->m_abyUserhash, m_achUserHash);
 
 	// m_Friend is set at this point. So we need to cancel any punishment made till now if client is a friend and IsDontPunishFriends is active.
-	if ((m_uBadClientCategory || m_uPunishment != P_NOPUNISHMENT) && thePrefs.IsDontPunishFriends() && IsFriend()) {
-		CString m_strReason;
-		m_strReason.Format(_T("<Friend Punishment Prevention> - Client %s"), DbgGetClientInfo());
-		theApp.shield->SetPunishment(this, m_strReason, PR_NOTBADCLIENT);
-	}
+	if ((m_uBadClientCategory || m_uPunishment != P_NOPUNISHMENT) && thePrefs.IsDontPunishFriends() && IsFriend())
+		theApp.shield->SetPunishment(this, EMPTY, PR_NOTBADCLIENT);
 
 	// check for known major gpl breaker
 	CString strBuffer(m_pszUsername);
@@ -1293,7 +1410,7 @@ bool CUpDownClient::ProcessHelloTypePacket(CSafeMemFile &data)
 	else
 		m_bUnitedComm = false;
 
-	if (theApp.shield->UploaderPunishmentPreventionActive(this) || (thePrefs.IsDontPunishFriends() && IsFriend())) // => Don't ban friends - sFrQlXeRt
+	if (thePrefs.IsDontPunishFriends() && IsFriend()) // => Don't ban friends - sFrQlXeRt
 		return bIsMule;
 
 	//Bad Shareaza detection [zz_fly]: Shareaza like client send UDPPort tag AFTER Misc Options tag. So check if UDP sent after Misc Options tag but pretends to be a mule?
@@ -1331,9 +1448,17 @@ bool CUpDownClient::ProcessHelloTypePacket(CSafeMemFile &data)
 			theApp.shield->SetPunishment(this, GetResString(_T("PUNISHMENT_REASON_EMCRYPT")), PR_EMCRYPT);
 	}
 
-	if (thePrefs.IsDetectGhostMod() && m_strModVersion.IsEmpty() &&	((m_bUnofficialOpcodes == true && GetClientSoft() != SO_LPHANT) // IsHarderPunishment isn't necessary here since the cost is low
+	const bool bHasReadableModVersion = HasReadableModVersionText(m_strModVersion);
+	if (thePrefs.IsDetectGhostMod() && !bHasReadableModVersion &&	((m_bUnofficialOpcodes == true && GetClientSoft() != SO_LPHANT) // IsHarderPunishment isn't necessary here since the cost is low
 		|| ((m_strUnknownOpcode.IsEmpty() == false || m_byAcceptCommentVer > 1) && m_clientSoft == SO_EMULE && m_nClientVersion <= MAKE_CLIENT_VERSION(CemuleApp::m_nVersionMjr, CemuleApp::m_nVersionMin, CemuleApp::m_nVersionUpd)))) {
 		m_strPunishmentReason = GetResString(_T("PUNISHMENT_REASON_GHOST_MOD"));
+		if (!m_strModVersion.IsEmpty())
+			AppendGhostModEvidenceTag(m_strGhostModEvidenceTags, _T("UnreadableModVersion"));
+		if (!m_strGhostModEvidenceTags.IsEmpty()) {
+			m_strPunishmentReason += _T(" [");
+			m_strPunishmentReason += m_strGhostModEvidenceTags;
+			m_strPunishmentReason += _T("]");
+		}
 		if (m_strUnknownOpcode.IsEmpty() == false)
 			m_strPunishmentReason += _T(" ") + m_strUnknownOpcode;
 		theApp.shield->SetPunishment(this, m_strPunishmentReason, PR_GHOSTMOD);
@@ -1376,10 +1501,7 @@ void CUpDownClient::SendMuleInfoPacket(bool bAnswer)
 	CSafeMemFile data(128);
 	data.WriteUInt8((uint8)theApp.m_uCurVersionShort);
 	data.WriteUInt8(EMULE_PROTOCOL);
-	const bool bSendModVersion = m_strModVersion.GetLength() || m_pszUsername == NULL; //Don't send MOD_VERSION to client that don't support it to reduce overhead
-
-	const bool bSendICS = (bSendModVersion || GetIncompletePartVersion());
-	data.WriteUInt32(7 + bSendModVersion + bSendICS); // Number of tags
+	data.WriteUInt32(9); // Number of tags
 	CTag tag(ET_COMPRESSION, 1);
 	tag.WriteTagToFile(data);
 	CTag tag2(ET_UDPVER, 4);
@@ -1399,15 +1521,11 @@ void CUpDownClient::SendMuleInfoPacket(bool bAnswer)
 	CTag tag7(ET_FEATURES, dwTagValue);
 	tag7.WriteTagToFile(data);
 
-	if (bSendModVersion){
-		CTag tag8(ET_MOD_VERSION, MOD_VERSION);
-		tag8.WriteTagToFile(data);
-	}
+	CTag tag8(ET_MOD_VERSION, MOD_VERSION);
+	tag8.WriteTagToFile(data);
 
-	if (bSendICS) {
-		CTag tag9(ET_INCOMPLETEPARTS, 1);
-		tag9.WriteTagToFile(data);
-	}
+	CTag tag9(ET_INCOMPLETEPARTS, 1);
+	tag9.WriteTagToFile(data);
 
 	Packet *packet = new Packet(data, OP_EMULEPROT);
 	packet->opcode = bAnswer ? OP_EMULEINFOANSWER : OP_EMULEINFO;
@@ -1424,6 +1542,7 @@ void CUpDownClient::ProcessMuleInfoPacket(const uchar *pachPacket, uint32 nSize)
 	m_strMuleInfo.Empty();
 	bool m_bUnOfficialOpcodes = false;
 	CString m_strUnknownOpcode;
+	CString m_strGhostModEvidenceTags;
 	CString m_strPunishmentReason;
 	CSafeMemFile data(pachPacket, nSize);
 	m_byCompatibleClient = 0;
@@ -1590,6 +1709,7 @@ void CUpDownClient::ProcessMuleInfoPacket(const uchar *pachPacket, uint32 nSize)
 			break;
 		case ET_INCOMPLETEPARTS:
 			m_bUnOfficialOpcodes = true;
+			AppendGhostModEvidenceTag(m_strGhostModEvidenceTags, _T("ET_INCOMPLETEPARTS"));
 			if (temptag.IsInt()) {
 				m_uIncompletepartVer = (uint8)temptag.GetInt();
 				if (bDbgInfo)
@@ -1624,7 +1744,7 @@ void CUpDownClient::ProcessMuleInfoPacket(const uchar *pachPacket, uint32 nSize)
 	if (thePrefs.GetVerbose() && GetServerIP() == INADDR_NONE)
 		AddDebugLogLine(false, _T("Received invalid server IP %s from %s"), (LPCTSTR)ipstr(GetServerIP()), (LPCTSTR)EscPercent(DbgGetClientInfo()));
 
-	if (theApp.shield->UploaderPunishmentPreventionActive(this) || (thePrefs.IsDontPunishFriends() && IsFriend())) // => Don't ban friends - sFrQlXeRt
+	if (thePrefs.IsDontPunishFriends() && IsFriend()) // => Don't ban friends - sFrQlXeRt
 		return;
 
 	if (thePrefs.IsDetectWrongTag() && (m_clientSoft == SO_EMULE || (m_clientSoft == SO_XMULE && m_byCompatibleClient != SO_XMULE)) && data.GetPosition() < data.GetLength()) { // IsHarderPunishment isn't necessary here since the cost is low
@@ -1635,10 +1755,18 @@ void CUpDownClient::ProcessMuleInfoPacket(const uchar *pachPacket, uint32 nSize)
 
 	theApp.shield->CheckClient(this); //test for mods name (older clients send it with the MuleInfoPacket)
 
-	if (thePrefs.IsDetectGhostMod() && m_strModVersion.IsEmpty() &&	((m_bUnOfficialOpcodes == true && GetClientSoft() != SO_LPHANT) // IsHarderPunishment isn't necessary here since the cost is low
+	const bool bHasReadableModVersion = HasReadableModVersionText(m_strModVersion);
+	if (thePrefs.IsDetectGhostMod() && !bHasReadableModVersion &&	((m_bUnOfficialOpcodes == true && GetClientSoft() != SO_LPHANT) // IsHarderPunishment isn't necessary here since the cost is low
 		|| (m_strUnknownOpcode.IsEmpty() == false && m_clientSoft == SO_EMULE && m_nClientVersion <= MAKE_CLIENT_VERSION(CemuleApp::m_nVersionMjr, CemuleApp::m_nVersionMin, CemuleApp::m_nVersionUpd))))
 	{
 		m_strPunishmentReason = GetResString(_T("PUNISHMENT_REASON_GHOST_MOD"));
+		if (!m_strModVersion.IsEmpty())
+			AppendGhostModEvidenceTag(m_strGhostModEvidenceTags, _T("UnreadableModVersion"));
+		if (!m_strGhostModEvidenceTags.IsEmpty()) {
+			m_strPunishmentReason += _T(" [");
+			m_strPunishmentReason += m_strGhostModEvidenceTags;
+			m_strPunishmentReason += _T("]");
+		}
 		if (m_strUnknownOpcode.IsEmpty() == false)
 			m_strPunishmentReason += _T(" ") + m_strUnknownOpcode;
 		theApp.shield->SetPunishment(this, m_strPunishmentReason, PR_GHOSTMOD);
@@ -1654,7 +1782,7 @@ void CUpDownClient::SendHelloAnswer()
 
 	if (thePrefs.GetLogNatTraversalEvents()) {
 		DebugLog(_T("[NatTraversal][HelloAnswer] SendHelloAnswer invoked (uTP=%d, force=%d, queued=%d), %s"),
-			(socket && socket->HaveUtpLayer()) ? 1 : 0,
+			(socket && socket->HaveNatTraversalLayer()) ? 1 : 0,
 			theApp.serverconnect->AwaitingTestFromIP(GetConnectIP().ToUInt32(false)) ? 1 : 0,
 			IsUtpHelloQueued() ? 1 : 0,
 			(LPCTSTR)EscPercent(DbgGetClientInfo()));
@@ -1672,24 +1800,24 @@ void CUpDownClient::SendHelloAnswer()
 	AddDebugLogLine(DLP_LOW, false, _T("[NatTraversal][Hello] Sending OP_HELLOANSWER to %s"), (LPCTSTR)EscPercent(DbgGetClientInfo()));
 	bool bForceSend = theApp.serverconnect->AwaitingTestFromIP(GetConnectIP().ToUInt32(false));
 
-	if (socket->HaveUtpLayer() && !bForceSend) {
+	if (socket->HaveNatTraversalLayer() && !bForceSend) {
 		if (socket->IsConnected()) {
 			SetUtpHelloQueued(false);
 			m_dwUtpQueuedPacketsTime = 0;
 			if (thePrefs.GetLogNatTraversalEvents())
-				DebugLog(_T("[NatTraversal] Sending OP_HELLOANSWER immediately on connected uTP socket, %s"), (LPCTSTR)EscPercent(DbgGetClientInfo()));
+				DebugLog(_T("[NatTraversal] Sending OP_HELLOANSWER immediately on connected NAT-T socket, %s"), (LPCTSTR)EscPercent(DbgGetClientInfo()));
 			SendPacket(packet, true);
 			if (theApp.clientudp)
 				theApp.clientudp->PumpUtpOnce();
 		} else {
 			// Keep HelloAnswerPending untouched here.
 			// It tracks the OP_HELLO we initiated and must only clear when OP_HELLOANSWER is received.
-			// Queue HelloAnswer only while the uTP socket is not connected yet.
+			// Queue HelloAnswer only while the NAT-T socket is not connected yet.
 			m_WaitingPackets_list.AddTail(packet);
 			m_dwUtpQueuedPacketsTime = ::GetTickCount();
 			SetUtpHelloQueued(true);
 			if (thePrefs.GetLogNatTraversalEvents())
-				DebugLog(_T("[NatTraversal] Queued OP_HELLOANSWER for deferred uTP flush, %s"), (LPCTSTR)EscPercent(DbgGetClientInfo()));
+				DebugLog(_T("[NatTraversal] Queued OP_HELLOANSWER for deferred NAT-T flush, %s"), (LPCTSTR)EscPercent(DbgGetClientInfo()));
 			return;
 		}
 	} else {
@@ -1758,7 +1886,7 @@ void CUpDownClient::SendHelloTypePacket(CSafeMemFile &data)
 	//		 3. Since ID is stored in 32 bit, there is no LowIDv6 for LowID IPv6 users. If there's no IPv4 but the IPv6 isn't firewalled, we'll set the clients ID as 0xFFFFFFFF.
 
 	uint32 clientid = theApp.GetID();
-	if (clientid == 0 && socket && socket->HaveUtpLayer())
+	if (clientid == 0 && socket && socket->HaveNatTraversalLayer())
 		// We've already setup UTP socket since we're firewalled. Now we must send a ID != 0, otherwise the remote client would think we have High ID.
 		// GetID didn't return a ed2k ID. 1 is the KAD low ID id.
 		clientid = 1; 
@@ -1768,28 +1896,24 @@ void CUpDownClient::SendHelloTypePacket(CSafeMemFile &data)
 	data.WriteUInt32(clientid);
 	data.WriteUInt16(thePrefs.GetPort());
 
-	// Base tags: 6 standard + 1 CT_MOD_IP (always) + 1 CT_ESERVER_BUDDY_FLAGS (always) = 8
-	uint32 tagcount = 8;
+	// Base tags: 6 standard + CT_MOD_YOUR_IP + CT_ESERVER_BUDDY_FLAGS + CT_MOD_VERSION + ET_INCOMPLETEPARTS + CT_MOD_MISCOPTIONS = 11
+	uint32 tagcount = 11;
 
-	//Don't send MOD_VERSION to client that don't support it to reduce overhead. Also don't send it to clients IP/Hash/Upload banned.
-	const bool bSendModVersion = !IsBadClient() || m_uPunishment > P_UPLOADBAN;
-	if (bSendModVersion)
-		tagcount++;
-
-	const bool bSendICS = (bSendModVersion || GetIncompletePartVersion()); 
-	if (bSendICS) // Send ICS tag only if Mod Version tag exists. This will protect us from being banned because of unknown tags by some clients.
-		tagcount++;
-	
 	if (theApp.clientlist->GetServingBuddy() && theApp.IsFirewalled())
 		tagcount += 3;
 
-	const bool bSendMiscHelloTag = bSendModVersion || SupportsExtendedSourceExchange() || GetNatTraversalSupport() || SupportsIPv6();
-	if (bSendMiscHelloTag)
-		++tagcount;
-
 	if (!theApp.GetPublicIPv6().IsNull())
-		tagcount += 1;	// CT_MOD_IP_V6 for IPv6
+		tagcount += 1;	// CT_MOD_IP_V6
 
+	bool bSendEServerBuddyKadID = false;
+	Kademlia::CUInt128 uMyEServerBuddyKadID;
+	if (SupportsEServerBuddy() && Kademlia::CKademlia::IsRunning()) {
+		uMyEServerBuddyKadID = Kademlia::CKademlia::GetPrefs()->GetKadID();
+		if (uMyEServerBuddyKadID != 0) {
+			bSendEServerBuddyKadID = true;
+			tagcount += 1;
+		}
+	}
 
 	data.WriteUInt32(tagcount);
 
@@ -1807,7 +1931,7 @@ void CUpDownClient::SendHelloTypePacket(CSafeMemFile &data)
 	}
 	else if (!thePrefs.IsInformBadClients()) // send the standard-nick to all other Leechers
 	{
-	CTag tagName(CT_NAME, !m_bGPLEvildoer ? (LPCTSTR)thePrefs.GetUserNick() : _T("Please use a GPL-conforming version of eMule"));
+	CTag tagName(CT_NAME, !m_bGPLEvildoer ? (LPCTSTR)thePrefs.GetUserNick() : (LPCTSTR)_T("Please use a GPL-conforming version of eMule"));
 	tagName.WriteTagToFile(data, UTF8strRaw);
 	}
 	else if (thePrefs.IsInformBadClients() && IsBadClient() && IsBadClient() != PR_AGGRESSIVE) {
@@ -2031,26 +2155,21 @@ void CUpDownClient::SendHelloTypePacket(CSafeMemFile &data)
 	tagMuleVersion.WriteTagToFile(data);
 	}
 
-	if (bSendModVersion) {
-		CTag tagMODVersion(CT_MOD_VERSION, CString(MOD_VERSION));
-		tagMODVersion.WriteTagToFile(data);
-	}
+	CTag tagMODVersion(CT_MOD_VERSION, CString(MOD_VERSION));
+	tagMODVersion.WriteTagToFile(data);
 
-	if (bSendICS) {
-		CTag tagIncompleteParts(ET_INCOMPLETEPARTS, 1);
-		tagIncompleteParts.WriteTagToFile(data);
-	}
+	CTag tagIncompleteParts(ET_INCOMPLETEPARTS, 1);
+	tagIncompleteParts.WriteTagToFile(data);
 
-	if (bSendMiscHelloTag) {
-		UModMiscOptions m_ModMiscOptionsToSend;
-		m_ModMiscOptionsToSend.Bits = 0;
-		m_ModMiscOptionsToSend.Fields.SupportsExtendedXS = 1;
-		m_ModMiscOptionsToSend.Fields.SupportsNatTraversal = thePrefs.IsNatTraversalServiceEnabled() ? 1 : 0;
-		m_ModMiscOptionsToSend.Fields.SupportsIPv6 = 1;
-		m_ModMiscOptionsToSend.Fields.SupportsServingBuddyPull = 1;
-		CTag tagModMiscOptions(CT_MOD_MISCOPTIONS, m_ModMiscOptionsToSend.Bits);
-		tagModMiscOptions.WriteTagToFile(data);
-	}
+	UModMiscOptions m_ModMiscOptionsToSend;
+	m_ModMiscOptionsToSend.Bits = 0;
+	m_ModMiscOptionsToSend.Fields.SupportsExtendedXS = 1;
+	m_ModMiscOptionsToSend.Fields.SupportsNatTraversal = (thePrefs.IsNatTraversalServiceEnabled() && thePrefs.IsNatTraversalUtpAllowed()) ? 1 : 0;
+	m_ModMiscOptionsToSend.Fields.SupportsNatTraversalQuic = (thePrefs.IsNatTraversalServiceEnabled() && thePrefs.IsNatTraversalQuicAllowed() && CQuicNatSocket::IsRuntimeAvailable()) ? 1 : 0;
+	m_ModMiscOptionsToSend.Fields.SupportsIPv6 = 1;
+	m_ModMiscOptionsToSend.Fields.SupportsServingBuddyPull = 1;
+	CTag tagModMiscOptions(CT_MOD_MISCOPTIONS, m_ModMiscOptionsToSend.Bits);
+	tagModMiscOptions.WriteTagToFile(data);
 
 	if (GetConnectIP().GetType() == CAddress::IPv6)	{
 		CTag tagYourIP(CT_MOD_YOUR_IP, GetConnectIP().Data());
@@ -2081,6 +2200,13 @@ void CUpDownClient::SendHelloTypePacket(CSafeMemFile &data)
 		}
 		CTag tagEServerBuddy(CT_ESERVER_BUDDY_FLAGS, byEServerFlags);
 		tagEServerBuddy.WriteTagToFile(data);
+	}
+
+	if (bSendEServerBuddyKadID) {
+		CTag tagEServerBuddyKadID(CT_ESERVER_BUDDY_KADID, uMyEServerBuddyKadID.GetData());
+		tagEServerBuddyKadID.WriteTagToFile(data);
+		if (thePrefs.GetLogNatTraversalEvents())
+			DebugLog(_T("[eServerBuddy][KadBridge] Sending own KadID for eServer buddy bridge: %s to %s"), (LPCTSTR)md4str(uMyEServerBuddyKadID.GetData()), (LPCTSTR)EscPercent(DbgGetClientInfo()));
 	}
 
 	uint32 dwIP;
@@ -2151,8 +2277,28 @@ void CUpDownClient::ProcessMuleCommentPacket(const uchar *pachPacket, uint32 nSi
 
 bool CUpDownClient::Disconnected(LPCTSTR pszReason, bool bFromSocket)
 {
+	if (!GuardUpDownClientMutation(_T("CUpDownClient::Disconnected")))
+		return false;
+	InvalidateRuntimeGeneration();
+
 	ASSERT(theApp.clientlist->IsValidClient(this));
 
+	const DWORD dwDisconnectTick = ::GetTickCount();
+	void* pClosingNatTraversalLayer = NULL;
+	if (socket != NULL && socket->HaveQuicNatLayer())
+		pClosingNatTraversalLayer = socket->GetQuicNatLayer();
+	else if (socket != NULL && socket->HaveUtpLayer())
+		pClosingNatTraversalLayer = socket->GetUtpLayer();
+	const EDownloadState eDownloadStateAtClose = GetDownloadState();
+	const bool bAwaitingFreshNatFileResponse = eDownloadStateAtClose == DS_CONNECTED || eDownloadStateAtClose == DS_REQHASHSET || (eDownloadStateAtClose == DS_ONQUEUE && m_fQueueRankPending != 0);
+	const bool bRetryRecentUtpFileRequest = !m_bNatFileRequestCloseRetryUsed && bFromSocket && socket != NULL && socket->HaveUtpLayer() && m_reqfile != NULL && !m_reqfile->IsStopped()
+		&& bAwaitingFreshNatFileResponse && pClosingNatTraversalLayer != NULL && m_pLastNatTraversalFileRequestLayer == pClosingNatTraversalLayer
+		&& md4equ(m_achLastNatTraversalFileRequestHash, m_reqfile->GetFileHash()) && m_dwLastNatTraversalFileRequestTick != 0
+		&& (DWORD)(dwDisconnectTick - m_dwLastNatTraversalFileRequestTick) <= NAT_TRAVERSAL_RECENT_UTP_FILE_REQUEST_RETRY_WINDOW_MS;
+	const CAddress natRetryIP = GetConnectIP().IsNull() ? GetIP() : GetConnectIP();
+	const uint16 natRetryPort = GetKadPort() ? GetKadPort() : GetUDPPort();
+	const bool bQueueRecentUtpFileRequestRetry = bRetryRecentUtpFileRequest && !natRetryIP.IsNull() && natRetryPort != 0;
+	ClearNatRendezvousTransportPin();
 
 	if (GetKadState() == KS_QUEUED_FWCHECK_UDP || GetKadState() == KS_CONNECTING_FWCHECK_UDP)
 		Kademlia::CUDPFirewallTester::SetUDPFWCheckResult(false, true, GetConnectIP().ToUInt32(true), 0); // inform the tester that this test was cancelled
@@ -2162,12 +2308,17 @@ bool CUpDownClient::Disconnected(LPCTSTR pszReason, bool bFromSocket)
 		DebugLogWarning(_T("[Buddy]: Buddy client disconnected - %s, %s"), (LPCTSTR)EscPercent(pszReason), (LPCTSTR)EscPercent(DbgGetClientInfo()));
 	//If this is a KAD client object, just delete it!
 	SetKadState(KS_NONE);
+	ClearIncomingServedBuddyWait();
 	m_bAwaitingDirectCallback = false;
 	m_bAllowRendezvousAfterCallback = false;
 	m_dwDirectCallbackAttemptTick = 0;
 	ResetUtpFlowControl();
 	ClearUtpQueuedPackets();
 	ClearEServerRelayNatTGuard();
+	m_pNatTraversalSecureIdentLayer = NULL;
+	m_pLastNatTraversalFileRequestLayer = NULL;
+	m_dwLastNatTraversalFileRequestTick = 0;
+	md4clr(m_achLastNatTraversalFileRequestHash);
 
 	theApp.clientlist->RemoveServedBuddy(this);
 
@@ -2175,11 +2326,25 @@ bool CUpDownClient::Disconnected(LPCTSTR pszReason, bool bFromSocket)
 		// sets US_NONE
 		theApp.uploadqueue->RemoveFromUploadQueue(this, CString(_T("CUpDownClient::Disconnected: ")) + pszReason);
 
-	if (GetDownloadState() == DS_DOWNLOADING) {
+	if (bQueueRecentUtpFileRequestRetry) {
+		ClearDownloadBlockRequests();
+		m_fQueueRankPending = 0;
+		m_fUnaskQueueRankRecv = 0;
+		SetRemoteQueueFull(false);
+		SetRemoteQueueRank(0);
+		SetAskedCountDown(0);
+		SetDownloadState(DS_CONNECTING, _T("uTP session closed after a new file request; reconnecting"));
+		m_bNatFileRequestCloseRetryUsed = true;
+		MarkNatTRendezvous(2, true);
+		QueueDeferredNatConnect(natRetryIP, natRetryPort, thePrefs.GetNatTraversalPortWindow());
+		if (thePrefs.GetLogNatTraversalEvents())
+			DebugLog(_T("[NatTraversal][uTP] Reconnecting after the reused session closed before file response, file=%s endpoint=%s:%u client=%s"),
+				(LPCTSTR)EscPercent(m_reqfile->GetFileName()), (LPCTSTR)ipstr(natRetryIP), (UINT)natRetryPort, (LPCTSTR)EscPercent(DbgGetClientInfo()));
+	} else if (GetDownloadState() == DS_DOWNLOADING) {
 		ASSERT(m_eConnectingState == CCS_NONE);
 		const bool bUtpDisconnectWithoutQueue = bFromSocket
 			&& socket != NULL
-			&& socket->HaveUtpLayer()
+			&& socket->HaveNatTraversalLayer()
 			&& GetRemoteQueueRank() == 0
 			&& !IsRemoteQueueFull();
 		if (bUtpDisconnectWithoutQueue) {
@@ -2220,7 +2385,7 @@ bool CUpDownClient::Disconnected(LPCTSTR pszReason, bool bFromSocket)
 	}
 	if (m_iFileListRequested) {
 		m_iFileListRequested = 0;
-		LogWarning(LOG_STATUSBAR, GetResString(_T("SHAREDFILES_FAILED")), (GetUserName() == NULL || GetUserName()[0] == '\0') ? _T('(') + md4str(GetUserHash()) + _T(')') : GetUserName());
+		LogWarning(LOG_STATUSBAR, GetResString(_T("SHAREDFILES_FAILED")), (GetUserName() == NULL || GetUserName()[0] == '\0') ? CString(_T('(') + md4str(GetUserHash()) + _T(')')) : CString(GetUserName()));
 		m_bQueryingSharedFiles = false;
 		if (m_uSharedFilesStatus == S_NOT_QUERIED) // Only update this value if we don't have a response in the past. 
 			m_uSharedFilesStatus = S_NO_RESPONSE;
@@ -2234,7 +2399,9 @@ bool CUpDownClient::Disconnected(LPCTSTR pszReason, bool bFromSocket)
 	//check if this client is needed in any way, if not - delete it
 	bool bDelete;
 
-	switch (m_eDownloadState) {
+	if (bQueueRecentUtpFileRequestRetry)
+		bDelete = false;
+	else switch (m_eDownloadState) {
 	case DS_ONQUEUE:
 	case DS_TOOMANYCONNS:
 	case DS_NONEEDEDPARTS:
@@ -2258,7 +2425,7 @@ bool CUpDownClient::Disconnected(LPCTSTR pszReason, bool bFromSocket)
 
 	bool bAddDeadSource = true;
 
-	if (m_eUploadState != US_BANNED) {
+	if (!bQueueRecentUtpFileRequestRetry && m_eUploadState != US_BANNED) {
 		switch (m_eDownloadState) {
 		case DS_CONNECTING:
 		{
@@ -2321,7 +2488,7 @@ bool CUpDownClient::Disconnected(LPCTSTR pszReason, bool bFromSocket)
 			else
 				SetChatState(MS_NONE);
 		} else
-			theApp.emuledlg->chatwnd->chatselector.ConnectingResult(this, false); // other clients update directly
+			theApp.QueueClientChatConnectingResultEvent(this, false); // other clients update through client event
 	}
 
 	// Delete Socket
@@ -2331,7 +2498,7 @@ bool CUpDownClient::Disconnected(LPCTSTR pszReason, bool bFromSocket)
 	}
 	socket = NULL;
 	if (!bDelete)
-		theApp.emuledlg->transferwnd->GetClientList()->RefreshClient(this, -1, CClientListCtrl::kSortImpactUploadState | CClientListCtrl::kSortImpactDownloadState | CClientListCtrl::kSortImpactClientStatus);
+		theApp.QueueClientRowUpdateEvent(GetRuntimeID(), GetRuntimeGeneration(), _T("client-disconnected-state"));
 
 	// finally, remove the client from the timeout timer and reset the connecting state
 	m_eConnectingState = CCS_NONE;
@@ -2348,6 +2515,7 @@ bool CUpDownClient::Disconnected(LPCTSTR pszReason, bool bFromSocket)
 
 	if (thePrefs.GetDebugClientTCPLevel() > 0)
 		Debug(_T("--- Disconnected client       %s; Reason=%s\n"), (LPCTSTR)DbgGetClientInfo(true), pszReason);
+	m_dwHashsetRequestSent = 0;
 	m_fHashsetRequestingMD4 = 0;
 	m_fHashsetRequestingAICH = 0;
 	SetSentCancelTransfer(0);
@@ -2403,7 +2571,7 @@ bool CUpDownClient::TryToConnect(bool bIgnoreMaxCon, bool bNoCallbacks, CRuntime
 			return true;
 
 		if (thePrefs.GetLogNatTraversalEvents()) {
-			DebugLog(_T("[NatTraversal] TryToConnect: Promoting callback wait state to direct uTP connect for %s"), (LPCTSTR)EscPercent(DbgGetClientInfo()));
+			DebugLog(_T("[NatTraversal] TryToConnect: Promoting callback wait state to direct NAT-T connect for %s"), (LPCTSTR)EscPercent(DbgGetClientInfo()));
 		}
 		theApp.clientlist->RemoveConnectingClient(this);
 		m_eConnectingState = CCS_NONE;
@@ -2416,7 +2584,7 @@ bool CUpDownClient::TryToConnect(bool bIgnoreMaxCon, bool bNoCallbacks, CRuntime
 				ConnectionEstablished();
 				return true;
 			}
-			if (socket->HaveUtpLayer()) {
+			if (socket->HaveNatTraversalLayer()) {
 				const DWORD now = ::GetTickCount();
 				const DWORD kUtpHandshakeReconnectDelayMs = NAT_TRAVERSAL_HANDSHAKE_GUARD_MS;
 				DWORD handshakeAge = 0;
@@ -2437,11 +2605,52 @@ bool CUpDownClient::TryToConnect(bool bIgnoreMaxCon, bool bNoCallbacks, CRuntime
 			// exchange was never completed. Close the stale socket and reconnect.
 			if (thePrefs.GetLogNatTraversalEvents())
 				DebugLogWarning(_T("[NatTraversal] TryToConnect: Closing stale socket (connected but handshake not finished) for reconnection, %s"), (LPCTSTR)EscPercent(DbgGetClientInfo()));
-			socket->Safe_Delete();
-			socket = NULL;
+			if (socket != NULL) {
+				socket->Safe_Delete();
+				socket = NULL;
+			}
 			// Fall through to create new connection
 		} else {
-			socket->Safe_Delete();
+			if (socket->HaveNatTraversalLayer()) {
+				const DWORD now = ::GetTickCount();
+				if (m_dwUtpConnectionStartTick == 0)
+					m_dwUtpConnectionStartTick = now;
+				DWORD connectAge = 0;
+				if ((int)(now - m_dwUtpConnectionStartTick) >= 0)
+					connectAge = now - m_dwUtpConnectionStartTick;
+				const bool bFreshNatRetryDue = m_reqfile != NULL && IsNatTRetryDue(now) && connectAge >= NAT_TRAVERSAL_HANDSHAKE_GUARD_MS;
+				if (socket->HaveUtpLayer() && socket->HasFailedUtpTransport()) {
+					ResetFailedUtpTransportForRetry(_T("failed uTP transport before connect retry"));
+				} else if (socket->HaveQuicNatLayer()) {
+					if (connectAge < NAT_TRAVERSAL_QUIC_FALLBACK_MS && !bFreshNatRetryDue) {
+						if (thePrefs.GetLogNatTraversalEvents())
+							DebugLog(_T("[NatTraversal] TryToConnect: Keeping pending QUIC NAT-T socket while handshake is in progress (age=%lu/%lu ms), %s"), connectAge, (DWORD)NAT_TRAVERSAL_QUIC_FALLBACK_MS, (LPCTSTR)EscPercent(DbgGetClientInfo()));
+						return true;
+					}
+					if (bFreshNatRetryDue) {
+						if (thePrefs.GetLogNatTraversalEvents())
+							DebugLogWarning(_T("[NatTraversal] TryToConnect: Restarting pending QUIC NAT-T socket for fresh source retry (age=%lu ms), %s"), connectAge, (LPCTSTR)EscPercent(DbgGetClientInfo()));
+					} else {
+						if (thePrefs.GetLogNatTraversalEvents())
+							DebugLogWarning(_T("[NatTraversal] TryToConnect: Closing stale pending QUIC NAT-T socket after fallback window, %s"), (LPCTSTR)EscPercent(DbgGetClientInfo()));
+						CAddress quicFailIP = GetConnectIP().IsNull() ? GetIP() : GetConnectIP();
+						uint16 quicFailPort = GetKadPort() ? GetKadPort() : GetUDPPort();
+						MarkNatTraversalQuicFailed(quicFailIP, quicFailPort, _T("stale pending QUIC socket in TryToConnect"));
+					}
+				} else if (socket->HaveUtpLayer()) {
+					if (connectAge < NAT_TRAVERSAL_HANDSHAKE_GUARD_MS && !bFreshNatRetryDue) {
+						if (thePrefs.GetLogNatTraversalEvents())
+							DebugLog(_T("[NatTraversal] TryToConnect: Keeping pending uTP NAT-T socket while connect is in progress (age=%lu/%lu ms), %s"), connectAge, (DWORD)NAT_TRAVERSAL_HANDSHAKE_GUARD_MS, (LPCTSTR)EscPercent(DbgGetClientInfo()));
+						return true;
+					}
+					if (thePrefs.GetLogNatTraversalEvents())
+						DebugLogWarning(_T("[NatTraversal] TryToConnect: Restarting stale pending uTP NAT-T socket (age=%lu ms), %s"), connectAge, (LPCTSTR)EscPercent(DbgGetClientInfo()));
+				}
+			}
+			if (socket != NULL) {
+				socket->Safe_Delete();
+				socket = NULL;
+			}
 		}
 	}
 	m_eConnectingState = CCS_PRECONDITIONS; // We now officially try to connect :)
@@ -2451,7 +2660,7 @@ bool CUpDownClient::TryToConnect(bool bIgnoreMaxCon, bool bNoCallbacks, CRuntime
 
     if (theApp.listensocket->TooManySockets() && !bIgnoreMaxCon) {
         if (thePrefs.GetLogNatTraversalEvents())
-        	DebugLog(_T("[NATTTESTMODE: TryToConnect] too many sockets: %s\n"), (LPCTSTR)DbgGetClientInfo());
+        	DebugLog(_T("[NatTraversal: TryToConnect] too many sockets: %s\n"), (LPCTSTR)DbgGetClientInfo());
 		// This is a sanitize check and counts as a "hard failure", so this check should be also done before calling
 		// TryToConnect if a special handling, like waiting till there are enough connection available should be fone
 		DebugLogWarning(_T("TryToConnect: Too many connections sanitize check (%s)"), (LPCTSTR)EscPercent(DbgGetClientInfo()));
@@ -2464,7 +2673,7 @@ bool CUpDownClient::TryToConnect(bool bIgnoreMaxCon, bool bNoCallbacks, CRuntime
 	// do not try to connect to source which are incompatible with our encryption setting (one requires it, and the other one doesn't support it)
     if ((RequiresCryptLayer() && !thePrefs.IsCryptLayerEnabled()) || (thePrefs.IsCryptLayerRequired() && !SupportsCryptLayer())) {
         if (thePrefs.GetLogNatTraversalEvents())
-        	DebugLog(_T("[NATTTESTMODE: TryToConnect] crypt guard hit: req=%d required=%d supp=%d: %s\n"), (int)RequiresCryptLayer(), (int)thePrefs.IsCryptLayerRequired(), (int)SupportsCryptLayer(), (LPCTSTR)DbgGetClientInfo());
+        	DebugLog(_T("[NatTraversal: TryToConnect] crypt guard hit: req=%d required=%d supp=%d: %s\n"), (int)RequiresCryptLayer(), (int)thePrefs.IsCryptLayerRequired(), (int)SupportsCryptLayer(), (LPCTSTR)DbgGetClientInfo());
 		DEBUG_ONLY(AddDebugLogLine(DLP_DEFAULT, false, _T("Rejected outgoing connection because CryptLayer-Setting (Obfuscation) was incompatible %s"), (LPCTSTR)EscPercent(DbgGetClientInfo())));
 		if (Disconnected(_T("CryptLayer-Settings (Obfuscation) incompatible"))) {
 			SafeDelete();
@@ -2514,12 +2723,24 @@ bool CUpDownClient::TryToConnect(bool bIgnoreMaxCon, bool bNoCallbacks, CRuntime
 	// Kad buddy handshakes are plain TCP control sessions and may involve peers that still advertise LowID.
 	// For these states, do not gate the connect attempt behind callback availability checks.
 	const bool bBuddyHandshake = (GetKadState() == KS_CONNECTING_SERVING_BUDDY) || (GetKadState() == KS_INCOMING_SERVED_BUDDY);
+	const CAddress directNatPrecheckIP = GetConnectIP().IsNull() ? GetIP() : GetConnectIP();
+	const uint16 directNatPrecheckPort = GetKadPort() != 0 ? GetKadPort() : GetUDPPort();
+	const bool bHasDirectNatTraversalRoute = SupportsDirectUDPCallback()
+		&& thePrefs.IsEnableNatTraversal()
+		&& thePrefs.GetUDPPort() != 0
+		&& theApp.clientudp != NULL
+		&& theApp.IsFirewalled()
+		&& !m_bNatTFatalConnect
+		&& !directNatPrecheckIP.IsNull()
+		&& directNatPrecheckPort != 0
+		&& (GetNatTraversalSupport() || GetNatTraversalQuicSupport())
+		&& GetEffectiveNatTraversalTransportForEndpoint(directNatPrecheckIP, directNatPrecheckPort) != NATT_TRANSPORT_NONE;
 
 	// LowID check: Skip if bUseUTP is set (e.g., after receiving relay response with target's IP/port)
 	// In NAT traversal scenarios (eServer Buddy relay), we have the target's IP:port and should attempt
-	// direct uTP connection instead of going through the callback mechanism.
+	// direct NAT-T connection instead of going through the callback mechanism.
 	// Note: If IPv6 is specified in the hello, that means it is not firewalled, and if we are IPv6 enabled we use it
-	if (!bUseUTP && !bUseIPv6 && HasLowID() && GetKadState() != KS_CONNECTING_FWCHECK && !bBuddyHandshake) {
+	if (!bUseUTP && !bUseIPv6 && HasLowID() && GetKadState() != KS_CONNECTING_FWCHECK && !bBuddyHandshake && !bHasDirectNatTraversalRoute) {
 
 		ASSERT(pClassSocket == NULL);
 		if (!theApp.CanDoCallback(this)) { // lowid2lowid check used for the whole function, don't remove
@@ -2550,7 +2771,7 @@ bool CUpDownClient::TryToConnect(bool bIgnoreMaxCon, bool bNoCallbacks, CRuntime
     if (!AnyCallbackAvailable())
     {
         if (thePrefs.GetLogNatTraversalEvents())
-        	DebugLog(_T("[NATTTESTMODE: TryToConnect] no callback option available guard hit: %s\n"), (LPCTSTR)DbgGetClientInfo());
+        	DebugLog(_T("[NatTraversal: TryToConnect] no callback option available guard hit: %s\n"), (LPCTSTR)DbgGetClientInfo());
         // Nope
 			if (Disconnected(_T("LowID: No Callback Option available"))) {
 				SafeDelete();
@@ -2578,10 +2799,10 @@ bool CUpDownClient::TryToConnect(bool bIgnoreMaxCon, bool bNoCallbacks, CRuntime
 		}
 	}
 	// If the client sent hello packet its NATT flag should be true; if hello packet is not sent we can try to continue with the checks
-	// NAT traversal via uTP rendezvous does not require remote's DirectUDPCallback capability.
-	// Do NOT use uTP layer for Kad buddy handshakes; those are plain TCP.
+	// NAT traversal transport does not require remote's DirectUDPCallback capability.
+	// Do NOT use a NAT-T transport layer for Kad buddy handshakes; those are plain TCP.
     // Require: feature enabled, remote advertises (or hello not yet), both sides have UDP/Kad ports, connect endpoint known, we are firewalled, and not in buddy handshake.
-    // Only attempt NAT-T/uTP when there is a file context (reqfile) to avoid triggering uTP connects for non-file clients like buddies.
+    // Only attempt direct NAT-T transport when there is a file context (reqfile) to avoid triggering hole-punch connects for non-file clients like buddies.
 	const DWORD curTick = ::GetTickCount();
 	const bool bHadRendezvousFallback = m_bAllowRendezvousAfterCallback;
 	if (m_bAwaitingDirectCallback) {
@@ -2598,45 +2819,82 @@ bool CUpDownClient::TryToConnect(bool bIgnoreMaxCon, bool bNoCallbacks, CRuntime
 				DebugLog(_T("[NatTraversal] TryToConnect: Forcing rendezvous after direct attempts, %s"), (LPCTSTR)EscPercent(DbgGetClientInfo()));
 		}
 	}
-	// For receiver/passive side (RENDEZVOUS target), we may not have file context yet - it comes in HELLO after uTP connects.
-	// Allow uTP if we have either explicit context OR we're in a NAT-T scenario (override flag set).
+	// For receiver/passive side (RENDEZVOUS target), we may not have file context yet - it comes in HELLO after the NAT-T transport connects.
+	// Allow the NAT-T direct path if we have either explicit context OR we're in a NAT-T scenario (override flag set).
 	const bool bHasFileContextOrNatT = HasNatTraversalFileContext() || bUseUTP;
-	bool bUTPPossible = thePrefs.IsEnableNatTraversal()
+	const bool bRemoteNeedsNatTraversal = HasLowID() || bUseUTP;
+	bool bNatUdpReady = theApp.clientudp != NULL && theApp.clientudp->IsNatTraversalEndpointReady();
+	if (!bNatUdpReady && theApp.clientudp != NULL && thePrefs.IsEnableNatTraversal() && !bBuddyHandshake && bHasFileContextOrNatT)
+		bNatUdpReady = theApp.clientudp->EnsureNatTraversalEndpointReady(_T("client NAT-T connect"));
+	const CAddress nattTransportIP = GetConnectIP().IsNull() ? GetIP() : GetConnectIP();
+	const uint16 nattTransportPort = GetKadPort() ? GetKadPort() : GetUDPPort();
+	const ENatTraversalTransport eEffectivePreferredNatTransport = GetEffectiveNatTraversalTransportForEndpoint(nattTransportIP, nattTransportPort);
+	if (thePrefs.GetLogNatTraversalEvents() && IsNatTraversalQuicTemporarilyDisabledFor(nattTransportIP, nattTransportPort)) {
+		DebugLog(_T("[NatTraversal][QUIC] QUIC is temporarily disabled for %s:%u; effective NAT-T transport=%d, %s"),
+			(LPCTSTR)ipstr(nattTransportIP), (UINT)nattTransportPort, (int)eEffectivePreferredNatTransport, (LPCTSTR)EscPercent(DbgGetClientInfo()));
+	}
+	const bool bRemoteHasNatTraversalTransport = GetNatTraversalSupport() || (GetNatTraversalQuicSupport() && CQuicNatSocket::IsRuntimeAvailable());
+	bool bUTPPossible = bNatUdpReady
+		&& thePrefs.IsEnableNatTraversal()
 		&& !bBuddyHandshake
 		&& bHasFileContextOrNatT
-		&& (m_strHelloInfo.IsEmpty() || GetNatTraversalSupport())
+		&& bRemoteNeedsNatTraversal
+		&& (m_strHelloInfo.IsEmpty() || bRemoteHasNatTraversalTransport)
 		&& thePrefs.GetUDPPort() != 0 && GetKadPort() != 0
 		&& !GetConnectIP().IsNull() && theApp.IsFirewalled();
 	if (bUTPPossible && m_bNatTFatalConnect) {
 		if (thePrefs.GetLogNatTraversalEvents())
-			DebugLogWarning(_T("[NatTraversal] TryToConnect: Disabling uTP direct path due to previous fatal connect failure, %s"), (LPCTSTR)EscPercent(DbgGetClientInfo()));
+			DebugLogWarning(_T("[NatTraversal] TryToConnect: Disabling NAT-T direct path due to previous fatal connect failure, %s"), (LPCTSTR)EscPercent(DbgGetClientInfo()));
 		bUTPPossible = false;
 	}
-    // Explicit uTP override (e.g. after RENDEZVOUS): allow direct uTP even if the above "possible" check is not yet true (e.g. hello not exchanged).
-    // Do not require our side to be firewalled here; in rendezvous the public side should also initiate uTP towards the NATed peer.
-	bool bUseUtpOverride = bUseUTP && thePrefs.IsEnableNatTraversal() && !bBuddyHandshake && GetKadPort() != 0 && !GetConnectIP().IsNull();
+	const bool bDirectNatTraversalCandidate = bUTPPossible && SupportsDirectUDPCallback() && eEffectivePreferredNatTransport != NATT_TRANSPORT_NONE;
+    // Explicit NAT-T override (e.g. after RENDEZVOUS): allow direct NAT-T even if the above "possible" check is not yet true (e.g. hello not exchanged).
+    // Do not require our side to be firewalled here; in rendezvous the public side should also initiate NAT-T towards the NATed peer.
+	bool bUseUtpOverride = bUseUTP && bNatUdpReady && thePrefs.IsEnableNatTraversal() && !bBuddyHandshake && GetKadPort() != 0 && !GetConnectIP().IsNull();
+	const bool bCanRequestDirectCaps = theApp.clientudp != NULL && !GetConnectIP().IsNull() && GetKadPort() != 0;
+	const bool bQuicTemporarilyDisabledForConnect = IsNatTraversalQuicTemporarilyDisabledFor(nattTransportIP, nattTransportPort);
+	const bool bCanProbeDirectCapsForQuic = !bQuicTemporarilyDisabledForConnect && CQuicNatSocket::IsRuntimeAvailable() && thePrefs.IsNatTraversalQuicAllowed() && bCanRequestDirectCaps
+		&& !bBuddyHandshake && bHasFileContextOrNatT && (bUseUTP || bUTPPossible || m_bEServerRelayNatTGuardActive || m_bDeferredNatConnect || m_uNattRetryLeft != 0);
+	const bool bCanUseLegacyUtpAfterCapsTimeout = CanUseLegacyUtpAfterDirectCapsTimeout(DIRECT_NATT_CAPS_LEGACY_TIMEOUT_MS);
+	const bool bIgnoreCachedLegacyForCapsRefresh = bCanProbeDirectCapsForQuic && NeedsDirectNatTraversalCapsRefresh();
+	const bool bKnownQuicFromHello = !bQuicTemporarilyDisabledForConnect && !NeedsDirectNatTraversalCapsRefresh() && GetNatTraversalQuicSupport() && CQuicNatSocket::IsRuntimeAvailable();
+	const bool bKnownLegacyWithoutQuic = (!bIgnoreCachedLegacyForCapsRefresh && HasReceivedHelloInfo() && !GetNatTraversalQuicSupport()) || bCanUseLegacyUtpAfterCapsTimeout;
+	// Direct CAPS refresh protects stale uTP-only cache. Do not block a known QUIC peer before NAT pinholes are open.
+	const bool bNeedsDirectCaps = bCanProbeDirectCapsForQuic && (!HasDirectNatTraversalCaps() || NeedsDirectNatTraversalCapsRefresh()) && !bKnownQuicFromHello && !bKnownLegacyWithoutQuic;
+	if (bNeedsDirectCaps) {
+		theApp.clientudp->RequestNatTraversalCaps(this, GetConnectIP(), GetKadPort());
+		if (thePrefs.GetLogNatTraversalEvents())
+			DebugLog(_T("[NatTraversal] TryToConnect: waiting for direct NAT-T caps before selecting QUIC/uTP, %s"), (LPCTSTR)EscPercent(DbgGetClientInfo()));
+		bUTPPossible = false;
+		bUseUtpOverride = false;
+		if (bUseUTP || bDirectNatTraversalCandidate)
+			return true;
+	}
 	if (bUseUtpOverride && m_bNatTFatalConnect) {
 		if (thePrefs.GetLogNatTraversalEvents())
-			DebugLogWarning(_T("[NatTraversal] TryToConnect: Skipping direct uTP override due to previous fatal connect failure, %s"), (LPCTSTR)EscPercent(DbgGetClientInfo()));
+			DebugLogWarning(_T("[NatTraversal] TryToConnect: Skipping direct NAT-T override due to previous fatal connect failure, %s"), (LPCTSTR)EscPercent(DbgGetClientInfo()));
 		bUseUtpOverride = false;
 	}
 	if (thePrefs.GetLogNatTraversalEvents() && (bUseUTP || bUTPPossible)) {
 		CString connectStr = ipstr(GetConnectIP());
 		CString ctxStr = DbgGetNatTraversalContext();
-		DebugLog(_T("[NatTraversal] TryToConnect gating: override=%d possible=%d buddyHS=%d kadPort=%u udpPort=%u connectIP=%s context=%s"),
-		(int)bUseUtpOverride, (int)bUTPPossible, (int)bBuddyHandshake, (UINT)GetKadPort(), (UINT)GetUDPPort(),
-		(LPCTSTR)connectStr, ctxStr.IsEmpty() ? _T("<none>") : (LPCTSTR)ctxStr);
+		DebugLog(_T("[NatTraversal] TryToConnect gating: override=%d possible=%d udpReady=%d buddyHS=%d kadPort=%u udpPort=%u connectIP=%s context=%s"),
+		(int)bUseUtpOverride, (int)bUTPPossible, (int)bNatUdpReady, (int)bBuddyHandshake, (UINT)GetKadPort(), (UINT)GetUDPPort(),
+		(LPCTSTR)connectStr, ctxStr.IsEmpty() ? (LPCTSTR)_T("<none>") : (LPCTSTR)ctxStr);
+		if (!bNatUdpReady)
+			DebugLogWarning(_T("[NatTraversal] TryToConnect: NAT-T UDP socket is not ready, skipping direct NAT-T transport, %s"), (LPCTSTR)EscPercent(DbgGetClientInfo()));
 	}
 	if (thePrefs.GetLogNatTraversalEvents())
-		DebugLog(_T("[NATTTESTMODE: UTPCheck] buddyHS=%d useUTP=%d helloEmpty=%d natSupp=%d myUDP=%u theirKad=%u connectIP=%s firewalled=%d reqfile=%p kadState=%s => utp=%d override=%d\n"),
-		(int)bBuddyHandshake, (int)bUseUTP, (int)m_strHelloInfo.IsEmpty(), (int)GetNatTraversalSupport(), (unsigned)thePrefs.GetUDPPort(), (unsigned)GetKadPort(), (LPCTSTR)ipstr(GetConnectIP()), (int)theApp.IsFirewalled(), m_reqfile, DbgGetKadState(), (int)bUTPPossible, (int)bUseUtpOverride);
+		DebugLog(_T("[NatTraversal: TransportCheck] buddyHS=%d useNATT=%d udpReady=%d helloEmpty=%d natSupp=%d quicSupp=%d preferred=%d myUDP=%u theirKad=%u connectIP=%s firewalled=%d reqfile=%p kadState=%s => nat=%d override=%d\n"),
+		(int)bBuddyHandshake, (int)bUseUTP, (int)bNatUdpReady, (int)m_strHelloInfo.IsEmpty(), (int)GetNatTraversalSupport(), (int)GetNatTraversalQuicSupport(), (int)eEffectivePreferredNatTransport, (unsigned)thePrefs.GetUDPPort(), (unsigned)GetKadPort(), (LPCTSTR)ipstr(GetConnectIP()), (int)theApp.IsFirewalled(), m_reqfile, DbgGetKadState(), (int)bUTPPossible, (int)bUseUtpOverride);
 	const bool bKadConnected = Kademlia::CKademlia::IsConnected();
 	const bool bKadFirewalled = bKadConnected && Kademlia::CKademlia::IsFirewalled();
 	const bool bHasServerHighID = theApp.serverconnect->IsConnected() && !theApp.serverconnect->IsLowID();
 	const bool bLocalLow = theApp.IsFirewalled();
 	const bool bRemoteLow = HasLowID();
 	const bool bLocalNeedsRendezvous = (bLocalLow && bRemoteLow);
-	const bool bRendezvousPossible = HasLowID() && HasValidServingBuddyID() && bKadConnected && HasNatTraversalFileContext() && !bUseUtpOverride;
+	const bool bDirectNatTraversalPossible = bUTPPossible && SupportsDirectUDPCallback() && eEffectivePreferredNatTransport != NATT_TRANSPORT_NONE;
+	const bool bRendezvousPossible = HasLowID() && HasValidServingBuddyID() && bKadConnected && HasNatTraversalFileContext() && !bUseUtpOverride && !bDirectNatTraversalPossible;
 	// LowID ↔ LowID MUST use rendezvous; grace period only applies when at least one side is public.
 	const bool bPreferRendezvous = bRendezvousPossible && (bLocalNeedsRendezvous || (m_bAllowRendezvousAfterCallback && !bRemoteLow));
 	if (bPreferRendezvous) {
@@ -2654,21 +2912,35 @@ bool CUpDownClient::TryToConnect(bool bIgnoreMaxCon, bool bNoCallbacks, CRuntime
 	} else if (HasLowID() && HasValidServingBuddyID() && !m_bAllowRendezvousAfterCallback && thePrefs.GetLogNatTraversalEvents()) {
 		DebugLog(_T("[NatTraversal] TryToConnect: Rendezvous deferred; waiting for direct path grace period, %s"), (LPCTSTR)EscPercent(DbgGetClientInfo()));
 	}
-	// Direct TCP/uTP connection: Buddy handshakes always use direct TCP.
-	// Otherwise, direct is allowed only for HighID or special cases (IPv6, KS_CONNECTING_FWCHECK, uTP override after rendezvous).
-	if (!bPreferRendezvous && (bBuddyHandshake || bUseUtpOverride || bUseIPv6 || !HasLowID() || GetKadState() == KS_CONNECTING_FWCHECK)) {
+	// Direct TCP/NAT-T connection: Buddy handshakes always use direct TCP.
+	// Otherwise, direct is allowed only for HighID or special cases (IPv6, KS_CONNECTING_FWCHECK, NAT-T override after rendezvous).
+	if (!bPreferRendezvous && (bBuddyHandshake || bUseUtpOverride || bDirectNatTraversalPossible || bUseIPv6 || !HasLowID() || GetKadState() == KS_CONNECTING_FWCHECK)) {
 		if (!m_bAllowRendezvousAfterCallback && m_dwDirectCallbackAttemptTick == 0)
 			m_dwDirectCallbackAttemptTick = curTick;
 		m_eConnectingState = CCS_DIRECTTCP;
 		if (pClassSocket == NULL)
 			pClassSocket = RUNTIME_CLASS(CClientReqSocket);
+		m_pNatTraversalSecureIdentLayer = NULL;
+		m_pLastNatTraversalFileRequestLayer = NULL;
+		m_dwLastNatTraversalFileRequestTick = 0;
+		md4clr(m_achLastNatTraversalFileRequestHash);
 		socket = static_cast<CClientReqSocket*>(pClassSocket->CreateObject());
 		socket->SetClient(this);
-		// Create socket FIRST so its state is correctly initialized before adding uTP layer
+		ENatTraversalTransport eNatTransport = NATT_TRANSPORT_NONE;
+		if (bUseUtpOverride || bUTPPossible) {
+			eNatTransport = eEffectivePreferredNatTransport;
+			if (eNatTransport == NATT_TRANSPORT_NONE && thePrefs.IsNatTraversalUtpAllowed())
+				eNatTransport = GetNatTraversalSupport() ? NATT_TRANSPORT_UTP : NATT_TRANSPORT_NONE;
+			if (eNatTransport == NATT_TRANSPORT_QUIC) {
+				// QUIC is UDP-backed; install the layer before Create() so no dummy TCP socket is required.
+				socket->InitQuicNatSupport();
+			}
+		}
+		// Create socket before adding a NAT-T layer so its state stays compatible with the legacy uTP path.
 		if (!socket->Create()) {
 			DWORD dwLastError = ::WSAGetLastError();
 			if (thePrefs.GetLogNatTraversalEvents())
-				DebugLog(_T("[NATTTESTMODE: TryToConnect] socket Create failed: %s\n"), (LPCTSTR)DbgGetClientInfo());
+				DebugLog(_T("[NatTraversal: TryToConnect] socket Create failed: %s\n"), (LPCTSTR)DbgGetClientInfo());
 			socket->Safe_Delete();
 			// we let the timeout handle the cleanup in this case
 			if (bUTPPossible && thePrefs.GetLogNatTraversalEvents())
@@ -2678,30 +2950,25 @@ bool CUpDownClient::TryToConnect(bool bIgnoreMaxCon, bool bNoCallbacks, CRuntime
 			AddDebugLogLine(DLP_LOW, false, _T("[NAT-T] TryToConnect: socket Create failed err=%lu for %s"), dwLastError, (LPCTSTR)EscPercent(DbgGetClientInfo()));
 			return true;
 		}
-		// NOW initialize uTP support AFTER Create() so layer state is correctly synchronized
+		// Initialize the selected NAT-T layer only after Create() to preserve the proven legacy uTP socket path.
 		if (bUseUtpOverride || bUTPPossible) {
+			if (eNatTransport == NATT_TRANSPORT_UTP)
+				socket->InitUtpSupport();
+			bool bHaveLayer = socket->HaveNatTraversalLayer();
 			if (thePrefs.GetLogNatTraversalEvents())
-				DebugLog(_T("[NATTTESTMODE: TryToConnect] Before InitUtpSupport: socket=%p, %s\n"), socket, (LPCTSTR)DbgGetClientInfo());
-			socket->InitUtpSupport();
-			bool bHaveLayer = socket->HaveUtpLayer();
-			if (thePrefs.GetLogNatTraversalEvents())
-				DebugLog(_T("[NATTTESTMODE: TryToConnect] After InitUtpSupport: haveLayer=%d socket=%p, %s\n"), (int)bHaveLayer, socket, (LPCTSTR)DbgGetClientInfo());
-			if (thePrefs.GetLogNatTraversalEvents())
-				DebugLog(_T("[NatTraversal] TryToConnect: UTP support initialized (have=%d) for the socket, %s"), (int)bHaveLayer, (LPCTSTR)EscPercent(DbgGetClientInfo()));
+				DebugLog(_T("[NatTraversal: TryToConnect] NAT-T transport=%d haveLayer=%d socket=%p, %s\n"), (int)eNatTransport, (int)bHaveLayer, socket, (LPCTSTR)DbgGetClientInfo());
 			if ((bUseUtpOverride || bUTPPossible) && !bHaveLayer) {
 				if (thePrefs.GetLogNatTraversalEvents())
-					DebugLog(_T("[NATTTESTMODE: TryToConnect] WARNING: UTP layer NOT created! socket=%p, %s\n"), socket, (LPCTSTR)DbgGetClientInfo());
-				if (thePrefs.GetLogNatTraversalEvents())
-					DebugLogWarning(_T("[NatTraversal] TryToConnect: UTP layer not attached after InitUtpSupport, %s"), (LPCTSTR)EscPercent(DbgGetClientInfo()));
+					DebugLogWarning(_T("[NatTraversal] TryToConnect: NAT-T layer not attached, transport=%d, %s"), (int)eNatTransport, (LPCTSTR)EscPercent(DbgGetClientInfo()));
 			}
 			ResetUtpFlowControl();
 			ClearUtpQueuedPackets();
-			if (socket->HaveUtpLayer()) {
+			if (socket->HaveNatTraversalLayer()) {
 				SetUtpLocalInitiator(true);
 				SetUtpConnectionStartTick(::GetTickCount());
 			}
 			if (thePrefs.GetLogNatTraversalEvents())
-				AddDebugLogLine(DLP_LOW, false, _T("[NAT-T] TryToConnect: Decision=Direct uTP/TCP (no rendezvous). %s"), (LPCTSTR)EscPercent(DbgGetClientInfo()));
+				AddDebugLogLine(DLP_LOW, false, _T("[NAT-T] TryToConnect: Decision=Direct NAT-T/TCP transport=%d. %s"), (int)eNatTransport, (LPCTSTR)EscPercent(DbgGetClientInfo()));
 		}
 		Connect();
 		return true;
@@ -2711,7 +2978,7 @@ bool CUpDownClient::TryToConnect(bool bIgnoreMaxCon, bool bNoCallbacks, CRuntime
 	// Direct UDP Callback is designed for LowID <-> LowID connections only!
 	// Both sides must be firewalled (receiver checks CKademlia::IsFirewalled()).
 	// If remote is HighID, skip callback - they should connect to us or we use different mechanism.
-	if (SupportsDirectUDPCallback() && thePrefs.GetUDPPort() != 0 && !GetConnectIP().IsNull() && HasLowID()) {
+	if (SupportsDirectUDPCallback() && bNatUdpReady && thePrefs.GetUDPPort() != 0 && !GetConnectIP().IsNull() && HasLowID()) {
 		// Set download state to CONNECTING before direct callback path (also handle DS_ONQUEUE)
 		if (m_reqfile != NULL && GetDownloadState() != DS_DOWNLOADING && GetDownloadState() != DS_CONNECTED && GetDownloadState() != DS_CONNECTING)
 			SetDownloadState(DS_CONNECTING);
@@ -2762,15 +3029,22 @@ bool CUpDownClient::TryToConnect(bool bIgnoreMaxCon, bool bNoCallbacks, CRuntime
 	// NOTE: Target does NOT need to support eServer Buddy - our buddy will use server callback to reach them
 	if (theApp.serverconnect->IsLowID() && HasLowID()) {
 		CUpDownClient* pMyBuddy = theApp.clientlist->GetServingEServerBuddy();
-		// Check if target is on the same server as our buddy (prerequisite for server callback)
-		bool bTargetOnSameServer = (theApp.serverconnect->IsLocalServer(m_dwServerIP, m_nServerPort));
+		// Check if the target is on our server, or was discovered through the same serving buddy.
+		const bool bTargetOnSameServer = CanRouteViaServingEServerBuddy(pMyBuddy);
 		
 		if (thePrefs.GetLogNatTraversalEvents()) {
-			AddDebugLogLine(false, _T("[eServerBuddy] TryToConnect: LowID-to-LowID check - MyBuddy=%p SameServer=%d TargetSrv=%s:%u"),
-				pMyBuddy, bTargetOnSameServer ? 1 : 0, (LPCTSTR)ipstr(m_dwServerIP), m_nServerPort);
+			AddDebugLogLine(false, _T("[eServerBuddy] TryToConnect: LowID-to-LowID check - MyBuddy=%p SameServerOrBuddy=%d TargetSrv=%s:%u TargetBuddy=%s:%u"),
+				pMyBuddy, bTargetOnSameServer ? 1 : 0, (LPCTSTR)ipstr(m_dwServerIP), m_nServerPort,
+				(LPCTSTR)ipstr(GetServingBuddyIP()), GetServingBuddyPort());
 		}
 		
-		if (pMyBuddy && bTargetOnSameServer) {
+		const bool bTargetHasEServerContext = (m_dwServerIP != 0 && m_nServerPort != 0);
+		const bool bTargetHasKadRendezvousContext = HasValidServingBuddyID() && !GetServingBuddyIP().IsNull() && GetServingBuddyPort() != 0 && Kademlia::CKademlia::IsConnected() && m_reqfile != NULL && thePrefs.IsEnableNatTraversal();
+		if (pMyBuddy && bTargetOnSameServer && bTargetHasKadRendezvousContext && thePrefs.GetLogNatTraversalEvents())
+			AddDebugLogLine(DLP_LOW, false, _T("[eServerBuddy] TryToConnect: Prefer Kad rendezvous over eServer relay for LowID source with serving buddy context: %s"), (LPCTSTR)EscPercent(DbgGetClientInfo()));
+		else if (pMyBuddy && bTargetOnSameServer && !bTargetHasEServerContext && HasValidServingBuddyID() && thePrefs.GetLogNatTraversalEvents())
+			AddDebugLogLine(DLP_LOW, false, _T("[eServerBuddy] TryToConnect: Skipping eServer relay for Kad only LowID source; using Kad rendezvous path for %s"), (LPCTSTR)EscPercent(DbgGetClientInfo()));
+		if (pMyBuddy && bTargetOnSameServer && bTargetHasEServerContext && !bTargetHasKadRendezvousContext) {
 			// Check socket validity - if invalid, reconnect to buddy
 			if (!pMyBuddy->socket || !pMyBuddy->socket->IsConnected()) {
 				if (thePrefs.GetLogNatTraversalEvents()) {
@@ -2779,19 +3053,19 @@ bool CUpDownClient::TryToConnect(bool bIgnoreMaxCon, bool bNoCallbacks, CRuntime
 						(LPCTSTR)EscPercent(pMyBuddy->DbgGetClientInfo()));
 				}
 				
-				// Queue the relay request to send when buddy reconnects
-				// Save the pending relay target on the buddy client
-				pMyBuddy->SetPendingEServerRelayTarget(const_cast<CUpDownClient*>(this));
-				
-				// Initiate reconnection to buddy - relay will be sent in OnConnect
-				if (thePrefs.GetLogNatTraversalEvents()) {
-					AddDebugLogLine(false, _T("[eServerBuddy] TryToConnect: Initiating reconnection to buddy %s for pending relay"),
-						(LPCTSTR)EscPercent(pMyBuddy->DbgGetClientInfo()));
+				// Queue the relay request to send when buddy reconnects.
+				if (pMyBuddy->SetPendingEServerRelayTarget(const_cast<CUpDownClient*>(this))) {
+					// Initiate reconnection to buddy - relay will be sent in OnConnect
+					if (thePrefs.GetLogNatTraversalEvents()) {
+						AddDebugLogLine(false, _T("[eServerBuddy] TryToConnect: Initiating reconnection to buddy %s for pending relay"),
+							(LPCTSTR)EscPercent(pMyBuddy->DbgGetClientInfo()));
+					}
+					pMyBuddy->TryToConnect(true, true, NULL, true);
+					m_eConnectingState = CCS_SERVERCALLBACK;  // Mark as waiting for callback
+					return true;
 				}
-				pMyBuddy->TryToConnect(true, true, NULL, true);
-				
-				m_eConnectingState = CCS_SERVERCALLBACK;  // Mark as waiting for callback
-				return true;
+				if (thePrefs.GetLogNatTraversalEvents())
+					AddDebugLogLine(false, _T("[eServerBuddy] TryToConnect: Failed to queue pending relay on reconnecting buddy"));
 			} else {
 				// We have a connected eServer buddy and target is on the same server, try relay
 				if (thePrefs.GetLogNatTraversalEvents()) {
@@ -2815,6 +3089,10 @@ bool CUpDownClient::TryToConnect(bool bIgnoreMaxCon, bool bNoCallbacks, CRuntime
 	if (HasValidServingBuddyID() && Kademlia::CKademlia::IsConnected()) { 
 		if (!GetServingBuddyIP().IsNull() && GetServingBuddyPort() && m_reqfile != NULL) { // eMule AI: I've catched an exception inside below lines for a client with a null m_reqfile. Arranged this lines to fix this.
 			if ((bLocalNeedsRendezvous || m_bAllowRendezvousAfterCallback) && thePrefs.IsEnableNatTraversal()) {
+				if (!RegisterNatTRendezvousAttempt()) {
+					AbortNatTRendezvousAttempt(_T("NAT-T rendezvous attempt limit reached."));
+					return true;
+				}
 				// Set download state to CONNECTING before rendezvous flow (also handle DS_ONQUEUE)
 				if (m_reqfile != NULL && GetDownloadState() != DS_DOWNLOADING && GetDownloadState() != DS_CONNECTED && GetDownloadState() != DS_CONNECTING)
 					SetDownloadState(DS_CONNECTING);
@@ -2839,7 +3117,7 @@ bool CUpDownClient::TryToConnect(bool bIgnoreMaxCon, bool bNoCallbacks, CRuntime
 					theApp.clientudp->SeedNatTraversalExpectation(this, GetConnectIP(), GetKadPort());
 				// Proactively send a small burst of hole punch packets towards the target's known Kad endpoint to open our NAT pinhole.
 				// We still perform another hole punch from OP_RENDEZVOUS using the buddy-observed endpoint for symmetry.
-				if (bNeedLocalHolePunch && !GetConnectIP().IsNull() && GetKadPort() != 0) {
+				if (bNeedLocalHolePunch && bNatUdpReady && !GetConnectIP().IsNull() && GetKadPort() != 0) {
 					if (thePrefs.GetLogNatTraversalEvents())
 						DebugLog(_T("[NatTraversal] TryToConnect: Pre-Rendezvous hole punch to %s:%u for %s"), (LPCTSTR)ipstr(GetConnectIP()), GetKadPort(), (LPCTSTR)EscPercent(DbgGetClientInfo()));
 					for (int i = 0; i < 6; ++i) {
@@ -2879,27 +3157,29 @@ bool CUpDownClient::TryToConnect(bool bIgnoreMaxCon, bool bNoCallbacks, CRuntime
 
 		data.WriteUInt8(OP_RENDEZVOUS);
 				data.WriteHash16(thePrefs.GetUserHash());
-				data.WriteUInt8(GetMyConnectOptions(true, true));
+				data.WriteUInt8(GetMyConnectOptions(true, true) | CONNECT_OPT_NATT_ENDPOINT_HINT);
 
 				bool bHasFileContext = (m_reqfile != NULL && !isnulmd4(m_reqfile->GetFileHash()));
 				if (bHasFileContext) {
 					data.WriteHash16(m_reqfile->GetFileHash());
 					if (thePrefs.GetLogNatTraversalEvents())
-						DebugLog(_T("[NATTTESTMODE: Rendezvous Request] Embedding file hash %s for file %s\n"), (LPCTSTR)md4str(m_reqfile->GetFileHash()), (LPCTSTR)EscPercent(m_reqfile->GetFileName()));
+						DebugLog(_T("[NatTraversal: Rendezvous Request] Embedding file hash %s for file %s\n"), (LPCTSTR)md4str(m_reqfile->GetFileHash()), (LPCTSTR)EscPercent(m_reqfile->GetFileName()));
 					if (thePrefs.GetLogNatTraversalEvents())
 						DebugLog(_T("[NatTraversal] TryToConnect: Embedding file hash in rendezvous payload for %s"), (LPCTSTR)EscPercent(m_reqfile->GetFileName()));
 				} else {
 					data.WriteHash16(nullMarker);
 					if (thePrefs.GetLogNatTraversalEvents())
-						DebugLog(_T("[NATTTESTMODE: Rendezvous Request] No file context available; embedding NULL hash placeholder\n"));
+						DebugLog(_T("[NatTraversal: Rendezvous Request] No file context available; embedding NULL hash placeholder\n"));
 				}
 
 				// Append REQUESTER's (our) public IPv4 + UDP/Kad port for buddy forwarding.
 				// The buddy needs to know where to forward ephemeral OP_REASKACK (to us, not to target).
 				// This is crucial for LowID-to-LowID NAT traversal: requester sends own public endpoint.
-				uint32 requesterIP = theApp.GetPublicIPv4();
-				if (requesterIP == 0)
-					requesterIP = Kademlia::CKademlia::GetIPAddress();
+				uint32 requesterIP = Kademlia::CKademlia::GetIPAddress();
+				if (requesterIP != 0)
+					requesterIP = htonl(requesterIP);
+				else
+					requesterIP = theApp.GetPublicIPv4();
 				
 				uint16 requesterPort = 0;
 				if (Kademlia::CKademlia::GetPrefs()->GetUseExternKadPort())
@@ -2908,10 +3188,17 @@ bool CUpDownClient::TryToConnect(bool bIgnoreMaxCon, bool bNoCallbacks, CRuntime
 					requesterPort = Kademlia::CKademlia::GetPrefs()->GetInternKadPort();
 				
 				if (requesterIP != 0 && requesterPort != 0) {
-					data.WriteUInt32(requesterIP);      // REQUESTER's (our) public IPv4 (host order)
+					data.WriteUInt32(requesterIP);      // REQUESTER's public IPv4 in network byte order
 					data.WriteUInt16(requesterPort);    // REQUESTER's (our) UDP/Kad port
+					data.WriteUInt8((uint8)eEffectivePreferredNatTransport); // Optional requester transport hint.
 					if (thePrefs.GetLogNatTraversalEvents())
-						DebugLog(_T("[NatTraversal] OP_ReaskCallbackUDP: Including REQUESTER endpoint %s:%u for ephemeral response"), (LPCTSTR)ipstr(requesterIP), requesterPort);
+						DebugLog(_T("[NatTraversal] OP_ReaskCallbackUDP: Including REQUESTER endpoint %s:%u transportHint=%u for ephemeral response"), (LPCTSTR)ipstr(requesterIP), requesterPort, (UINT)eEffectivePreferredNatTransport);
+				}
+
+				if (!bNatUdpReady) {
+					if (thePrefs.GetLogNatTraversalEvents())
+						DebugLog(_T("[NatTraversal] TryToConnect: SKIP Rendezvous - local UDP endpoint is not ready; %s"), (LPCTSTR)EscPercent(DbgGetClientInfo()));
+					return false;
 				}
 
 				if (thePrefs.GetDebugClientUDPLevel() > 0)
@@ -2940,13 +3227,15 @@ bool CUpDownClient::TryToConnect(bool bIgnoreMaxCon, bool bNoCallbacks, CRuntime
 		}
 
 		theApp.clientudp->SendPacket(response, targetBuddyIP, targetBuddyPort, false, NULL, false, 0);
+		if (eEffectivePreferredNatTransport == NATT_TRANSPORT_UTP)
+			PinNatRendezvousUtpTransport();
 
 				if (!GetConnectIP().IsNull() && GetKadPort() != 0 && m_reqfile != NULL) {
 					theApp.clientudp->RegisterPendingCallback(GetConnectIP(), GetKadPort(), m_reqfile->GetFileHash());
 				}
 
 				// Send OP_HOLEPUNCH directly to receiver to open NAT hole for incoming REASKACK
-				if (!GetConnectIP().IsNull() && GetKadPort() != 0) {
+				if (bNatUdpReady && !GetConnectIP().IsNull() && GetKadPort() != 0) {
 					Packet *holepunch = new Packet(OP_EMULEPROT);
 					holepunch->opcode = OP_HOLEPUNCH;
 					theApp.clientudp->SendPacket(holepunch, GetConnectIP(), GetKadPort(), false, NULL, false, 0);
@@ -2954,13 +3243,13 @@ bool CUpDownClient::TryToConnect(bool bIgnoreMaxCon, bool bNoCallbacks, CRuntime
 						DebugLog(_T("[NatTraversal][OP_REASKCALLBACKUDP][Requester] Sending OP_HOLEPUNCH to receiver %s:%u for NAT hole opening"), (LPCTSTR)ipstr(GetConnectIP()), GetKadPort());
 				}
 				
-				// Proactively attempt uTP connect after requesting rendezvous to avoid relying on RENDEZVOUS ordering.
+				// Proactively attempt the selected NAT-T connect after requesting rendezvous to avoid relying on RENDEZVOUS ordering.
 				// Reset connecting state first to avoid the early-return guard in TryToConnect.
 				// Download state was already set to DS_CONNECTING earlier in this flow, so no need to set again.
 				theApp.clientlist->RemoveConnectingClient(this);
 				m_eConnectingState = CCS_NONE;
 					if (thePrefs.GetLogNatTraversalEvents())
-						AddDebugLogLine(DLP_LOW, false, _T("[NAT-T] TryToConnect: Requester scheduling direct uTP after rendezvous. %s"), (LPCTSTR)EscPercent(DbgGetClientInfo()));
+						AddDebugLogLine(DLP_LOW, false, _T("[NAT-T] TryToConnect: Requester scheduling direct NAT-T transport after rendezvous. %s"), (LPCTSTR)EscPercent(DbgGetClientInfo()));
 					// Mark a couple of short retries for requester too
 					ClearEServerRelayNatTGuard();
 					MarkNatTRendezvous(2);
@@ -3130,11 +3419,11 @@ void CUpDownClient::QueueUtpHelloPacket()
 	if (thePrefs.GetDebugClientTCPLevel() > 0)
 		DebugSend("OP_Hello (queued)", this);
 
-	if (socket && socket->HaveUtpLayer() && socket->IsConnected()) {
+	if (socket && socket->HaveNatTraversalLayer() && socket->IsConnected()) {
 		SetUtpHelloQueued(false);
 		m_dwUtpQueuedPacketsTime = 0;
 		if (thePrefs.GetLogNatTraversalEvents())
-			DebugLog(_T("[NatTraversal] QueueUtpHelloPacket: Sending Hello immediately on connected uTP socket, %s"), (LPCTSTR)EscPercent(DbgGetClientInfo()));
+			DebugLog(_T("[NatTraversal] QueueUtpHelloPacket: Sending Hello immediately on connected NAT-T socket, %s"), (LPCTSTR)EscPercent(DbgGetClientInfo()));
 		SendPacket(packet, true);
 		if (theApp.clientudp)
 			theApp.clientudp->PumpUtpOnce();
@@ -3175,7 +3464,7 @@ void CUpDownClient::RegisterUtpInboundActivity(EUtpFrameType frameType)
 void CUpDownClient::ResendHelloIfTimeout()
 {
 	// Resend OP_HELLO if we still wait for OP_HELLOANSWER for too long on uTP
-	if (!socket || !socket->HaveUtpLayer())
+	if (!socket || !socket->HaveNatTraversalLayer())
 		return;
 	if (!socket->IsConnected())
 		return;
@@ -3243,24 +3532,146 @@ void CUpDownClient::ScheduleNextNatTRetry(DWORD now, DWORD jmin, DWORD jmax)
 		return;
 	if (jmax < jmin) jmax = jmin;
 	DWORD range = (jmax > jmin) ? (jmax - jmin) : 1u;
-	DWORD jitter;
-	if (m_bDeferredNatConnect)
-		jitter = 0;
-	else {
-		DWORD seed = now ^ (DWORD)(uintptr_t)this;
-		jitter = jmin + (seed % (range + 1u));
-	}
+	// QueueDeferredNatConnect schedules the first retry immediately. Later retries honor the requested delay.
+	DWORD seed = now ^ (DWORD)(uintptr_t)this;
+	DWORD jitter = jmin + (seed % (range + 1u));
 	m_dwNattNextRetryTick = now + (jitter == 0 ? 1 : jitter);
+}
+
+void CUpDownClient::ResetNatTRendezvousSession()
+{
+	m_dwNatTRendezvousStartTick = 0;
+	m_uNatTRendezvousAttempts = 0;
+	md4clr(m_achNatTRendezvousFileHash);
+}
+
+bool CUpDownClient::RegisterNatTRendezvousAttempt()
+{
+	if (m_reqfile == NULL || isnulmd4(m_reqfile->GetFileHash()))
+		return true;
+
+	const DWORD now = ::GetTickCount();
+	const uchar* pucFileHash = m_reqfile->GetFileHash();
+	if (m_dwNatTRendezvousStartTick == 0 || !md4equ(m_achNatTRendezvousFileHash, pucFileHash)) {
+		ClearNatRendezvousTransportPin();
+		m_dwNatTRendezvousStartTick = now;
+		m_uNatTRendezvousAttempts = 0;
+		md4cpy(m_achNatTRendezvousFileHash, pucFileHash);
+	}
+
+	const bool bAttemptLimitReached = m_uNatTRendezvousAttempts >= NAT_TRAVERSAL_RENDEZVOUS_MAX_ATTEMPTS;
+	const bool bTimeLimitReached = (DWORD)(now - m_dwNatTRendezvousStartTick) >= NAT_TRAVERSAL_RENDEZVOUS_TIMEOUT;
+	if (bAttemptLimitReached || bTimeLimitReached) {
+		if (thePrefs.GetLogNatTraversalEvents()) {
+			DebugLogWarning(_T("[NatTraversal] Rendezvous attempt limit reached: attempts=%u age=%lu file=%s client=%s"),
+				(UINT)m_uNatTRendezvousAttempts, (DWORD)(now - m_dwNatTRendezvousStartTick),
+				(LPCTSTR)md4str(m_achNatTRendezvousFileHash), (LPCTSTR)EscPercent(DbgGetClientInfo()));
+		}
+		return false;
+	}
+
+	++m_uNatTRendezvousAttempts;
+	return true;
+}
+
+void CUpDownClient::AbortNatTRendezvousAttempt(LPCTSTR pszReason)
+{
+	const DWORD now = ::GetTickCount();
+	m_bNatTFatalConnect = false;
+	m_uNattRetryLeft = 0;
+	m_bDeferredNatConnect = false;
+	m_DeferredNatIP = CAddress();
+	m_uDeferredNatPort = 0;
+	m_uDeferredNatPortWindow = 0;
+	m_dwNattNextRetryTick = 0;
+	ClearEServerRelayNatTGuard();
+	ResetNatTRendezvousSession();
+	ClearNatRendezvousTransportPin();
+	ResetUtpFlowControl();
+	ClearUtpQueuedPackets();
+	ClearHelloAnswerPending();
+	ResetConnectingState();
+	theApp.clientlist->RemoveConnectingClient(this);
+
+	if (socket != NULL) {
+		socket->Safe_Delete();
+		socket = NULL;
+	}
+
+	if (m_reqfile != NULL) {
+		if (GetDownloadState() == DS_CONNECTING || GetDownloadState() == DS_WAITCALLBACK || GetDownloadState() == DS_WAITCALLBACKKAD)
+			SetDownloadState(DS_ONQUEUE, pszReason != NULL ? pszReason : _T("NAT-T rendezvous failed; retry deferred."));
+		m_dwLastTriedToConnect = now - MIN2MS(11) + NAT_TRAVERSAL_RENDEZVOUS_BACKOFF;
+	}
+
+	if (GetSourceFrom() == SF_KADEMLIA && m_reqfile != NULL && thePrefs.GetLogNatTraversalEvents()) {
+		DebugLogWarning(_T("[NatTraversal] Keeping unreachable Kad LowID source on queue after rendezvous failure; retry backoff=%lu ms, %s"),
+			(DWORD)NAT_TRAVERSAL_RENDEZVOUS_BACKOFF, (LPCTSTR)EscPercent(DbgGetClientInfo()));
+	}
 }
 
 void CUpDownClient::DoNatTRetry()
 {
 	if (m_bNatTFatalConnect || m_uNattRetryLeft == 0)
 		return;
+	const bool bHasNatTRetryContext = m_bEServerRelayNatTGuardActive || m_bDeferredNatConnect || m_uNattRetryLeft != 0;
+	const CAddress nattRetryIP = (m_bDeferredNatConnect && !m_DeferredNatIP.IsNull()) ? m_DeferredNatIP : (GetConnectIP().IsNull() ? GetIP() : GetConnectIP());
+	const uint16 nattRetryPort = (m_bDeferredNatConnect && m_uDeferredNatPort != 0) ? m_uDeferredNatPort : (GetKadPort() ? GetKadPort() : GetUDPPort());
+	const bool bQuicTemporarilyDisabledForRetry = IsNatTraversalQuicTemporarilyDisabledFor(nattRetryIP, nattRetryPort);
+	const bool bEndpointHasQuicNatLayer = !bQuicTemporarilyDisabledForRetry && theApp.clientlist != NULL && theApp.clientlist->HasQuicNatTraversalLayerForEndpoint(this, nattRetryIP, nattRetryPort);
+	const bool bCanProbeDirectCapsForQuic = !bQuicTemporarilyDisabledForRetry && CQuicNatSocket::IsRuntimeAvailable() && thePrefs.IsNatTraversalQuicAllowed() && bHasNatTRetryContext;
+	const bool bCanUseLegacyUtpAfterCapsTimeout = !bEndpointHasQuicNatLayer && CanUseLegacyUtpAfterDirectCapsTimeout(DIRECT_NATT_CAPS_LEGACY_TIMEOUT_MS);
+	const bool bIgnoreCachedLegacyForCapsRefresh = bCanProbeDirectCapsForQuic && NeedsDirectNatTraversalCapsRefresh();
+	const bool bKnownQuicFromHello = !bQuicTemporarilyDisabledForRetry && !NeedsDirectNatTraversalCapsRefresh() && GetNatTraversalQuicSupport() && CQuicNatSocket::IsRuntimeAvailable();
+	const bool bKnownLegacyWithoutQuic = (!bIgnoreCachedLegacyForCapsRefresh && HasReceivedHelloInfo() && !GetNatTraversalQuicSupport()) || bCanUseLegacyUtpAfterCapsTimeout;
+	if (bCanProbeDirectCapsForQuic && (!HasDirectNatTraversalCaps() || NeedsDirectNatTraversalCapsRefresh()) && !bKnownQuicFromHello && !bKnownLegacyWithoutQuic
+		&& bHasNatTRetryContext) {
+		CAddress capsIP = !m_DeferredNatIP.IsNull() ? m_DeferredNatIP : (GetConnectIP().IsNull() ? GetIP() : GetConnectIP());
+		uint16 capsPort = m_uDeferredNatPort != 0 ? m_uDeferredNatPort : (GetKadPort() ? GetKadPort() : GetUDPPort());
+		if (theApp.clientudp != NULL && !capsIP.IsNull() && capsPort != 0)
+			theApp.clientudp->RequestNatTraversalCaps(this, capsIP, capsPort);
+		DWORD now = ::GetTickCount();
+		ScheduleNextNatTRetry(now, 250, 500);
+		if (thePrefs.GetLogNatTraversalEvents())
+			DebugLog(_T("[NatTraversal] DoNatTRetry: waiting for direct NAT-T CAPS before transport selection, %s"), (LPCTSTR)EscPercent(DbgGetClientInfo()));
+		return;
+	}
+	if (bEndpointHasQuicNatLayer) {
+		const DWORD now = ::GetTickCount();
+		if (m_dwUtpConnectionStartTick == 0)
+			m_dwUtpConnectionStartTick = now;
+		DWORD endpointQuicAge = 0;
+		if ((int)(now - m_dwUtpConnectionStartTick) >= 0)
+			endpointQuicAge = now - m_dwUtpConnectionStartTick;
+		if (endpointQuicAge < NAT_TRAVERSAL_QUIC_FALLBACK_MS) {
+			ScheduleNextNatTRetry(now, 500, 1000);
+			if (thePrefs.GetLogNatTraversalEvents())
+				DebugLog(_T("[NatTraversal] DoNatTRetry: peer endpoint already has a pending QUIC NAT-T layer; suppressing legacy fallback for %s:%u age=%lu/%lu ms, %s"), (LPCTSTR)ipstr(nattRetryIP), (UINT)nattRetryPort, endpointQuicAge, (DWORD)NAT_TRAVERSAL_QUIC_FALLBACK_MS, (LPCTSTR)EscPercent(DbgGetClientInfo()));
+			return;
+		}
+		MarkNatTraversalQuicFailed(nattRetryIP, nattRetryPort, _T("peer endpoint QUIC layer timeout in DoNatTRetry"));
+	}
+	if (socket != NULL && socket->HaveQuicNatLayer() && !socket->IsConnected()) {
+		const DWORD now = ::GetTickCount();
+		if (m_dwUtpConnectionStartTick == 0)
+			m_dwUtpConnectionStartTick = now;
+		DWORD quicAge = 0;
+		if ((int)(now - m_dwUtpConnectionStartTick) >= 0)
+			quicAge = now - m_dwUtpConnectionStartTick;
+		if (!bQuicTemporarilyDisabledForRetry && quicAge < NAT_TRAVERSAL_QUIC_FALLBACK_MS) {
+			ScheduleNextNatTRetry(now, 500, 1000);
+			if (thePrefs.GetLogNatTraversalEvents())
+				DebugLog(_T("[NatTraversal] DoNatTRetry: pending QUIC NAT-T handshake is in progress; suppressing retry age=%lu/%lu ms, %s"), quicAge, (DWORD)NAT_TRAVERSAL_QUIC_FALLBACK_MS, (LPCTSTR)EscPercent(DbgGetClientInfo()));
+			return;
+		}
+		MarkNatTraversalQuicFailed(nattRetryIP, nattRetryPort, _T("QUIC handshake timeout in DoNatTRetry"));
+		ResetNatTraversalSocketForTransportChange(_T("QUIC NAT-T handshake timeout; falling back to uTP"), true);
+	}
+
 	bool bHandshakeRetryTimeout = false;
 	// Once uTP is connected, do not keep immediate deferred retry cadence.
 	// Immediate retries are useful while opening NAT pinholes, but harmful after connect/adoption.
-	if (socket != NULL && socket->HaveUtpLayer() && socket->IsConnected() && m_bDeferredNatConnect) {
+	if (socket != NULL && socket->HaveNatTraversalLayer() && socket->IsConnected() && m_bDeferredNatConnect) {
 		m_bDeferredNatConnect = false;
 		m_DeferredNatIP = CAddress();
 		m_uDeferredNatPort = 0;
@@ -3270,12 +3681,12 @@ void CUpDownClient::DoNatTRetry()
 	// Skip retries while handshake is still in progress.
 	// Reconnecting too early can close a valid adopted socket before Hello/HelloAnswer completes.
 	// If handshake stalls beyond a grace window, retries are re-enabled to recover.
-	if (socket != NULL && socket->HaveUtpLayer() && socket->IsConnected() && !CheckHandshakeFinished()) {
+	if (socket != NULL && socket->HaveNatTraversalLayer() && socket->IsConnected() && !CheckHandshakeFinished()) {
 		const DWORD now = ::GetTickCount();
 		const DWORD kHandshakeRetryGraceMs = 6000;
 		if (m_dwHelloLastSentTick == 0 || (int)(now - m_dwHelloLastSentTick) < (int)kHandshakeRetryGraceMs) {
 			if (thePrefs.GetLogNatTraversalEvents())
-				DebugLog(_T("[NatTraversal] DoNatTRetry: Skip retry, handshake still pending on connected uTP, %s"), (LPCTSTR)EscPercent(DbgGetClientInfo()));
+				DebugLog(_T("[NatTraversal] DoNatTRetry: Skip retry, handshake still pending on connected NAT-T, %s"), (LPCTSTR)EscPercent(DbgGetClientInfo()));
 			return;
 		}
 		bHandshakeRetryTimeout = true;
@@ -3284,10 +3695,10 @@ void CUpDownClient::DoNatTRetry()
 	}
 
 	// Skip retries only when the uTP path is both connected and writable.
-	if (socket != NULL && socket->HaveUtpLayer() && socket->IsConnected()) {
+	if (socket != NULL && socket->HaveNatTraversalLayer() && socket->IsConnected()) {
 		if (!bHandshakeRetryTimeout && IsUtpWritable()) {
 			if (thePrefs.GetLogNatTraversalEvents())
-				DebugLog(_T("[NatTraversal] DoNatTRetry: Skip retry, uTP is connected+writable, %s"), (LPCTSTR)EscPercent(DbgGetClientInfo()));
+				DebugLog(_T("[NatTraversal] DoNatTRetry: Skip retry, NAT-T is connected+writable, %s"), (LPCTSTR)EscPercent(DbgGetClientInfo()));
 			m_uNattRetryLeft = 0;
 			ClearEServerRelayNatTGuard();
 			return;
@@ -3295,10 +3706,19 @@ void CUpDownClient::DoNatTRetry()
 		if (thePrefs.GetLogNatTraversalEvents() && !bHandshakeRetryTimeout)
 			DebugLog(_T("[NatTraversal] DoNatTRetry: Keep retry, uTP connected but not writable yet, %s"), (LPCTSTR)EscPercent(DbgGetClientInfo()));
 	}
+	// Passive uploader NAT-T sockets must not be converted into active connects by retry timers.
+	if (m_reqfile == NULL && !isnulmd4(GetUploadFileID()) && socket != NULL && socket->HaveNatTraversalLayer()) {
+		if (thePrefs.GetLogNatTraversalEvents())
+			DebugLog(_T("[NatTraversal] DoNatTRetry: passive uploader NAT-T socket is waiting; skipping active retry, %s"), (LPCTSTR)EscPercent(DbgGetClientInfo()));
+		m_uNattRetryLeft = 0;
+		return;
+	}
+
 	// Send an extra hole punch burst + retry uTP connect
-	CAddress tip = (m_bDeferredNatConnect && !m_DeferredNatIP.IsNull()) ? m_DeferredNatIP : (GetConnectIP().IsNull() ? GetIP() : GetConnectIP());
-	uint16 tport = (m_bDeferredNatConnect && m_uDeferredNatPort != 0) ? m_uDeferredNatPort : (GetKadPort() ? GetKadPort() : GetUDPPort());
-		if (!tip.IsNull() && tport != 0) {
+	CAddress tip = nattRetryIP;
+	uint16 tport = nattRetryPort;
+	const bool bNatUdpReady = theApp.clientudp != NULL && (theApp.clientudp->IsNatTraversalEndpointReady() || theApp.clientudp->EnsureNatTraversalEndpointReady(_T("NAT-T retry")));
+	if (!tip.IsNull() && tport != 0 && bNatUdpReady) {
 			for (int i = 0; i < 4; ++i) {
 				Packet* hp = new Packet(OP_EMULEPROT);
 				hp->opcode = OP_HOLEPUNCH;
@@ -3321,16 +3741,32 @@ void CUpDownClient::DoNatTRetry()
 			}
 		}
 		}
-		// After a transient uTP failure in guarded eServer relay flow, refresh relay first.
-		if (IsEServerRelayNatTGuardActive() && m_uEServerRelayTransientErrors > 0
+		// Keep an active eServer relay attempt on the same route until its retry budget is exhausted.
+		if (IsEServerRelayNatTGuardActive()
 			&& theApp.serverconnect->IsLowID() && HasLowID()
 			&& theApp.serverconnect->IsLocalServer(m_dwServerIP, m_nServerPort)) {
 			CUpDownClient* pMyBuddy = theApp.clientlist->GetServingEServerBuddy();
 			if (pMyBuddy != NULL && pMyBuddy->socket != NULL && pMyBuddy->socket->IsConnected()) {
+				const DWORD now = ::GetTickCount();
+				const uint32 dwBuddyIP = (!pMyBuddy->GetIP().IsNull() && pMyBuddy->GetIP().GetType() == CAddress::IPv4) ? pMyBuddy->GetIP().ToUInt32(false) : 0;
+				const bool bSameRelayContext = m_reqfile != NULL
+					&& m_dwLastEServerRelayRequestSent != 0
+					&& m_dwLastEServerRelayRequestTargetLowID == GetUserIDHybrid()
+					&& m_dwLastEServerRelayRequestBuddyIP == dwBuddyIP
+					&& md4equ(m_achLastEServerRelayRequestFileHash, m_reqfile->GetFileHash());
+				const DWORD dwRelayAge = bSameRelayContext ? (DWORD)(now - m_dwLastEServerRelayRequestSent) : ESERVERBUDDY_RELAY_REASK_TIME;
+				if (dwRelayAge < ESERVERBUDDY_RELAY_REASK_TIME) {
+					const DWORD dwRemaining = ESERVERBUDDY_RELAY_REASK_TIME - dwRelayAge;
+					ScheduleNextNatTRetry(now, dwRemaining, dwRemaining + 250);
+					return;
+				}
 				if (SendEServerRelayRequest(this)) {
 					m_eConnectingState = CCS_SERVERCALLBACK;
+					SetLastTriedToConnectTime();
 					if (m_uNattRetryLeft)
 						--m_uNattRetryLeft;
+					if (m_uNattRetryLeft)
+						ScheduleNextNatTRetry(now, ESERVERBUDDY_RELAY_REASK_TIME, ESERVERBUDDY_RELAY_REASK_TIME + 250);
 					return;
 				}
 			}
@@ -3354,8 +3790,12 @@ void CUpDownClient::DoNatTRetry()
 					&& HasNatTraversalFileContext()
 					&& Kademlia::CKademlia::IsConnected();
 				const bool bRetryWithUtpOverride = !bLowToLowRendezvousRetry;
-				if (bLowToLowRendezvousRetry && thePrefs.GetLogNatTraversalEvents())
-					DebugLog(_T("[NatTraversal] DoNatTRetry: lowID<->lowID retry uses normal connect path (override disabled) to allow rendezvous, %s"), (LPCTSTR)EscPercent(DbgGetClientInfo()));
+				if (bLowToLowRendezvousRetry) {
+					if (theApp.clientudp != NULL && RequestServingBuddyInfo() && thePrefs.GetLogNatTraversalEvents())
+						DebugLog(_T("[ServingBuddyPull] Requested fresh serving buddy info before NAT-T rendezvous retry, %s"), (LPCTSTR)EscPercent(DbgGetClientInfo()));
+					if (thePrefs.GetLogNatTraversalEvents())
+						DebugLog(_T("[NatTraversal] DoNatTRetry: lowID<->lowID retry uses normal connect path (override disabled) to allow rendezvous, %s"), (LPCTSTR)EscPercent(DbgGetClientInfo()));
+				}
 				SetLastTriedToConnectTime();
 				TryToConnect(true, false, NULL, bRetryWithUtpOverride);
 			}
@@ -3372,11 +3812,56 @@ void CUpDownClient::QueueDeferredNatConnect(const CAddress& ip, uint16 port, uin
 	uint8 retries = (m_uNattRetryLeft > 0) ? m_uNattRetryLeft : (ShouldAllowNatTRetryReseed() ? 1 : 0);
 	if (retries == 0)
 		return;
+	const bool bPreserveRetrySchedule = IsEServerRelayNatTGuardActive() && m_bDeferredNatConnect && m_uNattRetryLeft > 0 && m_DeferredNatIP == ip && m_uDeferredNatPort == port;
 	m_bDeferredNatConnect = true;
 	m_DeferredNatIP = ip;
 	m_uDeferredNatPort = port;
 	m_uDeferredNatPortWindow = window;
-	MarkNatTRendezvous(retries, true);
+	MarkNatTRendezvous(retries, !bPreserveRetrySchedule);
+}
+
+bool CUpDownClient::RefreshNatObservedEndpoint(const CAddress& ip, uint16 port, LPCTSTR pszReason)
+{
+	if (port == 0 || ip.IsNull() || !ip.IsPublicIP())
+		return false;
+
+	const bool bNatScoped = m_bDeferredNatConnect || m_bEServerRelayNatTGuardActive || m_uNattRetryLeft != 0
+		|| m_eConnectingState == CCS_SERVERCALLBACK || m_eConnectingState == CCS_KADCALLBACK
+		|| GetDownloadState() == DS_CONNECTING || GetDownloadState() == DS_WAITCALLBACK || GetDownloadState() == DS_WAITCALLBACKKAD;
+	if (!bNatScoped)
+		return false;
+
+	const CAddress oldIP = GetConnectIP().IsNull() ? GetIP() : GetConnectIP();
+	const uint16 oldPort = GetKadPort() ? GetKadPort() : GetUDPPort();
+	bool bChanged = false;
+
+	if (ip.GetType() == CAddress::IPv4 && GetIPv4() != ip && (socket == NULL || !socket->IsConnected())) {
+		// Persist trusted IPv4 NAT endpoints because TryToConnect restores ConnectIP from UserIPv4.
+		CAddress observedIP = ip;
+		SetIP(observedIP);
+		bChanged = true;
+	} else if (GetConnectIP().IsNull() || GetConnectIP() != ip) {
+		CAddress observedIP = ip;
+		SetConnectIP(observedIP);
+		bChanged = true;
+	}
+	if (GetKadPort() != port) {
+		SetKadPort(port);
+		bChanged = true;
+	}
+	if (GetUDPPort() != port) {
+		SetUDPPort(port);
+		bChanged = true;
+	}
+	SetNatTraversalSupport(true);
+
+	if (bChanged && thePrefs.GetLogNatTraversalEvents()) {
+		DebugLog(_T("[NatTraversal] Refreshed observed NAT endpoint old=%s:%u new=%s:%u reason=%s client=%s"),
+			(LPCTSTR)ipstr(oldIP), (UINT)oldPort, (LPCTSTR)ipstr(ip), (UINT)port,
+			pszReason != NULL ? pszReason : _T("unknown"), (LPCTSTR)EscPercent(DbgGetClientInfo()));
+	}
+
+	return bChanged;
 }
 
 void CUpDownClient::FlagNatTFatalConnectFailure()
@@ -3389,11 +3874,14 @@ void CUpDownClient::FlagNatTFatalConnectFailure()
 	m_uDeferredNatPortWindow = 0;
 	m_dwNattNextRetryTick = 0;
 	ClearEServerRelayNatTGuard();
+	ClearNatRendezvousTransportPin();
 }
 
 void CUpDownClient::ClearNatTFatalConnectFailure()
 {
 	m_bNatTFatalConnect = false;
+	ResetNatTRendezvousSession();
+	ClearNatRendezvousTransportPin();
 }
 
 void CUpDownClient::ArmEServerRelayNatTGuard()
@@ -3411,6 +3899,11 @@ void CUpDownClient::ClearEServerRelayNatTGuard()
 	m_bEServerRelayNatTGuardActive = false;
 	m_dwEServerRelayNatTWindowStart = 0;
 	m_uEServerRelayTransientErrors = 0;
+	m_bDirectNatTraversalCaps = false;
+	m_byDirectNatTraversalOptions = 0;
+	m_dwDirectNatTraversalCapsTick = 0;
+	m_dwDirectNatTraversalCapsProbeTick = 0;
+	m_bDirectNatTraversalCapsRefreshRequired = false;
 }
 
 void CUpDownClient::NormalizeEServerRelayNatTGuard()
@@ -3525,12 +4018,12 @@ void CUpDownClient::Connect()
 
 	//Try to always tell the socket to WaitForOnConnect before you call Connect.
 	socket->WaitForOnConnect();
-	SOCKADDR_IN6 sockAddr = { 0 };
+	sockaddr_storage sockAddr = {};
 	int nSockAddrLen = sizeof(sockAddr);
 	CAddress IP = GetConnectIP();
 	// Safety: ensure we have a valid connect endpoint for the chosen transport.
-	// For uTP, prefer the remote's public UserIP if ConnectIP is empty; fallback to last callback requester if available.
-	if (socket->HaveUtpLayer()) {
+	// For NAT-T, prefer the remote's public UserIP if ConnectIP is empty; fallback to last callback requester if available.
+	if (socket->HaveNatTraversalLayer()) {
 		if (IP.IsNull() || !IP.IsPublicIP()) {
 			const CAddress &user = GetIP();
 			if (!user.IsNull() && user.IsPublicIP()) {
@@ -3538,32 +4031,42 @@ void CUpDownClient::Connect()
 				if (GetConnectIP().IsNull())
 					SetConnectIP(IP);
 				if (thePrefs.GetLogNatTraversalEvents())
-					DebugLog(_T("[NatTraversal] Connect: Using fallback UserIP=%s for uTP, %s"), (LPCTSTR)ipstr(IP), (LPCTSTR)EscPercent(DbgGetClientInfo()));
+					DebugLog(_T("[NatTraversal] Connect: Using fallback UserIP=%s for NAT-T, %s"), (LPCTSTR)ipstr(IP), (LPCTSTR)EscPercent(DbgGetClientInfo()));
 			} else if (!GetLastCallbackRequesterIP().IsNull() && GetLastCallbackRequesterIP().IsPublicIP()) {
 				IP = GetLastCallbackRequesterIP();
 				if (GetConnectIP().IsNull())
 					SetConnectIP(IP);
 				if (thePrefs.GetLogNatTraversalEvents())
-					DebugLog(_T("[NatTraversal] Connect: Using fallback LastCallbackRequesterIP=%s for uTP, %s"), (LPCTSTR)ipstr(IP), (LPCTSTR)EscPercent(DbgGetClientInfo()));
+					DebugLog(_T("[NatTraversal] Connect: Using fallback LastCallbackRequesterIP=%s for NAT-T, %s"), (LPCTSTR)ipstr(IP), (LPCTSTR)EscPercent(DbgGetClientInfo()));
 			}
 		}
 	}
-	IP.Convert(CAddress::IPv6); // the socket works with IPv6 adresses only
-	if (socket->HaveUtpLayer())
-		IP.ToSA((SOCKADDR*)&sockAddr, &nSockAddrLen, GetKadPort() ? GetKadPort() : GetUDPPort());
-	else
-		IP.ToSA((SOCKADDR*)&sockAddr, &nSockAddrLen, GetUserPort());
-	if (socket->Connect((SOCKADDR*)&sockAddr, sizeof sockAddr)) {
-		if (socket->HaveUtpLayer() && thePrefs.GetLogNatTraversalEvents())
-			DebugLog(_T("[NatTraversal] Connect: UTP socket is connected, %s"), (LPCTSTR)EscPercent(DbgGetClientInfo()));
-	} else if (socket->HaveUtpLayer()) {
+	const bool bUseNatTraversalLayer = socket->HaveNatTraversalLayer() != FALSE;
+	bool bEndpointReady = true;
+	if (bUseNatTraversalLayer) {
+		bEndpointReady = theApp.clientudp != NULL && theApp.clientudp->BuildUtpPeerEndpoint(IP, GetKadPort() ? GetKadPort() : GetUDPPort(), sockAddr, nSockAddrLen);
+	}
+	else {
+		if (socket->GetFamily() == AF_INET)
+			bEndpointReady = IP.Convert(CAddress::IPv4);
+		else
+			bEndpointReady = IP.Convert(CAddress::IPv6);
+		if (bEndpointReady)
+			IP.ToSA(reinterpret_cast<sockaddr*>(&sockAddr), &nSockAddrLen, GetUserPort());
+	}
+	if (!bEndpointReady)
+		WSASetLastError(WSAEAFNOSUPPORT);
+	if (bEndpointReady && socket->Connect(reinterpret_cast<sockaddr*>(&sockAddr), nSockAddrLen)) {
+		if (socket->HaveNatTraversalLayer() && thePrefs.GetLogNatTraversalEvents())
+			DebugLog(_T("[NatTraversal] Connect: NAT-T socket is connected, %s"), (LPCTSTR)EscPercent(DbgGetClientInfo()));
+	} else if (socket->HaveNatTraversalLayer()) {
 		DWORD wsaErr = ::WSAGetLastError();
 		if (wsaErr == WSAEWOULDBLOCK || wsaErr == WSAEINPROGRESS || wsaErr == WSAEALREADY) {
 			if (thePrefs.GetLogNatTraversalEvents())
-				DebugLog(_T("[NatTraversal] Connect: UTP connect pending (err=%lu), %s"), wsaErr, (LPCTSTR)EscPercent(DbgGetClientInfo()));
+				DebugLog(_T("[NatTraversal] Connect: NAT-T connect pending (err=%lu), %s"), wsaErr, (LPCTSTR)EscPercent(DbgGetClientInfo()));
 		} else {
 			if (thePrefs.GetLogNatTraversalEvents())
-				DebugLogError(_T("[NatTraversal] Connect: UTP socket connection attempt has failed (err=%lu), %s"), wsaErr, (LPCTSTR)EscPercent(DbgGetClientInfo()));
+				DebugLogError(_T("[NatTraversal] Connect: NAT-T socket connection attempt has failed (err=%lu), %s"), wsaErr, (LPCTSTR)EscPercent(DbgGetClientInfo()));
 			socket->Safe_Delete();
 			socket = NULL;
 			// Keep current connect state/list registration so global connect-timeout lifecycle
@@ -3571,14 +4074,20 @@ void CUpDownClient::Connect()
 			return;
 		}
 	}
-	// Schedule deferred hello packet for uTP connections to allow NAT hole establishment
-	if (socket->HaveUtpLayer()) {
+	// Schedule deferred hello packet for NAT-T connections to allow hole establishment
+	if (socket->HaveNatTraversalLayer()) {
 		if (thePrefs.GetLogNatTraversalEvents())
-			DebugLog(_T("[NatTraversal] Connect: Scheduling deferred Hello for uTP handshake, %s"), (LPCTSTR)EscPercent(DbgGetClientInfo()));
-		// Give uTP some time for handshake before sending eMule Hello
-		// OnConnect callback will trigger SendHelloPacket when connection is established
+			DebugLog(_T("[NatTraversal] Connect: Scheduling deferred Hello for NAT-T handshake, %s"), (LPCTSTR)EscPercent(DbgGetClientInfo()));
+		// Allow the NAT-T layer to dispatch Hello when the transport becomes writable.
+		m_bUtpHelloDeferred = true;
+		if (!IsUtpHelloQueued()) {
+			m_dwHelloLastSentTick = 0;
+			m_uHelloResendCount = 0;
+		}
+		// Give NAT-T some time for handshake before sending eMule Hello.
+		// OnConnect or the NAT-T writable notification will trigger Hello when ready.
 		
-		// Set connection timeout for uTP handshake (fallback to direct Hello after delay)
+		// Set connection timeout for NAT-T handshake.
 		m_dwUtpConnectionStartTick = ::GetTickCount();
 	} else {
 		SendHelloPacket();
@@ -3607,27 +4116,40 @@ void CUpDownClient::ConnectionEstablished()
 	// Keep direct-path fallback window alive while uTP hello handshake is still pending.
 	// Otherwise repeated transient connects can keep resetting the timer and block rendezvous forever.
 	const bool bPreserveDirectFallbackWindow =
-		(socket != NULL && socket->HaveUtpLayer() && socket->IsConnected() && !CheckHandshakeFinished());
+		(socket != NULL && socket->HaveNatTraversalLayer() && socket->IsConnected() && !CheckHandshakeFinished());
 
 	m_eConnectingState = CCS_NONE;
 	theApp.clientlist->RemoveConnectingClient(this);
+	if (thePrefs.IsDetectUploadRequestAbuse() && thePrefs.IsUploadRequestAbusePostHelloDisconnect() && IsBanned()) {
+		if (socket != NULL)
+			socket->Close();
+		return;
+	}
 	if (!bPreserveDirectFallbackWindow) {
 		m_bAwaitingDirectCallback = false;
 		m_bAllowRendezvousAfterCallback = false;
 		m_dwDirectCallbackAttemptTick = 0;
 	}
 
-	// Reset SecureIdent state before sending Hello on uTP connections
-	// This ensures fresh SecIdent exchange for every new connection, preventing "Non SUI eMule" penalty
-	// When buddy handshake and download connection reuse same CUpDownClient object,
-	// stale m_dwLastSignatureIP causes SendSecIdentStatePacket() to skip with "Already identified"
-	if (socket && socket->HaveUtpLayer())
+	// Reset SecureIdent once for each physical NAT-T transport layer. Duplicate
+	// connected/Hello callbacks on the same layer must preserve an outstanding challenge.
+	void* pNatTraversalLayer = NULL;
+	if (socket && socket->HaveQuicNatLayer())
+		pNatTraversalLayer = socket->GetQuicNatLayer();
+	else if (socket && socket->HaveUtpLayer())
+		pNatTraversalLayer = socket->GetUtpLayer();
+	if (pNatTraversalLayer != NULL && m_pNatTraversalSecureIdentLayer != pNatTraversalLayer) {
+		m_pNatTraversalSecureIdentLayer = pNatTraversalLayer;
+		m_pLastNatTraversalFileRequestLayer = NULL;
+		m_dwLastNatTraversalFileRequestTick = 0;
+		md4clr(m_achLastNatTraversalFileRequestHash);
 		ResetSecureIdentState();
+	}
 
 	// For uTP connections, always queue Hello packet instead of sending immediately.
 	// uTP socket may report IsConnected()=true but internal handshake may not be complete,
 	// causing WSASend 10057 error. Queue it and let OnSend() handle when socket is truly writable.
-	if (socket && socket->HaveUtpLayer()) {
+	if (socket && socket->HaveNatTraversalLayer()) {
 		if (socket->IsConnected()) {
 			if (m_dwHelloLastSentTick == 0) {
 				if (IsUtpLocalInitiator()) {
@@ -3677,6 +4199,7 @@ void CUpDownClient::ConnectionEstablished()
 				SendHelloPacket();
 			}
 		}
+		ClearIncomingServedBuddyWait();
 		SetKadState(KS_CONNECTED_BUDDY);
 		break;
 	case KS_CONNECTING_FWCHECK_UDP:
@@ -3694,7 +4217,7 @@ void CUpDownClient::ConnectionEstablished()
 			} else
 				SetChatState(MS_NONE);
 		} else
-			theApp.emuledlg->chatwnd->chatselector.ConnectingResult(this, true); // other clients update directly
+			theApp.QueueClientChatConnectingResultEvent(this, true); // other clients update through client event
 
 		// Log incoming download state to diagnose intermittent failures
 		if (thePrefs.GetLogNatTraversalEvents()) {
@@ -3813,13 +4336,13 @@ void CUpDownClient::ConnectionEstablished()
 	if (GetUploadState() == US_CONNECTING && theApp.uploadqueue->IsDownloading(this)) {
 		SetUploadState(US_UPLOADING);
 		if (thePrefs.GetLogNatTraversalEvents())
-			DebugLog(_T("[NatTraversal] AcceptUpload: sending OP_ACCEPTUPLOADREQ via %s for %s"), (socket && socket->HaveUtpLayer()) ? _T("uTP(queue)") : _T("TCP"), (LPCTSTR)EscPercent(DbgGetClientInfo()));
+			DebugLog(_T("[NatTraversal] AcceptUpload: sending OP_ACCEPTUPLOADREQ via %s for %s"), (socket && socket->HaveQuicNatLayer()) ? _T("QUIC(queue)") : ((socket && socket->HaveUtpLayer()) ? _T("uTP(queue)") : _T("TCP")), (LPCTSTR)EscPercent(DbgGetClientInfo()));
 		if (thePrefs.GetDebugClientTCPLevel() > 0)
 			DebugSend("OP_AcceptUploadReq", this);
 		Packet *packet = new Packet(OP_ACCEPTUPLOADREQ, 0);
 		theStats.AddUpDataOverheadFileRequest(packet->size);
-		// For uTP, queue the packet instead of sending immediately
-		if (socket && socket->HaveUtpLayer())
+		// For NAT-T, queue the packet instead of sending immediately
+		if (socket && socket->HaveNatTraversalLayer())
 			m_WaitingPackets_list.AddTail(packet);
 		else
 			SendPacket(packet);
@@ -3830,8 +4353,8 @@ void CUpDownClient::ConnectionEstablished()
 			DebugSend(m_fSharedDirectories ? "OP_AskSharedDirs" : "OP_AskSharedFiles", this);
 		Packet *packet = new Packet(m_fSharedDirectories ? OP_ASKSHAREDDIRS : OP_ASKSHAREDFILES, 0);
 		theStats.AddUpDataOverheadOther(packet->size);
-		// For uTP, queue the packet instead of sending immediately
-		if (socket && socket->HaveUtpLayer())
+		// For NAT-T, queue the packet instead of sending immediately
+		if (socket && socket->HaveNatTraversalLayer())
 			m_WaitingPackets_list.AddTail(packet);
 		else
 			SendPacket(packet);
@@ -3840,16 +4363,17 @@ void CUpDownClient::ConnectionEstablished()
 	// For uTP connections, DON'T flush queue immediately - socket may not be write-ready yet.
 	// Instead, trigger a write attempt to make libutp fire WRITABLE callback, which will flush queue.
 	// This avoids WSASend 10057 error that occurs when socket reports connected but isn't ready.
-	if (socket && socket->HaveUtpLayer() && !m_WaitingPackets_list.IsEmpty()) {
+	if (socket && socket->HaveNatTraversalLayer() && !m_WaitingPackets_list.IsEmpty()) {
 		m_dwUtpQueuedPacketsTime = ::GetTickCount(); // Set timestamp for delayed flush
 		if (thePrefs.GetLogNatTraversalEvents())
-			DebugLog(_T("[NatTraversal] ConnectionEstablished: Queue has %d packets for uTP, deferring send to avoid premature Send(), %s"), m_WaitingPackets_list.GetCount(), (LPCTSTR)EscPercent(DbgGetClientInfo()));
+			DebugLog(_T("[NatTraversal] ConnectionEstablished: Queue has %d packets for NAT-T, deferring send to avoid premature Send(), %s"), m_WaitingPackets_list.GetCount(), (LPCTSTR)EscPercent(DbgGetClientInfo()));
 		// Queue will be flushed by ServiceUtpQueuedPackets after delay
 	}
 
 	// Check for pending eServer relay - buddy may have reconnected
 	if (m_pPendingEServerRelayTarget != NULL) {
-		AddDebugLogLine(false, _T("[eServerBuddy] ConnectionEstablished: Buddy socket now connected, processing pending relay"));
+		if (thePrefs.GetLogNatTraversalEvents())
+			AddDebugLogLine(false, _T("[eServerBuddy] ConnectionEstablished: Buddy socket now connected, processing pending relay"));
 		ProcessPendingEServerRelay();
 	}
 
@@ -4124,18 +4648,16 @@ void CUpDownClient::SetUserName(LPCTSTR pszNewName)
 void CUpDownClient::RequestSharedFileList()
 {
 	if (m_iFileListRequested == 0) {
-		AddLogLine(true, GetResString(_T("SHAREDFILES_REQUEST")), (GetUserName() == NULL || GetUserName()[0] == '\0') ? _T('(') + md4str(GetUserHash()) + _T(')') : (LPCTSTR)EscPercent(GetUserName()));
+		AddLogLine(true, GetResString(_T("SHAREDFILES_REQUEST")), (GetUserName() == NULL || GetUserName()[0] == '\0') ? CString(_T('(') + md4str(GetUserHash()) + _T(')')) : EscPercent(GetUserName()));
 		m_bQueryingSharedFiles = true;
 		m_tSharedFilesLastQueriedTime = time(NULL);
-		theApp.emuledlg->transferwnd->GetClientList()->RefreshClient(this, -1, CClientListCtrl::kSortImpactSharedFiles);
-		theApp.emuledlg->transferwnd->GetUploadList()->RefreshClient(this);
-		theApp.emuledlg->transferwnd->GetQueueList()->RefreshClient(this);
-		theApp.emuledlg->transferwnd->GetDownloadClientsList()->RefreshClient(this);
+		theApp.QueueClientRowUpdateEvent(GetRuntimeID(), GetRuntimeGeneration(), _T("client-shared-files-state"));
+		theApp.QueueUploadClientRowsChanged(this, CemuleApp::UploadClientUiTargetAll);
 		m_iFileListRequested = 1;
 		TryToConnect(true);
 	} else
 	{
-		LogWarning(LOG_STATUSBAR, GetResString(_T("SHAREDFILES_REQUEST_IN_PROGRESS")), (GetUserName() == NULL || GetUserName()[0] == '\0') ? _T('(') + md4str(GetUserHash()) + _T(')') : GetUserName(), GetUserIDHybrid());
+		LogWarning(LOG_STATUSBAR, GetResString(_T("SHAREDFILES_REQUEST_IN_PROGRESS")), (GetUserName() == NULL || GetUserName()[0] == '\0') ? CString(_T('(') + md4str(GetUserHash()) + _T(')')) : CString(GetUserName()), GetUserIDHybrid());
 	}
 }
 
@@ -4143,16 +4665,20 @@ void CUpDownClient::ProcessSharedFileList(const uchar *pachPacket, uint32 nSize,
 {
 	if (m_iFileListRequested > 0) {
 		--m_iFileListRequested;
-		theApp.searchlist->ProcessSearchAnswer(pachPacket, nSize, *this, NULL, pszDirectory);
+		theApp.searchlist->QueueClientSearchAnswerPacket(pachPacket, nSize, *this, pszDirectory);
 	}
 }
 
 void CUpDownClient::SetUserHash(const uchar *pucUserHash, bool bLoadArchive)
 {
-	if (pucUserHash == NULL || isnulmd4(pucUserHash))
+	bool bChanged = false;
+	if (pucUserHash == NULL || isnulmd4(pucUserHash)) {
+		bChanged = !isnulmd4(m_achUserHash);
 		md4clr(m_achUserHash);
+	}
 	else if (!md4equ(m_achUserHash, pucUserHash)) { // Update current hash only if it is different
 		md4cpy(m_achUserHash, pucUserHash);
+		bChanged = true;
 		if (thePrefs.GetClientHistory() && !m_bIsArchived) {
 			if (bLoadArchive)
 				theApp.emuledlg->transferwnd->GetClientList()->LoadArchive(this, _T("SetUserHash"));
@@ -4164,9 +4690,11 @@ void CUpDownClient::SetUserHash(const uchar *pucUserHash, bool bLoadArchive)
 					pArchivedClient->ReleaseRuntimeReference();
 				}
 			}
-			theApp.emuledlg->transferwnd->GetDownloadClientsList()->RefreshClient(this);
+			theApp.QueueUploadClientRowsChanged(this, CemuleApp::UploadClientUiTargetDownloadClients);
 		}
 	}
+	if (bChanged)
+		RefreshUploadQueueWaitingIndex();
 }
 
 void CUpDownClient::SetServingBuddyID(const uchar *pucServingBuddyID)
@@ -4177,6 +4705,17 @@ void CUpDownClient::SetServingBuddyID(const uchar *pucServingBuddyID)
 	} else {
 		m_bServingBuddyIDValid = true;
 		md4cpy(m_achServingBuddyID, pucServingBuddyID);
+	}
+}
+
+void CUpDownClient::SetEServerBuddyKadID(const uchar *pucKadID)
+{
+	if (pucKadID == NULL || isnulmd4(pucKadID)) {
+		md4clr(m_achEServerBuddyKadID);
+		m_bEServerBuddyKadIDValid = false;
+	} else {
+		m_bEServerBuddyKadIDValid = true;
+		md4cpy(m_achEServerBuddyKadID, pucKadID);
 	}
 }
 
@@ -4580,7 +5119,7 @@ bool CUpDownClient::SendPacket(Packet *packet, bool bVerifyConnection)
 	if (socket != NULL && (!bVerifyConnection || socket->IsConnected())) {
 		// For uTP, force immediate send to bypass bandwidth throttler queue
 		// uTP has its own internal congestion control, so eMule's throttler should not delay handshake packets
-		bool bForceImmediate = socket->HaveUtpLayer();
+		bool bForceImmediate = socket->HaveNatTraversalLayer();
 		socket->SendPacket(packet, true, 0, bForceImmediate);
 		return true;
 	}
@@ -4616,6 +5155,7 @@ void CUpDownClient::AssertValid() const
 	(void)m_pszUsername;
 	(void)m_achUserHash;
 	(void)m_achServingBuddyID;
+	(void)m_achEServerBuddyKadID;
 	(void)m_nServingBuddyPort;
 	(void)m_nUDPPort;
 	(void)m_nKadPort;
@@ -4666,6 +5206,7 @@ void CUpDownClient::AssertValid() const
 	(void)m_cShowDR;
 	(void)m_nRemoteQueueRank;
 	(void)m_dwLastBlockReceived;
+	(void)m_dwHashsetRequestSent;
 	(void)m_nPartCount;
 	ASSERT(m_eSourceFrom >= SF_SERVER && m_eSourceFrom <= SF_SLS);
 	CHECK_BOOL(m_bRemoteQueueFull);
@@ -4757,6 +5298,38 @@ LPCTSTR CUpDownClient::DbgGetKadState() const
 
 }
 
+static bool ExtractAIModVersion(CString strModVersion, CString& outVersion)
+{
+	strModVersion.Trim();
+	if (strModVersion.IsEmpty())
+		return false;
+
+	CString remainder;
+	const CString fullPrefix = _T("eMule AI");
+	const CString modPrefix = MOD_NAME;
+	if (strModVersion.GetLength() >= fullPrefix.GetLength() && strModVersion.Left(fullPrefix.GetLength()).CompareNoCase(fullPrefix) == 0) {
+		remainder = strModVersion.Mid(fullPrefix.GetLength());
+		if (!remainder.IsEmpty() && !_istspace(remainder[0]) && remainder[0] != _T('v') && remainder[0] != _T('V') && !_istdigit(remainder[0]))
+			return false;
+	}
+	else if (strModVersion.GetLength() >= modPrefix.GetLength() && strModVersion.Left(modPrefix.GetLength()).CompareNoCase(modPrefix) == 0) {
+		remainder = strModVersion.Mid(modPrefix.GetLength());
+		if (!remainder.IsEmpty() && !_istspace(remainder[0]) && remainder[0] != _T('v') && remainder[0] != _T('V') && !_istdigit(remainder[0]))
+			return false;
+	}
+	else
+		return false;
+
+	remainder.Trim();
+	if (!remainder.IsEmpty() && (remainder[0] == _T('v') || remainder[0] == _T('V'))) {
+		remainder = remainder.Mid(1);
+		remainder.Trim();
+	}
+
+	outVersion = remainder;
+	return true;
+}
+
 CString CUpDownClient::DbgGetFullClientSoftVer() const
 {
 	CString aiVersion;
@@ -4765,34 +5338,26 @@ CString CUpDownClient::DbgGetFullClientSoftVer() const
 		formatted.Format(_T("eMule AI v%s"), (LPCTSTR)aiVersion);
 		return formatted;
 	}
-	if (GetClientModVer().IsEmpty())
+	const CString& strModVersion = GetClientModVer();
+	if (strModVersion.IsEmpty())
 		return GetClientSoftVer();
+
+	const CString& strClientSoft = GetClientSoftVer();
+	if (strClientSoft.IsEmpty())
+		return strModVersion;
+
 	CString str;
-	str.Format(_T("%s [%s]"), (LPCTSTR)GetClientSoftVer(), (LPCTSTR)GetClientModVer());
+	str.Format(_T("%s [%s]"), (LPCTSTR)strClientSoft, (LPCTSTR)strModVersion);
 	return str;
 }
 
 bool CUpDownClient::GetAIModVersionString(CString& outVersion) const
 {
-	const CString& modVersion = GetClientModVer();
-	CString modName = MOD_NAME;
-	const int prefixLen = modName.GetLength();
-	if (modVersion.GetLength() < prefixLen)
+	CString strVersion;
+	if (!ExtractAIModVersion(m_strModVersion, strVersion))
 		return false;
-	if (modVersion.Left(prefixLen).CompareNoCase(modName) != 0)
-		return false;
-	CString remainder = modVersion.Mid(prefixLen);
-	remainder.Trim();
-	if (!remainder.IsEmpty() && (remainder[0] == _T('v') || remainder[0] == _T('V'))) {
-		remainder = remainder.Mid(1);
-		remainder.Trim();
-	}
-	if (remainder.IsEmpty()) {
-		CString fallback;
-		fallback.Format(_T("%u.%u"), static_cast<unsigned>(MOD_MAIN_VER), static_cast<unsigned>(MOD_MIN_VER));
-		remainder = fallback;
-	}
-	outVersion = remainder;
+
+	outVersion = strVersion.IsEmpty() ? CString(_T("1.4")) : strVersion;
 	return true;
 }
 
@@ -4810,7 +5375,7 @@ CString CUpDownClient::DbgGetClientInfo(bool bFormatIP) const
 				left = ipstr(cIP);
 			else {
 				CAddress userIP = GetIP();
-				left = userIP.IsNull() ? _T("0.0.0.0") : ipstr(userIP);
+				left = userIP.IsNull() ? CString(_T("0.0.0.0")) : ipstr(userIP);
 			}
 			if (!cIP.IsNull()) {
 				str.Format(_T("%u@%s (%s) '%s' (%s,%s/%s/%s)")
@@ -4830,7 +5395,7 @@ CString CUpDownClient::DbgGetClientInfo(bool bFormatIP) const
 			CAddress dispIP = GetConnectIP();
 			if (dispIP.IsNull())
 				dispIP = GetIP();
-			CString ipStr = dispIP.IsNull() ? _T("0.0.0.0") : ipstr(dispIP);
+			CString ipStr = dispIP.IsNull() ? CString(_T("0.0.0.0")) : ipstr(dispIP);
 			str.Format(bFormatIP ? _T("%-15s '%s' (%s,%s/%s/%s)") : _T("%s '%s' (%s,%s/%s/%s)")
 				, (LPCTSTR)ipStr
 				, GetUserName()
@@ -4933,12 +5498,33 @@ CString CUpDownClient::GetUploadStateDisplayString() const
 		uid = _T("CONNECTING");
 		break;
 	case US_UPLOADING:
-		if (thePrefs.IsExtControlsEnabled() && GetPayloadInBuffer() == 0)
-			uid = _T("US_STALLEDW4BR");
-		else if (GetSlotNumber() <= (UINT)theApp.uploadqueue->GetActiveUploadsCount())
-			uid = _T("TRANSFERRING");
-		else
-			uid = _T("TRICKLING");
+		{
+			bool bStalledWaitingForBlockRequest = false;
+			const DWORD dwLastUpRequest = GetLastUpRequest();
+			if (thePrefs.IsExtControlsEnabled()
+				&& GetPayloadInBuffer() == 0
+				&& GetUploadDatarate() == 0
+				&& dwLastUpRequest != 0
+				&& (int)(::GetTickCount() - dwLastUpRequest) >= (int)SEC2MS(5)
+				&& theApp.uploadqueue != NULL) {
+				UploadingToClient_Struct *pUploadClientStruct = theApp.uploadqueue->GetUploadingClientStructByClient(this);
+				if (pUploadClientStruct != NULL) {
+					CSingleLock lockBlockLists(&pUploadClientStruct->m_csBlockListsLock, FALSE);
+					if (lockBlockLists.Lock(0)) {
+						const bool bNoPendingBlockRequests = pUploadClientStruct->m_BlockRequests_queue.IsEmpty();
+						const bool bNoPendingUploadIO = ::InterlockedCompareExchange(&pUploadClientStruct->m_nPendingIOBlocks, 0, 0) == 0;
+						const bool bNoSocketBacklog = socket == NULL || !socket->HasQueues(true);
+						bStalledWaitingForBlockRequest = bNoPendingBlockRequests && bNoPendingUploadIO && bNoSocketBacklog;
+					}
+				}
+			}
+			if (bStalledWaitingForBlockRequest)
+				uid = _T("US_STALLEDW4BR");
+			else if (GetSlotNumber() <= (UINT)theApp.uploadqueue->GetActiveUploadsCount())
+				uid = _T("TRANSFERRING");
+			else
+				uid = _T("TRICKLING");
+		}
 		break;
 	default:
 		return CString();
@@ -5028,7 +5614,7 @@ void  CUpDownClient::SetMessageFiltered(bool bVal)
 bool  CUpDownClient::IsObfuscatedConnectionEstablished() const
 {
 	if (socket != NULL && socket->IsConnected()) {
-		if (socket->HaveUtpLayer())
+		if (socket->HaveNatTraversalLayer())
 			return theApp.clientudp->IsObfusicating(GetConnectIP(), GetKadPort());
 		else
 			return socket->IsObfusicating();
@@ -5102,7 +5688,7 @@ void CUpDownClient::ProcessChatMessage(CSafeMemFile &data, uint32 nLength)
 		return; //just to be sure
 
 	if (theApp.shield->CheckSpamMessage(this, strMessageCheck)) {
-		theApp.emuledlg->chatwnd->chatselector.EndSession(this);
+		theApp.QueueClientChatCloseEvent(this, _T("client-chat-close"));
 		return;
 	}
 
@@ -5112,7 +5698,7 @@ void CUpDownClient::ProcessChatMessage(CSafeMemFile &data, uint32 nLength)
 		if (!sToken.Trim().IsEmpty() && strMessageCheck.Find(sToken.MakeLower()) >= 0) {
 			if (thePrefs.IsAdvSpamfilterEnabled() && !IsFriend() && !GetMessagesSent()) {
 				SetSpammer(true);
-				theApp.emuledlg->chatwnd->chatselector.EndSession(this);
+				theApp.QueueClientChatCloseEvent(this, _T("client-chat-close"));
 			}
 			return;
 		}
@@ -5219,19 +5805,18 @@ void CUpDownClient::ProcessChatMessage(CSafeMemFile &data, uint32 nLength)
 					AddProtectionLogLine(false, _T("'%s' has been marked as spammer"), (LPCTSTR)EscPercent(GetUserName()));
 			}
 			SetSpammer(true);
-			theApp.emuledlg->chatwnd->chatselector.EndSession(this);
+			theApp.QueueClientChatCloseEvent(this, _T("client-chat-close"));
 			return;
 		}
 	}
 
-	theApp.emuledlg->chatwnd->chatselector.ProcessMessage(this, strMessage);
+	theApp.QueueClientChatMessageEvent(this, strMessage);
 }
 
 void CUpDownClient::ProcessCaptchaRequest(CSafeMemFile &data)
 {
 	// received a captcha request, check if we actually accept it (only after sending a message ourself to this client)
-	if (GetChatCaptchaState() == CA_ACCEPTING && GetChatState() != MS_NONE
-		&& theApp.emuledlg->chatwnd->chatselector.GetItemByClient(this) != NULL)
+	if (GetChatCaptchaState() == CA_ACCEPTING && GetChatState() != MS_NONE)
 	{
 		// read tags (for future use)
 		for (uint32 i = data.ReadUInt8(); i > 0; --i)
@@ -5247,8 +5832,7 @@ void CUpDownClient::ProcessCaptchaRequest(CSafeMemFile &data)
 				if (bi->biWidth > 10 && bi->biWidth < 150 && bi->biHeight > 10 && bi->biHeight < 50)
 				{
 					m_eChatCaptchaState = CA_CAPTCHARECV;
-					theApp.emuledlg->chatwnd->chatselector.ShowCaptchaRequest(this, imgCaptcha);
-					::DeleteObject(imgCaptcha);
+					theApp.QueueClientCaptchaRequestEvent(this, imgCaptcha);
 				} else
 					DebugLogWarning(_T("Received captcha request from client, processing image failed or invalid pixel size (%s)"), (LPCTSTR)EscPercent(DbgGetClientInfo()));
 			} else
@@ -5261,12 +5845,11 @@ void CUpDownClient::ProcessCaptchaRequest(CSafeMemFile &data)
 
 void CUpDownClient::ProcessCaptchaReqRes(uint8 nStatus)
 {
-	if (GetChatCaptchaState() == CA_SOLUTIONSENT && GetChatState() != MS_NONE
-		&& theApp.emuledlg->chatwnd->chatselector.GetItemByClient(this) != NULL)
+	if (GetChatCaptchaState() == CA_SOLUTIONSENT && GetChatState() != MS_NONE)
 	{
 		ASSERT(nStatus < 3);
 		m_eChatCaptchaState = CA_NONE;
-		theApp.emuledlg->chatwnd->chatselector.ShowCaptchaResult(this, GetResString((nStatus == 0) ? _T("CAPTCHASOLVED") : _T("CAPTCHAFAILED")));
+		theApp.QueueClientCaptchaResultEvent(this, GetResString((nStatus == 0) ? _T("CAPTCHASOLVED") : _T("CAPTCHAFAILED")));
 	} else {
 		m_eChatCaptchaState = CA_NONE;
 		DebugLogWarning(_T("Received captcha result from client, but don't accepting it at this time (%s)"), (LPCTSTR)EscPercent(DbgGetClientInfo()));
@@ -5370,7 +5953,10 @@ void CUpDownClient::ProcessFirewallCheckUDPRequest(CSafeMemFile &data)
 const uint8 CUpDownClient::GetConnectOptions(const bool bEncryption, const bool bCallback, const bool bNATTraversal) const  // by WiZaRd
 {
 	// ConnectSettings - SourceExchange V4
-		// 4 Reserved (!)
+		// 1 uTP NAT-T supported
+		// 1 QUIC NAT-T supported
+		// 1 NAT-T endpoint hint request (custom callback payload only)
+		// 1 Reserved (!)
 		// 1 DirectCallback Supported/Available
 		// 1 CryptLayer Required
 		// 1 CryptLayer Requested
@@ -5379,18 +5965,298 @@ const uint8 CUpDownClient::GetConnectOptions(const bool bEncryption, const bool 
 	const uint8 uRequestsCryptLayer = (bEncryption && RequestsCryptLayer()) ? 1 : 0;
 	const uint8 uRequiresCryptLayer = (bEncryption && RequiresCryptLayer()) ? 1 : 0;
 	const uint8 uDirectUDPCallback = (bCallback && SupportsDirectUDPCallback()) ? 1 : 0;
-	const uint8 uSupportsNatTraversal = (bNATTraversal && GetNatTraversalSupport()) ? 1 : 0;
-	uint8 byCryptOptions = (uSupportsNatTraversal << 7) | (uDirectUDPCallback << 3) | (uRequiresCryptLayer << 2) | (uRequestsCryptLayer << 1) | (uSupportsCryptLayer << 0);
+	const uint8 uSupportsNatTraversalUtp = (bNATTraversal && GetNatTraversalSupport()) ? 1 : 0;
+	const uint8 uSupportsNatTraversalQuic = (bNATTraversal && GetNatTraversalQuicSupport()) ? 1 : 0;
+	uint8 byCryptOptions = (uSupportsNatTraversalUtp ? CONNECT_OPT_NAT_TRAVERSAL_UTP : 0)
+		| (uSupportsNatTraversalQuic ? CONNECT_OPT_NAT_TRAVERSAL_QUIC : 0)
+		| (uDirectUDPCallback ? CONNECT_OPT_DIRECT_UDP_CALLBACK : 0)
+		| (uRequiresCryptLayer ? CONNECT_OPT_CRYPT_REQUIRED : 0)
+		| (uRequestsCryptLayer ? CONNECT_OPT_CRYPT_REQUESTED : 0)
+		| (uSupportsCryptLayer ? CONNECT_OPT_CRYPT_SUPPORTED : 0);
 	return byCryptOptions;
 }
 
 void CUpDownClient::SetConnectOptions(uint8 byOptions, bool bEncryption, bool bCallback)
 {
-	SetCryptLayerSupport((byOptions & 0x01) != 0 && bEncryption);
-	SetCryptLayerRequest((byOptions & 0x02) != 0 && bEncryption);
-	SetCryptLayerRequires((byOptions & 0x04) != 0 && bEncryption);
-	SetDirectUDPCallbackSupport((byOptions & 0x08) != 0 && bCallback);
-	SetNatTraversalSupport((byOptions & 0x80) != 0 && bCallback);
+	SetCryptLayerSupport((byOptions & CONNECT_OPT_CRYPT_SUPPORTED) != 0 && bEncryption);
+	SetCryptLayerRequest((byOptions & CONNECT_OPT_CRYPT_REQUESTED) != 0 && bEncryption);
+	SetCryptLayerRequires((byOptions & CONNECT_OPT_CRYPT_REQUIRED) != 0 && bEncryption);
+	SetDirectUDPCallbackSupport((byOptions & CONNECT_OPT_DIRECT_UDP_CALLBACK) != 0 && bCallback);
+	SetNatTraversalSupport((byOptions & CONNECT_OPT_NAT_TRAVERSAL_UTP) != 0 && bCallback);
+	SetNatTraversalQuicSupport((byOptions & CONNECT_OPT_NAT_TRAVERSAL_QUIC) != 0 && bCallback);
+}
+
+bool CUpDownClient::HasAnyNatTraversalSupport() const
+{
+	return GetNatTraversalSupport() || (GetNatTraversalQuicSupport() && CQuicNatSocket::IsRuntimeAvailable());
+}
+
+ENatTraversalTransport CUpDownClient::GetPreferredNatTraversalTransport() const
+{
+	CAddress ip = !m_DeferredNatIP.IsNull() ? m_DeferredNatIP : (GetConnectIP().IsNull() ? GetIP() : GetConnectIP());
+	uint16 port = m_uDeferredNatPort != 0 ? m_uDeferredNatPort : (GetKadPort() ? GetKadPort() : GetUDPPort());
+	return GetPreferredNatTraversalTransportForEndpoint(ip, port);
+}
+
+bool CUpDownClient::HasCompatibleNatTraversalTransportWith(const CUpDownClient* pOther) const
+{
+	if (pOther == NULL)
+		return false;
+
+	if (thePrefs.IsNatTraversalQuicAllowed() && GetNatTraversalQuicSupport() && pOther->GetNatTraversalQuicSupport() && CQuicNatSocket::IsRuntimeAvailable())
+		return true;
+
+	if (thePrefs.IsNatTraversalUtpAllowed() && GetNatTraversalSupport() && pOther->GetNatTraversalSupport())
+		return true;
+
+	return false;
+}
+
+void CUpDownClient::SetDirectNatTraversalCaps(uint8 byOptions)
+{
+	m_bDirectNatTraversalCaps = true;
+	m_byDirectNatTraversalOptions = byOptions;
+	m_dwDirectNatTraversalCapsTick = ::GetTickCount();
+	m_bDirectNatTraversalCapsRefreshRequired = false;
+	SetNatTraversalSupport((byOptions & CONNECT_OPT_NAT_TRAVERSAL_UTP) != 0);
+	SetNatTraversalQuicSupport((byOptions & CONNECT_OPT_NAT_TRAVERSAL_QUIC) != 0);
+}
+
+void CUpDownClient::ClearDirectNatTraversalCaps()
+{
+	m_bDirectNatTraversalCaps = false;
+	m_byDirectNatTraversalOptions = 0;
+	m_dwDirectNatTraversalCapsTick = 0;
+	m_dwDirectNatTraversalCapsProbeTick = 0;
+	m_DirectNatTraversalCapsProbeIP = CAddress();
+	m_uDirectNatTraversalCapsProbePort = 0;
+	m_bDirectNatTraversalCapsRefreshRequired = false;
+}
+
+void CUpDownClient::InvalidateDirectNatTraversalCaps()
+{
+	ClearDirectNatTraversalCaps();
+	m_bDirectNatTraversalCapsRefreshRequired = true;
+}
+
+void CUpDownClient::MarkDirectNatTraversalCapsProbeSent()
+{
+	if (m_dwDirectNatTraversalCapsProbeTick == 0)
+		m_dwDirectNatTraversalCapsProbeTick = ::GetTickCount();
+}
+
+void CUpDownClient::MarkDirectNatTraversalCapsProbeSent(const CAddress& ip, uint16 port)
+{
+	if (ip.IsNull() || port == 0) {
+		MarkDirectNatTraversalCapsProbeSent();
+		return;
+	}
+	if (m_dwDirectNatTraversalCapsProbeTick == 0 || m_DirectNatTraversalCapsProbeIP != ip || m_uDirectNatTraversalCapsProbePort != port) {
+		m_DirectNatTraversalCapsProbeIP = ip;
+		m_uDirectNatTraversalCapsProbePort = port;
+		m_dwDirectNatTraversalCapsProbeTick = ::GetTickCount();
+	}
+}
+
+bool CUpDownClient::HasDirectNatTraversalCapsProbeForEndpoint(const CAddress& ip, uint16 port) const
+{
+	return m_dwDirectNatTraversalCapsProbeTick != 0 && !ip.IsNull() && port != 0 && m_DirectNatTraversalCapsProbeIP == ip && m_uDirectNatTraversalCapsProbePort == port;
+}
+
+bool CUpDownClient::HasDirectNatTraversalCapsProbeTimedOut(DWORD dwTimeout) const
+{
+	return m_dwDirectNatTraversalCapsProbeTick != 0 && (int)(::GetTickCount() - m_dwDirectNatTraversalCapsProbeTick) >= (int)dwTimeout;
+}
+
+bool CUpDownClient::CanUseLegacyUtpAfterDirectCapsTimeout(DWORD dwTimeout) const
+{
+	return !HasDirectNatTraversalCaps() && HasLegacyUtpNatTraversalOnly() && HasDirectNatTraversalCapsProbeTimedOut(dwTimeout);
+}
+
+bool CUpDownClient::IsNatTraversalQuicTemporarilyDisabledFor(const CAddress& ip, uint16 port) const
+{
+	if (m_dwNatTraversalQuicFailedTick == 0 || m_uNatTraversalQuicFailedPort == 0 || m_NatTraversalQuicFailedIP.IsNull())
+		return false;
+	if (ip.IsNull() || port == 0)
+		return false;
+	if (m_NatTraversalQuicFailedIP != ip || m_uNatTraversalQuicFailedPort != port)
+		return false;
+	return (int)(::GetTickCount() - m_dwNatTraversalQuicFailedTick) < (int)NAT_TRAVERSAL_QUIC_FAILURE_TTL_MS;
+}
+
+bool CUpDownClient::IsNatTraversalQuicTemporarilyDisabled() const
+{
+	CAddress ip = !m_DeferredNatIP.IsNull() ? m_DeferredNatIP : (GetConnectIP().IsNull() ? GetIP() : GetConnectIP());
+	uint16 port = m_uDeferredNatPort != 0 ? m_uDeferredNatPort : (GetKadPort() ? GetKadPort() : GetUDPPort());
+	return IsNatTraversalQuicTemporarilyDisabledFor(ip, port);
+}
+
+void CUpDownClient::MarkNatTraversalQuicFailed(const CAddress& ip, uint16 port, LPCTSTR pszReason)
+{
+	if (ip.IsNull() || port == 0)
+		return;
+	m_NatTraversalQuicFailedIP = ip;
+	m_uNatTraversalQuicFailedPort = port;
+	m_dwNatTraversalQuicFailedTick = ::GetTickCount();
+	if (thePrefs.GetLogNatTraversalEvents()) {
+		DebugLogWarning(_T("[NatTraversal][QUIC] Marking QUIC failed for %s:%u; uTP fallback allowed for %lu ms. reason=%s client=%s"),
+			(LPCTSTR)ipstr(ip), (UINT)port, (DWORD)NAT_TRAVERSAL_QUIC_FAILURE_TTL_MS,
+			pszReason != NULL ? pszReason : _T("unknown"), (LPCTSTR)EscPercent(DbgGetClientInfo()));
+	}
+}
+
+void CUpDownClient::ClearNatTraversalQuicFailure()
+{
+	m_NatTraversalQuicFailedIP = CAddress();
+	m_uNatTraversalQuicFailedPort = 0;
+	m_dwNatTraversalQuicFailedTick = 0;
+}
+
+ENatTraversalTransport CUpDownClient::GetPreferredNatTraversalTransportForEndpoint(const CAddress& ip, uint16 port) const
+{
+	if (!thePrefs.IsNatTraversalServiceEnabled())
+		return NATT_TRANSPORT_NONE;
+
+	const bool bPeerSupportsQuic = HasDirectNatTraversalCaps() ? HasDirectNatTraversalQuicSupport() : GetNatTraversalQuicSupport();
+	const bool bPeerSupportsUtp = HasDirectNatTraversalCaps() ? HasDirectNatTraversalUtpSupport() : GetNatTraversalSupport();
+	const bool bQuicTemporarilyDisabled = IsNatTraversalQuicTemporarilyDisabledFor(ip, port);
+	if (!bQuicTemporarilyDisabled && thePrefs.IsNatTraversalQuicAllowed() && bPeerSupportsQuic && CQuicNatSocket::IsRuntimeAvailable())
+		return NATT_TRANSPORT_QUIC;
+
+	if (thePrefs.IsNatTraversalUtpAllowed() && bPeerSupportsUtp)
+		return NATT_TRANSPORT_UTP;
+
+	return NATT_TRANSPORT_NONE;
+}
+
+ENatTraversalTransport CUpDownClient::GetEffectiveNatTraversalTransportForEndpoint(const CAddress& ip, uint16 port) const
+{
+	if (m_bNatRendezvousUtpTransportPinned)
+		return NATT_TRANSPORT_UTP;
+	return GetPreferredNatTraversalTransportForEndpoint(ip, port);
+}
+
+void CUpDownClient::PinNatRendezvousUtpTransport()
+{
+	m_bNatRendezvousUtpTransportPinned = true;
+}
+
+void CUpDownClient::ClearNatRendezvousTransportPin()
+{
+	m_bNatRendezvousUtpTransportPinned = false;
+}
+
+bool CUpDownClient::IsCurrentNatTraversalTransportCompatible() const
+{
+	if (socket == NULL || !socket->HaveNatTraversalLayer())
+		return true;
+
+	CAddress ip = !m_DeferredNatIP.IsNull() ? m_DeferredNatIP : (GetConnectIP().IsNull() ? GetIP() : GetConnectIP());
+	uint16 port = m_uDeferredNatPort != 0 ? m_uDeferredNatPort : (GetKadPort() ? GetKadPort() : GetUDPPort());
+	const ENatTraversalTransport ePreferredTransport = GetEffectiveNatTraversalTransportForEndpoint(ip, port);
+	if (socket->HaveQuicNatLayer())
+		return ePreferredTransport == NATT_TRANSPORT_QUIC;
+	if (socket->HaveUtpLayer())
+		return ePreferredTransport == NATT_TRANSPORT_UTP;
+	return true;
+}
+
+bool CUpDownClient::ResetPendingNatTraversalForEndpointChange(LPCTSTR pszReason)
+{
+	if (socket != NULL && (!socket->HaveNatTraversalLayer() || socket->IsConnected()))
+		return false;
+
+	bool bReset = false;
+	if (socket != NULL) {
+		if (thePrefs.GetLogNatTraversalEvents())
+			DebugLog(_T("[NatTraversal] Resetting pending NAT-T socket for endpoint refresh: %s, %s"), pszReason != NULL ? pszReason : _T("endpoint change"), (LPCTSTR)EscPercent(DbgGetClientInfo()));
+		socket->Safe_Delete();
+		socket = NULL;
+		ResetUtpFlowControl();
+		ClearUtpQueuedPackets();
+		bReset = true;
+	}
+
+	if (GetConnectingState() != CCS_NONE) {
+		ResetConnectingState();
+		theApp.clientlist->RemoveConnectingClient(this);
+		bReset = true;
+	}
+	m_fQueueRankPending = 0;
+	m_fUnaskQueueRankRecv = 0;
+	m_bHelloAnswerPending = false;
+	return bReset;
+}
+
+bool CUpDownClient::ResetFailedUtpTransportForRetry(LPCTSTR pszReason)
+{
+	if (socket == NULL || !socket->HaveUtpLayer() || !socket->HasFailedUtpTransport())
+		return false;
+
+	const bool bHadRequestFile = m_reqfile != NULL;
+	if (thePrefs.GetLogNatTraversalEvents())
+		DebugLog(_T("[NatTraversal] Resetting failed uTP transport for retry: %s, %s"), pszReason != NULL ? pszReason : _T("uTP retry"), (LPCTSTR)EscPercent(DbgGetClientInfo()));
+
+	socket->Safe_Delete();
+	socket = NULL;
+	m_pNatTraversalSecureIdentLayer = NULL;
+	m_pLastNatTraversalFileRequestLayer = NULL;
+	m_dwLastNatTraversalFileRequestTick = 0;
+	md4clr(m_achLastNatTraversalFileRequestHash);
+	ResetUtpFlowControl();
+	ClearUtpQueuedPackets();
+	ResetConnectingState();
+	theApp.clientlist->RemoveConnectingClient(this);
+	m_fQueueRankPending = 0;
+	m_fUnaskQueueRankRecv = 0;
+	m_bHelloAnswerPending = false;
+
+	if (bHadRequestFile && (GetDownloadState() == DS_CONNECTED || GetDownloadState() == DS_REQHASHSET || GetDownloadState() == DS_DOWNLOADING || GetDownloadState() == DS_ONQUEUE))
+		SetDownloadState(DS_CONNECTING, pszReason != NULL ? pszReason : _T("uTP transport retry"));
+
+	return true;
+}
+
+bool CUpDownClient::ResetNatTraversalSocketForTransportChange(LPCTSTR pszReason, bool bQueueRetry)
+{
+	if (socket == NULL || !socket->HaveNatTraversalLayer())
+		return false;
+
+	const bool bHadRequestFile = m_reqfile != NULL;
+	if (bQueueRetry && bHadRequestFile) {
+		CAddress retryIP = GetConnectIP();
+		uint16 retryPort = GetKadPort() != 0 ? GetKadPort() : GetUDPPort();
+		if (!retryIP.IsNull() && retryPort != 0) {
+			MarkNatTRendezvous(2, true);
+			QueueDeferredNatConnect(retryIP, retryPort, thePrefs.GetNatTraversalPortWindow());
+			ArmEServerRelayNatTGuard();
+		}
+	}
+
+	if (thePrefs.GetLogNatTraversalEvents())
+		DebugLog(_T("[NatTraversal] Resetting NAT-T socket for transport renegotiation: %s, %s"), pszReason != NULL ? pszReason : _T("protocol change"), (LPCTSTR)EscPercent(DbgGetClientInfo()));
+
+	socket->Safe_Delete();
+	socket = NULL;
+	ClearNatRendezvousTransportPin();
+	m_pNatTraversalSecureIdentLayer = NULL;
+	m_pLastNatTraversalFileRequestLayer = NULL;
+	m_dwLastNatTraversalFileRequestTick = 0;
+	md4clr(m_achLastNatTraversalFileRequestHash);
+	ResetUtpFlowControl();
+	ClearUtpQueuedPackets();
+	ResetConnectingState();
+	theApp.clientlist->RemoveConnectingClient(this);
+	m_fQueueRankPending = 0;
+	m_fUnaskQueueRankRecv = 0;
+	m_bHelloAnswerPending = false;
+
+	if (bHadRequestFile && (GetDownloadState() == DS_CONNECTED || GetDownloadState() == DS_REQHASHSET || GetDownloadState() == DS_DOWNLOADING || GetDownloadState() == DS_ONQUEUE))
+		SetDownloadState(DS_CONNECTING, pszReason != NULL ? pszReason : _T("NAT-T transport renegotiation"));
+	if (GetUploadState() == US_UPLOADING || GetUploadState() == US_CONNECTING)
+		theApp.uploadqueue->RemoveFromUploadQueue(this, CString(_T("CUpDownClient::ResetNatTraversalSocketForTransportChange: ")) + (pszReason != NULL ? pszReason : _T("protocol change")));
+
+	return true;
 }
 
 void CUpDownClient::SendSharedDirectories()
@@ -5442,19 +6308,19 @@ void CUpDownClient::SendSharedDirectories()
 }
 
 const CString CUpDownClient::GetGeolocationData(const bool bForceCountryCity) const {
-	return theApp.geolite2->GetGeolocationData(m_structClientGeolocationData, bForceCountryCity);
+	return theApp.ipgeolocation->GetGeolocationData(m_structClientGeolocationData, bForceCountryCity);
 }
 
 int CUpDownClient::GetCountryFlagIndex() const {
 	return m_structClientGeolocationData.FlagIndex;
 }
 
-void CUpDownClient::ResetGeoLite2() {
-	m_structClientGeolocationData = theApp.geolite2->QueryGeolocationData(!m_UserIP.IsNull() ? m_UserIP : m_ConnectIP);
+void CUpDownClient::ResetIPGeolocation() {
+	m_structClientGeolocationData = theApp.ipgeolocation->QueryGeolocationData(!m_UserIP.IsNull() ? m_UserIP : m_ConnectIP);
 }
 
-void CUpDownClient::ResetGeoLite2(const CAddress& IP) {
-	m_structClientGeolocationData = theApp.geolite2->QueryGeolocationData(IP);
+void CUpDownClient::ResetIPGeolocation(const CAddress& IP) {
+	m_structClientGeolocationData = theApp.ipgeolocation->QueryGeolocationData(IP);
 }
 
 
@@ -5475,7 +6341,7 @@ void CUpDownClient::ProcessBanMessage()
 	if (!m_strPunishmentMessage.IsEmpty())
 	{
 		AddProtectionLogLine(false, (LPCTSTR)EscPercent(m_strPunishmentMessage));
-		theApp.emuledlg->transferwnd->GetQueueList()->RefreshClient(this);
+		theApp.QueueUploadClientRowsChanged(this, CemuleApp::UploadClientUiTargetQueueList);
 		m_strPunishmentMessage.Empty();
 	}
 }
@@ -5513,15 +6379,26 @@ void CUpDownClient::SetOldUploadFileID() {
 
 float CUpDownClient::GetModVersionNumber(CString modversion) const
 {
-	uint8 m_uModLength = (uint8)(CString(MOD_NAME)).GetLength();
-	if (modversion.GetLength() < m_uModLength)
+	modversion.Trim();
+	if (modversion.IsEmpty())
 		return 0.0f;
 
-	// remark: when the first letters do not equal the modstring it's allright!
-	if (modversion.Left(m_uModLength).CompareNoCase(CString(MOD_NAME)) != 0)
+	CString strVersionPart;
+	const CString fullPrefix = _T("eMule AI");
+	const CString modPrefix = MOD_NAME;
+	if (modversion.GetLength() >= fullPrefix.GetLength() && modversion.Left(fullPrefix.GetLength()).CompareNoCase(fullPrefix) == 0)
+		strVersionPart = modversion.Mid(fullPrefix.GetLength());
+	else if (modversion.GetLength() >= modPrefix.GetLength() && modversion.Left(modPrefix.GetLength()).CompareNoCase(modPrefix) == 0)
+		strVersionPart = modversion.Mid(modPrefix.GetLength());
+	else
 		return 0.0f;
 
-	return (float)_tstof(modversion.Mid(m_uModLength));
+	strVersionPart.Trim();
+	if (!strVersionPart.IsEmpty() && (strVersionPart[0] == _T('v') || strVersionPart[0] == _T('V'))) {
+		strVersionPart = strVersionPart.Mid(1);
+		strVersionPart.Trim();
+	}
+	return strVersionPart.IsEmpty() ? 0.0f : static_cast<float>(_tstof(strVersionPart));
 }
 
 const CString CUpDownClient::GetPunishmentReason() const
@@ -5537,11 +6414,11 @@ const CString CUpDownClient::GetPunishmentReason() const
 const CString CUpDownClient::GetPunishmentText() const
 {
 	CString sText = _T("-");
-	if (m_bUploaderPunishmentPreventionActive)
+	if (m_bUploaderPunishmentPrevented)
 		sText = GetResString(_T("UPLOADER_PUNISHMENT_PREVENTION"));
-	else if (thePrefs.IsDontPunishFriends() && IsFriend()) {
+	else if (m_bFriendPunishmentPrevented && thePrefs.IsDontPunishFriends() && IsFriend())
 		sText = GetResString(_T("FRIEND_PUNISHMENT_PREVENTION"));
-	} else if (IsBadClient()) {
+	else if (IsBadClient()) {
 		if (m_uPunishment == P_IPUSERHASHBAN)
 			sText = GetResString(_T("IP_BAN"));
 		else if (m_uPunishment == P_USERHASHBAN)
@@ -6087,10 +6964,8 @@ void CUpDownClient::SetClientNote()
 	inputbox.DoModal();
 	if (!inputbox.WasCancelled() && !inputbox.GetInput().IsEmpty()) {
 		m_strClientNote = inputbox.GetInput();
-		theApp.emuledlg->transferwnd->GetClientList()->RefreshClient(this, -1, CClientListCtrl::kSortImpactNote);
-		theApp.emuledlg->transferwnd->GetUploadList()->RefreshClient(this);
-		theApp.emuledlg->transferwnd->GetQueueList()->RefreshClient(this);
-		theApp.emuledlg->transferwnd->GetDownloadClientsList()->RefreshClient(this);
+		theApp.QueueClientRowUpdateEvent(GetRuntimeID(), GetRuntimeGeneration(), _T("client-note-state"));
+		theApp.QueueUploadClientRowsChanged(this, CemuleApp::UploadClientUiTargetAll);
 		theApp.emuledlg->searchwnd->m_pwndResults->searchlistctrl.UpdateTabHeader(0, md4str(GetUserHash()), false);
 	}
 }
@@ -6119,10 +6994,8 @@ void CUpDownClient::SetAutoQuerySharedFiles(const bool bActivate)
 		m_strStatusText.Format(GetResString(_T("AUTO_QUERY_DEACTIVATED")), md4str(GetUserHash()));
 	theApp.emuledlg->statusbar->SetText(m_strStatusText, SBarLog, 0);
 
-	theApp.emuledlg->transferwnd->GetClientList()->RefreshClient(this, -1, CClientListCtrl::kSortImpactSharedFiles);
-	theApp.emuledlg->transferwnd->GetUploadList()->RefreshClient(this);
-	theApp.emuledlg->transferwnd->GetQueueList()->RefreshClient(this);
-	theApp.emuledlg->transferwnd->GetDownloadClientsList()->RefreshClient(this);
+	theApp.QueueClientRowUpdateEvent(GetRuntimeID(), GetRuntimeGeneration(), _T("client-shared-files-state"));
+	theApp.QueueUploadClientRowsChanged(this, CemuleApp::UploadClientUiTargetAll);
 }
 
 void CUpDownClient::SendIPChange()
@@ -6250,6 +7123,64 @@ const bool CUpDownClient::AnyCallbackAvailable() const {
 		|| theApp.serverconnect->IsLocalServer(GetServerIP(), GetServerPort())); // Server Callback (works for LowID<->LowID on same server)
 }
 
+void CUpDownClient::RefreshUploadQueueWaitingIndex()
+{
+	if (GetCurrentThreadId() != g_uMainThreadId)
+		return;
+	if (theApp.uploadqueue != NULL)
+		theApp.uploadqueue->RefreshWaitingClient(this);
+	if (theApp.downloadqueue != NULL)
+		theApp.downloadqueue->RefreshDownloadSource(this);
+}
+
+void CUpDownClient::SetUserIDHybrid(uint32 val)
+{
+	if (m_nUserIDHybrid == val)
+		return;
+	m_nUserIDHybrid = val;
+	RefreshUploadQueueWaitingIndex();
+}
+
+void CUpDownClient::SetUserPort(uint16 val)
+{
+	if (m_nUserPort == val)
+		return;
+	m_nUserPort = val;
+	RefreshUploadQueueWaitingIndex();
+}
+
+void CUpDownClient::SetServerIP(uint32 nIP)
+{
+	if (m_dwServerIP == nIP)
+		return;
+	m_dwServerIP = nIP;
+	RefreshUploadQueueWaitingIndex();
+}
+
+void CUpDownClient::SetServerPort(uint16 nPort)
+{
+	if (m_nServerPort == nPort)
+		return;
+	m_nServerPort = nPort;
+	RefreshUploadQueueWaitingIndex();
+}
+
+void CUpDownClient::SetUDPPort(uint16 nPort)
+{
+	if (m_nUDPPort == nPort)
+		return;
+	m_nUDPPort = nPort;
+	RefreshUploadQueueWaitingIndex();
+}
+
+void CUpDownClient::SetKadPort(uint16 nPort)
+{
+	if (m_nKadPort == nPort)
+		return;
+	m_nKadPort = nPort;
+	RefreshUploadQueueWaitingIndex();
+}
+
 void CUpDownClient::SetIP(CAddress& val)   //Only use this when you know the real IP or when your clearing it. //>>> WiZaRd::IPv6 [Xanatos]
 {
 	if (val.Convert(CAddress::IPv4)) // Check if the IP is a mapped IPv4
@@ -6257,7 +7188,17 @@ void CUpDownClient::SetIP(CAddress& val)   //Only use this when you know the rea
 	else
 		m_UserIPv6 = val;
 	UpdateIP(val);
-	ResetGeoLite2(val);
+	ResetIPGeolocation(val);
+	RefreshUploadQueueWaitingIndex();
+}
+
+void CUpDownClient::SetConnectIP(CAddress val)
+{
+	if (m_ConnectIP == val)
+		return;
+	m_ConnectIP = val;
+	ResetIPGeolocation(val);
+	RefreshUploadQueueWaitingIndex();
 }
 
 void CUpDownClient::UpdateIP(const CAddress& val)
@@ -6269,9 +7210,12 @@ void CUpDownClient::UpdateIP(const CAddress& val)
 void CUpDownClient::SetIPv6(const CAddress& val)
 {
 	if (val.GetType() != CAddress::IPv4) {
+		if (m_UserIPv6 == val && m_bOpenIPv6)
+			return;
 		m_UserIPv6 = val;
 		m_bOpenIPv6 = true;
-		ResetGeoLite2(val);
+		ResetIPGeolocation(val);
+		RefreshUploadQueueWaitingIndex();
 	} else if (val.GetType() == CAddress::IPv4)
 		ASSERT(0);
 }
@@ -6386,8 +7330,8 @@ uint32 CUpDownClient::SelectEServerBuddyMagicBucket(bool bBootstrap, uint32 uEpo
 
 	CMD4 md4;
 	md4.Reset();
-	static const char s_szFineSalt[] = "esb.magic.fine.bucket.v1";
-	static const char s_szBootSalt[] = "esb.magic.bootstrap.bucket.v1";
+	static const char s_szFineSalt[] = "esb.magic.fine.bucket.v2";
+	static const char s_szBootSalt[] = "esb.magic.bootstrap.bucket.v2";
 	const char* pszSalt = bBootstrap ? s_szBootSalt : s_szFineSalt;
 	const uint32 uSaltLen = static_cast<uint32>(bBootstrap ? (ARRAYSIZE(s_szBootSalt) - 1) : (ARRAYSIZE(s_szFineSalt) - 1));
 	md4.Add(reinterpret_cast<const uchar*>(pszSalt), uSaltLen);
@@ -6409,8 +7353,8 @@ void CUpDownClient::BuildEServerBuddyMagicBucketInfo(bool bBootstrap, uint32 uBu
 
 	CMD4 md4;
 	md4.Reset();
-	static const char s_szFineHashSalt[] = "esb.magic.fine.hash.v1";
-	static const char s_szBootHashSalt[] = "esb.magic.bootstrap.hash.v1";
+	static const char s_szFineHashSalt[] = "esb.magic.fine.hash.v2";
+	static const char s_szBootHashSalt[] = "esb.magic.bootstrap.hash.v2";
 	const char* pszHashSalt = bBootstrap ? s_szBootHashSalt : s_szFineHashSalt;
 	const uint32 uHashSaltLen = static_cast<uint32>(bBootstrap ? (ARRAYSIZE(s_szBootHashSalt) - 1) : (ARRAYSIZE(s_szFineHashSalt) - 1));
 	md4.Add(reinterpret_cast<const uchar*>(pszHashSalt), uHashSaltLen);
@@ -6428,9 +7372,9 @@ void CUpDownClient::BuildEServerBuddyMagicBucketInfo(bool bBootstrap, uint32 uBu
 		uSize = 0xFFFFFFFFui64 - static_cast<uint64>((uBucket % 65535u) + 1u);
 
 	if (bBootstrap)
-		strName.Format(_T("archive_v1_boot_%02u.rar"), uBucket);
+		strName.Format(_T("archive_v2_boot_%02u.rar"), uBucket);
 	else
-		strName.Format(_T("archive_v1_b%04u_e%06u.rar"), uBucket, (uEpoch % 1000000u));
+		strName.Format(_T("archive_v2_b%04u_e%06u.rar"), uBucket, (uEpoch % 1000000u));
 }
 
 void CUpDownClient::BuildEServerBuddyMagicProof(uint32 dwNonce, uchar aucProof[MDX_DIGEST_SIZE])
@@ -6475,8 +7419,11 @@ bool CUpDownClient::SendEServerUdpProbe()
 	if (buddyAddr.IsNull())
 		return false;
 
-	if (m_dwEServerExtPortProbeToken == 0)
-		return false;
+	if (m_dwEServerExtPortProbeToken == 0) {
+		m_dwEServerExtPortProbeToken = GetRandomUInt32();
+		if (m_dwEServerExtPortProbeToken == 0)
+			m_dwEServerExtPortProbeToken = 1;
+	}
 
 	DWORD dwNow = ::GetTickCount();
 	if (m_dwEServerExtPortProbeSent != 0
@@ -6495,23 +7442,32 @@ bool CUpDownClient::SendEServerUdpProbe()
 }
 
 // Check if we can request this client as eServer Buddy
-bool CUpDownClient::CanQueryEServerBuddySlot() const
+bool CUpDownClient::CanQueryEServerBuddySlot(bool bIgnoreCachedSlot) const
 {
 	// Must support eServer Buddy
 	if (!m_bSupportsEServerBuddy)
 		return false;
 
-	// Must have available slot
-	if (!m_bHasEServerBuddySlot)
+	// Must have available slot unless a fresh server-side magic candidate is being probed.
+	if (!bIgnoreCachedSlot && !m_bHasEServerBuddySlot)
 		return false;
 
 	// Must be HighID (we only want HighID buddies)
 	if (HasLowID())
 		return false;
 
-	// Must be on the same server as us
-	if (theApp.serverconnect && theApp.serverconnect->IsConnected()) {
-		if (m_dwReportedServerIP != theApp.serverconnect->GetCurrentServer()->GetIP())
+	// Must be on the same server as us. Prefer full IP:port when known.
+	if (theApp.serverconnect && theApp.serverconnect->IsConnected() && theApp.serverconnect->GetCurrentServer() != NULL) {
+		const uint32 dwCurrentServerIP = theApp.serverconnect->GetCurrentServer()->GetIP();
+		const uint16 nCurrentServerPort = theApp.serverconnect->GetCurrentServer()->GetPort();
+		if (m_dwServerIP != 0 && m_nServerPort != 0) {
+			if (m_dwServerIP != dwCurrentServerIP || m_nServerPort != nCurrentServerPort)
+				return false;
+		} else if (m_dwServerIP != 0 && m_dwServerIP != dwCurrentServerIP)
+			return false;
+		else if (m_dwReportedServerIP != 0 && m_dwReportedServerIP != dwCurrentServerIP)
+			return false;
+		else if (m_dwServerIP == 0 && m_dwReportedServerIP == 0)
 			return false;
 	} else {
 		return false;	// We're not connected to any server
@@ -6537,6 +7493,18 @@ void CUpDownClient::OnEServerBuddyRejectedGeneric()
 	const DWORD dwRetryAfter = ::GetTickCount() + ESERVERBUDDY_GENERIC_REJECT_RETRY;
 	if (m_dwEServerBuddyRetryAfter == 0 || (INT)(dwRetryAfter - m_dwEServerBuddyRetryAfter) > 0)
 		m_dwEServerBuddyRetryAfter = dwRetryAfter;
+}
+
+void CUpDownClient::OnEServerBuddyProofRejected()
+{
+	const DWORD dwRetryAfter = ::GetTickCount() + ESERVERBUDDY_PROOF_REJECT_RETRY;
+	if (m_dwEServerBuddyRetryAfter == 0 || (INT)(dwRetryAfter - m_dwEServerBuddyRetryAfter) > 0)
+		m_dwEServerBuddyRetryAfter = dwRetryAfter;
+}
+
+void CUpDownClient::ClearEServerBuddyRetryAfter()
+{
+	m_dwEServerBuddyRetryAfter = 0;
 }
 
 // Called when our buddy request is accepted
@@ -6589,16 +7557,45 @@ bool CUpDownClient::CanAcceptEServerRelayRequest()
 	return true;
 }
 
-// Send eServer Buddy request to this client
-bool CUpDownClient::SendEServerBuddyRequest()
+bool CUpDownClient::CanAcceptEServerPeerInfo()
 {
-	// Verify we should send
-	if (!CanQueryEServerBuddySlot())
+	const DWORD dwNow = ::GetTickCount();
+
+	if (m_dwEServerPeerInfoFirstRequest == 0
+		|| (DWORD)(dwNow - m_dwEServerPeerInfoFirstRequest) >= ESERVERBUDDY_RELAY_REQUEST_WINDOW) {
+		m_nEServerPeerInfoCount = 0;
+		m_dwEServerPeerInfoFirstRequest = dwNow;
+	}
+
+	if (m_nEServerPeerInfoCount >= ESERVERBUDDY_MAX_RELAY_REQUESTS_PER_WINDOW)
 		return false;
 
-	// Must have a valid socket connection
+	++m_nEServerPeerInfoCount;
+	return true;
+}
+
+// Send eServer Buddy request to this client
+bool CUpDownClient::SendEServerBuddyRequest(bool bIgnoreCachedSlot)
+{
+	// Verify we should send
+	if (!CanQueryEServerBuddySlot(bIgnoreCachedSlot))
+		return false;
+
+	if (!SupportsEServerBuddyMagicProof()) {
+		OnEServerBuddyProofRejected();
+		if (thePrefs.GetLogNatTraversalEvents())
+			AddDebugLogLine(false, _T("[eServerBuddy] SendEServerBuddyRequest Failed: Peer does not support magic proof: %s"), (LPCTSTR)EscPercent(DbgGetClientInfo()));
+		return false;
+	}
+
+	// Must have a valid socket connection and local UDP endpoint for NAT-T relay.
 	if (!socket || !socket->IsConnected())
 		return false;
+	if (theApp.clientudp == NULL || !theApp.clientudp->EnsureNatTraversalEndpointReady(_T("eServer buddy request"))) {
+		if (thePrefs.GetLogNatTraversalEvents())
+			AddDebugLogLine(false, _T("[eServerBuddy] SendEServerBuddyRequest Failed: local UDP endpoint is not ready"));
+		return false;
+	}
 
 	if (thePrefs.GetDebugClientTCPLevel() > 0)
 		DebugSend("OP_EServerBuddyRequest", this);
@@ -6620,8 +7617,7 @@ bool CUpDownClient::SendEServerBuddyRequest()
 	Packet* packet = NULL;
 	if (SupportsEServerBuddyMagicProof() || byReqFlags != 0) {
 		uint32 dwNonce = 0;
-		if (SupportsEServerBuddyMagicProof())
-			byReqFlags |= ESERVERBUDDY_REQUEST_FLAG_MAGIC_PROOF;
+		byReqFlags |= ESERVERBUDDY_REQUEST_FLAG_MAGIC_PROOF;
 
 		UINT uPayloadSize = 1;
 		if ((byReqFlags & ESERVERBUDDY_REQUEST_FLAG_MAGIC_PROOF) != 0)
@@ -6664,8 +7660,43 @@ bool CUpDownClient::SendEServerBuddyRequest()
 	return true;
 }
 
-// Send relay request via our eServer buddy to reach a target LowID client
+// Check whether this LowID target can be reached through our serving eServer buddy.
+bool CUpDownClient::CanRouteViaServingEServerBuddy(const CUpDownClient* pServingBuddy) const
+{
+	if (pServingBuddy == NULL)
+		return false;
+
+	if (theApp.serverconnect != NULL && theApp.serverconnect->IsLocalServer(m_dwServerIP, m_nServerPort))
+		return true;
+
+	const CAddress& rServingBuddyIP = GetServingBuddyIP();
+	if (rServingBuddyIP.IsNull())
+		return false;
+
+	bool bIPMatches = false;
+	if (rServingBuddyIP.GetType() == CAddress::IPv6)
+		bIPMatches = (rServingBuddyIP == pServingBuddy->GetIPv6());
+	else {
+		if (!pServingBuddy->GetConnectIP().IsNull() && rServingBuddyIP == pServingBuddy->GetConnectIP())
+			bIPMatches = true;
+		else if (!pServingBuddy->GetIP().IsNull() && rServingBuddyIP == pServingBuddy->GetIP())
+			bIPMatches = true;
+	}
+
+	if (!bIPMatches)
+		return false;
+
+	const uint16 nServingBuddyPort = GetServingBuddyPort();
+	return nServingBuddyPort == 0 || nServingBuddyPort == pServingBuddy->GetKadPort() || nServingBuddyPort == pServingBuddy->GetUDPPort();
+}
+
 bool CUpDownClient::SendEServerRelayRequest(CUpDownClient* pTarget)
+{
+	CUpDownClient* pBuddy = theApp.clientlist->GetServingEServerBuddy();
+	return SendEServerRelayRequestToBuddy(pTarget, pBuddy);
+}
+
+bool CUpDownClient::SendEServerRelayRequestToBuddy(CUpDownClient* pTarget, CUpDownClient* pBuddy)
 {
 	// We must be LowID and have a serving buddy
 	if (!theApp.serverconnect->IsLowID()) {
@@ -6675,10 +7706,16 @@ bool CUpDownClient::SendEServerRelayRequest(CUpDownClient* pTarget)
 		return false;
 	}
 
-	CUpDownClient* pBuddy = theApp.clientlist->GetServingEServerBuddy();
 	if (!pBuddy || !pBuddy->socket || !pBuddy->socket->IsConnected()) {
 		if (thePrefs.GetLogNatTraversalEvents()) {
 			AddDebugLogLine(false, _T("[eServerBuddy] SendEServerRelayRequest Failed: No connected buddy (pBuddy=%p)"), pBuddy);
+		}
+		return false;
+	}
+	if (!theApp.clientlist->IsServingEServerBuddyRelayReady(pBuddy)) {
+		if (thePrefs.GetLogNatTraversalEvents()) {
+			AddDebugLogLine(false, _T("[eServerBuddy] SendEServerRelayRequest Failed: buddy is not server-verified for current eServer (%s)"),
+				(LPCTSTR)EscPercent(pBuddy->DbgGetClientInfo()));
 		}
 		return false;
 	}
@@ -6709,6 +7746,12 @@ bool CUpDownClient::SendEServerRelayRequest(CUpDownClient* pTarget)
 		return false;
 	}
 
+	if (theApp.clientudp == NULL || !theApp.clientudp->EnsureNatTraversalEndpointReady(_T("eServer relay request"))) {
+		if (thePrefs.GetLogNatTraversalEvents())
+			AddDebugLogLine(false, _T("[eServerBuddy] SendEServerRelayRequest Failed: local UDP endpoint is not ready"));
+		return false;
+	}
+
 	// Get our external IP (from server's perspective)
 	// If we are LowID, we might not know our true public IP correctly.
 	// We will send what we have (even if 0 or private), and rely on the Buddy to observe our true IP.
@@ -6734,11 +7777,17 @@ bool CUpDownClient::SendEServerRelayRequest(CUpDownClient* pTarget)
 		dwMyIP = myAddr.ToUInt32(false);
 	}
 
-	if (!thePrefs.HasValidExternalUdpPort())
+	const DWORD dwNow = ::GetTickCount();
+	if (!thePrefs.HasValidExternalUdpPort() && pBuddy->SupportsEServerBuddyExternalUdpPort()) {
 		pBuddy->SendEServerUdpProbe();
+		if (thePrefs.GetLogNatTraversalEvents()) {
+			AddDebugLogLine(false, _T("[eServerBuddy] SendEServerRelayRequest: requester external UDP port is not verified yet, continuing with local UDP port fallback"));
+		}
+	}
 
-	// Get best external UDP port (prefer KAD external, fallback to eServer buddy cache)
+	// Get best external UDP port (prefer KAD external, fallback to context-verified eServer buddy cache)
 	uint16 nMyKadPort = thePrefs.GetBestExternalUdpPort();
+	const bool bBlindLocalPort = (nMyKadPort == 0);
 	if (nMyKadPort == 0)
 		nMyKadPort = thePrefs.GetUDPPort();
 
@@ -6764,8 +7813,27 @@ bool CUpDownClient::SendEServerRelayRequest(CUpDownClient* pTarget)
 		bHasFileContext = true;
 	}
 
-	// Packet format: targetLowID(4) + myIP(4) + myKadPort(2) + fileHash(16) = 26 bytes
-	// Uses LowID (not UserHash) because server callback requires LowID
+	uint32 dwBuddyIP = (!pBuddy->GetIP().IsNull() && pBuddy->GetIP().GetType() == CAddress::IPv4) ? pBuddy->GetIP().ToUInt32(false) : 0;
+	if (bHasFileContext
+		&& m_dwLastEServerRelayRequestSent != 0
+		&& m_dwLastEServerRelayRequestTargetLowID == dwTargetLowID
+		&& m_dwLastEServerRelayRequestBuddyIP == dwBuddyIP
+		&& md4equ(m_achLastEServerRelayRequestFileHash, fileHash)
+		&& (DWORD)(dwNow - m_dwLastEServerRelayRequestSent) < ESERVERBUDDY_RELAY_REASK_TIME) {
+		if (thePrefs.GetLogNatTraversalEvents()) {
+			AddDebugLogLine(false, _T("[eServerBuddy] SendEServerRelayRequest: Skipping duplicate relay request for target LowID=%u Buddy=%s FileHash=%s (age=%u ms)"),
+				dwTargetLowID, (LPCTSTR)ipstr(dwBuddyIP), (LPCTSTR)md4str(fileHash), (UINT)(dwNow - m_dwLastEServerRelayRequestSent));
+		}
+		return true;
+	}
+
+	if (bBlindLocalPort && thePrefs.GetLogNatTraversalEvents()) {
+		AddDebugLogLine(false, _T("[eServerBuddy] SendEServerRelayRequest: using blind local UDP port fallback %u for relay endpoint"), nMyKadPort);
+	}
+
+	// Packet format: targetLowID(4) + myIP(4) + myKadPort(2) + fileHash(16).
+	// Transport capability is negotiated end-to-end with direct NAT-T CAPS frames, not through the buddy.
+	const uint8 byRequesterConnectOptions = GetMyConnectOptions(true, true);
 	CSafeMemFile data(26);
 	data.WriteUInt32(dwTargetLowID);
 	data.WriteUInt32(dwMyIP);
@@ -6775,12 +7843,19 @@ bool CUpDownClient::SendEServerRelayRequest(CUpDownClient* pTarget)
 	Packet* packet = new Packet(data, OP_EMULEPROT, OP_ESERVER_RELAY_REQUEST);
 	theStats.AddUpDataOverheadOther(packet->size);
 	pBuddy->socket->SendPacket(packet);
+	m_dwLastEServerRelayRequestSent = dwNow;
+	m_dwLastEServerRelayRequestTargetLowID = dwTargetLowID;
+	m_dwLastEServerRelayRequestBuddyIP = dwBuddyIP;
+	if (bHasFileContext)
+		md4cpy(m_achLastEServerRelayRequestFileHash, fileHash);
+	else
+		md4clr(m_achLastEServerRelayRequestFileHash);
 
 	if (thePrefs.GetLogNatTraversalEvents()) {
-		AddDebugLogLine(false, _T("[eServerBuddy] SendEServerRelayRequest: Sent to buddy %s for target LowID=%u (SentMyIP=%s MyKadPort=%u FileHash=%s)"),
+		AddDebugLogLine(false, _T("[eServerBuddy] SendEServerRelayRequest: Sent to buddy %s for target LowID=%u (SentMyIP=%s MyKadPort=%u FileHash=%s LocalOptions=0x%02X Wire=legacy26 direct-caps)"),
 			(LPCTSTR)EscPercent(pBuddy->DbgGetClientInfo()), dwTargetLowID,
-			(LPCTSTR)ipstr(htonl(dwMyIP)), nMyKadPort,
-			bHasFileContext ? (LPCTSTR)md4str(fileHash) : _T("NULL"));
+			(LPCTSTR)ipstr(dwMyIP), nMyKadPort,
+			bHasFileContext ? (LPCTSTR)md4str(fileHash) : (LPCTSTR)_T("NULL"), byRequesterConnectOptions);
 	}
 
 	if (thePrefs.GetDebugClientTCPLevel() > 0)
@@ -6791,37 +7866,139 @@ bool CUpDownClient::SendEServerRelayRequest(CUpDownClient* pTarget)
 	return true;
 }
 
+bool CUpDownClient::HasRecentEServerRelayRequestToBuddy(const CUpDownClient* pBuddy, DWORD dwMaxAge) const
+{
+	if (pBuddy == NULL || m_reqfile == NULL || m_dwLastEServerRelayRequestSent == 0 || dwMaxAge == 0)
+		return false;
+
+	const uint32 dwBuddyIP = (!pBuddy->GetIP().IsNull() && pBuddy->GetIP().GetType() == CAddress::IPv4) ? pBuddy->GetIP().ToUInt32(false) : 0;
+	if (dwBuddyIP == 0 || m_dwLastEServerRelayRequestBuddyIP != dwBuddyIP)
+		return false;
+	if (m_dwLastEServerRelayRequestTargetLowID == 0 || m_dwLastEServerRelayRequestTargetLowID != GetUserIDHybrid())
+		return false;
+	if (isnulmd4(m_achLastEServerRelayRequestFileHash) || !md4equ(m_achLastEServerRelayRequestFileHash, m_reqfile->GetFileHash()))
+		return false;
+
+	const DWORD dwAge = (DWORD)(::GetTickCount() - m_dwLastEServerRelayRequestSent);
+	if (dwAge > dwMaxAge)
+		return false;
+
+	const EDownloadState eState = GetDownloadState();
+	return m_eConnectingState == CCS_SERVERCALLBACK || IsEServerRelayNatTGuardActive()
+		|| eState == DS_CONNECTING || eState == DS_WAITCALLBACK;
+}
+
+bool CUpDownClient::QueueDirectNatTraversalAfterEServerRelayFailure(LPCTSTR pszReason)
+{
+	if (m_reqfile == NULL || m_bNatTFatalConnect)
+		return false;
+	if (socket != NULL || GetDownloadState() == DS_DOWNLOADING || GetUploadState() == US_UPLOADING)
+		return false;
+
+	const CAddress directIP = GetConnectIP().IsNull() ? GetIP() : GetConnectIP();
+	const uint16 directPort = GetKadPort() != 0 ? GetKadPort() : GetUDPPort();
+	if ((!GetNatTraversalSupport() && !GetNatTraversalQuicSupport())
+		|| directIP.IsNull() || !directIP.IsPublicIP() || directPort == 0)
+		return false;
+
+	m_dwLastEServerRelayRequestSent = 0;
+	m_dwLastEServerRelayRequestTargetLowID = 0;
+	m_dwLastEServerRelayRequestBuddyIP = 0;
+	md4clr(m_achLastEServerRelayRequestFileHash);
+	// End only the relay wait. Keep direct CAPS state for the fallback transport selection.
+	m_bEServerRelayNatTGuardActive = false;
+	m_dwEServerRelayNatTWindowStart = 0;
+	m_uEServerRelayTransientErrors = 0;
+	ResetConnectingState();
+	theApp.clientlist->RemoveConnectingClient(this);
+	MarkNatTRendezvous(2, true);
+	QueueDeferredNatConnect(directIP, directPort, thePrefs.GetNatTraversalPortWindow());
+	SetDownloadState(DS_CONNECTING, pszReason != NULL ? pszReason : _T("eServer relay failed; direct NAT-T retry queued"));
+	TrigNextSafeAskForDownload(m_reqfile);
+
+	if (thePrefs.GetLogNatTraversalEvents()) {
+		DebugLog(_T("[eServerBuddy] Queued direct NAT-T fallback after relay failure to %s:%u, %s"),
+			(LPCTSTR)ipstr(directIP), (UINT)directPort, (LPCTSTR)EscPercent(DbgGetClientInfo()));
+	}
+	return true;
+}
+
+bool CUpDownClient::SetPendingEServerRelayTarget(CUpDownClient* pTarget)
+{
+	if (pTarget == NULL || theApp.clientlist == NULL || !theApp.clientlist->IsValidClient(pTarget))
+		return false;
+	if (m_pPendingEServerRelayTarget != NULL && m_pPendingEServerRelayTarget != pTarget && theApp.clientlist->IsValidClient(m_pPendingEServerRelayTarget)) {
+		if (thePrefs.GetLogNatTraversalEvents()) {
+			AddDebugLogLine(false, _T("[eServerBuddy] SetPendingEServerRelayTarget: keeping existing pending target %s, rejecting new %s"),
+				(LPCTSTR)EscPercent(m_pPendingEServerRelayTarget->DbgGetClientInfo()),
+				(LPCTSTR)EscPercent(pTarget->DbgGetClientInfo()));
+		}
+		return false;
+	}
+
+	m_pPendingEServerRelayTarget = pTarget;
+	m_dwPendingEServerRelayTargetLowID = pTarget->GetUserIDHybrid();
+	if (pTarget->GetRequestFile() != NULL)
+		md4cpy(m_achPendingEServerRelayFileHash, pTarget->GetRequestFile()->GetFileHash());
+	else
+		md4clr(m_achPendingEServerRelayFileHash);
+	return true;
+}
+
+void CUpDownClient::ClearPendingEServerRelayTarget()
+{
+	m_pPendingEServerRelayTarget = NULL;
+	m_dwPendingEServerRelayTargetLowID = 0;
+	md4clr(m_achPendingEServerRelayFileHash);
+}
+
 // Process pending relay when buddy reconnects
 void CUpDownClient::ProcessPendingEServerRelay()
 {
-	if (!m_pPendingEServerRelayTarget) {
+	if (m_pPendingEServerRelayTarget == NULL)
+		return;
+
+	CUpDownClient* pTarget = m_pPendingEServerRelayTarget;
+	const uint32 dwPendingLowID = m_dwPendingEServerRelayTargetLowID;
+	uchar pendingFileHash[MDX_DIGEST_SIZE];
+	md4cpy(pendingFileHash, m_achPendingEServerRelayFileHash);
+	ClearPendingEServerRelayTarget();
+
+	if (!theApp.clientlist->IsServingEServerBuddyRelayReady(this)) {
+		if (thePrefs.GetLogNatTraversalEvents()) {
+			AddDebugLogLine(false, _T("[eServerBuddy] ProcessPendingEServerRelay: Reconnected client is not the current relay-ready eServer buddy"));
+		}
 		return;
 	}
 
-	CUpDownClient* pTarget = m_pPendingEServerRelayTarget;
-	m_pPendingEServerRelayTarget = NULL;  // Clear pending state
+	if (pTarget == NULL || !theApp.clientlist->IsValidClient(pTarget)) {
+		if (thePrefs.GetLogNatTraversalEvents())
+			AddDebugLogLine(false, _T("[eServerBuddy] ProcessPendingEServerRelay: Pending target is no longer valid"));
+		return;
+	}
+	if (dwPendingLowID != 0 && pTarget->GetUserIDHybrid() != dwPendingLowID) {
+		if (thePrefs.GetLogNatTraversalEvents()) {
+			AddDebugLogLine(false, _T("[eServerBuddy] ProcessPendingEServerRelay: Pending target LowID changed from %u to %u"),
+				dwPendingLowID, pTarget->GetUserIDHybrid());
+		}
+		return;
+	}
+	if (!isnulmd4(pendingFileHash) && pTarget->GetRequestFile() != NULL && !md4equ(pendingFileHash, pTarget->GetRequestFile()->GetFileHash())) {
+		if (thePrefs.GetLogNatTraversalEvents())
+			AddDebugLogLine(false, _T("[eServerBuddy] ProcessPendingEServerRelay: Pending target file context changed"));
+		return;
+	}
 
 	if (thePrefs.GetLogNatTraversalEvents()) {
 		AddDebugLogLine(false, _T("[eServerBuddy] ProcessPendingEServerRelay: Buddy reconnected, sending pending relay for %s"),
 			(LPCTSTR)EscPercent(pTarget->DbgGetClientInfo()));
 	}
 
-	// Make sure we're the serving buddy and socket is valid now
-	if (!socket || !socket->IsConnected()) {
-		if (thePrefs.GetLogNatTraversalEvents()) {
-			AddDebugLogLine(false, _T("[eServerBuddy] ProcessPendingEServerRelay: Socket still invalid after reconnect!"));
-		}
-		return;
-	}
-
-	// Send the relay request
-	if (pTarget->SendEServerRelayRequest(pTarget)) {
-		if (thePrefs.GetLogNatTraversalEvents()) {
+	if (pTarget->SendEServerRelayRequestToBuddy(pTarget, this)) {
+		if (thePrefs.GetLogNatTraversalEvents())
 			AddDebugLogLine(false, _T("[eServerBuddy] ProcessPendingEServerRelay: Relay request sent successfully"));
-		}
-	} else {
-		if (thePrefs.GetLogNatTraversalEvents()) {
-			AddDebugLogLine(false, _T("[eServerBuddy] ProcessPendingEServerRelay: Relay request failed"));
-		}
+	} else if (thePrefs.GetLogNatTraversalEvents()) {
+		AddDebugLogLine(false, _T("[eServerBuddy] ProcessPendingEServerRelay: Relay request failed"));
 	}
 }
+

@@ -272,6 +272,7 @@ CPreferencesDlg::CPreferencesDlg()
 	m_wndGeneral.m_psp.dwFlags &= ~PSH_HASHELP;
 	m_wndDisplay.m_psp.dwFlags &= ~PSH_HASHELP;
 	m_wndConnection.m_psp.dwFlags &= ~PSH_HASHELP;
+	m_wndNetworkInterface.m_psp.dwFlags &= ~PSH_HASHELP;
 	m_wndServer.m_psp.dwFlags &= ~PSH_HASHELP;
 	m_wndDirectories.m_psp.dwFlags &= ~PSH_HASHELP;
 	m_wndFiles.m_psp.dwFlags &= ~PSH_HASHELP;
@@ -293,6 +294,7 @@ CPreferencesDlg::CPreferencesDlg()
 	CTreePropSheet::SetPageIcon(&m_wndGeneral, _T("Preferences"));
 	CTreePropSheet::SetPageIcon(&m_wndDisplay, _T("DISPLAY"));
 	CTreePropSheet::SetPageIcon(&m_wndConnection, _T("CONNECTION"));
+	CTreePropSheet::SetPageIcon(&m_wndNetworkInterface, _T("NETWORK_INTERFACE"));
 	CTreePropSheet::SetPageIcon(&m_wndProxy, _T("PROXY"));
 	CTreePropSheet::SetPageIcon(&m_wndServer, _T("SERVER"));
 	CTreePropSheet::SetPageIcon(&m_wndDirectories, _T("FOLDERS"));
@@ -315,6 +317,7 @@ CPreferencesDlg::CPreferencesDlg()
 	AddPage(&m_wndGeneral);
 	AddPage(&m_wndDisplay);
 	AddPage(&m_wndConnection);
+	AddPage(&m_wndNetworkInterface);
 	AddPage(&m_wndProxy);
 	AddPage(&m_wndServer);
 	AddPage(&m_wndDirectories);
@@ -465,6 +468,7 @@ void CPreferencesDlg::Localize()
 	m_wndGeneral.Localize();
 	m_wndDisplay.Localize();
 	m_wndConnection.Localize();
+	m_wndNetworkInterface.Localize();
 	m_wndServer.Localize();
 	m_wndDirectories.Localize();
 	m_wndFiles.Localize();
@@ -482,11 +486,12 @@ void CPreferencesDlg::Localize()
 	m_wndBlacklistPanel.Localize();
 
 	if (GetPageTreeControl()) {
-		static const LPCTSTR uids[18] =
+		static const LPCTSTR uids[19] =
 		{
-			_T("PW_GENERAL"), _T("PW_DISPLAY"), _T("CONNECTION"), _T("PW_PROXY"), _T("PW_SERVER"),
-			_T("PW_DIR"), _T("PW_FILES"), _T("PW_EKDEV_OPTIONS"), _T("STATSSETUPINFO"), _T("IRC"),
-			_T("MESSAGESCOMMENTS"), _T("SECURITY"), _T("SCHEDULER"), _T("PW_WS"), _T("PW_TWEAK"), _T("PW_MOD"), _T("PW_PROTECTION_PANEL"), _T("PW_BLACKLIST_PANEL")
+			_T("PW_GENERAL"), _T("PW_DISPLAY"), _T("CONNECTION"), _T("NETBIND_NETWORK_INTERFACE"), _T("PW_PROXY"),
+			_T("PW_SERVER"), _T("PW_DIR"), _T("PW_FILES"), _T("PW_EKDEV_OPTIONS"), _T("STATSSETUPINFO"),
+			_T("IRC"), _T("MESSAGESCOMMENTS"), _T("SECURITY"), _T("SCHEDULER"), _T("PW_WS"),
+			_T("PW_TWEAK"), _T("PW_MOD"), _T("PW_PROTECTION_PANEL"), _T("PW_BLACKLIST_PANEL")
 		};
 
 		int c;

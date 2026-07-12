@@ -45,11 +45,154 @@ BOOL CAICHSyncThread::InitInstance()
 	return TRUE;
 }
 
+bool CAICHSyncThread::RunStartupSync(bool bBuildMissingHashsets, INT_PTR *piPendingHashCount, UINT uMaxHashsetsToBuild, INT_PTR *piProcessedHashCount, std::vector<BYTE> *pvecDeferredAICHFileHashes)
+{
+	CAICHSyncThread syncThread;
+	syncThread.m_bBuildMissingHashsets = bBuildMissingHashsets;
+	syncThread.m_uMaxHashsetsToBuild = uMaxHashsetsToBuild;
+	syncThread.m_pvecDeferredAICHFileHashes = pvecDeferredAICHFileHashes;
+	const bool bSuccess = syncThread.Run() == 0;
+	if (piPendingHashCount != NULL)
+		*piPendingHashCount = syncThread.m_iPendingHashCount;
+	if (piProcessedHashCount != NULL)
+		*piProcessedHashCount = syncThread.m_iProcessedHashCount;
+	return bSuccess;
+}
+
+void CAICHSyncThread::AppendAICHFileHash(const CKnownFile *pFile, std::vector<BYTE>& vecFileHashes)
+{
+	if (pFile == NULL || pFile->GetFileHash() == NULL)
+		return;
+
+	const BYTE *pucHash = reinterpret_cast<const BYTE*>(pFile->GetFileHash());
+	vecFileHashes.insert(vecFileHashes.end(), pucHash, pucHash + MDX_DIGEST_SIZE);
+}
+
+void CAICHSyncThread::QueueDeferredAICHFileHash(const CKnownFile *pFile) const
+{
+	if (m_pvecDeferredAICHFileHashes == NULL)
+		return;
+	AppendAICHFileHash(pFile, *m_pvecDeferredAICHFileHashes);
+}
+
+void CAICHSyncThread::QueueMissingAICHFileHash(const CKnownFile *pFile)
+{
+	AppendAICHFileHash(pFile, m_vecToHashFileHashes);
+}
+
+bool CAICHSyncThread::BuildStartupDeferredAICHHashset(const uchar *pucFileHash)
+{
+	if (pucFileHash == NULL || theApp.IsClosing() || thePrefs.m_bDisableAICHCreation)
+		return false;
+
+	CString strFilePath;
+	CString strFileName;
+	EMFileSize nFileSize(0ull);
+	bool bHasAICHHash = false;
+	bool bNeedsPartHashSet = false;
+	CAICHHash aichHash;
+	{
+		CSingleLock sharelock(&theApp.sharedfiles->m_mutWriteList, TRUE);
+		CKnownFile *pFile = theApp.sharedfiles->GetFileByID(pucFileHash);
+		if (pFile == NULL || pFile->IsPartFile() || !theApp.knownfiles->IsKnownFile(pFile))
+			return true;
+
+		strFilePath = pFile->GetFilePath();
+		strFileName = pFile->GetFileName();
+		nFileSize = pFile->GetFileSize();
+		CFileIdentifier &fileid = pFile->GetFileIdentifier();
+		bHasAICHHash = fileid.HasAICHHash();
+		if (bHasAICHHash) {
+			aichHash = fileid.GetAICHHash();
+			bNeedsPartHashSet = !fileid.HasExpectedAICHHashCount();
+		}
+		if (bHasAICHHash && !bNeedsPartHashSet)
+			return true;
+	}
+
+	if (bHasAICHHash && bNeedsPartHashSet) {
+		CKnownFile snapshotFile;
+		snapshotFile.SetFileName(strFileName);
+		snapshotFile.SetFileSize(nFileSize);
+		CAICHRecoveryHashSet tempHashSet(&snapshotFile, nFileSize);
+		tempHashSet.SetMasterHash(aichHash, AICH_HASHSETCOMPLETE);
+		if (!tempHashSet.LoadHashSet()) {
+			ASSERT(0);
+			DebugLogError(_T("Failed to load full AICH recovery Hashset - known2.met might be corrupt. Unable to create AICH Part Hashset - %s"), (LPCTSTR)EscPercent(strFileName));
+			return true;
+		}
+
+		CSingleLock sharelock(&theApp.sharedfiles->m_mutWriteList, TRUE);
+		CKnownFile *pFile = theApp.sharedfiles->GetFileByID(pucFileHash);
+		if (pFile == NULL || pFile->IsPartFile() || !theApp.knownfiles->IsKnownFile(pFile))
+			return true;
+		if (pFile->GetFileSize() != nFileSize || pFile->GetFilePath().CompareNoCase(strFilePath) != 0)
+			return true;
+
+		CFileIdentifier &fileid = pFile->GetFileIdentifier();
+		if (!fileid.HasAICHHash() || fileid.GetAICHHash() != aichHash || fileid.HasExpectedAICHHashCount())
+			return true;
+		if (!fileid.SetAICHHashSet(tempHashSet)) {
+			DebugLogError(_T("Failed to create AICH Part Hashset out of full AICH recovery Hashset - %s"), (LPCTSTR)EscPercent(pFile->GetFileName()));
+			ASSERT(0);
+		}
+		pFile->SetAICHRecoverHashSetAvailable(true);
+		return true;
+	}
+
+	while (theApp.sharedfiles->GetHashingCount() != 0) {
+		if (theApp.IsClosing())
+			return false;
+		::Sleep(100);
+	}
+
+	CSingleLock hashlock(&theApp.hashing_mut, TRUE);
+	if (theApp.IsClosing())
+		return false;
+
+	CAICHRecoveryHashSet calculatedHashSet(NULL, nFileSize);
+	theApp.QueueLogLine(false, GetResString(_T("AICH_CALCFILE")), (LPCTSTR)strFileName);
+	if (!CKnownFile::CreateAICHHashSetFromFile(strFilePath, nFileSize, calculatedHashSet)) {
+		theApp.QueueDebugLogLine(false, _T("Failed to create AICH Hashset while sync. for file %s"), (LPCTSTR)strFileName);
+		return true;
+	}
+	hashlock.Unlock();
+
+	bool bApplied = false;
+	{
+		CSingleLock sharelock(&theApp.sharedfiles->m_mutWriteList, TRUE);
+		CKnownFile *pCurFile = theApp.sharedfiles->GetFileByID(pucFileHash);
+		if (pCurFile == NULL || pCurFile->IsPartFile() || !theApp.knownfiles->IsKnownFile(pCurFile))
+			return true;
+		if (pCurFile->GetFileSize() != nFileSize || pCurFile->GetFilePath().CompareNoCase(strFilePath) != 0)
+			return true;
+
+		calculatedHashSet.SetOwner(pCurFile);
+		CFileIdentifier &fileid = pCurFile->GetFileIdentifier();
+		const CAICHHash *pHash = (fileid.HasAICHHash() && fileid.GetAICHHash() != calculatedHashSet.GetMasterHash())
+			? &fileid.GetAICHHash() : NULL;
+		theApp.knownfiles->AICHHashChanged(pHash, calculatedHashSet.GetMasterHash(), pCurFile);
+		fileid.SetAICHHash(calculatedHashSet.GetMasterHash());
+		if (!fileid.SetAICHHashSet(calculatedHashSet)) {
+			ASSERT(0);
+			theApp.QueueDebugLogLine(false, _T("Failed to create AICH PartHashSet out of RecoveryHashSet while sync. for file %s"), (LPCTSTR)pCurFile->GetFileName());
+		}
+		pCurFile->SetAICHRecoverHashSetAvailable(true);
+		bApplied = true;
+	}
+
+	if (bApplied && !calculatedHashSet.SaveHashSetForFileSize(nFileSize))
+		LogError(LOG_STATUSBAR, GetResString(_T("SAVEACFAILED")));
+	return true;
+}
+
 int CAICHSyncThread::Run()
 {
 	// Note: m_bDisableAICHCreation should only be used for testing purposes. So it can't be set on GUI.
 	if (theApp.IsClosing() || thePrefs.m_bDisableAICHCreation)
 		return 0;
+
+	const bool bLimitHashsetBuild = m_bBuildMissingHashsets && m_uMaxHashsetsToBuild > 0;
 
 	// we collect all masterhashes which we find in the known2.met and store them in a list
 	CArray<CAICHHash> aKnown2Hashes;
@@ -70,7 +213,7 @@ int CAICHSyncThread::Run()
 		return 0;
 		}
 	}
-	uint32 nLastVerifiedPos = 0;
+	ULONGLONG nLastVerifiedPos = 0;
 	try {
 		if (file.GetLength() >= 1) {
 			uint8 header = file.ReadUInt8();
@@ -87,7 +230,7 @@ int CAICHSyncThread::Run()
 
 				// skip the rest of this hashset
 				file.Seek(nHashCount * (LONGLONG)CAICHHash::GetHashSize(), CFile::current);
-				nLastVerifiedPos = (uint32)file.GetPosition();
+				nLastVerifiedPos = file.GetPosition();
 			}
 		} else
 			file.WriteUInt8(KNOWN2_MET_VERSION);
@@ -110,9 +253,14 @@ int CAICHSyncThread::Run()
 		return 0;
 	}
 
+	CMap<CAICHHash, const CAICHHash&, INT_PTR, INT_PTR> mapKnown2Hashes;
+	for (INT_PTR i = 0; i < aKnown2Hashes.GetCount(); ++i)
+		mapKnown2Hashes[aKnown2Hashes[i]] = i;
+
 	// now we check that all files which are in the shared file list have a corresponding hash in the out list
 	// those who don't are added to the hashing list
 	CList<CAICHHash> liUsedHashes;
+	CMap<CAICHHash, const CAICHHash&, bool, bool> mapUsedHashes;
 	bool bDbgMsgCreatingPartHashes = true;
 
 	CSingleLock sharelock(&theApp.sharedfiles->m_mutWriteList, TRUE);
@@ -123,39 +271,42 @@ int CAICHSyncThread::Run()
 		if (pFile != NULL && !pFile->IsPartFile()) {
 			CFileIdentifier &fileid = pFile->GetFileIdentifier();
 			if (fileid.HasAICHHash()) {
-				bool bAICHfound = false;
-				for (INT_PTR i = aKnown2Hashes.GetCount(); --i >= 0;) {
-					if (aKnown2Hashes[i] == fileid.GetAICHHash()) {
-						bAICHfound = true;
-						liUsedHashes.AddTail(CAICHHash(aKnown2Hashes[i]));
-						pFile->SetAICHRecoverHashSetAvailable(true);
-						// Has the file the proper AICH Part hashset? If not, probably upgrading, create it
-						if (!fileid.HasExpectedAICHHashCount()) {
-							if (bDbgMsgCreatingPartHashes) {
-								bDbgMsgCreatingPartHashes = false;
-								DebugLogWarning(_T("Missing AICH Part Hashsets for known files - maybe upgrading from earlier version. Creating them out of full AICH recovery Hashsets, shouldn't take too long"));
-							}
-							CAICHRecoveryHashSet tempHashSet(pFile, pFile->GetFileSize());
-							tempHashSet.SetMasterHash(fileid.GetAICHHash(), AICH_HASHSETCOMPLETE);
-							if (!tempHashSet.LoadHashSet()) {
-								ASSERT(0);
-								DebugLogError(_T("Failed to load full AICH recovery Hashset - known2.met might be corrupt. Unable to create AICH Part Hashset - %s"), (LPCTSTR)EscPercent(pFile->GetFileName()));
-							} else {
-								if (!fileid.SetAICHHashSet(tempHashSet)) {
-									DebugLogError(_T("Failed to create AICH Part Hashset out of full AICH recovery Hashset - %s"), (LPCTSTR)EscPercent(pFile->GetFileName()));
-									ASSERT(0);
-								}
-								ASSERT(fileid.HasExpectedAICHHashCount());
-							}
+				INT_PTR iKnown2Hash = -1;
+				if (mapKnown2Hashes.Lookup(fileid.GetAICHHash(), iKnown2Hash) && iKnown2Hash >= 0 && iKnown2Hash < aKnown2Hashes.GetCount()) {
+					const CAICHHash& aichHash = aKnown2Hashes[iKnown2Hash];
+					liUsedHashes.AddTail(CAICHHash(aichHash));
+					mapUsedHashes[aichHash] = true;
+					pFile->SetAICHRecoverHashSetAvailable(true);
+					// Has the file the proper AICH Part hashset? If not, probably upgrading, create it
+					if (!fileid.HasExpectedAICHHashCount()) {
+						if (!m_bBuildMissingHashsets || (bLimitHashsetBuild && m_iProcessedHashCount >= static_cast<INT_PTR>(m_uMaxHashsetsToBuild))) {
+							++m_iDeferredPartHashSetCount;
+							QueueDeferredAICHFileHash(pFile);
+							continue;
 						}
-						break;
+						++m_iProcessedHashCount;
+						if (bDbgMsgCreatingPartHashes) {
+							bDbgMsgCreatingPartHashes = false;
+							DebugLogWarning(_T("Missing AICH Part Hashsets for known files - maybe upgrading from earlier version. Creating them out of full AICH recovery Hashsets, shouldn't take too long"));
+						}
+						CAICHRecoveryHashSet tempHashSet(pFile, pFile->GetFileSize());
+						tempHashSet.SetMasterHash(fileid.GetAICHHash(), AICH_HASHSETCOMPLETE);
+						if (!tempHashSet.LoadHashSet()) {
+							DebugLogError(_T("Failed to load full AICH recovery Hashset - known2.met might be corrupt. Unable to create AICH Part Hashset - %s"), (LPCTSTR)EscPercent(pFile->GetFileName()));
+						} else {
+							if (!fileid.SetAICHHashSet(tempHashSet))
+								DebugLogError(_T("Failed to create AICH Part Hashset out of full AICH recovery Hashset - %s"), (LPCTSTR)EscPercent(pFile->GetFileName()));
+							else if (!fileid.HasExpectedAICHHashCount())
+								DebugLogError(_T("Created AICH Part Hashset has unexpected part count - %s"), (LPCTSTR)EscPercent(pFile->GetFileName()));
+						}
 					}
-				}
-				if (bAICHfound)
 					continue;
+				}
 			}
 			pFile->SetAICHRecoverHashSetAvailable(false);
-			m_liToHash.AddTail(pFile);
+			QueueMissingAICHFileHash(pFile);
+			if (!m_bBuildMissingHashsets || bLimitHashsetBuild)
+				QueueDeferredAICHFileHash(pFile);
 		}
 	}
 	sharelock.Unlock();
@@ -190,7 +341,9 @@ int CAICHSyncThread::Run()
 				if (file.GetPosition() + nHashCount * (ULONGLONG)CAICHHash::GetHashSize() > nExistingSize)
 					AfxThrowFileException(CFileException::endOfFile, 0, file.GetFileName());
 
-				if (aichHash == empty || (!thePrefs.IsRememberingDownloadedFiles() && liUsedHashes.Find(aichHash) == NULL)) {
+				bool bUsedHash = false;
+				const bool bUsedAICHHash = mapUsedHashes.Lookup(aichHash, bUsedHash) && bUsedHash;
+				if (aichHash == empty || (!thePrefs.IsRememberingDownloadedFiles() && !bUsedAICHHash)) {
 					// unused hashset skip the rest of this hashset
 					file.Seek(nHashCount * (LONGLONG)CAICHHash::GetHashSize(), CFile::current);
 					++nPurgeCount;
@@ -250,28 +403,37 @@ int CAICHSyncThread::Run()
 	}
 
 #ifdef _DEBUG
-	for (POSITION pos = liUsedHashes.GetHeadPosition(); pos != NULL && !theApp.IsClosing();) {
-		CKnownFile *pFile = theApp.sharedfiles->GetFileByAICH(liUsedHashes.GetNext(pos));
-		if (pFile == NULL) {
-			ASSERT(0);
-			continue;
+	if (m_bBuildMissingHashsets && !bLimitHashsetBuild) {
+		for (POSITION pos = liUsedHashes.GetHeadPosition(); pos != NULL && !theApp.IsClosing();) {
+			CKnownFile *pFile = theApp.sharedfiles->GetFileByAICH(liUsedHashes.GetNext(pos));
+			if (pFile == NULL)
+				continue;
+			CAICHRecoveryHashSet *pTempHashSet = new CAICHRecoveryHashSet(pFile);
+			pTempHashSet->SetFileSize(pFile->GetFileSize());
+			pTempHashSet->SetMasterHash(pFile->GetFileIdentifier().GetAICHHash(), AICH_HASHSETCOMPLETE);
+			(void)pTempHashSet->LoadHashSet();
+			delete pTempHashSet;
 		}
-		CAICHRecoveryHashSet *pTempHashSet = new CAICHRecoveryHashSet(pFile);
-		pTempHashSet->SetFileSize(pFile->GetFileSize());
-		pTempHashSet->SetMasterHash(pFile->GetFileIdentifier().GetAICHHash(), AICH_HASHSETCOMPLETE);
-		ASSERT(pTempHashSet->LoadHashSet());
-		delete pTempHashSet;
 	}
 #endif
 
 	lockKnown2Met.Unlock();
+	if (!m_bBuildMissingHashsets) {
+		const INT_PTR iFilesToHash = static_cast<INT_PTR>(m_vecToHashFileHashes.size() / MDX_DIGEST_SIZE);
+		m_iPendingHashCount = iFilesToHash + m_iDeferredPartHashSetCount;
+		if (m_iPendingHashCount > 0)
+			theApp.QueueDebugLogLine(false, _T("Deferred AICH hashset creation until after startup. files=%Id partsets=%Id"), iFilesToHash, m_iDeferredPartHashSetCount);
+		return 0;
+	}
+	m_iPendingHashCount = m_iDeferredPartHashSetCount;
 	// warn the user if he just upgraded
-	if (thePrefs.IsFirstStart() && !m_liToHash.IsEmpty() && !bJustCreated)
+	const INT_PTR iFilesToHash = static_cast<INT_PTR>(m_vecToHashFileHashes.size() / MDX_DIGEST_SIZE);
+	if (thePrefs.IsFirstStart() && iFilesToHash > 0 && !bJustCreated)
 		LogWarning(GetResString(_T("AICH_WARNUSER")));
 
-	if (!m_liToHash.IsEmpty()) {
-		theApp.QueueLogLine(true, GetResString(_T("AICH_SYNCTOTAL")), m_liToHash.GetCount());
-		theApp.emuledlg->sharedfileswnd->sharedfilesctrl.SetAICHHashing(m_liToHash.GetCount());
+	if (iFilesToHash > 0) {
+		theApp.QueueLogLine(true, GetResString(_T("AICH_SYNCTOTAL")), iFilesToHash);
+		theApp.emuledlg->sharedfileswnd->sharedfilesctrl.SetAICHHashing(iFilesToHash);
 		theApp.sharedfiles->NotifyShowFilesCount();
 		// first let all normal hashing be done before starting out sync hashing
 		CSingleLock sLock1(&theApp.hashing_mut); // only one file hash at a time
@@ -281,27 +443,35 @@ int CAICHSyncThread::Run()
 			::Sleep(100);
 		}
 		sLock1.Lock();
-		INT_PTR cDone = 0;
-		for (POSITION pos = m_liToHash.GetHeadPosition(); pos != NULL; ++cDone) {
+		INT_PTR cRemainingToHash = iFilesToHash;
+		for (INT_PTR iHash = 0; iHash < iFilesToHash; ++iHash) {
 			if (theApp.IsClosing()) // in case of shutdown while still hashing
 				return 0;
+			if (bLimitHashsetBuild && m_iProcessedHashCount >= static_cast<INT_PTR>(m_uMaxHashsetsToBuild)) {
+				m_iPendingHashCount = cRemainingToHash + m_iDeferredPartHashSetCount;
+				break;
+			}
 
-			theApp.emuledlg->sharedfileswnd->sharedfilesctrl.SetAICHHashing(m_liToHash.GetCount() - cDone);
+			theApp.emuledlg->sharedfileswnd->sharedfilesctrl.SetAICHHashing(cRemainingToHash);
 			theApp.sharedfiles->NotifyShowFilesCount();
 
-			CKnownFile *pCurFile = m_liToHash.GetNext(pos);
-			// just to be sure that the file hasn't been deleted lately
-			if (!(theApp.knownfiles->IsKnownFile(pCurFile) && theApp.sharedfiles->GetFileByID(pCurFile->GetFileHash())))
-				continue;
-			theApp.QueueLogLine(false, GetResString(_T("AICH_CALCFILE")), (LPCTSTR)pCurFile->GetFileName());
-			if (!pCurFile->CreateAICHHashSetOnly())
-				theApp.QueueDebugLogLine(false, _T("Failed to create AICH Hashset while sync. for file %s"), (LPCTSTR)pCurFile->GetFileName());
+			const uchar *pucFileHash = reinterpret_cast<const uchar*>(&m_vecToHashFileHashes[static_cast<size_t>(iHash) * MDX_DIGEST_SIZE]);
+			--cRemainingToHash;
+			++m_iProcessedHashCount;
+			BuildStartupDeferredAICHHashset(pucFileHash);
 		}
 
-		theApp.emuledlg->sharedfileswnd->sharedfilesctrl.SetAICHHashing(0);
+		theApp.emuledlg->sharedfileswnd->sharedfilesctrl.SetAICHHashing(m_iPendingHashCount);
 		theApp.sharedfiles->NotifyShowFilesCount();
 		sLock1.Unlock();
 	}
+
+	if (m_iPendingHashCount > 0) {
+		theApp.QueueDebugLogLine(false, _T("AICHSyncThread deferred remaining hashset work. pending=%Id processed=%Id"), m_iPendingHashCount, m_iProcessedHashCount);
+		theApp.emuledlg->sharedfileswnd->sharedfilesctrl.SetAICHHashing(m_iPendingHashCount);
+	} else
+		theApp.emuledlg->sharedfileswnd->sharedfilesctrl.SetAICHHashing(0);
+	theApp.sharedfiles->NotifyShowFilesCount();
 
 	theApp.QueueDebugLogLine(false, _T("AICHSyncThread finished"));
 	return 0;

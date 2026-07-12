@@ -39,6 +39,19 @@ static CCriticalSection g_utpCtxLock;
 static std::set<utp_context*> g_utpConfiguredContexts;
 static unsigned long long g_randState = 0ULL; // simple LCG state for RNG
 static const size_t kMaxUtpSockets = 2048; // Soft cap for active uTP endpoints
+static const size_t kUtpInitialAppWriteBufferSize = 64 * 1024;
+static const size_t kUtpFirstAdaptiveAppWriteBufferSize = 512 * 1024;
+static const size_t kUtpSecondAdaptiveAppWriteBufferSize = 2 * 1024 * 1024;
+static const size_t kUtpMaxAdaptiveAppWriteBufferSize = 4 * 1024 * 1024;
+static const size_t kUtpDuplexMaxAdaptiveAppWriteBufferSize = kUtpFirstAdaptiveAppWriteBufferSize;
+static const uint32 kUtpWriteBufferPromotionBlocks = 64;
+static const DWORD kUtpAppWriteBufferIdleShrinkMs = 30000;
+static const size_t kUtpMaxWriteAttemptSize = 256 * 1024;
+static const UINT kUtpMaxWriteAttemptsPerProcess = 4;
+static const size_t kUtpMaxWriteBytesPerProcess = 256 * 1024;
+static const DWORD kUtpZeroWriteRetryBaseMs = 20;
+static const DWORD kUtpZeroWriteRetryStepMs = 5;
+static const DWORD kUtpZeroWriteRetryMaxMs = 125;
 
 // Best-effort dynamic MTU query via IP Helper API (loaded at runtime)
 static bool QueryMtuForPeer(const sockaddr* to, socklen_t tolen, uint32& mtu)
@@ -359,11 +372,33 @@ static CUpDownClient* ResolveNatClient(CUtpSocket* pSocket)
 	return client;
 }
 
-static uint64 on_utp_state_change(utp_callback_arguments* a)
+static bool HasActiveNatTraversalTransfer(const CUpDownClient* pClient)
+{
+	return pClient != NULL && (pClient->GetDownloadState() == DS_DOWNLOADING || pClient->GetUploadState() == US_UPLOADING);
+}
+
+static void RefreshAcceptedUtpUploadHandshakeGuard(CUpDownClient* pClient, LPCTSTR pszReason)
+{
+	if (pClient == NULL || theApp.clientlist == NULL || !theApp.clientlist->IsValidClient(pClient))
+		return;
+
+	if (pClient->GetUploadState() == US_UPLOADING || pClient->GetUploadState() == US_CONNECTING) {
+		pClient->SetUploadState(US_CONNECTING);
+		pClient->SetUpStartTime();
+		if (thePrefs.GetLogNatTraversalEvents()) {
+			DebugLog(_T("[NatTraversal][uTP] Refreshed upload handshake guard after accepted transport (%s), %s"),
+				pszReason != NULL ? pszReason : _T("accepted uTP"), (LPCTSTR)EscPercent(pClient->DbgGetClientInfo()));
+		}
+	}
+}
+
+uint64 CUtpSocket::on_utp_state_change(utp_callback_arguments* a)
 {
 	// Defensive: ignore events until userdata is bound
 	CUtpSocket* pSocket = (CUtpSocket*)utp_get_userdata(a->socket);
 	if (!pSocket)
+		return 0;
+	if (pSocket->m_Socket != a->socket)
 		return 0;
 	CUpDownClient* natClient = ResolveNatClient(pSocket);
 
@@ -375,6 +410,12 @@ static uint64 on_utp_state_change(utp_callback_arguments* a)
 			pSocket->m_bConnectNotified = true;
 			pSocket->OnConnect(0);
 		}
+		{
+			CSingleLock writeLock(&pSocket->m_csWriteBuffer, TRUE);
+			pSocket->m_bUtpWriteBlocked = false;
+			pSocket->m_bUtpWritableHint = false;
+			pSocket->m_dwNextUtpWriteAttemptTick = 0;
+		}
 		// Don't call OnSend here - ConnectionEstablished will handle queue flushing
 		if (thePrefs.GetLogNatTraversalEvents())
 			DebugLog(_T("[NatTraversal][uTP] CONNECT state"));
@@ -384,6 +425,12 @@ static uint64 on_utp_state_change(utp_callback_arguments* a)
 			natClient->SetUtpWritable(false);
 		break;
 	case UTP_STATE_WRITABLE:
+		{
+			CSingleLock writeLock(&pSocket->m_csWriteBuffer, TRUE);
+			pSocket->m_bUtpWriteBlocked = false;
+			pSocket->m_bUtpWritableHint = true;
+			pSocket->m_dwNextUtpWriteAttemptTick = 0;
+		}
 		pSocket->OnSend(0);
 		if (!pSocket->m_bConnectNotified) {
 			pSocket->m_nLayerState = connected;
@@ -437,7 +484,7 @@ static uint64 on_utp_state_change(utp_callback_arguments* a)
 	return 0;
 }
 
-static uint64 on_utp_read(utp_callback_arguments* a)
+uint64 CUtpSocket::on_utp_read(utp_callback_arguments* a)
 {
 
 
@@ -446,6 +493,8 @@ static uint64 on_utp_read(utp_callback_arguments* a)
 	CUtpSocket* pSocket = (CUtpSocket*)utp_get_userdata(a->socket);
 	if (!pSocket)
 		return 0; // not bound yet
+	if (pSocket->m_Socket != a->socket)
+		return 0;
 	if (pSocket->m_ShutDown & 0x01) // socket is shutting down
 		return 1;
 
@@ -464,7 +513,7 @@ static uint64 on_utp_read(utp_callback_arguments* a)
 	return 0;
 }
 
-static uint64 on_utp_sendto(utp_callback_arguments* a)
+uint64 CUtpSocket::on_utp_sendto(utp_callback_arguments* a)
 {
 	// Bind context userdata to UDP transport
 	CClientUDPSocket* pUDPSocket = (CClientUDPSocket*)utp_context_get_userdata(a->context);
@@ -473,23 +522,13 @@ static uint64 on_utp_sendto(utp_callback_arguments* a)
 	if (a->buf == NULL || a->len == 0 || a->address == NULL || a->address_len <= 0)
 		return 0; // malformed callback payload, ignore safely
 
-	// Diagnostic: Parse and log frame type
-	// uTP header byte 0: [version (lower 4 bits)] | [type (upper 4 bits)]
-	uint8 utp_type = 255;
-	if (a->len >= 1) {
-		uint8 b0 = ((const uint8*)a->buf)[0];
-		utp_type = (uint8)((b0 >> 4) & 0x0F);  // Extract upper 4 bits for type
-	}
-	if (thePrefs.GetLogNatTraversalEvents() && thePrefs.GetVerboseLogPriority() <= DLP_VERYLOW)
-		AddDebugLogLine(DLP_VERYLOW, false, _T("[uTP-DEBUG] on_utp_sendto: type=%u len=%u"), (UINT)utp_type, (UINT)a->len);
-
 	// Forward the serialized uTP packet through the shared UDP transport.
 	pUDPSocket->SendUtpPacket((const byte*)a->buf, a->len, a->address, (socklen_t)a->address_len);
 
 	return 0;
 }
 
-static uint64 on_utp_error(utp_callback_arguments* a)
+uint64 CUtpSocket::on_utp_error(utp_callback_arguments* a)
 {
 	// Map libutp error codes to proper WSA codes
 	int Error;
@@ -504,6 +543,11 @@ static uint64 on_utp_error(utp_callback_arguments* a)
 	CUtpSocket* pSocket = (CUtpSocket*)utp_get_userdata(a->socket);
 	if (!pSocket)
 		return 0;
+	if (pSocket->m_Socket != a->socket) {
+		if (thePrefs.GetLogNatTraversalEvents())
+			DebugLog(_T("[NatTraversal][uTP] Ignored stale error callback (callbackSocket=%p currentSocket=%p code=%d)"), a->socket, pSocket->m_Socket, a->error_code);
+		return 0;
+	}
 	CUpDownClient* natClient = ResolveNatClient(pSocket);
 
 	sockaddr_storage peer = {};
@@ -531,15 +575,22 @@ static uint64 on_utp_error(utp_callback_arguments* a)
 		}
 
 		const bool bHadConnectingState = (natClient != NULL && natClient->GetConnectingState() != CCS_NONE);
+		const bool bActiveLowIdUploadRetry = (natClient != NULL
+			&& bHavePeer
+			&& theApp.IsFirewalled()
+			&& natClient->HasLowID()
+			&& (natClient->GetUploadState() == US_UPLOADING || natClient->GetUploadState() == US_CONNECTING));
 		const bool bNeedNatRetry = (natClient != NULL &&
 			(natClient->IsHelloAnswerPending() ||
 			 bHadConnectingState ||
 			 natClient->GetDownloadState() == DS_WAITCALLBACK ||
-			 natClient->GetDownloadState() == DS_CONNECTING));
+			 natClient->GetDownloadState() == DS_CONNECTING ||
+			 bActiveLowIdUploadRetry));
 
 		// Transient reset/timeout during simultaneous open should not tear down the client object.
 		pSocket->m_nLayerState = unconnected;
 		pSocket->m_bConnectNotified = false;
+		pSocket->m_bTransportFailed = true;
 		pSocket->Destroy();
 		CEMSocket* ownerSocket = dynamic_cast<CEMSocket*>(pSocket->GetOwnerSocket());
 		if (ownerSocket != NULL)
@@ -591,6 +642,8 @@ static uint64 on_utp_error(utp_callback_arguments* a)
 			}
 
 			if (bRetryScheduled && (natClient->GetUploadState() == US_UPLOADING || natClient->GetUploadState() == US_CONNECTING)) {
+				if (ownerSocket != NULL)
+					ownerSocket->ResetTransportStateForReconnect();
 				natClient->SetUploadState(US_CONNECTING);
 				natClient->SetUpStartTime();
 				if (thePrefs.GetLogNatTraversalEvents()) {
@@ -601,13 +654,14 @@ static uint64 on_utp_error(utp_callback_arguments* a)
 		}
 
 		if (thePrefs.GetLogNatTraversalEvents())
-			DebugLog(_T("[NatTraversal][uTP] ERROR transient: kept client alive for retry (code=%d mappedWSA=%d rearm=%d endpoint=%s:%u)"),
-				a->error_code, Error, bRetryScheduled ? 1 : 0, (LPCTSTR)ipstr(retryIP), (UINT)retryPort);
+			DebugLog(_T("[NatTraversal][uTP] ERROR transient: kept client alive for retry (code=%d mappedWSA=%d rearm=%d uploadRetry=%d endpoint=%s:%u)"),
+				a->error_code, Error, bRetryScheduled ? 1 : 0, bActiveLowIdUploadRetry ? 1 : 0, (LPCTSTR)ipstr(retryIP), (UINT)retryPort);
 		return 0;
 	}
 
 	RemoveExpectedPeersForOwner(pSocket); // Hard failures should clear stale expected entries.
 	pSocket->m_nLayerState = aborted;
+	pSocket->m_bTransportFailed = true;
 	pSocket->Destroy();
 	pSocket->OnClose(Error);
 	if (natClient) {
@@ -676,6 +730,18 @@ static uint64 on_utp_accept(utp_callback_arguments* a)
 					if (existing->GetPeerName((sockaddr*)&existingPeer, &existingPeerLen)) {
 						// Compare IP+PORT to allow multiple connections from same IP (different ports)
 						if (SockaddrEqualIPAndPort((sockaddr*)&existingPeer, existingPeerLen, (sockaddr*)&peer, peerlen)) {
+							const AsyncSocketExState existingState = existing->GetState();
+							CUpDownClient* existingClient = existing->GetOwnerClient();
+							if (existingState == connected && !existing->HasTransportFailed() && HasActiveNatTraversalTransfer(existingClient)) {
+								g_utpSocketsLock.Unlock();
+								if (thePrefs.GetLogNatTraversalEvents())
+									DebugLog(_T("[NatTraversal][uTP] Rejecting duplicate incoming SYN for an active uTP transfer, %s"), (LPCTSTR)EscPercent(existingClient->DbgGetClientInfo()));
+								utp_close(a->socket);
+								return 0;
+							}
+							if (existingState != connecting && existingState != connected)
+								continue;
+
 							// Simultaneous connect detected.
 							// Always prefer endpoint tuple compare first so both peers use the same metric.
 							// This avoids asymmetric decisions when only one side knows the remote user hash.
@@ -704,7 +770,7 @@ static uint64 on_utp_accept(utp_callback_arguments* a)
 									cmp = memcmp(localHash, remoteHash, MDX_DIGEST_SIZE);
 									bCmpReady = true;
 									if (thePrefs.GetLogNatTraversalEvents())
-										DebugLog(_T("[NatTraversal][uTP] Tie-breaking fallback by UserHash (cmp=%d), %s"), cmp, adoptClient ? (LPCTSTR)EscPercent(adoptClient->DbgGetClientInfo()) : _T("no-owner"));
+										DebugLog(_T("[NatTraversal][uTP] Tie-breaking fallback by UserHash (cmp=%d), %s"), cmp, adoptClient ? (LPCTSTR)EscPercent(adoptClient->DbgGetClientInfo()) : (LPCTSTR)_T("no-owner"));
 								}
 							}
 
@@ -737,6 +803,7 @@ static uint64 on_utp_accept(utp_callback_arguments* a)
 								existing->Setup(a->socket, true);
 								RemoveExpectedPeersForOwner(existing);
 								g_utpSocketsLock.Unlock();
+								RefreshAcceptedUtpUploadHandshakeGuard(adoptClient, _T("simultaneous connect adoption"));
 								return 0;
 							}
 
@@ -793,6 +860,7 @@ static uint64 on_utp_accept(utp_callback_arguments* a)
 				}
 				adoptOwner->Destroy();
 				adoptOwner->Setup(a->socket, true);
+				RefreshAcceptedUtpUploadHandshakeGuard(adoptClient, _T("expected peer adoption"));
 
 				// Clear any remaining expected entries for this owner to avoid stale records
 				RemoveExpectedPeersForOwner(adoptOwner);
@@ -881,6 +949,7 @@ static uint64 on_utp_accept(utp_callback_arguments* a)
 					}
 					bestOwner->Destroy();
 					bestOwner->Setup(a->socket, true);
+					RefreshAcceptedUtpUploadHandshakeGuard(adoptClient2, _T("IP fallback adoption"));
 
 					// Remove all expected entries for this owner to avoid stale records.
 					RemoveExpectedPeersForOwner(bestOwner);
@@ -916,6 +985,23 @@ static uint64 on_utp_accept(utp_callback_arguments* a)
 				if (thePrefs.GetLogNatTraversalEvents())
 					DebugLog(_T("[NatTraversal][uTP] ACCEPT via NatExpectation fallback: found client %s"), (LPCTSTR)EscPercent(natClient->DbgGetClientInfo()));
 
+				// Never mix a delayed uTP accept into an existing QUIC transport.
+				if (natClient->socket != NULL && natClient->socket->HaveQuicNatLayer()) {
+					if (thePrefs.GetLogNatTraversalEvents())
+						DebugLog(_T("[NatTraversal][uTP] ACCEPT via NatExpectation rejected: QUIC layer already exists for %s"), (LPCTSTR)EscPercent(natClient->DbgGetClientInfo()));
+					utp_close(a->socket);
+					return 0;
+				}
+
+				CUtpSocket* currentUtpLayer = natClient->socket != NULL ? natClient->socket->GetUtpLayer() : NULL;
+				if (currentUtpLayer != NULL && !currentUtpLayer->HasTransportFailed()
+					&& currentUtpLayer->GetState() == connected && HasActiveNatTraversalTransfer(natClient)) {
+					if (thePrefs.GetLogNatTraversalEvents())
+						DebugLog(_T("[NatTraversal][uTP] ACCEPT via NatExpectation rejected: established uTP transport already exists for %s"), (LPCTSTR)EscPercent(natClient->DbgGetClientInfo()));
+					utp_close(a->socket);
+					return 0;
+				}
+
 				// Client needs a socket to own the uTP layer
 				if (natClient->socket == NULL) {
 					// Create new CEMSocket that will own the uTP layer
@@ -932,7 +1018,11 @@ static uint64 on_utp_accept(utp_callback_arguments* a)
 
 				if (utpLayer != NULL) {
 					// Adopt the incoming connection to this socket layer
+					natClient->ResetUtpFlowControl();
+					natClient->RequestUtpQueuePurge();
 					utpLayer->Setup(a->socket, true);
+					RefreshAcceptedUtpUploadHandshakeGuard(natClient, _T("NAT expectation adoption"));
+					RemoveExpectedPeersForOwner(utpLayer);
 					if (thePrefs.GetLogNatTraversalEvents())
 						DebugLog(_T("[NatTraversal][uTP] ACCEPT via NatExpectation: adopted incoming connection for %s"), (LPCTSTR)EscPercent(natClient->DbgGetClientInfo()));
 					return 0; // success - don't close
@@ -950,14 +1040,14 @@ static uint64 on_utp_accept(utp_callback_arguments* a)
 	return 0;
 }
 
-static uint64 on_utp_get_read_buffer_size(utp_callback_arguments* a)
+uint64 CUtpSocket::on_utp_get_read_buffer_size(utp_callback_arguments* a)
 {
 	CUtpSocket* pSocket = (CUtpSocket*)utp_get_userdata(a->socket);
 	// Report available free space, not the used size.
 	size_t used = 0;
 	size_t cap = 0;
 	
-	if (pSocket) {
+	if (pSocket && pSocket->m_Socket == a->socket) {
 		CSingleLock readLock(&pSocket->m_csReadBuffer, TRUE);
 		used = pSocket->m_ReadBuffer.GetSize();
 		cap = pSocket->m_ReadBuffer.GetLength();
@@ -1110,18 +1200,22 @@ CUtpSocket::CUtpSocket()
 	m_ShutDown = 0;
 	
 	// Adaptive buffer strategy: Start with small buffers for handshake, grow dynamically during data transfer
-	// Initial 16KB write buffer minimizes memory footprint during connection establishment
-	// Buffer will grow to 64KB when congestion detected during active data transfer
+	// Initial 64KB write buffer keeps memory low during connection establishment
+	// Grow the application buffer to 512KB/2MB/4MB only after data-path pressure.
 	m_ReadBuffer.AllocBuffer(64 * 1024); // Note: UTP can push more data into the buffer than expected
-	m_WriteBuffer.AllocBuffer(16 * 1024);
-	m_nCurrentWriteBufferSize = 16 * 1024;
+	m_WriteBuffer.AllocBuffer(kUtpInitialAppWriteBufferSize);
+	m_uWriteBufferBlockCountAtCapacity = 0;
 	m_dwLastSendTime = 0;
 	m_bBufferGrown = false;
 	
 	m_bConnectNotified = false;
+	m_bTransportFailed = false;
 	m_pOwnerClient = NULL;
 	m_uZeroWriteBurst = 0;
 	m_bAppSendBlocked = false;
+	m_bUtpWriteBlocked = false;
+	m_bUtpWritableHint = false;
+	m_dwNextUtpWriteAttemptTick = 0;
 	m_nLayerState = unconnected; // uTP doesn't need socket creation, ready for Connect
     g_utpSocketsLock.Lock();
     theApp.g_UtpSockets.insert(this);
@@ -1166,141 +1260,255 @@ void CUtpSocket::UnregisterFromGlobalSet()
     g_utpSocketsLock.Unlock();
 }
 
+bool CUtpSocket::IsDuplexTransferLikely() const
+{
+	CUpDownClient* pClient = m_pOwnerClient;
+	if (pClient == NULL || theApp.clientlist == NULL || !theApp.clientlist->IsValidClient(pClient))
+		return false;
+
+	const EUploadState eUploadState = pClient->GetUploadState();
+	const bool bHasUploadContext = eUploadState == US_UPLOADING || eUploadState == US_CONNECTING;
+	const EDownloadState eDownloadState = pClient->GetDownloadState();
+	const bool bHasDownloadContext = pClient->GetRequestFile() != NULL
+		&& eDownloadState != DS_NONE
+		&& eDownloadState != DS_ERROR
+		&& eDownloadState != DS_BANNED;
+
+	return bHasUploadContext && bHasDownloadContext;
+}
+
+size_t CUtpSocket::GetMaxWriteBufferCapacity() const
+{
+	return IsDuplexTransferLikely() ? kUtpDuplexMaxAdaptiveAppWriteBufferSize : kUtpMaxAdaptiveAppWriteBufferSize;
+}
+
+bool CUtpSocket::GrowWriteBufferTo(size_t uNewCapacity, LPCTSTR pszReason)
+{
+	UNREFERENCED_PARAMETER(pszReason);
+	const size_t uCurrentCapacity = m_WriteBuffer.GetLength();
+	const size_t uCurrentSize = m_WriteBuffer.GetSize();
+	const size_t uMaxCapacity = GetMaxWriteBufferCapacity();
+	if (uNewCapacity > uMaxCapacity)
+		uNewCapacity = uMaxCapacity;
+	if (uNewCapacity <= uCurrentCapacity)
+		return true;
+	if (uCurrentSize >= uNewCapacity)
+		return false;
+
+	bool bResult = false;
+	if (uCurrentSize == 0) {
+		m_WriteBuffer.AllocBuffer(uNewCapacity);
+		bResult = true;
+	} else {
+		const size_t uGrowSize = uCurrentSize + 1;
+		const size_t uPreAlloc = uNewCapacity - uGrowSize;
+		bResult = m_WriteBuffer.SetSize(uGrowSize, true, uPreAlloc) && m_WriteBuffer.SetSize(uCurrentSize, false);
+	}
+	if (!bResult)
+		return false;
+
+	m_bBufferGrown = uNewCapacity > kUtpInitialAppWriteBufferSize;
+	m_uWriteBufferBlockCountAtCapacity = 0;
+	return true;
+}
+
+bool CUtpSocket::ShrinkWriteBufferTo(size_t uNewCapacity, LPCTSTR pszReason)
+{
+	UNREFERENCED_PARAMETER(pszReason);
+	const size_t uCurrentCapacity = m_WriteBuffer.GetLength();
+	const size_t uCurrentSize = m_WriteBuffer.GetSize();
+	if (uNewCapacity >= uCurrentCapacity)
+		return true;
+	if (uCurrentSize > uNewCapacity)
+		return false;
+
+	std::vector<byte> oldData;
+	if (uCurrentSize != 0) {
+		oldData.resize(uCurrentSize);
+		memcpy(&oldData[0], m_WriteBuffer.GetBuffer(), uCurrentSize);
+	}
+	m_WriteBuffer.AllocBuffer(uNewCapacity);
+	if (!oldData.empty())
+		m_WriteBuffer.AppendData(&oldData[0], oldData.size());
+
+	m_bBufferGrown = uNewCapacity > kUtpInitialAppWriteBufferSize;
+	m_uWriteBufferBlockCountAtCapacity = 0;
+	return true;
+}
+
+void CUtpSocket::TrimWriteBufferForDuplexIfPossible(LPCTSTR pszReason)
+{
+	if (IsDuplexTransferLikely() && m_WriteBuffer.GetLength() > kUtpDuplexMaxAdaptiveAppWriteBufferSize && m_WriteBuffer.GetSize() <= kUtpDuplexMaxAdaptiveAppWriteBufferSize)
+		ShrinkWriteBufferTo(kUtpDuplexMaxAdaptiveAppWriteBufferSize, pszReason);
+}
+
+size_t CUtpSocket::GetNextWriteBufferCapacity() const
+{
+	const size_t uCurrentCapacity = m_WriteBuffer.GetLength();
+	const size_t uMaxCapacity = GetMaxWriteBufferCapacity();
+	if (uCurrentCapacity >= uMaxCapacity)
+		return uCurrentCapacity;
+	if (uCurrentCapacity < kUtpFirstAdaptiveAppWriteBufferSize)
+		return min(kUtpFirstAdaptiveAppWriteBufferSize, uMaxCapacity);
+	if (uCurrentCapacity < kUtpSecondAdaptiveAppWriteBufferSize)
+		return min(kUtpSecondAdaptiveAppWriteBufferSize, uMaxCapacity);
+	return min(kUtpMaxAdaptiveAppWriteBufferSize, uMaxCapacity);
+}
+
+void CUtpSocket::OnWriteBufferBlocked()
+{
+	TrimWriteBufferForDuplexIfPossible(_T("duplex-block"));
+	if (m_WriteBuffer.GetLength() >= GetMaxWriteBufferCapacity())
+		return;
+
+	const bool bFirstAdaptivePromotion = m_WriteBuffer.GetLength() < kUtpFirstAdaptiveAppWriteBufferSize;
+	if (!bFirstAdaptivePromotion && ++m_uWriteBufferBlockCountAtCapacity < kUtpWriteBufferPromotionBlocks)
+		return;
+
+	const size_t uRequestedWriteBufferSize = GetNextWriteBufferCapacity();
+	GrowWriteBufferTo(uRequestedWriteBufferSize, bFirstAdaptivePromotion ? _T("first-block") : _T("repeated-block"));
+}
+
 void CUtpSocket::Process()
 {
 	CSingleLock runtimeLock(&g_utpRuntimeLock, TRUE);
 	// Take a snapshot to minimize lock hold time during writes
 	std::vector<CUtpSocket*> sockets;
-    g_utpSocketsLock.Lock();
-    sockets.reserve(theApp.g_UtpSockets.size());
-    for (std::set<CUtpSocket*>::iterator it = theApp.g_UtpSockets.begin(); it != theApp.g_UtpSockets.end(); ++it)
-        sockets.push_back(*it);
-    g_utpSocketsLock.Unlock();
+	g_utpSocketsLock.Lock();
+	sockets.reserve(theApp.g_UtpSockets.size());
+	for (std::set<CUtpSocket*>::iterator it = theApp.g_UtpSockets.begin(); it != theApp.g_UtpSockets.end(); ++it)
+		sockets.push_back(*it);
+	g_utpSocketsLock.Unlock();
 
-    for (size_t i = 0; i < sockets.size(); ++i) {
-        CUtpSocket* cursocket = sockets[i];
-        if (!cursocket)
-            continue;
+	for (size_t i = 0; i < sockets.size(); ++i) {
+		CUtpSocket* cursocket = sockets[i];
+		if (!cursocket)
+			continue;
 
-        if (cursocket->m_ShutDown & 0x02)
-            continue;
+		if (cursocket->m_ShutDown & 0x02)
+			continue;
 
+		UINT uWriteAttemptsThisPass = 0;
+		size_t uWriteBytesThisPass = 0;
 		std::vector<byte> writeSnapshot;
-		{
-			CSingleLock writeLock(&cursocket->m_csWriteBuffer, TRUE);
-			if (cursocket->m_Socket && cursocket->m_WriteBuffer.GetSize() != 0) {
-				writeSnapshot.resize(cursocket->m_WriteBuffer.GetSize());
-				memcpy(&writeSnapshot[0], cursocket->m_WriteBuffer.GetBuffer(), writeSnapshot.size());
+		while (uWriteAttemptsThisPass < kUtpMaxWriteAttemptsPerProcess && uWriteBytesThisPass < kUtpMaxWriteBytesPerProcess) {
+			writeSnapshot.clear();
+			bool bSkipWriteAttempt = false;
+			const DWORD nowTick = ::GetTickCount();
+			{
+				CSingleLock writeLock(&cursocket->m_csWriteBuffer, TRUE);
+				if (cursocket->m_Socket && cursocket->m_WriteBuffer.GetSize() != 0) {
+					if (cursocket->m_bUtpWriteBlocked && !cursocket->m_bUtpWritableHint && cursocket->m_dwNextUtpWriteAttemptTick != 0
+						&& (int)(nowTick - cursocket->m_dwNextUtpWriteAttemptTick) < 0) {
+						bSkipWriteAttempt = true;
+					} else {
+						cursocket->m_bUtpWritableHint = false;
+						const size_t uRemainingBudget = kUtpMaxWriteBytesPerProcess - uWriteBytesThisPass;
+						const size_t uSnapshotSize = min(min(cursocket->m_WriteBuffer.GetSize(), kUtpMaxWriteAttemptSize), uRemainingBudget);
+						writeSnapshot.resize(uSnapshotSize);
+						memcpy(&writeSnapshot[0], cursocket->m_WriteBuffer.GetBuffer(), writeSnapshot.size());
+					}
+				}
 			}
-		}
 
-		if (cursocket->m_Socket && !writeSnapshot.empty()) {
-			// Attempt a single write per Process() pass. If libutp returns 0 (no space in internal send buffer),
-			// ask libutp to issue deferred acks/check timeouts immediately to free up space instead of
-			// introducing a local sleep/retry that may race with libutp's internal state machine.
-			ssize_t written = utp_write(cursocket->m_Socket, &writeSnapshot[0], writeSnapshot.size());
+			if (bSkipWriteAttempt || writeSnapshot.empty())
+				break;
+
+			++uWriteAttemptsThisPass;
+			// Drain only within the per-socket attempt and byte budget.
+			const ssize_t written = utp_write(cursocket->m_Socket, &writeSnapshot[0], writeSnapshot.size());
 
 			if (written > 0) {
-				// Success: data accepted by libutp
-				bool bWasBlocked = false;
 				bool bWakeOwnerSend = false;
 				UINT uRemaining = 0;
 				{
 					CSingleLock writeLock(&cursocket->m_csWriteBuffer, TRUE);
-					bWasBlocked = (cursocket->m_uZeroWriteBurst > 0);
 					cursocket->m_WriteBuffer.ShiftData((size_t)written);
 					cursocket->m_uZeroWriteBurst = 0;
-					if (cursocket->m_bAppSendBlocked && cursocket->m_WriteBuffer.GetSize() < cursocket->m_WriteBuffer.GetLength()) {
+					const size_t uUsableCapacity = min(cursocket->m_WriteBuffer.GetLength(), cursocket->GetMaxWriteBufferCapacity());
+					if (cursocket->m_bAppSendBlocked && cursocket->m_WriteBuffer.GetSize() < uUsableCapacity) {
 						cursocket->m_bAppSendBlocked = false;
 						bWakeOwnerSend = true;
 					}
+					cursocket->m_bUtpWriteBlocked = false;
+					cursocket->m_bUtpWritableHint = false;
+					cursocket->m_dwNextUtpWriteAttemptTick = 0;
 					uRemaining = (UINT)cursocket->m_WriteBuffer.GetSize();
+					if (uRemaining == 0)
+						cursocket->TrimWriteBufferForDuplexIfPossible(_T("duplex-drained"));
 				}
-				
-				// Log only state transitions (blocked->success)
-				if (thePrefs.GetLogNatTraversalEvents() && bWasBlocked)
-					DebugLog(_T("[NatTraversal][uTP] WRITE resumed: wrote=%d remain=%u"), (int)written, uRemaining);
-				
+				uWriteBytesThisPass += (size_t)written;
+
+
 				if (cursocket->m_Context != NULL) {
 					utp_issue_deferred_acks(cursocket->m_Context);
 					utp_check_timeouts(cursocket->m_Context);
 				}
 
-				// uTP does not guarantee an additional WRITABLE callback when app buffer recovers.
-				// Trigger a synthetic write-ready notification to release CEMSocket busy state.
+				// Release the upper socket only when application buffer capacity reopened.
 				if (bWakeOwnerSend && cursocket->m_nLayerState == connected)
 					cursocket->OnSend(0);
-			} else {
-				// written <= 0: libutp cannot accept application data now (congestion / send buffer full).
-				// Immediately trigger deferred acks/timeouts to prompt libutp to make progress.
-				if (cursocket->m_Context != NULL) {
-					utp_issue_deferred_acks(cursocket->m_Context);
-					utp_check_timeouts(cursocket->m_Context);
-				}
-
-					if (written == 0) {
-						bool bWasUnblocked = false;
-						UINT uRemain = 0;
-						UINT uBurst = 0;
-						{
-							CSingleLock writeLock(&cursocket->m_csWriteBuffer, TRUE);
-							bWasUnblocked = (cursocket->m_uZeroWriteBurst == 0);
-							if (cursocket->m_uZeroWriteBurst < 0xFF)
-								++cursocket->m_uZeroWriteBurst;
-							uRemain = (UINT)cursocket->m_WriteBuffer.GetSize();
-							uBurst = (UINT)cursocket->m_uZeroWriteBurst;
-						}
-
-						// Log only: first occurrence and every 16th retry to avoid spam
-						if (thePrefs.GetLogNatTraversalEvents()) {
-							if (bWasUnblocked)
-								DebugLog(_T("[NatTraversal][uTP] WRITE blocked: bufsize=%u layerState=%d (congestion)"), uRemain, (int)cursocket->m_nLayerState);
-							else if ((uBurst & 0x0F) == 0)
-								DebugLog(_T("[NatTraversal][uTP] WRITE still blocked (remain=%u, burst=%u)"), uRemain, uBurst);
-						}
-					} else {
-						// written < 0: actual error
-						UINT uRemain = 0;
-						{
-							CSingleLock writeLock(&cursocket->m_csWriteBuffer, TRUE);
-							cursocket->m_uZeroWriteBurst = 0;
-							uRemain = (UINT)cursocket->m_WriteBuffer.GetSize();
-						}
-						if (thePrefs.GetLogNatTraversalEvents())
-							DebugLogError(_T("[NatTraversal][uTP] WRITE failed (err=%d remain=%u)"), (int)written, uRemain);
-					}
-					// don't busy-wait here; let ServiceUtp callers try again later
-					continue;
+				if (uRemaining == 0)
+					break;
+				continue;
 			}
+
+			if (cursocket->m_Context != NULL) {
+				utp_issue_deferred_acks(cursocket->m_Context);
+				utp_check_timeouts(cursocket->m_Context);
+			}
+
+			if (written == 0) {
+				CSingleLock writeLock(&cursocket->m_csWriteBuffer, TRUE);
+				if (cursocket->m_uZeroWriteBurst < 0xFF)
+					++cursocket->m_uZeroWriteBurst;
+				cursocket->m_bUtpWriteBlocked = true;
+				cursocket->m_bUtpWritableHint = false;
+				DWORD retryDelay = kUtpZeroWriteRetryBaseMs + ((DWORD)cursocket->m_uZeroWriteBurst * kUtpZeroWriteRetryStepMs);
+				if (retryDelay > kUtpZeroWriteRetryMaxMs)
+					retryDelay = kUtpZeroWriteRetryMaxMs;
+				cursocket->m_dwNextUtpWriteAttemptTick = nowTick + retryDelay;
+			} else {
+				UINT uRemain = 0;
+				{
+					CSingleLock writeLock(&cursocket->m_csWriteBuffer, TRUE);
+					cursocket->m_uZeroWriteBurst = 0;
+					cursocket->m_bUtpWriteBlocked = false;
+					cursocket->m_bUtpWritableHint = false;
+					cursocket->m_dwNextUtpWriteAttemptTick = 0;
+					uRemain = (UINT)cursocket->m_WriteBuffer.GetSize();
+				}
+				if (thePrefs.GetLogNatTraversalEvents())
+					DebugLogError(_T("[NatTraversal][uTP] WRITE failed (err=%d remain=%u)"), (int)written, uRemain);
+			}
+			break;
 		}
-		
+
 		// Adaptive application buffer shrinking: If buffer has been grown but is now idle for 30s, shrink back to save memory
 		// NOTE: Only application buffer shrinks. libutp buffer stays at 256KB (required for protocol reliability).
-			{
-				CSingleLock writeLock(&cursocket->m_csWriteBuffer, TRUE);
-				if (cursocket->m_bBufferGrown &&
-					cursocket->m_WriteBuffer.GetSize() == 0 &&
-					cursocket->m_dwLastSendTime > 0 &&
-					(GetTickCount() - cursocket->m_dwLastSendTime) > 30000) {
+		{
+			CSingleLock writeLock(&cursocket->m_csWriteBuffer, TRUE);
+			if (cursocket->m_bBufferGrown &&
+				cursocket->m_WriteBuffer.GetSize() == 0 &&
+				cursocket->m_dwLastSendTime > 0 &&
+				(GetTickCount() - cursocket->m_dwLastSendTime) > kUtpAppWriteBufferIdleShrinkMs) {
 
-					const size_t oldCapacity = cursocket->m_WriteBuffer.GetLength();
-					const size_t newCapacity = 16 * 1024;
+				const size_t newCapacity = kUtpInitialAppWriteBufferSize;
 
-					// Shrink application buffer back to 16KB
-					cursocket->m_WriteBuffer.SetSize(0, true, newCapacity);
-					cursocket->m_nCurrentWriteBufferSize = newCapacity;
-					cursocket->m_bBufferGrown = false;
-					cursocket->m_dwLastSendTime = 0; // Reset timer
+				// Shrink application buffer back to 64KB
+				cursocket->m_WriteBuffer.AllocBuffer(newCapacity);
+				cursocket->m_uWriteBufferBlockCountAtCapacity = 0;
+				cursocket->m_bBufferGrown = false;
+				cursocket->m_bUtpWriteBlocked = false;
+				cursocket->m_bUtpWritableHint = false;
+				cursocket->m_dwNextUtpWriteAttemptTick = 0;
+				cursocket->m_dwLastSendTime = 0; // Reset timer
 
-					if (thePrefs.GetLogNatTraversalEvents()) {
-						DebugLog(_T("[NatTraversal][uTP] App buffer shrunk: %u -> %u KB (idle for 30s)"),
-							(UINT)(oldCapacity / 1024), (UINT)(newCapacity / 1024));
-					}
-				}
 			}
+		}
 
 		// eMule AI: timers are serviced centrally by CClientUDPSocket::ServiceUtp
-    }
+	}
 }
 
 bool CUtpSocket::ProcessUtpPacket(const byte* data, size_t len, const struct sockaddr* from, socklen_t fromlen)
@@ -1330,12 +1538,18 @@ void CUtpSocket::ExpectPeer(const struct sockaddr* to, socklen_t tolen)
 
 BOOL CUtpSocket::Create(UINT /*nSocketPort*/, int /*nSocketType*/, long lEvent, LPCSTR /*lpszSocketAddress*/)
 {
+	if (theApp.IsNetworkActivityBlockedByBind())
+		return FALSE;
+
 	m_pOwnerSocket->AsyncSelect(lEvent);
 	return TRUE;
 }
 
 BOOL CUtpSocket::Connect(const LPSOCKADDR lpSockAddr, int nSockAddrLen)
 {
+	if (theApp.IsNetworkActivityBlockedByBind())
+		return FALSE;
+
 	CSingleLock runtimeLock(&g_utpRuntimeLock, TRUE);
 	if (thePrefs.GetLogNatTraversalEvents()) {
 		AddDebugLogLine(DLP_VERYLOW, false, _T("[uTP-DEBUG] *** CUtpSocket::Connect CALLED! this=%p state=%d ***"), this, (int)m_nLayerState);
@@ -1419,9 +1633,13 @@ void CUtpSocket::Setup(utp_socket* Socket, bool bAcceptedSocket)
 	if (!Socket)
 		return;
 
+	// Retire a previous handle before adoption.
+	if (m_Socket != NULL && m_Socket != Socket)
+		Destroy();
 	ASSERT(m_Socket == NULL);
 	m_Socket = Socket;
 	m_bConnectNotified = bAcceptedSocket;
+	m_bTransportFailed = false;
 	m_pOwnerClient = NULL;
 	CClientReqSocket* ownerSocket = dynamic_cast<CClientReqSocket*>(m_pOwnerSocket);
 	if (ownerSocket) {
@@ -1446,7 +1664,7 @@ void CUtpSocket::Setup(utp_socket* Socket, bool bAcceptedSocket)
 	// libutp buffer strategy: 256 KB proven necessary for reliable handshake
 	// 16KB/128KB cause layerState=4 (congestion) during Hello exchange, blocking connection setup
 	// 256 KB allows libutp to accept initial control packets (Hello/HelloAnswer) without congestion
-	// Application buffer (m_WriteBuffer) uses adaptive growth independently (16KB→64KB on transfer demand)
+	// Application buffer (m_WriteBuffer) uses adaptive growth independently.
 	// This separation allows: small app buffer for memory efficiency + large libutp buffer for protocol reliability
 	const int initialSndbuf = 256 * 1024; // 256 KB libutp send buffer (protocol requirement)
 	const int initialRcvbuf = 256 * 1024; // 256 KB libutp receive buffer
@@ -1454,6 +1672,12 @@ void CUtpSocket::Setup(utp_socket* Socket, bool bAcceptedSocket)
 	utp_setsockopt(m_Socket, UTP_RCVBUF, initialRcvbuf);
 
 	m_ShutDown = 0;
+	{
+		CSingleLock writeLock(&m_csWriteBuffer, TRUE);
+		m_bUtpWriteBlocked = false;
+		m_bUtpWritableHint = false;
+		m_dwNextUtpWriteAttemptTick = 0;
+			}
 
 	// Use single global UDP context managed by CClientUDPSocket
 	m_Context = theApp.clientudp ? theApp.clientudp->GetUtpContext() : NULL;
@@ -1584,41 +1808,19 @@ int CUtpSocket::Send(const void* lpBuf, int nBufLen, int /*nFlags*/)
 	}
 
 	CSingleLock writeLock(&m_csWriteBuffer, TRUE);
+	TrimWriteBufferForDuplexIfPossible(_T("duplex-send"));
 
-	// Adaptive application buffer growth: If buffer is congested during data transfer, grow it
-	// NOTE: libutp internal buffer is fixed at 256KB (Setup()). Only application buffer grows.
-	// This prevents application-level bottleneck while libutp handles protocol-level flow control.
-	const size_t currentSize = m_WriteBuffer.GetSize();
-	const size_t currentCapacity = m_WriteBuffer.GetLength();
-	
-	if (currentSize == currentCapacity) { // buffer is full
-		// Check if we should grow the buffer (only once, from 16KB to 64KB)
-		if (!m_bBufferGrown && currentCapacity < (64 * 1024) && nBufLen > 0) {
-			// Grow application buffer to 64KB to prevent bottleneck
-			const size_t newCapacity = 64 * 1024;
-			m_WriteBuffer.SetSize(currentSize, true, newCapacity);
-			m_nCurrentWriteBufferSize = newCapacity;
-			m_bBufferGrown = true;
-			
-			if (thePrefs.GetLogNatTraversalEvents()) {
-				DebugLog(_T("[NatTraversal][uTP] App buffer grown: %u -> %u KB (congestion detected during transfer)"),
-					(UINT)(currentCapacity / 1024), (UINT)(newCapacity / 1024));
-			}
-			
-			// Try to append data after growth
-			size_t ToGo = min(newCapacity - currentSize, (size_t)nBufLen);
-			if (ToGo > 0) {
-				m_WriteBuffer.AppendData(lpBuf, ToGo);
-				m_bAppSendBlocked = false;
-				m_dwLastSendTime = GetTickCount();
-				return ToGo;
-			}
+	size_t currentSize = m_WriteBuffer.GetSize();
+	size_t currentCapacity = min(m_WriteBuffer.GetLength(), GetMaxWriteBufferCapacity());
+	if (currentSize >= currentCapacity) {
+		OnWriteBufferBlocked();
+		currentSize = m_WriteBuffer.GetSize();
+		currentCapacity = min(m_WriteBuffer.GetLength(), GetMaxWriteBufferCapacity());
+		if (currentSize >= currentCapacity) {
+			m_bAppSendBlocked = true;
+			WSASetLastError(WSAEWOULDBLOCK);
+			return SOCKET_ERROR;
 		}
-		
-		// Buffer still full after growth attempt (or already at max size)
-		m_bAppSendBlocked = true;
-		WSASetLastError(WSAEWOULDBLOCK);
-		return SOCKET_ERROR;
 	}
 
 	size_t ToGo = min(currentCapacity - currentSize, (size_t)nBufLen);

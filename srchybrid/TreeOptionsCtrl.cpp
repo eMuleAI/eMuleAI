@@ -240,6 +240,73 @@ void CTreeOptionsCtrl::SetItemInfo(HTREEITEM hItem, LPCTSTR sInfo)
 		pItemData->m_sInfo.Replace(_T("\n"), _T("\r\n"));
 }
 
+BOOL CTreeOptionsCtrl::IsItemHeightSpacer(HTREEITEM hItem) const
+{
+	CTreeOptionsItemData *pItemData = hItem != NULL ? reinterpret_cast<CTreeOptionsItemData*>(GetItemData(hItem)) : NULL;
+	return pItemData != NULL && pItemData->m_Type == CTreeOptionsItemData::HeightSpacer;
+}
+
+HTREEITEM CTreeOptionsCtrl::InsertHeightSpacer(HTREEITEM hParent, HTREEITEM hAfter)
+{
+	CTreeOptionsItemData *pItemData = new CTreeOptionsItemData;
+	pItemData->m_Type = CTreeOptionsItemData::HeightSpacer;
+
+	static TCHAR s_szSpacerText[] = _T("");
+	TVINSERTSTRUCT tvInsert;
+	memset(&tvInsert, 0, sizeof(tvInsert));
+	tvInsert.hParent = hParent;
+	tvInsert.hInsertAfter = hAfter;
+	tvInsert.item.mask = TVIF_TEXT | TVIF_PARAM;
+	tvInsert.item.pszText = s_szSpacerText;
+	tvInsert.item.lParam = reinterpret_cast<LPARAM>(pItemData);
+
+	HTREEITEM hItem = InsertItem(&tvInsert);
+	if (hItem == NULL)
+		delete pItemData;
+	return hItem;
+}
+
+BOOL CTreeOptionsCtrl::SetItemMinHeight(HTREEITEM hItem, int iMinHeight)
+{
+	if (hItem == NULL || iMinHeight <= 0)
+		return FALSE;
+
+	const int iItemHeight = static_cast<int>(SendMessage(TVM_GETITEMHEIGHT, 0, 0));
+	if (iItemHeight <= 0)
+		return FALSE;
+
+	const int iRequiredRows = max(1, (iMinHeight + iItemHeight - 1) / iItemHeight);
+	HTREEITEM hParent = GetParentItem(hItem);
+	if (hParent == NULL)
+		hParent = TVI_ROOT;
+	HTREEITEM hAfter = hItem;
+	int iCurrentRows = 1;
+	while (iCurrentRows < iRequiredRows) {
+		HTREEITEM hNext = GetNextSiblingItem(hAfter);
+		if (!IsItemHeightSpacer(hNext))
+			hNext = InsertHeightSpacer(hParent, hAfter);
+		if (hNext == NULL)
+			return FALSE;
+		hAfter = hNext;
+		++iCurrentRows;
+	}
+	return TRUE;
+}
+
+CRect CTreeOptionsCtrl::GetItemReservedRect(HTREEITEM hItem)
+{
+	CRect rcItem;
+	if (hItem == NULL || !GetItemRect(hItem, rcItem, FALSE))
+		return CRect(0, 0, 0, 0);
+
+	for (HTREEITEM hNext = GetNextSiblingItem(hItem); IsItemHeightSpacer(hNext); hNext = GetNextSiblingItem(hNext)) {
+		CRect rcNext;
+		if (GetItemRect(hNext, rcNext, FALSE))
+			rcItem.bottom = rcNext.bottom;
+	}
+	return rcItem;
+}
+
 void CTreeOptionsCtrl::SendHelpMessage(HTREEITEM hItem)
 {
 	if (hItem) {
@@ -331,6 +398,21 @@ BOOL CTreeOptionsCtrl::OnDeleteItem(LPNMHDR pNMHDR, LRESULT *pResult)
 
 void CTreeOptionsCtrl::OnKeyDown(UINT nChar, UINT nRepCnt, UINT nFlags)
 {
+	if (nChar == VK_DOWN || nChar == VK_UP) {
+		HTREEITEM hItem = GetSelectedItem();
+		if (hItem != NULL) {
+			HTREEITEM hTarget = nChar == VK_DOWN ? GetNextVisibleItem(hItem) : GetPrevVisibleItem(hItem);
+			if (IsItemHeightSpacer(hTarget)) {
+				while (IsItemHeightSpacer(hTarget))
+					hTarget = nChar == VK_DOWN ? GetNextVisibleItem(hTarget) : GetPrevVisibleItem(hTarget);
+				if (hTarget != NULL) {
+					SelectItem(hTarget);
+					return;
+				}
+			}
+		}
+	}
+
 	if (nChar == VK_RIGHT) {
 		HTREEITEM hItem = GetSelectedItem();
 		if (GetItemData(hItem) && m_hControlItem != NULL) {
@@ -1545,6 +1627,20 @@ BOOL CTreeOptionsCtrl::OnSelchanged(LPNMHDR pNMHDR, LRESULT *pResult)
 	NMTREEVIEW *pNMTreeView = (NMTREEVIEW*)pNMHDR;
 
 	if (!m_bBeingCleared) {
+		if (IsItemHeightSpacer(pNMTreeView->itemNew.hItem)) {
+			HTREEITEM hTarget = GetPrevVisibleItem(pNMTreeView->itemNew.hItem);
+			while (IsItemHeightSpacer(hTarget))
+				hTarget = GetPrevVisibleItem(hTarget);
+			if (hTarget == NULL) {
+				hTarget = GetNextVisibleItem(pNMTreeView->itemNew.hItem);
+				while (IsItemHeightSpacer(hTarget))
+					hTarget = GetNextVisibleItem(hTarget);
+			}
+			if (hTarget != NULL)
+				SelectItem(hTarget);
+			return (BOOL)(*pResult = 1);
+		}
+
 		//Destroy the old combo or edit box if need be
 		if (m_hControlItem) {
 			UpdateTreeControlValueFromChildControl(m_hControlItem);
@@ -1726,8 +1822,11 @@ BOOL CTreeOptionsCtrl::OnCustomDraw(LPNMHDR pNMHDR, LRESULT *pResult)
 		*pResult = CDRF_NOTIFYITEMDRAW; //Tell the control that we are interested in item notifications
 		break;
 	case CDDS_ITEMPREPAINT:
-		//Just let me know about post painting
-		*pResult = CDRF_NOTIFYPOSTPAINT;
+		if (IsItemHeightSpacer((HTREEITEM)pCustomDraw->nmcd.dwItemSpec))
+			*pResult = CDRF_SKIPDEFAULT;
+		else
+			//Just let me know about post painting
+			*pResult = CDRF_NOTIFYPOSTPAINT;
 		break;
 	case CDDS_ITEMPOSTPAINT:
 		{

@@ -1,12 +1,15 @@
-﻿//This file is part of eMule AI
+//This file is part of eMule AI
 //Copyright (C)2026 eMule AI
 
 #include "stdafx.h"
+#include <float.h>
+#include <locale.h>
 #include "emule.h"
 #include "SearchDlg.h"
 #include "PPgMod.h"
 #include "Scheduler.h"
 #include "DownloadQueue.h"
+#include "PartFile.h"
 #include "Preferences.h"
 #include "OtherFunctions.h"
 #include "TransferDlg.h"
@@ -17,7 +20,7 @@
 #include "Log.h"
 #include "UserMsgs.h"
 #include "opcodes.h"
-#include "eMuleAI/GeoLite2.h"
+#include "eMuleAI/IPGeolocation.h"
 #include "ClientCredits.h"
 #include "SharedFileList.h"
 #include "KnownFile.h"
@@ -47,7 +50,36 @@ BEGIN_MESSAGE_MAP(CPPgMod, CPropertyPage)
 	ON_MESSAGE(WM_TREEITEM_HELP, DrawTreeItemHelp)
 	ON_WM_HELPINFO()
 	ON_WM_CTLCOLOR()
+	ON_WM_SIZE()
 END_MESSAGE_MAP()
+
+namespace
+{
+	bool ParseFloatOptionText(CString strText, float& fValue)
+	{
+		strText.Trim();
+		if (strText.IsEmpty())
+			return false;
+
+		strText.Replace(_T(','), _T('.'));
+		LPCTSTR pszText = strText;
+		LPTSTR pszEnd = NULL;
+		_locale_t locale = _create_locale(LC_NUMERIC, "C");
+		const double dValue = locale != NULL ? _tcstod_l(pszText, &pszEnd, locale) : _tcstod(pszText, &pszEnd);
+		if (locale != NULL)
+			_free_locale(locale);
+		if (pszEnd == pszText || !_finite(dValue))
+			return false;
+
+		CString strTail(pszEnd);
+		strTail.Trim();
+		if (!strTail.IsEmpty())
+			return false;
+
+		fValue = static_cast<float>(dValue);
+		return true;
+	}
+}
 
 CPPgMod::CPPgMod()
 	: CPropertyPage(CPPgMod::IDD)
@@ -90,16 +122,43 @@ CPPgMod::CPPgMod()
 	, m_iUITweaksKadContactSortHistory()
 	, m_iUITweaksKadSearchSortHistory()
 
-	, m_htiGeoLite2()
-	, m_htiGeoLite2NameDisable()
-	, m_htiGeoLite2CountryCode()
-	, m_htiGeoLite2Country()
-	, m_htiGeoLite2CountryCity()
-	, m_htiGeoLite2ShowFlag()
-	, m_iGeoLite2Mode()
-	, m_bGeoLite2ShowFlag()
+	, m_htiIPGeolocation()
+	, m_htiIPGeolocationNameDisable()
+	, m_htiIPGeolocationCountryCode()
+	, m_htiIPGeolocationCountry()
+	, m_htiIPGeolocationCountryCity()
+	, m_htiIPGeolocationShowFlag()
+	, m_htiIPGeolocationAutoUpdate()
+	, m_htiIPGeolocationUpdateURL()
+	, m_htiIPGeolocationUpdateNow()
+	, m_htiIPGeolocationPeriodDays()
+	, m_iIPGeolocationMode()
+	, m_bIPGeolocationShowFlag()
+	, m_bIPGeolocationAutoUpdate()
+	, m_sIPGeolocationUpdateURL()
+	, m_iIPGeolocationUpdatePeriodDays()
 
 	, m_htiConTweaks()
+
+	, m_htiUploadSettings()
+	, m_htiHighBandwidthUploadPolicy()
+	, m_htiHighBandwidthTargetUploadClients()
+	, m_htiHighBandwidthUploadSlotElasticPercent()
+	, m_htiAutoHighBandwidthDownloadBuffer()
+	, m_htiHighBandwidthSlowUploadThresholdFactor()
+	, m_htiHighBandwidthSlowUploadGraceSeconds()
+	, m_htiHighBandwidthSlowUploadWarmupSeconds()
+	, m_htiHighBandwidthZeroUploadGraceSeconds()
+	, m_htiHighBandwidthSlowUploadCooldownSeconds()
+	, m_bHighBandwidthUploadPolicy()
+	, m_iHighBandwidthTargetUploadClients()
+	, m_iHighBandwidthUploadSlotElasticPercent()
+	, m_bAutoHighBandwidthDownloadBuffer()
+	, m_sHighBandwidthSlowUploadThresholdFactor()
+	, m_iHighBandwidthSlowUploadGraceSeconds()
+	, m_iHighBandwidthSlowUploadWarmupSeconds()
+	, m_iHighBandwidthZeroUploadGraceSeconds()
+	, m_iHighBandwidthSlowUploadCooldownSeconds()
 
 	, m_htiConnectionChecker()
 	, m_htiConnectionCheckerActivate()
@@ -109,10 +168,14 @@ CPPgMod::CPPgMod()
 
 	, m_htiEnableNatTraversal()
 	, m_bEnableNatTraversal()
+	, m_htiNatTraversalProtocol()
+	, m_htiNatTraversalProtocolPreferQuic()
+	, m_htiNatTraversalProtocolUtpOnly()
 	, m_htiNatTraversalPortWindow()
 	, m_htiNatTraversalSweepWindow()
 	, m_htiNatTraversalJitterMinMs()
 	, m_htiNatTraversalJitterMaxMs()
+	, m_iNatTraversalProtocolMode()
 	, m_iNatTraversalPortWindow()
 	, m_iNatTraversalSweepWindow()
 	, m_iNatTraversalJitterMinMs()
@@ -135,38 +198,50 @@ CPPgMod::CPPgMod()
 	, m_htiReAskFileSrc()
 	, m_iReAskFileSrc()
 
-	, m_htiDownloadChecker()
-	, m_htiDownloadCheckerPassive()
-	, m_htiDownloadCheckerAlwaysAsk()
-	, m_htiDownloadCheckerReject()
-	, m_htiDownloadCheckerAccept()
-	, m_htiDownloadCheckerAcceptPercentage()
-	, m_htiDownloadCheckerRejectCanceled()
-	, m_htiDownloadCheckerRejectSameHash()
-	, m_htiDownloadCheckerRejectBlacklisted()
-	, m_htiDownloadCheckerCaseInsensitive()
-	, m_htiDownloadCheckerIgnoreExtension()
-	, m_htiDownloadCheckerIgnoreTags()
-	, m_htiDownloadCheckerDontIgnoreNumericTags()
-	, m_htiDownloadCheckerIgnoreNonAlphaNumeric()
-	, m_htiDownloadCheckerMinimumComparisonLength()
-	, m_htiDownloadCheckerSkipIncompleteFileConfirmation()
-	, m_htiDownloadCheckerMarkAsBlacklisted()
-	, m_htiDownloadCheckerAutoMarkAsBlacklisted()
-	, m_iDownloadChecker()
-	, m_iDownloadCheckerAcceptPercentage()
-	, m_bDownloadCheckerRejectCanceled()
-	, m_bDownloadCheckerRejectSameHash()
-	, m_bDownloadCheckerRejectBlacklisted()
-	, m_bDownloadCheckerCaseInsensitive()
-	, m_bDownloadCheckerIgnoreExtension()
-	, m_bDownloadCheckerIgnoreTags()
-	, m_bDownloadCheckerDontIgnoreNumericTags()
-	, m_bDownloadCheckerIgnoreNonAlphaNumeric()
-	, m_iDownloadCheckerMinimumComparisonLength()
-	, m_bDownloadCheckerSkipIncompleteFileConfirmation()
-	, m_bDownloadCheckerMarkAsBlacklisted()
-	, m_bDownloadCheckerAutoMarkAsBlacklisted()
+	, m_htiDownloadValidator()
+	, m_htiDownloadValidatorPassive()
+	, m_htiDownloadValidatorAlwaysAsk()
+	, m_htiDownloadValidatorReject()
+	, m_htiDownloadValidatorAccept()
+	, m_htiDownloadValidatorAcceptPercentage()
+	, m_htiDownloadValidatorRejectCanceled()
+	, m_htiDownloadValidatorRejectSameHash()
+	, m_htiDownloadValidatorRejectBlacklisted()
+	, m_htiDownloadValidatorCaseInsensitive()
+	, m_htiDownloadValidatorIgnoreExtension()
+	, m_htiDownloadValidatorIgnoreTags()
+	, m_htiDownloadValidatorDontIgnoreNumericTags()
+	, m_htiDownloadValidatorIgnoreNonAlphaNumeric()
+	, m_htiDownloadValidatorMinimumComparisonLength()
+	, m_htiDownloadValidatorSkipIncompleteFileConfirmation()
+	, m_htiDownloadValidatorMarkAsBlacklisted()
+	, m_htiDownloadValidatorAutoMarkAsBlacklisted()
+	, m_htiDownloadValidatorDateTimeMatching()
+	, m_htiDownloadValidatorDateTimeUseYearRange()
+	, m_htiDownloadValidatorDateTimeYearStart()
+	, m_htiDownloadValidatorDateTimeYearEnd()
+	, m_htiDownloadValidatorDateTimeCheckSeconds()
+	, m_htiDownloadValidatorDateTimeIncludeFollowingNumericValues()
+	, m_iDownloadValidator()
+	, m_iDownloadValidatorAcceptPercentage()
+	, m_bDownloadValidatorRejectCanceled()
+	, m_bDownloadValidatorRejectSameHash()
+	, m_bDownloadValidatorRejectBlacklisted()
+	, m_bDownloadValidatorCaseInsensitive()
+	, m_bDownloadValidatorIgnoreExtension()
+	, m_bDownloadValidatorIgnoreTags()
+	, m_bDownloadValidatorDontIgnoreNumericTags()
+	, m_bDownloadValidatorIgnoreNonAlphaNumeric()
+	, m_iDownloadValidatorMinimumComparisonLength()
+	, m_bDownloadValidatorSkipIncompleteFileConfirmation()
+	, m_bDownloadValidatorMarkAsBlacklisted()
+	, m_bDownloadValidatorAutoMarkAsBlacklisted()
+	, m_bDownloadValidatorDateTimeMatching()
+	, m_bDownloadValidatorDateTimeUseYearRange()
+	, m_iDownloadValidatorDateTimeYearStart()
+	, m_iDownloadValidatorDateTimeYearEnd()
+	, m_bDownloadValidatorDateTimeCheckSeconds()
+	, m_bDownloadValidatorDateTimeIncludeFollowingNumericValues()
 
 	, m_htiDownloadInspector()
 	, m_htiDownloadInspectorDisable()
@@ -185,6 +260,9 @@ CPPgMod::CPPgMod()
 	, m_bDownloadInspectorDRM()
 	, m_htiDownloadInspectorInvalidExt()
 	, m_htiDownloadInspectorAutoRenameToMajorityName()
+	, m_htiDownloadInspectorAutoRenameToMajorityNameForNewDownloadsOnly()
+	, m_htiDownloadInspectorAutoRenameToMajorityNameRequiredPercent()
+	, m_htiDownloadInspectorAutoRenameToMajorityNameMinimumVotes()
 	, m_htiDownloadInspectorAutoDelete()
 	, m_htiDownloadInspectorAutoDeleteAddedBefore()
 	, m_htiDownloadInspectorAutoDeleteAddedBeforeDays()
@@ -200,6 +278,9 @@ CPPgMod::CPPgMod()
 	, m_htiDownloadInspectorAutoDeleteDontMarkAsCanceled()
 	, m_bDownloadInspectorInvalidExt()
 	, m_bDownloadInspectorAutoRenameToMajorityName()
+	, m_bDownloadInspectorAutoRenameToMajorityNameForNewDownloadsOnly()
+	, m_iDownloadInspectorAutoRenameToMajorityNameRequiredPercent()
+	, m_iDownloadInspectorAutoRenameToMajorityNameMinimumVotes()
 	, m_bDownloadInspectorAutoDeleteEnabled()
 	, m_bDownloadInspectorAutoDeleteAddedBeforeEnabled()
 	, m_iDownloadInspectorAutoDeleteAddedBeforeDays()
@@ -225,8 +306,18 @@ CPPgMod::CPPgMod()
 	, m_bGroupKnownAtTheBottom()
 	, m_htiSpamThreshold()
 	, m_iSpamThreshold()
+	, m_htiEd2kSearchMaxResults()
+	, m_iEd2kSearchMaxResults()
+	, m_htiEd2kSearchMaxMoreRequests()
+	, m_iEd2kSearchMaxMoreRequests()
+	, m_htiKadFileSearchTotal()
+	, m_iKadFileSearchTotal()
 	, m_htiKadSearchKeywordTotal()
 	, m_iKadSearchKeywordTotal()
+	, m_htiKadFileSearchLifetime()
+	, m_iKadFileSearchLifetime()
+	, m_htiKadSearchKeywordLifetime()
+	, m_iKadSearchKeywordLifetime()
 	, m_htiShowCloseButtonOnSearchTabs()
 	, m_bShowCloseButtonOnSearchTabs()
 
@@ -386,7 +477,6 @@ CPPgMod::CPPgMod()
 	, m_htiDebugSearchResultDetailLevel()
 	, m_htiDisplay()
 	, m_htiDontCompressAvi()
-	, m_htiForceSpeedsToKB()
 	, m_htiHighresTimer()
 	, m_htiICH()
 	, m_htiIconflashOnNewMessage()
@@ -463,7 +553,6 @@ CPPgMod::CPPgMod()
 	, m_bMsgOnlySec()
 	, m_bShowUpDownIconInTaskbar()
 	, m_bKeepUnavailableFixedSharedDirs()
-	, m_bForceSpeedsToKB()
 	, m_bExtControls()
 {
 	if (thePrefs.DoPartiallyPurgeOldKnownFiles())
@@ -484,8 +573,9 @@ void CPPgMod::DoDataExchange(CDataExchange *pDX)
 		int iImgUITweaks = 8;
 		int iImgUIDarkMode = 8;
 		int iImgSort = 8;
-		int iImgGeoLite2 = 8;
+		int iImgIPGeolocation = 8;
 		int iImgConTweaks = 8;
+		int iImgUploadSettings = 8;
 		int iImgPrefBlue = 8;
 		int iImgInspect = 8;
 		int iImgESearch = 8;
@@ -511,8 +601,9 @@ void CPPgMod::DoDataExchange(CDataExchange *pDX)
 			iImgUITweaks = piml->Add(CTempIconLoader(_T("UI")));
 			iImgUIDarkMode = piml->Add(CTempIconLoader(_T("DARKMODE")));
 			iImgSort = piml->Add(CTempIconLoader(_T("SORT")));
-			iImgGeoLite2 = piml->Add(CTempIconLoader(_T("LOCATION")));
+			iImgIPGeolocation = piml->Add(CTempIconLoader(_T("LOCATION")));
 			iImgConTweaks = piml->Add(CTempIconLoader(_T("CONNECTION2")));
+			iImgUploadSettings = piml->Add(CTempIconLoader(_T("UPLOADSETTINGS")));
 			iImgPrefBlue = piml->Add(CTempIconLoader(_T("PREFERENCESBLUE")));
 			iImgInspect = piml->Add(CTempIconLoader(_T("INSPECT")));
 			iImgESearch = piml->Add(CTempIconLoader(_T("SEARCH")));
@@ -567,22 +658,32 @@ void CPPgMod::DoDataExchange(CDataExchange *pDX)
 		m_ctrlTreeOptions.AddEditBox(m_htiUITweaksKadSearchSortHistory, RUNTIME_CLASS(CNumTreeOptionsEdit));
 		m_ctrlTreeOptions.Expand(m_htiUITweaksMaxSortHistory, TVE_EXPAND);
 	
-		m_htiGeoLite2 = m_ctrlTreeOptions.InsertGroup(GetResString(_T("GEOLITE2_MAIN")), iImgGeoLite2, TVI_ROOT);
-		m_htiGeoLite2NameDisable = m_ctrlTreeOptions.InsertRadioButton(GetResString(_T("GEOLITE2_DISABLED")), m_htiGeoLite2, m_iGeoLite2Mode == GL2_DISABLE);
-		m_htiGeoLite2CountryCode = m_ctrlTreeOptions.InsertRadioButton(GetResString(_T("GEOLITE2_COUNTRYCODE")), m_htiGeoLite2, m_iGeoLite2Mode == GL2_COUNTRYCODE);
-		m_htiGeoLite2Country = m_ctrlTreeOptions.InsertRadioButton(GetResString(_T("GEOLITE2_COUNTRY")), m_htiGeoLite2, m_iGeoLite2Mode == GL2_COUNTRY);
-		m_htiGeoLite2CountryCity = m_ctrlTreeOptions.InsertRadioButton(GetResString(_T("GEOLITE2_COUNTRYCITY")), m_htiGeoLite2, m_iGeoLite2Mode == GL2_COUNTRYCITY);
-		m_htiGeoLite2ShowFlag = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("GEOLITE2_FLAGS")), m_htiGeoLite2, m_bGeoLite2ShowFlag);
+		m_htiIPGeolocation = m_ctrlTreeOptions.InsertGroup(GetResString(_T("IPGEOLOCATION_MAIN")), iImgIPGeolocation, TVI_ROOT);
+		m_htiIPGeolocationNameDisable = m_ctrlTreeOptions.InsertRadioButton(GetResString(_T("IPGEOLOCATION_DISABLED")), m_htiIPGeolocation, m_iIPGeolocationMode == IPGEO_DISABLE);
+		m_htiIPGeolocationCountryCode = m_ctrlTreeOptions.InsertRadioButton(GetResString(_T("IPGEOLOCATION_COUNTRYCODE")), m_htiIPGeolocation, m_iIPGeolocationMode == IPGEO_COUNTRYCODE);
+		m_htiIPGeolocationCountry = m_ctrlTreeOptions.InsertRadioButton(GetResString(_T("IPGEOLOCATION_COUNTRY")), m_htiIPGeolocation, m_iIPGeolocationMode == IPGEO_COUNTRY);
+		m_htiIPGeolocationCountryCity = m_ctrlTreeOptions.InsertRadioButton(GetResString(_T("IPGEOLOCATION_COUNTRYCITY")), m_htiIPGeolocation, m_iIPGeolocationMode == IPGEO_COUNTRYCITY);
+		m_htiIPGeolocationShowFlag = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("IPGEOLOCATION_FLAGS")), m_htiIPGeolocation, m_bIPGeolocationShowFlag);
+		m_htiIPGeolocationAutoUpdate = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("AUTO_UPDATE")), m_htiIPGeolocation, m_bIPGeolocationAutoUpdate);
+		m_htiIPGeolocationUpdateURL = m_ctrlTreeOptions.InsertItem(GetResString(_T("IPGEOLOCATION_UPDATE_URL")), TREEOPTSCTRLIMG_EDIT, TREEOPTSCTRLIMG_EDIT, m_htiIPGeolocation);
+		m_ctrlTreeOptions.AddEditBox(m_htiIPGeolocationUpdateURL, RUNTIME_CLASS(CTreeOptionsEditEx));
+		m_htiIPGeolocationPeriodDays = m_ctrlTreeOptions.InsertItem(GetResString(_T("IPGEOLOCATION_PERIOD_DAYS")), TREEOPTSCTRLIMG_EDIT, TREEOPTSCTRLIMG_EDIT, m_htiIPGeolocation);
+		m_ctrlTreeOptions.AddEditBox(m_htiIPGeolocationPeriodDays, RUNTIME_CLASS(CNumTreeOptionsEdit));
+		m_htiIPGeolocationUpdateNow = m_ctrlTreeOptions.InsertCommandButton(GetResString(_T("IPGEOLOCATION_UPDATE_NOW")), m_htiIPGeolocation);
 
 		m_htiConTweaks = m_ctrlTreeOptions.InsertGroup(GetResString(_T("CON_TWEAKS")), iImgConTweaks, TVI_ROOT);
 
 		m_htiConnectionChecker = m_ctrlTreeOptions.InsertGroup(GetResString(_T("CONNECTION_CHECK")), iImgConnection, m_htiConTweaks);
 		m_htiConnectionCheckerActivate = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("CONNECTION_CHECK_ACTIVATE")), m_htiConnectionChecker, m_bConnectionChecker);
-		m_htiConnectionCheckerServer = m_ctrlTreeOptions.InsertItem(GetResString(_T("CONNECTION_CHECK_SERVER")), TREEOPTSCTRLIMG_EDIT, TREEOPTSCTRLIMG_EDIT, m_htiConnectionChecker);
+		m_htiConnectionCheckerServer = m_ctrlTreeOptions.InsertItem(GetResString(_T("URL_ADDR")), TREEOPTSCTRLIMG_EDIT, TREEOPTSCTRLIMG_EDIT, m_htiConnectionChecker);
 		m_ctrlTreeOptions.AddEditBox(m_htiConnectionCheckerServer, RUNTIME_CLASS(CTreeOptionsEditEx));
 		m_ctrlTreeOptions.Expand(m_htiConnectionChecker, TVE_EXPAND);
 
 		m_htiEnableNatTraversal = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("ENABLE_NATT")), m_htiConTweaks, m_bEnableNatTraversal);
+		m_htiNatTraversalProtocol = m_ctrlTreeOptions.InsertGroup(GetResString(_T("NATT_TRANSFER_PROTOCOL")), 0, m_htiEnableNatTraversal);
+		m_htiNatTraversalProtocolPreferQuic = m_ctrlTreeOptions.InsertRadioButton(GetResString(_T("NATT_PROTOCOL_PREFER_QUIC")), m_htiNatTraversalProtocol, m_iNatTraversalProtocolMode == NAT_TRAVERSAL_PROTOCOL_PREFER_QUIC);
+		m_htiNatTraversalProtocolUtpOnly = m_ctrlTreeOptions.InsertRadioButton(GetResString(_T("NATT_PROTOCOL_UTP_ONLY")), m_htiNatTraversalProtocol, m_iNatTraversalProtocolMode == NAT_TRAVERSAL_PROTOCOL_UTP_ONLY);
+		m_ctrlTreeOptions.Expand(m_htiNatTraversalProtocol, TVE_EXPAND);
 		m_htiNatTraversalPortWindow = m_ctrlTreeOptions.InsertItem(GetResString(_T("NATT_PORT_WINDOW")), TREEOPTSCTRLIMG_EDIT, TREEOPTSCTRLIMG_EDIT, m_htiEnableNatTraversal);
 		m_ctrlTreeOptions.AddEditBox(m_htiNatTraversalPortWindow, RUNTIME_CLASS(CNumTreeOptionsEdit));
 		m_htiNatTraversalSweepWindow = m_ctrlTreeOptions.InsertItem(GetResString(_T("NATT_SWEEP_WINDOW")), TREEOPTSCTRLIMG_EDIT, TREEOPTSCTRLIMG_EDIT, m_htiEnableNatTraversal);
@@ -592,6 +693,7 @@ void CPPgMod::DoDataExchange(CDataExchange *pDX)
 		m_htiNatTraversalJitterMaxMs = m_ctrlTreeOptions.InsertItem(GetResString(_T("NATT_UTP_JITTER_MAX")), TREEOPTSCTRLIMG_EDIT, TREEOPTSCTRLIMG_EDIT, m_htiEnableNatTraversal);
 		m_ctrlTreeOptions.AddEditBox(m_htiNatTraversalJitterMaxMs, RUNTIME_CLASS(CNumTreeOptionsEdit));
 		m_ctrlTreeOptions.Expand(m_htiEnableNatTraversal, TVE_EXPAND);
+		UpdateNatTraversalProtocolUi();
 
 		m_htiMaxServedBuddies = m_ctrlTreeOptions.InsertItem(GetResString(_T("KAD_BUDDY_SLOTS")), TREEOPTSCTRLIMG_EDIT, TREEOPTSCTRLIMG_EDIT, m_htiConTweaks);
 		m_ctrlTreeOptions.AddEditBox(m_htiMaxServedBuddies, RUNTIME_CLASS(CNumTreeOptionsEdit));
@@ -609,27 +711,76 @@ void CPPgMod::DoDataExchange(CDataExchange *pDX)
 		m_htiReAskFileSrc = m_ctrlTreeOptions.InsertItem(GetResString(_T("REASK_FILE_SRC")), TREEOPTSCTRLIMG_EDIT, TREEOPTSCTRLIMG_EDIT, m_htiConTweaks);
 		m_ctrlTreeOptions.AddEditBox(m_htiReAskFileSrc, RUNTIME_CLASS(CNumTreeOptionsEdit));
 
-		m_htiDownloadChecker = m_ctrlTreeOptions.InsertGroup(GetResString(_T("DOWNLOAD_CHECK")), iImgPrefBlue, TVI_ROOT);
-		m_htiDownloadCheckerPassive = m_ctrlTreeOptions.InsertRadioButton(GetResString(_T("DOWNLOAD_CHECK_PASSIVE")), m_htiDownloadChecker, m_iDownloadChecker == 0);
-		m_htiDownloadCheckerAlwaysAsk = m_ctrlTreeOptions.InsertRadioButton(GetResString(_T("DOWNLOAD_CHECK_ALWAYS_ASK")), m_htiDownloadChecker, m_iDownloadChecker == 1);
-		m_htiDownloadCheckerReject = m_ctrlTreeOptions.InsertRadioButton(GetResString(_T("DOWNLOAD_CHECK_REJECT")), m_htiDownloadChecker, m_iDownloadChecker == 2);
-		m_htiDownloadCheckerAccept = m_ctrlTreeOptions.InsertRadioButton(GetResString(_T("DOWNLOAD_CHECK_ACCEPT")), m_htiDownloadChecker, m_iDownloadChecker == 3);
-		m_htiDownloadCheckerAcceptPercentage = m_ctrlTreeOptions.InsertItem(GetResString(_T("DOWNLOAD_CHECK_ACCEPT_PERCENTAGE")), TREEOPTSCTRLIMG_EDIT, TREEOPTSCTRLIMG_EDIT, m_htiDownloadCheckerAccept);
-		m_ctrlTreeOptions.AddEditBox(m_htiDownloadCheckerAcceptPercentage, RUNTIME_CLASS(CNumTreeOptionsEdit));
-		m_ctrlTreeOptions.Expand(m_htiDownloadCheckerAccept, TVE_EXPAND);
-		m_htiDownloadCheckerRejectCanceled = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("DOWNLOAD_CHECK_REJECT_CANCELED")), m_htiDownloadChecker, m_bDownloadCheckerRejectCanceled);
-		m_htiDownloadCheckerRejectSameHash = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("DOWNLOAD_CHECK_REJECT_SAME_HASH")), m_htiDownloadChecker, m_bDownloadCheckerRejectSameHash);
-		m_htiDownloadCheckerRejectBlacklisted = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("DOWNLOAD_CHECK_REJECT_BLACKLISTED")), m_htiDownloadChecker, m_bDownloadCheckerRejectBlacklisted);
-		m_htiDownloadCheckerCaseInsensitive = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("DOWNLOAD_CHECK_CASE_INSENSITIVE")), m_htiDownloadChecker, m_bDownloadCheckerCaseInsensitive);
-		m_htiDownloadCheckerIgnoreExtension = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("DOWNLOAD_CHECK_IGNORE_EXTENSION")), m_htiDownloadChecker, m_bDownloadCheckerIgnoreExtension);
-		m_htiDownloadCheckerIgnoreTags = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("DOWNLOAD_CHECK_IGNORE_TAGS")), m_htiDownloadChecker, m_bDownloadCheckerIgnoreTags);
-		m_htiDownloadCheckerDontIgnoreNumericTags = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("DOWNLOAD_CHECK_DONT_IGNORE_NUMERIC_TAGS")), m_htiDownloadChecker, m_bDownloadCheckerDontIgnoreNumericTags);
-		m_htiDownloadCheckerIgnoreNonAlphaNumeric = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("DOWNLOAD_CHECK_IGNORE_NON_ALPHANUMERIC")), m_htiDownloadChecker, m_bDownloadCheckerIgnoreNonAlphaNumeric);
-		m_htiDownloadCheckerMinimumComparisonLength = m_ctrlTreeOptions.InsertItem(GetResString(_T("DOWNLOAD_CHECK_MINIMUM_COMPARISON_LENGTH")), TREEOPTSCTRLIMG_EDIT, TREEOPTSCTRLIMG_EDIT, m_htiDownloadChecker);
-		m_ctrlTreeOptions.AddEditBox(m_htiDownloadCheckerMinimumComparisonLength, RUNTIME_CLASS(CNumTreeOptionsEdit));
-		m_htiDownloadCheckerSkipIncompleteFileConfirmation = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("DOWNLOAD_CHECK_SKIP_INCOMPLETE_CONFIRMATION")), m_htiDownloadChecker, m_bDownloadCheckerSkipIncompleteFileConfirmation);
-		m_htiDownloadCheckerMarkAsBlacklisted = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("DOWNLOAD_CHECK_MARK_AS_BLACKLISTED")), m_htiDownloadChecker, m_bDownloadCheckerMarkAsBlacklisted);
-		m_htiDownloadCheckerAutoMarkAsBlacklisted = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("DOWNLOAD_CHECK_AUTO_MARK_AS_BLACKLISTED")), m_htiDownloadChecker, m_bDownloadCheckerAutoMarkAsBlacklisted);
+		m_htiUploadSettings = m_ctrlTreeOptions.InsertGroup(GetResString(_T("UPLOAD_SETTINGS")), iImgUploadSettings, TVI_ROOT);
+		m_htiHighBandwidthUploadPolicy = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("HIGH_BANDWIDTH_UPLOAD_POLICY")), m_htiUploadSettings, m_bHighBandwidthUploadPolicy);
+		m_htiHighBandwidthTargetUploadClients = m_ctrlTreeOptions.InsertItem(GetResString(_T("HIGH_BANDWIDTH_TARGET_UPLOAD_CLIENTS")), TREEOPTSCTRLIMG_EDIT, TREEOPTSCTRLIMG_EDIT, m_htiHighBandwidthUploadPolicy);
+		m_ctrlTreeOptions.AddEditBox(m_htiHighBandwidthTargetUploadClients, RUNTIME_CLASS(CNumTreeOptionsEdit));
+		m_htiHighBandwidthUploadSlotElasticPercent = m_ctrlTreeOptions.InsertItem(GetResString(_T("HIGH_BANDWIDTH_UPLOAD_SLOT_ELASTIC_PERCENT")), TREEOPTSCTRLIMG_EDIT, TREEOPTSCTRLIMG_EDIT, m_htiHighBandwidthUploadPolicy);
+		m_ctrlTreeOptions.AddEditBox(m_htiHighBandwidthUploadSlotElasticPercent, RUNTIME_CLASS(CNumTreeOptionsEdit));
+		m_htiHighBandwidthSlowUploadThresholdFactor = m_ctrlTreeOptions.InsertItem(GetResString(_T("HIGH_BANDWIDTH_SLOW_UPLOAD_THRESHOLD_FACTOR")), TREEOPTSCTRLIMG_EDIT, TREEOPTSCTRLIMG_EDIT, m_htiHighBandwidthUploadPolicy);
+		m_ctrlTreeOptions.AddEditBox(m_htiHighBandwidthSlowUploadThresholdFactor, RUNTIME_CLASS(CTreeOptionsEditEx));
+		m_htiHighBandwidthSlowUploadGraceSeconds = m_ctrlTreeOptions.InsertItem(GetResString(_T("HIGH_BANDWIDTH_SLOW_UPLOAD_GRACE_SECONDS")), TREEOPTSCTRLIMG_EDIT, TREEOPTSCTRLIMG_EDIT, m_htiHighBandwidthUploadPolicy);
+		m_ctrlTreeOptions.AddEditBox(m_htiHighBandwidthSlowUploadGraceSeconds, RUNTIME_CLASS(CNumTreeOptionsEdit));
+		m_htiHighBandwidthSlowUploadWarmupSeconds = m_ctrlTreeOptions.InsertItem(GetResString(_T("HIGH_BANDWIDTH_SLOW_UPLOAD_WARMUP_SECONDS")), TREEOPTSCTRLIMG_EDIT, TREEOPTSCTRLIMG_EDIT, m_htiHighBandwidthUploadPolicy);
+		m_ctrlTreeOptions.AddEditBox(m_htiHighBandwidthSlowUploadWarmupSeconds, RUNTIME_CLASS(CNumTreeOptionsEdit));
+		m_htiHighBandwidthZeroUploadGraceSeconds = m_ctrlTreeOptions.InsertItem(GetResString(_T("HIGH_BANDWIDTH_ZERO_UPLOAD_GRACE_SECONDS")), TREEOPTSCTRLIMG_EDIT, TREEOPTSCTRLIMG_EDIT, m_htiHighBandwidthUploadPolicy);
+		m_ctrlTreeOptions.AddEditBox(m_htiHighBandwidthZeroUploadGraceSeconds, RUNTIME_CLASS(CNumTreeOptionsEdit));
+		m_htiHighBandwidthSlowUploadCooldownSeconds = m_ctrlTreeOptions.InsertItem(GetResString(_T("HIGH_BANDWIDTH_SLOW_UPLOAD_COOLDOWN_SECONDS")), TREEOPTSCTRLIMG_EDIT, TREEOPTSCTRLIMG_EDIT, m_htiHighBandwidthUploadPolicy);
+		m_ctrlTreeOptions.AddEditBox(m_htiHighBandwidthSlowUploadCooldownSeconds, RUNTIME_CLASS(CNumTreeOptionsEdit));
+		m_htiLowRatioQueueScoreBoost = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("LOW_RATIO_QUEUE_SCORE_BOOST")), m_htiUploadSettings, m_bLowRatioQueueScoreBoost);
+		m_htiLowRatioQueueScoreThreshold = m_ctrlTreeOptions.InsertItem(GetResString(_T("LOW_RATIO_QUEUE_SCORE_THRESHOLD")), TREEOPTSCTRLIMG_EDIT, TREEOPTSCTRLIMG_EDIT, m_htiLowRatioQueueScoreBoost);
+		m_ctrlTreeOptions.AddEditBox(m_htiLowRatioQueueScoreThreshold, RUNTIME_CLASS(CTreeOptionsEditEx));
+		m_htiLowRatioQueueScoreBonus = m_ctrlTreeOptions.InsertItem(GetResString(_T("LOW_RATIO_QUEUE_SCORE_BONUS")), TREEOPTSCTRLIMG_EDIT, TREEOPTSCTRLIMG_EDIT, m_htiLowRatioQueueScoreBoost);
+		m_ctrlTreeOptions.AddEditBox(m_htiLowRatioQueueScoreBonus, RUNTIME_CLASS(CNumTreeOptionsEdit));
+		m_htiUploadSessionTransferLimit = m_ctrlTreeOptions.InsertGroup(GetResString(_T("UPLOAD_SESSION_TRANSFER_LIMIT")), 0, m_htiUploadSettings);
+		m_htiUploadSessionTransferLimitDisabled = m_ctrlTreeOptions.InsertRadioButton(GetResString(_T("UPLOAD_SESSION_TRANSFER_LIMIT_DISABLED")), m_htiUploadSessionTransferLimit, m_iUploadSessionTransferLimitMode == static_cast<int>(ESessionTransferLimitMode::Disabled));
+		m_htiUploadSessionTransferLimitPercent = m_ctrlTreeOptions.InsertRadioButton(GetResString(_T("UPLOAD_SESSION_TRANSFER_LIMIT_PERCENT")), m_htiUploadSessionTransferLimit, m_iUploadSessionTransferLimitMode == static_cast<int>(ESessionTransferLimitMode::PercentOfFile));
+		m_htiUploadSessionTransferLimitPercentValue = m_ctrlTreeOptions.InsertItem(GetResString(_T("UPLOAD_SESSION_TRANSFER_LIMIT_PERCENT_VALUE")), TREEOPTSCTRLIMG_EDIT, TREEOPTSCTRLIMG_EDIT, m_htiUploadSessionTransferLimitPercent);
+		m_ctrlTreeOptions.AddEditBox(m_htiUploadSessionTransferLimitPercentValue, RUNTIME_CLASS(CNumTreeOptionsEdit));
+		m_htiUploadSessionTransferLimitMiB = m_ctrlTreeOptions.InsertRadioButton(GetResString(_T("UPLOAD_SESSION_TRANSFER_LIMIT_MIB")), m_htiUploadSessionTransferLimit, m_iUploadSessionTransferLimitMode == static_cast<int>(ESessionTransferLimitMode::AbsoluteMiB));
+		m_htiUploadSessionTransferLimitMiBValue = m_ctrlTreeOptions.InsertItem(GetResString(_T("UPLOAD_SESSION_TRANSFER_LIMIT_MIB_VALUE")), TREEOPTSCTRLIMG_EDIT, TREEOPTSCTRLIMG_EDIT, m_htiUploadSessionTransferLimitMiB);
+		m_ctrlTreeOptions.AddEditBox(m_htiUploadSessionTransferLimitMiBValue, RUNTIME_CLASS(CNumTreeOptionsEdit));
+		m_htiUploadSessionTimeLimitSeconds = m_ctrlTreeOptions.InsertItem(GetResString(_T("UPLOAD_SESSION_TIME_LIMIT_SECONDS")), TREEOPTSCTRLIMG_EDIT, TREEOPTSCTRLIMG_EDIT, m_htiUploadSettings);
+		m_ctrlTreeOptions.AddEditBox(m_htiUploadSessionTimeLimitSeconds, RUNTIME_CLASS(CNumTreeOptionsEdit));
+		m_htiAutoHighBandwidthDownloadBuffer = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("AUTO_HIGH_BANDWIDTH_DOWNLOAD_BUFFER")), m_htiUploadSettings, m_bAutoHighBandwidthDownloadBuffer);
+		m_ctrlTreeOptions.Expand(m_htiHighBandwidthUploadPolicy, TVE_EXPAND);
+		m_ctrlTreeOptions.Expand(m_htiLowRatioQueueScoreBoost, TVE_EXPAND);
+		m_ctrlTreeOptions.Expand(m_htiUploadSessionTransferLimit, TVE_EXPAND);
+		m_ctrlTreeOptions.Expand(m_htiUploadSessionTransferLimitPercent, TVE_EXPAND);
+		m_ctrlTreeOptions.Expand(m_htiUploadSessionTransferLimitMiB, TVE_EXPAND);
+
+		m_htiDownloadValidator = m_ctrlTreeOptions.InsertGroup(GetResString(_T("DOWNLOAD_VALIDATOR")), iImgPrefBlue, TVI_ROOT);
+		m_htiDownloadValidatorPassive = m_ctrlTreeOptions.InsertRadioButton(GetResString(_T("DOWNLOAD_VALIDATOR_PASSIVE")), m_htiDownloadValidator, m_iDownloadValidator == 0);
+		m_htiDownloadValidatorAlwaysAsk = m_ctrlTreeOptions.InsertRadioButton(GetResString(_T("DOWNLOAD_VALIDATOR_ALWAYS_ASK")), m_htiDownloadValidator, m_iDownloadValidator == 1);
+		m_htiDownloadValidatorReject = m_ctrlTreeOptions.InsertRadioButton(GetResString(_T("DOWNLOAD_VALIDATOR_REJECT")), m_htiDownloadValidator, m_iDownloadValidator == 2);
+		m_htiDownloadValidatorAccept = m_ctrlTreeOptions.InsertRadioButton(GetResString(_T("DOWNLOAD_VALIDATOR_ACCEPT")), m_htiDownloadValidator, m_iDownloadValidator == 3);
+		m_htiDownloadValidatorAcceptPercentage = m_ctrlTreeOptions.InsertItem(GetResString(_T("DOWNLOAD_VALIDATOR_ACCEPT_PERCENTAGE")), TREEOPTSCTRLIMG_EDIT, TREEOPTSCTRLIMG_EDIT, m_htiDownloadValidatorAccept);
+		m_ctrlTreeOptions.AddEditBox(m_htiDownloadValidatorAcceptPercentage, RUNTIME_CLASS(CNumTreeOptionsEdit));
+		m_ctrlTreeOptions.Expand(m_htiDownloadValidatorAccept, TVE_EXPAND);
+		m_htiDownloadValidatorRejectCanceled = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("DOWNLOAD_VALIDATOR_REJECT_CANCELED")), m_htiDownloadValidator, m_bDownloadValidatorRejectCanceled);
+		m_htiDownloadValidatorRejectSameHash = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("DOWNLOAD_VALIDATOR_REJECT_SAME_HASH")), m_htiDownloadValidator, m_bDownloadValidatorRejectSameHash);
+		m_htiDownloadValidatorRejectBlacklisted = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("DOWNLOAD_VALIDATOR_REJECT_BLACKLISTED")), m_htiDownloadValidator, m_bDownloadValidatorRejectBlacklisted);
+		m_htiDownloadValidatorCaseInsensitive = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("DOWNLOAD_VALIDATOR_CASE_INSENSITIVE")), m_htiDownloadValidator, m_bDownloadValidatorCaseInsensitive);
+		m_htiDownloadValidatorIgnoreExtension = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("DOWNLOAD_VALIDATOR_IGNORE_EXTENSION")), m_htiDownloadValidator, m_bDownloadValidatorIgnoreExtension);
+		m_htiDownloadValidatorIgnoreTags = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("DOWNLOAD_VALIDATOR_IGNORE_TAGS")), m_htiDownloadValidator, m_bDownloadValidatorIgnoreTags);
+		m_htiDownloadValidatorDontIgnoreNumericTags = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("DOWNLOAD_VALIDATOR_DONT_IGNORE_NUMERIC_TAGS")), m_htiDownloadValidator, m_bDownloadValidatorDontIgnoreNumericTags);
+		m_htiDownloadValidatorIgnoreNonAlphaNumeric = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("DOWNLOAD_VALIDATOR_IGNORE_NON_ALPHANUMERIC")), m_htiDownloadValidator, m_bDownloadValidatorIgnoreNonAlphaNumeric);
+		m_htiDownloadValidatorMinimumComparisonLength = m_ctrlTreeOptions.InsertItem(GetResString(_T("DOWNLOAD_VALIDATOR_MINIMUM_COMPARISON_LENGTH")), TREEOPTSCTRLIMG_EDIT, TREEOPTSCTRLIMG_EDIT, m_htiDownloadValidator);
+		m_ctrlTreeOptions.AddEditBox(m_htiDownloadValidatorMinimumComparisonLength, RUNTIME_CLASS(CNumTreeOptionsEdit));
+		m_htiDownloadValidatorDateTimeMatching = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("DOWNLOAD_VALIDATOR_DATETIME_MATCHING")), m_htiDownloadValidator, m_bDownloadValidatorDateTimeMatching);
+		m_htiDownloadValidatorDateTimeUseYearRange = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("DOWNLOAD_VALIDATOR_DATETIME_USE_YEAR_RANGE")), m_htiDownloadValidatorDateTimeMatching, m_bDownloadValidatorDateTimeUseYearRange);
+		m_htiDownloadValidatorDateTimeYearStart = m_ctrlTreeOptions.InsertItem(GetResString(_T("DOWNLOAD_VALIDATOR_DATETIME_YEAR_START")), TREEOPTSCTRLIMG_EDIT, TREEOPTSCTRLIMG_EDIT, m_htiDownloadValidatorDateTimeUseYearRange);
+		m_ctrlTreeOptions.AddEditBox(m_htiDownloadValidatorDateTimeYearStart, RUNTIME_CLASS(CNumTreeOptionsEdit));
+		m_htiDownloadValidatorDateTimeYearEnd = m_ctrlTreeOptions.InsertItem(GetResString(_T("DOWNLOAD_VALIDATOR_DATETIME_YEAR_END")), TREEOPTSCTRLIMG_EDIT, TREEOPTSCTRLIMG_EDIT, m_htiDownloadValidatorDateTimeUseYearRange);
+		m_ctrlTreeOptions.AddEditBox(m_htiDownloadValidatorDateTimeYearEnd, RUNTIME_CLASS(CNumTreeOptionsEdit));
+		m_htiDownloadValidatorDateTimeCheckSeconds = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("DOWNLOAD_VALIDATOR_DATETIME_CHECK_SECONDS")), m_htiDownloadValidatorDateTimeMatching, m_bDownloadValidatorDateTimeCheckSeconds);
+		m_htiDownloadValidatorDateTimeIncludeFollowingNumericValues = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("DOWNLOAD_VALIDATOR_DATETIME_INCLUDE_FOLLOWING_NUMERIC_VALUES")),
+			m_htiDownloadValidatorDateTimeMatching, m_bDownloadValidatorDateTimeIncludeFollowingNumericValues);
+		m_ctrlTreeOptions.Expand(m_htiDownloadValidatorDateTimeMatching, TVE_EXPAND);
+		m_ctrlTreeOptions.Expand(m_htiDownloadValidatorDateTimeUseYearRange, TVE_EXPAND);
+		m_htiDownloadValidatorSkipIncompleteFileConfirmation = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("DOWNLOAD_VALIDATOR_SKIP_INCOMPLETE_CONFIRMATION")), m_htiDownloadValidator, m_bDownloadValidatorSkipIncompleteFileConfirmation);
+		m_htiDownloadValidatorMarkAsBlacklisted = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("DOWNLOAD_VALIDATOR_MARK_AS_BLACKLISTED")), m_htiDownloadValidator, m_bDownloadValidatorMarkAsBlacklisted);
+		m_htiDownloadValidatorAutoMarkAsBlacklisted = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("DOWNLOAD_VALIDATOR_AUTO_MARK_AS_BLACKLISTED")), m_htiDownloadValidator, m_bDownloadValidatorAutoMarkAsBlacklisted);
 		
 		m_htiDownloadInspector = m_ctrlTreeOptions.InsertGroup(GetResString(_T("DOWNLOAD_INSPECTOR")), iImgInspect, TVI_ROOT);
 		m_htiDownloadInspectorDisable = m_ctrlTreeOptions.InsertRadioButton(GetResString(_T("DOWNLOAD_INSPECTOR_DISABLE")), m_htiDownloadInspector, m_iDownloadInspector == 0);
@@ -639,6 +790,11 @@ void CPPgMod::DoDataExchange(CDataExchange *pDX)
 		m_htiDownloadInspectorDRM = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("DOWNLOAD_INSPECTOR_INCLUDE_DRM")), m_htiDownloadInspector, m_bDownloadInspectorDRM);
 		m_htiDownloadInspectorInvalidExt = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("REPLACE_INVALID_FILE_EXTENSION")), m_htiDownloadInspector, m_bDownloadInspectorInvalidExt);
 		m_htiDownloadInspectorAutoRenameToMajorityName = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("DOWNLOAD_INSPECTOR_AUTO_RENAME_TO_MAJORITY_NAME")), m_htiDownloadInspector, m_bDownloadInspectorAutoRenameToMajorityName);
+		m_htiDownloadInspectorAutoRenameToMajorityNameForNewDownloadsOnly = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("DOWNLOAD_INSPECTOR_AUTO_RENAME_TO_MAJORITY_NAME_NEW_DOWNLOADS_ONLY")), m_htiDownloadInspectorAutoRenameToMajorityName, m_bDownloadInspectorAutoRenameToMajorityNameForNewDownloadsOnly);
+		m_htiDownloadInspectorAutoRenameToMajorityNameRequiredPercent = m_ctrlTreeOptions.InsertItem(GetResString(_T("PERCENT_THRESHOLD")), TREEOPTSCTRLIMG_EDIT, TREEOPTSCTRLIMG_EDIT, m_htiDownloadInspectorAutoRenameToMajorityName);
+		m_ctrlTreeOptions.AddEditBox(m_htiDownloadInspectorAutoRenameToMajorityNameRequiredPercent, RUNTIME_CLASS(CNumTreeOptionsEdit));
+		m_htiDownloadInspectorAutoRenameToMajorityNameMinimumVotes = m_ctrlTreeOptions.InsertItem(GetResString(_T("DOWNLOAD_INSPECTOR_AUTO_RENAME_TO_MAJORITY_NAME_MINIMUM_VOTES")), TREEOPTSCTRLIMG_EDIT, TREEOPTSCTRLIMG_EDIT, m_htiDownloadInspectorAutoRenameToMajorityName);
+		m_ctrlTreeOptions.AddEditBox(m_htiDownloadInspectorAutoRenameToMajorityNameMinimumVotes, RUNTIME_CLASS(CNumTreeOptionsEdit));
 		m_htiDownloadInspectorAutoDelete = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("DOWNLOAD_INSPECTOR_AUTO_DELETE")), m_htiDownloadInspector, m_bDownloadInspectorAutoDeleteEnabled);
 		m_htiDownloadInspectorAutoDeleteAddedBefore = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("DOWNLOAD_INSPECTOR_AUTO_DELETE_ADDED_BEFORE")), m_htiDownloadInspectorAutoDelete, m_bDownloadInspectorAutoDeleteAddedBeforeEnabled);
 		m_htiDownloadInspectorAutoDeleteAddedBeforeDays = m_ctrlTreeOptions.InsertItem(GetResString(_T("DOWNLOAD_INSPECTOR_AUTO_DELETE_DAYS_THRESHOLD")), TREEOPTSCTRLIMG_EDIT, TREEOPTSCTRLIMG_EDIT, m_htiDownloadInspectorAutoDeleteAddedBefore);
@@ -650,7 +806,7 @@ void CPPgMod::DoDataExchange(CDataExchange *pDX)
 		m_htiDownloadInspectorAutoDeleteLastReceivedBeforeDays = m_ctrlTreeOptions.InsertItem(GetResString(_T("DOWNLOAD_INSPECTOR_AUTO_DELETE_DAYS_THRESHOLD")), TREEOPTSCTRLIMG_EDIT, TREEOPTSCTRLIMG_EDIT, m_htiDownloadInspectorAutoDeleteLastReceivedBefore);
 		m_ctrlTreeOptions.AddEditBox(m_htiDownloadInspectorAutoDeleteLastReceivedBeforeDays, RUNTIME_CLASS(CNumTreeOptionsEdit));
 		m_htiDownloadInspectorAutoDeleteDownloadedLessThanPercent = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("DOWNLOAD_INSPECTOR_AUTO_DELETE_DOWNLOADED_LESS_THAN_PERCENT")), m_htiDownloadInspectorAutoDelete, m_bDownloadInspectorAutoDeleteDownloadedLessThanPercentEnabled);
-		m_htiDownloadInspectorAutoDeleteDownloadedLessThanPercentValue = m_ctrlTreeOptions.InsertItem(GetResString(_T("DOWNLOAD_INSPECTOR_AUTO_DELETE_PERCENT_THRESHOLD")), TREEOPTSCTRLIMG_EDIT, TREEOPTSCTRLIMG_EDIT, m_htiDownloadInspectorAutoDeleteDownloadedLessThanPercent);
+		m_htiDownloadInspectorAutoDeleteDownloadedLessThanPercentValue = m_ctrlTreeOptions.InsertItem(GetResString(_T("PERCENT_THRESHOLD")), TREEOPTSCTRLIMG_EDIT, TREEOPTSCTRLIMG_EDIT, m_htiDownloadInspectorAutoDeleteDownloadedLessThanPercent);
 		m_ctrlTreeOptions.AddEditBox(m_htiDownloadInspectorAutoDeleteDownloadedLessThanPercentValue, RUNTIME_CLASS(CNumTreeOptionsEdit));
 		m_htiDownloadInspectorAutoDeleteDownloadedLessThanMb = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("DOWNLOAD_INSPECTOR_AUTO_DELETE_DOWNLOADED_LESS_THAN_MB")), m_htiDownloadInspectorAutoDelete, m_bDownloadInspectorAutoDeleteDownloadedLessThanMbEnabled);
 		m_htiDownloadInspectorAutoDeleteDownloadedLessThanMbValue = m_ctrlTreeOptions.InsertItem(GetResString(_T("DOWNLOAD_INSPECTOR_AUTO_DELETE_MB_THRESHOLD")), TREEOPTSCTRLIMG_EDIT, TREEOPTSCTRLIMG_EDIT, m_htiDownloadInspectorAutoDeleteDownloadedLessThanMb);
@@ -671,11 +827,21 @@ void CPPgMod::DoDataExchange(CDataExchange *pDX)
 
 		m_htiSearchTweaksGroup = m_ctrlTreeOptions.InsertGroup(GetResString(_T("SEARCH_TWEAKS")), iImgESearch, TVI_ROOT);
 		m_htiGroupKnownAtTheBottom = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("GROUP_KNOWN_AT_THE_BOTTOM")), m_htiSearchTweaksGroup, m_bGroupKnownAtTheBottom);
+		m_htiShowCloseButtonOnSearchTabs = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("SHOW_CLOSE_BUTTON_ON_SEARCH_TABS")), m_htiSearchTweaksGroup, m_bShowCloseButtonOnSearchTabs);
 		m_htiSpamThreshold = m_ctrlTreeOptions.InsertItem(GetResString(_T("SPAM_THRESHOLD")), TREEOPTSCTRLIMG_EDIT, TREEOPTSCTRLIMG_EDIT, m_htiSearchTweaksGroup);
 		m_ctrlTreeOptions.AddEditBox(m_htiSpamThreshold, RUNTIME_CLASS(CNumTreeOptionsEdit));
+		m_htiEd2kSearchMaxResults = m_ctrlTreeOptions.InsertItem(GetResString(_T("ED2K_SEARCH_MAX_RESULTS")), TREEOPTSCTRLIMG_EDIT, TREEOPTSCTRLIMG_EDIT, m_htiSearchTweaksGroup);
+		m_ctrlTreeOptions.AddEditBox(m_htiEd2kSearchMaxResults, RUNTIME_CLASS(CNumTreeOptionsEdit));
+		m_htiEd2kSearchMaxMoreRequests = m_ctrlTreeOptions.InsertItem(GetResString(_T("ED2K_SEARCH_MAX_MORE_REQUESTS")), TREEOPTSCTRLIMG_EDIT, TREEOPTSCTRLIMG_EDIT, m_htiSearchTweaksGroup);
+		m_ctrlTreeOptions.AddEditBox(m_htiEd2kSearchMaxMoreRequests, RUNTIME_CLASS(CNumTreeOptionsEdit));
+		m_htiKadFileSearchTotal = m_ctrlTreeOptions.InsertItem(GetResString(_T("KAD_FILE_SEARCH_TOTAL")), TREEOPTSCTRLIMG_EDIT, TREEOPTSCTRLIMG_EDIT, m_htiSearchTweaksGroup);
+		m_ctrlTreeOptions.AddEditBox(m_htiKadFileSearchTotal, RUNTIME_CLASS(CNumTreeOptionsEdit));
 		m_htiKadSearchKeywordTotal = m_ctrlTreeOptions.InsertItem(GetResString(_T("KAD_SEARCH_KEYWORD_TOTAL")), TREEOPTSCTRLIMG_EDIT, TREEOPTSCTRLIMG_EDIT, m_htiSearchTweaksGroup);
 		m_ctrlTreeOptions.AddEditBox(m_htiKadSearchKeywordTotal, RUNTIME_CLASS(CNumTreeOptionsEdit));
-		m_htiShowCloseButtonOnSearchTabs = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("SHOW_CLOSE_BUTTON_ON_SEARCH_TABS")), m_htiSearchTweaksGroup, m_bShowCloseButtonOnSearchTabs);
+		m_htiKadFileSearchLifetime = m_ctrlTreeOptions.InsertItem(GetResString(_T("KAD_FILE_SEARCH_LIFETIME")), TREEOPTSCTRLIMG_EDIT, TREEOPTSCTRLIMG_EDIT, m_htiSearchTweaksGroup);
+		m_ctrlTreeOptions.AddEditBox(m_htiKadFileSearchLifetime, RUNTIME_CLASS(CNumTreeOptionsEdit));
+		m_htiKadSearchKeywordLifetime = m_ctrlTreeOptions.InsertItem(GetResString(_T("KAD_SEARCH_KEYWORD_LIFETIME")), TREEOPTSCTRLIMG_EDIT, TREEOPTSCTRLIMG_EDIT, m_htiSearchTweaksGroup);
+		m_ctrlTreeOptions.AddEditBox(m_htiKadSearchKeywordLifetime, RUNTIME_CLASS(CNumTreeOptionsEdit));
 	
 		m_htiServerTweaksGroup = m_ctrlTreeOptions.InsertGroup(GetResString(_T("ESERVER_TWEAKS")), iImgEServer, TVI_ROOT);
 		m_htiRepeatServerList = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("REPEAT_SERVER_LIST")), m_htiServerTweaksGroup, m_bRepeatServerList);
@@ -821,7 +987,6 @@ void CPPgMod::DoDataExchange(CDataExchange *pDX)
 		m_htiUpdateQueue = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("UPDATEQUEUE")), m_htiDisplay, m_bUpdateQueue);
 		m_htiRepaint = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("REPAINTGRAPHS")), m_htiDisplay, m_bRepaint);
 		m_htiShowUpDownIconInTaskbar = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("SHOWUPDOWNICONINTASKBAR")), m_htiDisplay, m_bShowUpDownIconInTaskbar);
-		m_htiForceSpeedsToKB = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("FORCESPEEDSTOKB")), m_htiDisplay, m_bForceSpeedsToKB);
 		m_htiLog = m_ctrlTreeOptions.InsertGroup(GetResString(_T("SV_LOG")), iImgLog, m_htiAdvancedPreferences);
 		m_htiMaxLogBuff = m_ctrlTreeOptions.InsertItem(GetResString(_T("MAXLOGBUFF")), TREEOPTSCTRLIMG_EDIT, TREEOPTSCTRLIMG_EDIT, m_htiLog);
 		m_ctrlTreeOptions.AddEditBox(m_htiMaxLogBuff, RUNTIME_CLASS(CNumTreeOptionsEdit));
@@ -917,13 +1082,21 @@ void CPPgMod::DoDataExchange(CDataExchange *pDX)
 		DDV_MinMaxInt(pDX, m_iUITweaksKadSearchSortHistory, 0, INT_MAX);
 	}
 
-	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiGeoLite2ShowFlag, m_bGeoLite2ShowFlag);
-	DDX_TreeRadio(pDX, IDC_MOD_OPTS, m_htiGeoLite2, m_iGeoLite2Mode);
+	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiIPGeolocationShowFlag, m_bIPGeolocationShowFlag);
+	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiIPGeolocationAutoUpdate, m_bIPGeolocationAutoUpdate);
+	DDX_TreeEdit(pDX, IDC_MOD_OPTS, m_htiIPGeolocationUpdateURL, m_sIPGeolocationUpdateURL);
+	DDX_TreeEdit(pDX, IDC_MOD_OPTS, m_htiIPGeolocationPeriodDays, m_iIPGeolocationUpdatePeriodDays);
+	DDV_MinMaxInt(pDX, m_iIPGeolocationUpdatePeriodDays, 1, 365);
+	DDX_TreeRadio(pDX, IDC_MOD_OPTS, m_htiIPGeolocation, m_iIPGeolocationMode);
 
 	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiConnectionCheckerActivate, m_bConnectionChecker);
 	DDX_TreeEdit(pDX, IDC_MOD_OPTS, m_htiConnectionCheckerServer, m_sConnectionCheckerServer);
 
 	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiEnableNatTraversal, m_bEnableNatTraversal);
+	int iNatTraversalProtocolRadio = (m_iNatTraversalProtocolMode == NAT_TRAVERSAL_PROTOCOL_UTP_ONLY) ? 1 : 0;
+	DDX_TreeRadio(pDX, IDC_MOD_OPTS, m_htiNatTraversalProtocol, iNatTraversalProtocolRadio);
+	if (pDX->m_bSaveAndValidate)
+		m_iNatTraversalProtocolMode = (iNatTraversalProtocolRadio == 1) ? NAT_TRAVERSAL_PROTOCOL_UTP_ONLY : NAT_TRAVERSAL_PROTOCOL_PREFER_QUIC;
 	DDX_TreeEdit(pDX, IDC_MOD_OPTS, m_htiNatTraversalPortWindow, m_iNatTraversalPortWindow);
 	DDV_MinMaxInt(pDX, m_iNatTraversalPortWindow, 0, 65535);
 	DDX_TreeEdit(pDX, IDC_MOD_OPTS, m_htiNatTraversalSweepWindow, m_iNatTraversalSweepWindow);
@@ -949,47 +1122,68 @@ void CPPgMod::DoDataExchange(CDataExchange *pDX)
 		DDV_MinMaxInt(pDX, m_iReAskFileSrc, (MS2MIN(FILEREASKTIME)), 55);
 	}
 
-	DDX_TreeRadio(pDX, IDC_MOD_OPTS, m_htiDownloadChecker, m_iDownloadChecker);
-	if (m_htiDownloadCheckerAcceptPercentage) {
-		DDX_TreeEdit(pDX, IDC_MOD_OPTS, m_htiDownloadCheckerAcceptPercentage, m_iDownloadCheckerAcceptPercentage);
-		DDV_MinMaxInt(pDX, m_iDownloadCheckerAcceptPercentage, 1, 100);
+	DDX_TreeRadio(pDX, IDC_MOD_OPTS, m_htiDownloadValidator, m_iDownloadValidator);
+	if (m_htiDownloadValidatorAcceptPercentage) {
+		DDX_TreeEdit(pDX, IDC_MOD_OPTS, m_htiDownloadValidatorAcceptPercentage, m_iDownloadValidatorAcceptPercentage);
+		DDV_MinMaxInt(pDX, m_iDownloadValidatorAcceptPercentage, 1, 100);
 	}
-	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiDownloadCheckerRejectCanceled, m_bDownloadCheckerRejectCanceled);
-	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiDownloadCheckerRejectSameHash, m_bDownloadCheckerRejectSameHash);
-	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiDownloadCheckerRejectBlacklisted, m_bDownloadCheckerRejectBlacklisted);
-	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiDownloadCheckerCaseInsensitive, m_bDownloadCheckerCaseInsensitive);
-	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiDownloadCheckerIgnoreExtension, m_bDownloadCheckerIgnoreExtension);
-	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiDownloadCheckerIgnoreTags, m_bDownloadCheckerIgnoreTags);
-	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiDownloadCheckerDontIgnoreNumericTags, m_bDownloadCheckerDontIgnoreNumericTags);
-	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiDownloadCheckerIgnoreNonAlphaNumeric, m_bDownloadCheckerIgnoreNonAlphaNumeric);
-	if (m_htiDownloadCheckerMinimumComparisonLength) {
-		DDX_TreeEdit(pDX, IDC_MOD_OPTS, m_htiDownloadCheckerMinimumComparisonLength, m_iDownloadCheckerMinimumComparisonLength);
-		DDV_MinMaxInt(pDX, m_iDownloadCheckerMinimumComparisonLength, 4, INT_MAX);
+	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiDownloadValidatorRejectCanceled, m_bDownloadValidatorRejectCanceled);
+	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiDownloadValidatorRejectSameHash, m_bDownloadValidatorRejectSameHash);
+	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiDownloadValidatorRejectBlacklisted, m_bDownloadValidatorRejectBlacklisted);
+	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiDownloadValidatorCaseInsensitive, m_bDownloadValidatorCaseInsensitive);
+	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiDownloadValidatorIgnoreExtension, m_bDownloadValidatorIgnoreExtension);
+	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiDownloadValidatorIgnoreTags, m_bDownloadValidatorIgnoreTags);
+	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiDownloadValidatorDontIgnoreNumericTags, m_bDownloadValidatorDontIgnoreNumericTags);
+	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiDownloadValidatorIgnoreNonAlphaNumeric, m_bDownloadValidatorIgnoreNonAlphaNumeric);
+	if (m_htiDownloadValidatorMinimumComparisonLength) {
+		DDX_TreeEdit(pDX, IDC_MOD_OPTS, m_htiDownloadValidatorMinimumComparisonLength, m_iDownloadValidatorMinimumComparisonLength);
+		DDV_MinMaxInt(pDX, m_iDownloadValidatorMinimumComparisonLength, 4, INT_MAX);
 	}
-	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiDownloadCheckerSkipIncompleteFileConfirmation, m_bDownloadCheckerSkipIncompleteFileConfirmation);
-	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiDownloadCheckerMarkAsBlacklisted, m_bDownloadCheckerMarkAsBlacklisted);
-	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiDownloadCheckerAutoMarkAsBlacklisted, m_bDownloadCheckerAutoMarkAsBlacklisted);
+	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiDownloadValidatorDateTimeMatching, m_bDownloadValidatorDateTimeMatching);
+	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiDownloadValidatorDateTimeUseYearRange, m_bDownloadValidatorDateTimeUseYearRange);
+	if (m_htiDownloadValidatorDateTimeYearStart) {
+		DDX_TreeEdit(pDX, IDC_MOD_OPTS, m_htiDownloadValidatorDateTimeYearStart, m_iDownloadValidatorDateTimeYearStart);
+		DDV_MinMaxInt(pDX, m_iDownloadValidatorDateTimeYearStart, 1000, 9999);
+	}
+	if (m_htiDownloadValidatorDateTimeYearEnd) {
+		DDX_TreeEdit(pDX, IDC_MOD_OPTS, m_htiDownloadValidatorDateTimeYearEnd, m_iDownloadValidatorDateTimeYearEnd);
+		DDV_MinMaxInt(pDX, m_iDownloadValidatorDateTimeYearEnd, 1000, 9999);
+	}
+	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiDownloadValidatorDateTimeCheckSeconds, m_bDownloadValidatorDateTimeCheckSeconds);
+	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiDownloadValidatorDateTimeIncludeFollowingNumericValues, m_bDownloadValidatorDateTimeIncludeFollowingNumericValues);
+	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiDownloadValidatorSkipIncompleteFileConfirmation, m_bDownloadValidatorSkipIncompleteFileConfirmation);
+	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiDownloadValidatorMarkAsBlacklisted, m_bDownloadValidatorMarkAsBlacklisted);
+	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiDownloadValidatorAutoMarkAsBlacklisted, m_bDownloadValidatorAutoMarkAsBlacklisted);
 
 	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiDownloadInspectorFake, m_bDownloadInspectorFake);
 	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiDownloadInspectorDRM, m_bDownloadInspectorDRM);
 	DDX_TreeRadio(pDX, IDC_MOD_OPTS, m_htiDownloadInspector, m_iDownloadInspector);
 	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiDownloadInspectorInvalidExt, m_bDownloadInspectorInvalidExt);
 	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiDownloadInspectorAutoRenameToMajorityName, m_bDownloadInspectorAutoRenameToMajorityName);
+	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiDownloadInspectorAutoRenameToMajorityNameForNewDownloadsOnly, m_bDownloadInspectorAutoRenameToMajorityNameForNewDownloadsOnly);
+	if (m_htiDownloadInspectorAutoRenameToMajorityNameRequiredPercent) {
+		DDX_TreeEdit(pDX, IDC_MOD_OPTS, m_htiDownloadInspectorAutoRenameToMajorityNameRequiredPercent, m_iDownloadInspectorAutoRenameToMajorityNameRequiredPercent);
+		DDV_MinMaxInt(pDX, m_iDownloadInspectorAutoRenameToMajorityNameRequiredPercent, thePrefs.GetMinDownloadInspectorAutoRenameToMajorityNameRequiredPercent(), thePrefs.GetMaxDownloadInspectorAutoRenameToMajorityNameRequiredPercent());
+	}
+	if (m_htiDownloadInspectorAutoRenameToMajorityNameMinimumVotes) {
+		DDX_TreeEdit(pDX, IDC_MOD_OPTS, m_htiDownloadInspectorAutoRenameToMajorityNameMinimumVotes, m_iDownloadInspectorAutoRenameToMajorityNameMinimumVotes);
+		DDV_MinMaxInt(pDX, m_iDownloadInspectorAutoRenameToMajorityNameMinimumVotes, 0, thePrefs.GetMaxDownloadInspectorAutoRenameToMajorityNameMinimumVotes());
+	}
 	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiDownloadInspectorAutoDelete, m_bDownloadInspectorAutoDeleteEnabled);
 	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiDownloadInspectorAutoDeleteAddedBefore, m_bDownloadInspectorAutoDeleteAddedBeforeEnabled);
 	if (m_htiDownloadInspectorAutoDeleteAddedBeforeDays) {
 		DDX_TreeEdit(pDX, IDC_MOD_OPTS, m_htiDownloadInspectorAutoDeleteAddedBeforeDays, m_iDownloadInspectorAutoDeleteAddedBeforeDays);
-		DDV_MinMaxInt(pDX, m_iDownloadInspectorAutoDeleteAddedBeforeDays, 0, INT_MAX);
+		DDV_MinMaxInt(pDX, m_iDownloadInspectorAutoDeleteAddedBeforeDays, 1, INT_MAX);
 	}
 	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiDownloadInspectorAutoDeleteLastSeenCompleteBefore, m_bDownloadInspectorAutoDeleteLastSeenCompleteBeforeEnabled);
 	if (m_htiDownloadInspectorAutoDeleteLastSeenCompleteBeforeDays) {
 		DDX_TreeEdit(pDX, IDC_MOD_OPTS, m_htiDownloadInspectorAutoDeleteLastSeenCompleteBeforeDays, m_iDownloadInspectorAutoDeleteLastSeenCompleteBeforeDays);
-		DDV_MinMaxInt(pDX, m_iDownloadInspectorAutoDeleteLastSeenCompleteBeforeDays, 0, INT_MAX);
+		DDV_MinMaxInt(pDX, m_iDownloadInspectorAutoDeleteLastSeenCompleteBeforeDays, 1, INT_MAX);
 	}
 	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiDownloadInspectorAutoDeleteLastReceivedBefore, m_bDownloadInspectorAutoDeleteLastReceivedBeforeEnabled);
 	if (m_htiDownloadInspectorAutoDeleteLastReceivedBeforeDays) {
 		DDX_TreeEdit(pDX, IDC_MOD_OPTS, m_htiDownloadInspectorAutoDeleteLastReceivedBeforeDays, m_iDownloadInspectorAutoDeleteLastReceivedBeforeDays);
-		DDV_MinMaxInt(pDX, m_iDownloadInspectorAutoDeleteLastReceivedBeforeDays, 0, INT_MAX);
+		DDV_MinMaxInt(pDX, m_iDownloadInspectorAutoDeleteLastReceivedBeforeDays, 1, INT_MAX);
 	}
 	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiDownloadInspectorAutoDeleteDownloadedLessThanPercent, m_bDownloadInspectorAutoDeleteDownloadedLessThanPercentEnabled);
 	if (m_htiDownloadInspectorAutoDeleteDownloadedLessThanPercentValue) {
@@ -1030,11 +1224,31 @@ void CPPgMod::DoDataExchange(CDataExchange *pDX)
 		DDX_TreeEdit(pDX, IDC_MOD_OPTS, m_htiSpamThreshold, m_iSpamThreshold);
 		DDV_MinMaxInt(pDX, m_iSpamThreshold, SEARCH_SPAM_THRESHOLD, INT_MAX);
 	}
-	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiShowCloseButtonOnSearchTabs, m_bShowCloseButtonOnSearchTabs);
+	if (m_htiEd2kSearchMaxResults) {
+		DDX_TreeEdit(pDX, IDC_MOD_OPTS, m_htiEd2kSearchMaxResults, m_iEd2kSearchMaxResults);
+		DDV_MinMaxInt(pDX, m_iEd2kSearchMaxResults, CPreferences::GetDefaultEd2kSearchMaxResults(), INT_MAX);
+	}
+	if (m_htiEd2kSearchMaxMoreRequests) {
+		DDX_TreeEdit(pDX, IDC_MOD_OPTS, m_htiEd2kSearchMaxMoreRequests, m_iEd2kSearchMaxMoreRequests);
+		DDV_MinMaxInt(pDX, m_iEd2kSearchMaxMoreRequests, CPreferences::GetDefaultEd2kSearchMaxMoreRequests(), INT_MAX);
+	}
+	if (m_htiKadFileSearchTotal) {
+		DDX_TreeEdit(pDX, IDC_MOD_OPTS, m_htiKadFileSearchTotal, m_iKadFileSearchTotal);
+		DDV_MinMaxInt(pDX, m_iKadFileSearchTotal, CPreferences::GetMinKadSearchTotal(), CPreferences::GetMaxKadSearchTotal());
+	}
 	if (m_htiKadSearchKeywordTotal) {
 		DDX_TreeEdit(pDX, IDC_MOD_OPTS, m_htiKadSearchKeywordTotal, m_iKadSearchKeywordTotal);
-		DDV_MinMaxInt(pDX, m_iKadSearchKeywordTotal, SEARCHKEYWORD_TOTAL, INT_MAX);
+		DDV_MinMaxInt(pDX, m_iKadSearchKeywordTotal, CPreferences::GetMinKadSearchTotal(), CPreferences::GetMaxKadSearchTotal());
 	}
+	if (m_htiKadFileSearchLifetime) {
+		DDX_TreeEdit(pDX, IDC_MOD_OPTS, m_htiKadFileSearchLifetime, m_iKadFileSearchLifetime);
+		DDV_MinMaxInt(pDX, m_iKadFileSearchLifetime, CPreferences::GetMinKadSearchLifetime(), CPreferences::GetMaxKadSearchLifetime());
+	}
+	if (m_htiKadSearchKeywordLifetime) {
+		DDX_TreeEdit(pDX, IDC_MOD_OPTS, m_htiKadSearchKeywordLifetime, m_iKadSearchKeywordLifetime);
+		DDV_MinMaxInt(pDX, m_iKadSearchKeywordLifetime, CPreferences::GetMinKadSearchLifetime(), CPreferences::GetMaxKadSearchLifetime());
+	}
+	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiShowCloseButtonOnSearchTabs, m_bShowCloseButtonOnSearchTabs);
 
 	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiRepeatServerList, m_bRepeatServerList);
 	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiDontRemoveStaticServers, m_bDontRemoveStaticServers);
@@ -1054,6 +1268,53 @@ void CPPgMod::DoDataExchange(CDataExchange *pDX)
 	}
 	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiSelectiveShare, m_bSelectiveShare);
 	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiShareOnlyTheNeed, m_bShareOnlyTheNeed);
+	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiHighBandwidthUploadPolicy, m_bHighBandwidthUploadPolicy);
+	if (m_htiHighBandwidthTargetUploadClients) {
+		DDX_TreeEdit(pDX, IDC_MOD_OPTS, m_htiHighBandwidthTargetUploadClients, m_iHighBandwidthTargetUploadClients);
+		DDV_MinMaxInt(pDX, m_iHighBandwidthTargetUploadClients, static_cast<int>(thePrefs.GetMinHighBandwidthTargetUploadClients()), static_cast<int>(thePrefs.GetMaxHighBandwidthTargetUploadClients()));
+	}
+	if (m_htiHighBandwidthUploadSlotElasticPercent) {
+		DDX_TreeEdit(pDX, IDC_MOD_OPTS, m_htiHighBandwidthUploadSlotElasticPercent, m_iHighBandwidthUploadSlotElasticPercent);
+		DDV_MinMaxInt(pDX, m_iHighBandwidthUploadSlotElasticPercent, static_cast<int>(thePrefs.GetMinHighBandwidthUploadSlotElasticPercent()), static_cast<int>(thePrefs.GetMaxHighBandwidthUploadSlotElasticPercent()));
+	}
+	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiAutoHighBandwidthDownloadBuffer, m_bAutoHighBandwidthDownloadBuffer);
+	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiLowRatioQueueScoreBoost, m_bLowRatioQueueScoreBoost);
+	DDX_TreeRadio(pDX, IDC_MOD_OPTS, m_htiUploadSessionTransferLimit, m_iUploadSessionTransferLimitMode);
+	DDX_TreeEdit(pDX, IDC_MOD_OPTS, m_htiHighBandwidthSlowUploadThresholdFactor, m_sHighBandwidthSlowUploadThresholdFactor);
+	if (m_htiHighBandwidthSlowUploadGraceSeconds) {
+		DDX_TreeEdit(pDX, IDC_MOD_OPTS, m_htiHighBandwidthSlowUploadGraceSeconds, m_iHighBandwidthSlowUploadGraceSeconds);
+		DDV_MinMaxInt(pDX, m_iHighBandwidthSlowUploadGraceSeconds, static_cast<int>(thePrefs.GetMinHighBandwidthSlowUploadGraceSeconds()), static_cast<int>(thePrefs.GetMaxHighBandwidthSlowUploadGraceSeconds()));
+	}
+	if (m_htiHighBandwidthSlowUploadWarmupSeconds) {
+		DDX_TreeEdit(pDX, IDC_MOD_OPTS, m_htiHighBandwidthSlowUploadWarmupSeconds, m_iHighBandwidthSlowUploadWarmupSeconds);
+		DDV_MinMaxInt(pDX, m_iHighBandwidthSlowUploadWarmupSeconds, static_cast<int>(thePrefs.GetMinHighBandwidthSlowUploadWarmupSeconds()), static_cast<int>(thePrefs.GetMaxHighBandwidthSlowUploadWarmupSeconds()));
+	}
+	if (m_htiHighBandwidthZeroUploadGraceSeconds) {
+		DDX_TreeEdit(pDX, IDC_MOD_OPTS, m_htiHighBandwidthZeroUploadGraceSeconds, m_iHighBandwidthZeroUploadGraceSeconds);
+		DDV_MinMaxInt(pDX, m_iHighBandwidthZeroUploadGraceSeconds, static_cast<int>(thePrefs.GetMinHighBandwidthZeroUploadGraceSeconds()), static_cast<int>(thePrefs.GetMaxHighBandwidthZeroUploadGraceSeconds()));
+	}
+	if (m_htiHighBandwidthSlowUploadCooldownSeconds) {
+		DDX_TreeEdit(pDX, IDC_MOD_OPTS, m_htiHighBandwidthSlowUploadCooldownSeconds, m_iHighBandwidthSlowUploadCooldownSeconds);
+		DDV_MinMaxInt(pDX, m_iHighBandwidthSlowUploadCooldownSeconds, static_cast<int>(thePrefs.GetMinHighBandwidthSlowUploadCooldownSeconds()), static_cast<int>(thePrefs.GetMaxHighBandwidthSlowUploadCooldownSeconds()));
+	}
+	if (m_htiLowRatioQueueScoreThreshold)
+		DDX_TreeEdit(pDX, IDC_MOD_OPTS, m_htiLowRatioQueueScoreThreshold, m_sLowRatioQueueScoreThreshold);
+	if (m_htiLowRatioQueueScoreBonus) {
+		DDX_TreeEdit(pDX, IDC_MOD_OPTS, m_htiLowRatioQueueScoreBonus, m_iLowRatioQueueScoreBonus);
+		DDV_MinMaxInt(pDX, m_iLowRatioQueueScoreBonus, static_cast<int>(thePrefs.GetMinLowRatioQueueScoreBonus()), static_cast<int>(thePrefs.GetMaxLowRatioQueueScoreBonus()));
+	}
+	if (m_htiUploadSessionTransferLimitPercentValue) {
+		DDX_TreeEdit(pDX, IDC_MOD_OPTS, m_htiUploadSessionTransferLimitPercentValue, m_iUploadSessionTransferLimitPercent);
+		DDV_MinMaxInt(pDX, m_iUploadSessionTransferLimitPercent, static_cast<int>(thePrefs.GetMinUploadSessionTransferLimitPercent()), static_cast<int>(thePrefs.GetMaxUploadSessionTransferLimitPercent()));
+	}
+	if (m_htiUploadSessionTransferLimitMiBValue) {
+		DDX_TreeEdit(pDX, IDC_MOD_OPTS, m_htiUploadSessionTransferLimitMiBValue, m_iUploadSessionTransferLimitMiB);
+		DDV_MinMaxInt(pDX, m_iUploadSessionTransferLimitMiB, static_cast<int>(thePrefs.GetMinUploadSessionTransferLimitMiB()), static_cast<int>(thePrefs.GetMaxUploadSessionTransferLimitMiB()));
+	}
+	if (m_htiUploadSessionTimeLimitSeconds) {
+		DDX_TreeEdit(pDX, IDC_MOD_OPTS, m_htiUploadSessionTimeLimitSeconds, m_iUploadSessionTimeLimitSeconds);
+		DDV_MinMaxInt(pDX, m_iUploadSessionTimeLimitSeconds, static_cast<int>(thePrefs.GetMinUploadSessionTimeLimitSeconds()), static_cast<int>(thePrefs.GetMaxUploadSessionTimeLimitSeconds()));
+	}
 	DDX_TreeRadio(pDX, IDC_MOD_OPTS, m_htiPowerShareGroup, m_iPowerShareMode);
 	if (m_htiPowerShareLimit) {
 		DDX_TreeEdit(pDX, IDC_MOD_OPTS, m_htiPowerShareLimit, m_iPowerShareLimit);
@@ -1161,7 +1422,7 @@ void CPPgMod::DoDataExchange(CDataExchange *pDX)
 		DDV_MinMaxInt(pDX, m_iMaxChatHistory, 3, 2048);
 	}
 	if (m_htiMaxMsgSessions) {
-		DDX_TreeEdit(pDX, IDC_MOD_OPTS, m_htiMaxMsgSessions, (int)m_umaxmsgsessions);
+		DDX_TreeEdit(pDX, IDC_MOD_OPTS, m_htiMaxMsgSessions, m_umaxmsgsessions);
 		DDV_MinMaxInt(pDX, m_umaxmsgsessions, 0, 6000);
 	}
 	DDX_Text(pDX, IDC_MOD_OPTS, m_htiDateTimeFormat, m_strDateTimeFormat);
@@ -1173,7 +1434,6 @@ void CPPgMod::DoDataExchange(CDataExchange *pDX)
 	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiUpdateQueue, m_bUpdateQueue);
 	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiRepaint, m_bRepaint);
 	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiShowUpDownIconInTaskbar, m_bShowUpDownIconInTaskbar);
-	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiForceSpeedsToKB, m_bForceSpeedsToKB);
 	if (m_htiMaxLogBuff) {
 		DDX_TreeEdit(pDX, IDC_MOD_OPTS, m_htiMaxLogBuff, iMaxLogBuff);
 		DDV_MinMaxInt(pDX, iMaxLogBuff, 64, 512);
@@ -1234,13 +1494,17 @@ BOOL CPPgMod::OnInitDialog()
 	m_iUITweaksKadContactSortHistory = theApp.emuledlg->kademliawnd->m_contactListCtrl->GetMaxSortHistory();
 	m_iUITweaksKadSearchSortHistory = theApp.emuledlg->kademliawnd->searchList->GetMaxSortHistory();
 
-	m_iGeoLite2Mode = thePrefs.GetGeoLite2Mode();
-	m_bGeoLite2ShowFlag = thePrefs.GetGeoLite2ShowFlag();
+	m_iIPGeolocationMode = thePrefs.GetIPGeolocationMode();
+	m_bIPGeolocationShowFlag = thePrefs.GetIPGeolocationShowFlag();
+	m_bIPGeolocationAutoUpdate = thePrefs.GetAutoIPGeolocationUpdate();
+	m_sIPGeolocationUpdateURL = thePrefs.GetIPGeolocationUpdateURL();
+	m_iIPGeolocationUpdatePeriodDays = thePrefs.GetIPGeolocationUpdatePeriodDays();
 
 	m_bConnectionChecker = thePrefs.GetConnectionChecker();
 	m_sConnectionCheckerServer = thePrefs.GetConnectionCheckerServer();
 
 	m_bEnableNatTraversal = thePrefs.m_bEnableNatTraversal;
+	m_iNatTraversalProtocolMode = (int)thePrefs.GetNatTraversalProtocolMode();
 	m_iNatTraversalPortWindow = thePrefs.GetNatTraversalPortWindow();
 	m_iNatTraversalSweepWindow = thePrefs.GetNatTraversalSweepWindow();
 	m_iNatTraversalJitterMinMs = (int)thePrefs.GetNatTraversalJitterMinMs();
@@ -1255,26 +1519,35 @@ BOOL CPPgMod::OnInitDialog()
 
 	m_iReAskFileSrc = MS2MIN(thePrefs.GetReAskTimeDif() + FILEREASKTIME);
 
-	m_iDownloadChecker = thePrefs.GetDownloadChecker();
-	m_iDownloadCheckerAcceptPercentage = thePrefs.GetDownloadCheckerAcceptPercentage();
-	m_bDownloadCheckerRejectCanceled = thePrefs.GetDownloadCheckerRejectCanceled();
-	m_bDownloadCheckerRejectSameHash = thePrefs.GetDownloadCheckerRejectSameHash();
-	m_bDownloadCheckerRejectBlacklisted = thePrefs.GetDownloadCheckerRejectBlacklisted();
-	m_bDownloadCheckerCaseInsensitive = thePrefs.GetDownloadCheckerCaseInsensitive();
-	m_bDownloadCheckerIgnoreExtension = thePrefs.GetDownloadCheckerIgnoreExtension();
-	m_bDownloadCheckerIgnoreTags = thePrefs.GetDownloadCheckerIgnoreTags();
-	m_bDownloadCheckerDontIgnoreNumericTags = thePrefs.GetDownloadCheckerDontIgnoreNumericTags();
-	m_bDownloadCheckerIgnoreNonAlphaNumeric = thePrefs.GetDownloadCheckerIgnoreNonAlphaNumeric();
-	m_iDownloadCheckerMinimumComparisonLength = thePrefs.GetDownloadCheckerMinimumComparisonLength();
-	m_bDownloadCheckerSkipIncompleteFileConfirmation = thePrefs.GetDownloadCheckerSkipIncompleteFileConfirmation();
-	m_bDownloadCheckerMarkAsBlacklisted = thePrefs.GetDownloadCheckerMarkAsBlacklisted();
-	m_bDownloadCheckerAutoMarkAsBlacklisted = thePrefs.GetDownloadCheckerAutoMarkAsBlacklisted();
+	m_iDownloadValidator = thePrefs.GetDownloadValidator();
+	m_iDownloadValidatorAcceptPercentage = thePrefs.GetDownloadValidatorAcceptPercentage();
+	m_bDownloadValidatorRejectCanceled = thePrefs.GetDownloadValidatorRejectCanceled();
+	m_bDownloadValidatorRejectSameHash = thePrefs.GetDownloadValidatorRejectSameHash();
+	m_bDownloadValidatorRejectBlacklisted = thePrefs.GetDownloadValidatorRejectBlacklisted();
+	m_bDownloadValidatorCaseInsensitive = thePrefs.GetDownloadValidatorCaseInsensitive();
+	m_bDownloadValidatorIgnoreExtension = thePrefs.GetDownloadValidatorIgnoreExtension();
+	m_bDownloadValidatorIgnoreTags = thePrefs.GetDownloadValidatorIgnoreTags();
+	m_bDownloadValidatorDontIgnoreNumericTags = thePrefs.GetDownloadValidatorDontIgnoreNumericTags();
+	m_bDownloadValidatorIgnoreNonAlphaNumeric = thePrefs.GetDownloadValidatorIgnoreNonAlphaNumeric();
+	m_iDownloadValidatorMinimumComparisonLength = thePrefs.GetDownloadValidatorMinimumComparisonLength();
+	m_bDownloadValidatorSkipIncompleteFileConfirmation = thePrefs.GetDownloadValidatorSkipIncompleteFileConfirmation();
+	m_bDownloadValidatorMarkAsBlacklisted = thePrefs.GetDownloadValidatorMarkAsBlacklisted();
+	m_bDownloadValidatorAutoMarkAsBlacklisted = thePrefs.GetDownloadValidatorAutoMarkAsBlacklisted();
+	m_bDownloadValidatorDateTimeMatching = thePrefs.GetDownloadValidatorDateTimeMatching();
+	m_bDownloadValidatorDateTimeUseYearRange = thePrefs.GetDownloadValidatorDateTimeUseYearRange();
+	m_iDownloadValidatorDateTimeYearStart = thePrefs.GetDownloadValidatorDateTimeYearStart();
+	m_iDownloadValidatorDateTimeYearEnd = thePrefs.GetDownloadValidatorDateTimeYearEnd();
+	m_bDownloadValidatorDateTimeCheckSeconds = thePrefs.GetDownloadValidatorDateTimeCheckSeconds();
+	m_bDownloadValidatorDateTimeIncludeFollowingNumericValues = thePrefs.GetDownloadValidatorDateTimeIncludeFollowingNumericValues();
 
 	m_iDownloadInspector = thePrefs.GetDownloadInspector();
 	m_bDownloadInspectorFake = thePrefs.GetDownloadInspectorFake();
 	m_bDownloadInspectorDRM = thePrefs.GetDownloadInspectorDRM();
 	m_bDownloadInspectorInvalidExt = thePrefs.m_bDownloadInspectorInvalidExt;
 	m_bDownloadInspectorAutoRenameToMajorityName = thePrefs.IsDownloadInspectorAutoRenameToMajorityName();
+	m_bDownloadInspectorAutoRenameToMajorityNameForNewDownloadsOnly = thePrefs.IsDownloadInspectorAutoRenameToMajorityNameForNewDownloadsOnly();
+	m_iDownloadInspectorAutoRenameToMajorityNameRequiredPercent = thePrefs.GetDownloadInspectorAutoRenameToMajorityNameRequiredPercent();
+	m_iDownloadInspectorAutoRenameToMajorityNameMinimumVotes = thePrefs.GetDownloadInspectorAutoRenameToMajorityNameMinimumVotes();
 	m_bDownloadInspectorAutoDeleteEnabled = thePrefs.IsDownloadInspectorAutoDeleteEnabled();
 	m_bDownloadInspectorAutoDeleteAddedBeforeEnabled = thePrefs.IsDownloadInspectorAutoDeleteAddedBeforeEnabled();
 	m_iDownloadInspectorAutoDeleteAddedBeforeDays = thePrefs.GetDownloadInspectorAutoDeleteAddedBeforeDays();
@@ -1297,7 +1570,12 @@ BOOL CPPgMod::OnInitDialog()
 
 	m_bGroupKnownAtTheBottom = thePrefs.GetGroupKnownAtTheBottom();
 	m_iSpamThreshold = thePrefs.GetSpamThreshold();
+	m_iEd2kSearchMaxResults = thePrefs.GetEd2kSearchMaxResults();
+	m_iEd2kSearchMaxMoreRequests = thePrefs.GetEd2kSearchMaxMoreRequests();
+	m_iKadFileSearchTotal = thePrefs.GetKadFileSearchTotal();
 	m_iKadSearchKeywordTotal = thePrefs.GetKadSearchKeywordTotal();
+	m_iKadFileSearchLifetime = thePrefs.GetKadFileSearchLifetime();
+	m_iKadSearchKeywordLifetime = thePrefs.GetKadSearchKeywordLifetime();
 	m_bShowCloseButtonOnSearchTabs = thePrefs.GetShowCloseButtonOnSearchTabs();
 
 	m_bRepeatServerList = thePrefs.GetRepeatServerList();
@@ -1319,6 +1597,22 @@ BOOL CPPgMod::OnInitDialog()
 	m_iPowerShareLimit = thePrefs.GetPowerShareLimit();
 	m_iSharePermissions = thePrefs.GetSharePermissions();
 	m_bSharePermissionColorRows = thePrefs.GetSharePermissionColorRows();
+	m_bHighBandwidthUploadPolicy = thePrefs.IsHighBandwidthUploadPolicyEnabled();
+	m_iHighBandwidthTargetUploadClients = static_cast<int>(thePrefs.GetHighBandwidthTargetUploadClients());
+	m_iHighBandwidthUploadSlotElasticPercent = static_cast<int>(thePrefs.GetHighBandwidthUploadSlotElasticPercent());
+	m_bAutoHighBandwidthDownloadBuffer = thePrefs.IsAutoHighBandwidthDownloadBufferEnabled();
+	m_sHighBandwidthSlowUploadThresholdFactor.Format(_T("%.2f"), thePrefs.GetHighBandwidthSlowUploadThresholdFactor());
+	m_iHighBandwidthSlowUploadGraceSeconds = static_cast<int>(thePrefs.GetHighBandwidthSlowUploadGraceSeconds());
+	m_iHighBandwidthSlowUploadWarmupSeconds = static_cast<int>(thePrefs.GetHighBandwidthSlowUploadWarmupSeconds());
+	m_iHighBandwidthZeroUploadGraceSeconds = static_cast<int>(thePrefs.GetHighBandwidthZeroUploadGraceSeconds());
+	m_iHighBandwidthSlowUploadCooldownSeconds = static_cast<int>(thePrefs.GetHighBandwidthSlowUploadCooldownSeconds());
+	m_bLowRatioQueueScoreBoost = thePrefs.IsLowRatioQueueScoreBoostEnabled();
+	m_sLowRatioQueueScoreThreshold.Format(_T("%.2f"), thePrefs.GetLowRatioQueueScoreThreshold());
+	m_iLowRatioQueueScoreBonus = static_cast<int>(thePrefs.GetLowRatioQueueScoreBonus());
+	m_iUploadSessionTransferLimitMode = static_cast<int>(thePrefs.GetUploadSessionTransferLimitMode());
+	m_iUploadSessionTransferLimitPercent = static_cast<int>(thePrefs.GetUploadSessionTransferLimitPercent());
+	m_iUploadSessionTransferLimitMiB = static_cast<int>(thePrefs.GetUploadSessionTransferLimitMiB());
+	m_iUploadSessionTimeLimitSeconds = static_cast<int>(thePrefs.GetUploadSessionTimeLimitSeconds());
 	m_bAdjustNTFSDaylightFileTime = thePrefs.GetAdjustNTFSDaylightFileTime(); // Official preference
 	m_bAllowDSTTimeTolerance = thePrefs.GetAllowDSTTimeTolerance();
 
@@ -1381,7 +1675,6 @@ BOOL CPPgMod::OnInitDialog()
 	m_bUpdateQueue = !thePrefs.m_bupdatequeuelist;
 	m_bRepaint = thePrefs.IsGraphRecreateDisabled();
 	m_bShowUpDownIconInTaskbar = thePrefs.IsShowUpDownIconInTaskbar();
-	m_bForceSpeedsToKB = thePrefs.GetForceSpeedsToKB();
 
 	iMaxLogBuff = thePrefs.GetMaxLogBuff() / 1024;
 	m_iLogFileFormat = thePrefs.m_iLogFileFormat;
@@ -1421,8 +1714,44 @@ BOOL CPPgMod::OnInitDialog()
 	CPropertyPage::OnInitDialog();
 	InitWindowStyles(this);
 	Localize();
+	UpdateDownloadValidatorDateTimeUi();
+	UpdateLayout();
 
 	return TRUE;  // return TRUE unless you set the focus to the control. EXCEPTION: OCX Property Pages should return FALSE
+}
+
+void CPPgMod::UpdateLayout()
+{
+	CWnd* pTree = GetDlgItem(IDC_MOD_OPTS);
+	CWnd* pInfo = GetDlgItem(IDC_MOD_OPTS_INFO);
+	if (pTree == NULL || pInfo == NULL || !::IsWindow(pTree->GetSafeHwnd()) || !::IsWindow(pInfo->GetSafeHwnd()))
+		return;
+
+	CRect rcClient;
+	GetClientRect(&rcClient);
+
+	CRect rcTree;
+	pTree->GetWindowRect(&rcTree);
+	ScreenToClient(&rcTree);
+
+	CRect rcInfo;
+	pInfo->GetWindowRect(&rcInfo);
+	ScreenToClient(&rcInfo);
+
+	const int iBottomMargin = max(1, rcInfo.left);
+	const int iInfoTop = max(rcTree.top + 1, rcClient.bottom - iBottomMargin - rcInfo.Height());
+	rcInfo.OffsetRect(0, iInfoTop - rcInfo.top);
+	pInfo->MoveWindow(&rcInfo);
+
+	rcTree.bottom = rcInfo.top;
+	if (rcTree.bottom > rcTree.top)
+		pTree->MoveWindow(&rcTree);
+}
+
+void CPPgMod::OnSize(UINT nType, int cx, int cy)
+{
+	CPropertyPage::OnSize(nType, cx, cy);
+	UpdateLayout();
 }
 
 BOOL CPPgMod::OnKillActive()
@@ -1441,6 +1770,20 @@ BOOL CPPgMod::OnApply()
 
 	if (!UpdateData())
 		return FALSE;
+
+	float fHighBandwidthSlowUploadThresholdFactor = 0.0f;
+	if (!ParseFloatOptionText(m_sHighBandwidthSlowUploadThresholdFactor, fHighBandwidthSlowUploadThresholdFactor)) {
+		m_ctrlTreeOptions.SelectItem(m_htiHighBandwidthSlowUploadThresholdFactor);
+		CDarkMode::MessageBox(AFX_IDP_PARSE_REAL);
+		return FALSE;
+	}
+
+	float fLowRatioQueueScoreThreshold = 0.0f;
+	if (!ParseFloatOptionText(m_sLowRatioQueueScoreThreshold, fLowRatioQueueScoreThreshold)) {
+		m_ctrlTreeOptions.SelectItem(m_htiLowRatioQueueScoreThreshold);
+		CDarkMode::MessageBox(AFX_IDP_PARSE_REAL);
+		return FALSE;
+	}
 
 	if (m_bUITweaksSpeedGraph != thePrefs.GetUITweaksSpeedGraph()) {
 		thePrefs.SetUITweaksSpeedGraph(m_bUITweaksSpeedGraph);
@@ -1463,12 +1806,17 @@ BOOL CPPgMod::OnApply()
 	theApp.emuledlg->kademliawnd->m_contactListCtrl->SetMaxSortHistory(m_iUITweaksKadContactSortHistory);
 	theApp.emuledlg->kademliawnd->searchList->SetMaxSortHistory(m_iUITweaksKadSearchSortHistory);
 
-	if (thePrefs.GetGeoLite2Mode() != m_iGeoLite2Mode || thePrefs.GetGeoLite2ShowFlag() != m_bGeoLite2ShowFlag) {
-		if (thePrefs.GetGeoLite2Mode() == GL2_DISABLE && m_iGeoLite2Mode != GL2_DISABLE)
-			theApp.geolite2->LoadGeoLite2();// Load GeoLite DB file if it isn't already loaded
-		thePrefs.SetGeoLite2Mode(m_iGeoLite2Mode);
-		thePrefs.SetGeoLite2ShowFlag(m_bGeoLite2ShowFlag);
-		theApp.geolite2->Redraw(); // Refresh passive windows
+	m_sIPGeolocationUpdateURL.Trim();
+	thePrefs.SetAutoIPGeolocationUpdate(m_bIPGeolocationAutoUpdate);
+	thePrefs.SetIPGeolocationUpdateURL(m_sIPGeolocationUpdateURL);
+	thePrefs.SetIPGeolocationUpdatePeriodDays(m_iIPGeolocationUpdatePeriodDays);
+
+	if (thePrefs.GetIPGeolocationMode() != m_iIPGeolocationMode || thePrefs.GetIPGeolocationShowFlag() != m_bIPGeolocationShowFlag) {
+		if (thePrefs.GetIPGeolocationMode() == IPGEO_DISABLE && m_iIPGeolocationMode != IPGEO_DISABLE)
+			theApp.ipgeolocation->LoadIPGeolocation();// Load IP geolocation database file if it is not already loaded
+		thePrefs.SetIPGeolocationMode(m_iIPGeolocationMode);
+		thePrefs.SetIPGeolocationShowFlag(m_bIPGeolocationShowFlag);
+		theApp.ipgeolocation->Redraw(); // Refresh passive windows
 	}
 
 	const CString strPreviousConnectionCheckerServer = thePrefs.GetConnectionCheckerServer();
@@ -1491,6 +1839,11 @@ BOOL CPPgMod::OnApply()
 	}
 
 	thePrefs.m_bEnableNatTraversal = m_bEnableNatTraversal;
+	const ENatTraversalProtocolMode eOldNatTraversalProtocolMode = thePrefs.GetNatTraversalProtocolMode();
+	thePrefs.SetNatTraversalProtocolMode(m_iNatTraversalProtocolMode);
+	m_iNatTraversalProtocolMode = (int)thePrefs.GetNatTraversalProtocolMode();
+	if (eOldNatTraversalProtocolMode != thePrefs.GetNatTraversalProtocolMode() && theApp.clientlist != NULL)
+		theApp.clientlist->HandleNatTraversalProtocolModeChanged();
 
 	if (m_iNatTraversalPortWindow < 0) 
 		m_iNatTraversalPortWindow = 0;
@@ -1537,31 +1890,46 @@ BOOL CPPgMod::OnApply()
 
 	thePrefs.m_uReAskTimeDif = MIN2MS(m_iReAskFileSrc) - FILEREASKTIME;
 
-	if (thePrefs.GetDownloadChecker() != m_iDownloadChecker) {
-		thePrefs.SetDownloadChecker(m_iDownloadChecker);
+	if (thePrefs.GetDownloadValidator() != m_iDownloadValidator) {
+		thePrefs.SetDownloadValidator(m_iDownloadValidator);
 		theApp.emuledlg->searchwnd->CreateMenus();
 
-	} // Download Checker selection changed
+	} // Download Validator selection changed
 
-	// Download Checker parameters changed
-	if (thePrefs.GetDownloadCheckerIgnoreExtension() != m_bDownloadCheckerIgnoreExtension || thePrefs.GetDownloadCheckerIgnoreTags() != m_bDownloadCheckerIgnoreTags || thePrefs.GetDownloadCheckerDontIgnoreNumericTags() != m_bDownloadCheckerDontIgnoreNumericTags
-			|| thePrefs.GetDownloadCheckerIgnoreNonAlphaNumeric() != m_bDownloadCheckerIgnoreNonAlphaNumeric || thePrefs.GetDownloadCheckerCaseInsensitive() != m_bDownloadCheckerCaseInsensitive) {
-		thePrefs.SetDownloadCheckerIgnoreExtension(m_bDownloadCheckerIgnoreExtension);
-		thePrefs.SetDownloadCheckerIgnoreTags(m_bDownloadCheckerIgnoreTags);
-		thePrefs.SetDownloadCheckerDontIgnoreNumericTags(m_bDownloadCheckerDontIgnoreNumericTags);
-		thePrefs.SetDownloadCheckerIgnoreNonAlphaNumeric(m_bDownloadCheckerIgnoreNonAlphaNumeric);
-		thePrefs.SetDownloadCheckerCaseInsensitive(m_bDownloadCheckerCaseInsensitive);
-		theApp.DownloadChecker->ReloadMap();
+	if (m_iDownloadValidatorDateTimeYearStart > m_iDownloadValidatorDateTimeYearEnd) {
+		const int iTemp = m_iDownloadValidatorDateTimeYearStart;
+		m_iDownloadValidatorDateTimeYearStart = m_iDownloadValidatorDateTimeYearEnd;
+		m_iDownloadValidatorDateTimeYearEnd = iTemp;
 	}
 
-	thePrefs.SetDownloadCheckerAcceptPercentage(m_iDownloadCheckerAcceptPercentage);
-	thePrefs.SetDownloadCheckerRejectCanceled(m_bDownloadCheckerRejectCanceled);
-	thePrefs.SetDownloadCheckerRejectSameHash(m_bDownloadCheckerRejectSameHash);
-	thePrefs.SetDownloadCheckerRejectBlacklisted(m_bDownloadCheckerRejectBlacklisted);
-	thePrefs.SetDownloadCheckerMinimumComparisonLength(m_iDownloadCheckerMinimumComparisonLength);
-	thePrefs.SetDownloadCheckerSkipIncompleteFileConfirmation(m_bDownloadCheckerSkipIncompleteFileConfirmation);
-	thePrefs.SetDownloadCheckerMarkAsBlacklisted(m_bDownloadCheckerMarkAsBlacklisted);
-	thePrefs.SetDownloadCheckerAutoMarkAsBlacklisted(m_bDownloadCheckerAutoMarkAsBlacklisted);
+	// Download Validator parameters changed
+	if (thePrefs.GetDownloadValidatorIgnoreExtension() != m_bDownloadValidatorIgnoreExtension || thePrefs.GetDownloadValidatorIgnoreTags() != m_bDownloadValidatorIgnoreTags || thePrefs.GetDownloadValidatorDontIgnoreNumericTags() != m_bDownloadValidatorDontIgnoreNumericTags
+			|| thePrefs.GetDownloadValidatorIgnoreNonAlphaNumeric() != m_bDownloadValidatorIgnoreNonAlphaNumeric || thePrefs.GetDownloadValidatorCaseInsensitive() != m_bDownloadValidatorCaseInsensitive
+			|| thePrefs.GetDownloadValidatorDateTimeMatching() != m_bDownloadValidatorDateTimeMatching || thePrefs.GetDownloadValidatorDateTimeUseYearRange() != m_bDownloadValidatorDateTimeUseYearRange
+			|| thePrefs.GetDownloadValidatorDateTimeYearStart() != m_iDownloadValidatorDateTimeYearStart || thePrefs.GetDownloadValidatorDateTimeYearEnd() != m_iDownloadValidatorDateTimeYearEnd
+			|| thePrefs.GetDownloadValidatorDateTimeCheckSeconds() != m_bDownloadValidatorDateTimeCheckSeconds || thePrefs.GetDownloadValidatorDateTimeIncludeFollowingNumericValues() != m_bDownloadValidatorDateTimeIncludeFollowingNumericValues) {
+		thePrefs.SetDownloadValidatorIgnoreExtension(m_bDownloadValidatorIgnoreExtension);
+		thePrefs.SetDownloadValidatorIgnoreTags(m_bDownloadValidatorIgnoreTags);
+		thePrefs.SetDownloadValidatorDontIgnoreNumericTags(m_bDownloadValidatorDontIgnoreNumericTags);
+		thePrefs.SetDownloadValidatorIgnoreNonAlphaNumeric(m_bDownloadValidatorIgnoreNonAlphaNumeric);
+		thePrefs.SetDownloadValidatorCaseInsensitive(m_bDownloadValidatorCaseInsensitive);
+		thePrefs.SetDownloadValidatorDateTimeMatching(m_bDownloadValidatorDateTimeMatching);
+		thePrefs.SetDownloadValidatorDateTimeUseYearRange(m_bDownloadValidatorDateTimeUseYearRange);
+		thePrefs.SetDownloadValidatorDateTimeYearStart(m_iDownloadValidatorDateTimeYearStart);
+		thePrefs.SetDownloadValidatorDateTimeYearEnd(m_iDownloadValidatorDateTimeYearEnd);
+		thePrefs.SetDownloadValidatorDateTimeCheckSeconds(m_bDownloadValidatorDateTimeCheckSeconds);
+		thePrefs.SetDownloadValidatorDateTimeIncludeFollowingNumericValues(m_bDownloadValidatorDateTimeIncludeFollowingNumericValues);
+		theApp.DownloadValidator->ReloadMap();
+	}
+
+	thePrefs.SetDownloadValidatorAcceptPercentage(m_iDownloadValidatorAcceptPercentage);
+	thePrefs.SetDownloadValidatorRejectCanceled(m_bDownloadValidatorRejectCanceled);
+	thePrefs.SetDownloadValidatorRejectSameHash(m_bDownloadValidatorRejectSameHash);
+	thePrefs.SetDownloadValidatorRejectBlacklisted(m_bDownloadValidatorRejectBlacklisted);
+	thePrefs.SetDownloadValidatorMinimumComparisonLength(m_iDownloadValidatorMinimumComparisonLength);
+	thePrefs.SetDownloadValidatorSkipIncompleteFileConfirmation(m_bDownloadValidatorSkipIncompleteFileConfirmation);
+	thePrefs.SetDownloadValidatorMarkAsBlacklisted(m_bDownloadValidatorMarkAsBlacklisted);
+	thePrefs.SetDownloadValidatorAutoMarkAsBlacklisted(m_bDownloadValidatorAutoMarkAsBlacklisted);
 
 		const bool bDownloadInspectorAutoDeleteSettingsChanged = thePrefs.GetDownloadInspector() != m_iDownloadInspector
 			|| thePrefs.IsDownloadInspectorAutoDeleteEnabled() != m_bDownloadInspectorAutoDeleteEnabled
@@ -1577,12 +1945,22 @@ BOOL CPPgMod::OnApply()
 			|| thePrefs.GetDownloadInspectorAutoDeleteDownloadedLessThanMb() != m_iDownloadInspectorAutoDeleteDownloadedLessThanMb
 			|| thePrefs.IsDownloadInspectorAutoDeleteBackupEd2kLinksEnabled() != m_bDownloadInspectorAutoDeleteBackupEd2kLinks
 			|| thePrefs.IsDownloadInspectorAutoDeleteDontMarkAsCanceledEnabled() != m_bDownloadInspectorAutoDeleteDontMarkAsCanceled;
+		const bool bOldDownloadInspectorAutoRenameToMajorityName = thePrefs.IsDownloadInspectorAutoRenameToMajorityName();
+		const bool bOldDownloadInspectorAutoRenameToMajorityNameForNewDownloadsOnly = thePrefs.IsDownloadInspectorAutoRenameToMajorityNameForNewDownloadsOnly();
+		const bool bDownloadInspectorAutoRenameSettingsChanged = thePrefs.GetDownloadInspector() != m_iDownloadInspector
+			|| bOldDownloadInspectorAutoRenameToMajorityName != m_bDownloadInspectorAutoRenameToMajorityName
+			|| bOldDownloadInspectorAutoRenameToMajorityNameForNewDownloadsOnly != m_bDownloadInspectorAutoRenameToMajorityNameForNewDownloadsOnly
+			|| thePrefs.GetDownloadInspectorAutoRenameToMajorityNameRequiredPercent() != m_iDownloadInspectorAutoRenameToMajorityNameRequiredPercent
+			|| thePrefs.GetDownloadInspectorAutoRenameToMajorityNameMinimumVotes() != m_iDownloadInspectorAutoRenameToMajorityNameMinimumVotes;
 
 		thePrefs.SetDownloadInspector(m_iDownloadInspector);
 	thePrefs.SetDownloadInspectorFake(m_bDownloadInspectorFake);
 	thePrefs.SetDownloadInspectorDRM(m_bDownloadInspectorDRM);
 	thePrefs.m_bDownloadInspectorInvalidExt = m_bDownloadInspectorInvalidExt;
 	thePrefs.SetDownloadInspectorAutoRenameToMajorityName(m_bDownloadInspectorAutoRenameToMajorityName);
+	thePrefs.SetDownloadInspectorAutoRenameToMajorityNameForNewDownloadsOnly(m_bDownloadInspectorAutoRenameToMajorityNameForNewDownloadsOnly);
+	thePrefs.SetDownloadInspectorAutoRenameToMajorityNameRequiredPercent(m_iDownloadInspectorAutoRenameToMajorityNameRequiredPercent);
+	thePrefs.SetDownloadInspectorAutoRenameToMajorityNameMinimumVotes(m_iDownloadInspectorAutoRenameToMajorityNameMinimumVotes);
 	thePrefs.SetDownloadInspectorAutoDeleteEnabled(m_bDownloadInspectorAutoDeleteEnabled);
 	thePrefs.SetDownloadInspectorAutoDeleteAddedBeforeEnabled(m_bDownloadInspectorAutoDeleteAddedBeforeEnabled);
 	thePrefs.SetDownloadInspectorAutoDeleteAddedBeforeDays(m_iDownloadInspectorAutoDeleteAddedBeforeDays);
@@ -1602,12 +1980,24 @@ BOOL CPPgMod::OnApply()
 	thePrefs.SetDownloadInspectorCompressionThreshold(m_iDownloadInspectorCompressionThreshold);
 	thePrefs.SetDownloadInspectorBypassZeroPercentage(m_bDownloadInspectorBypassZeroPercentage);
 	thePrefs.SetDownloadInspectorCompressionThresholdToBypassZero(m_iDownloadInspectorCompressionThresholdToBypassZero);
+		if (bDownloadInspectorAutoRenameSettingsChanged && theApp.downloadqueue != NULL) {
+			for (POSITION pos = theApp.downloadqueue->filelist.GetHeadPosition(); pos != NULL;) {
+				CPartFile* pPartFile = theApp.downloadqueue->filelist.GetNext(pos);
+				if (pPartFile != NULL)
+					pPartFile->RefreshAutoRenameToMajorityNamePolicy(bOldDownloadInspectorAutoRenameToMajorityName, bOldDownloadInspectorAutoRenameToMajorityNameForNewDownloadsOnly);
+			}
+		}
 		if (bDownloadInspectorAutoDeleteSettingsChanged && theApp.emuledlg != NULL && theApp.emuledlg->transferwnd != NULL && theApp.emuledlg->transferwnd->GetDownloadList() != NULL)
 			theApp.emuledlg->transferwnd->GetDownloadList()->ResetDownloadInspectorAutoDeleteState();
 
 	thePrefs.SetGroupKnownAtTheBottom(m_bGroupKnownAtTheBottom);
 	thePrefs.SetSpamThreshold(m_iSpamThreshold);
+	thePrefs.SetEd2kSearchMaxResults(m_iEd2kSearchMaxResults);
+	thePrefs.SetEd2kSearchMaxMoreRequests(m_iEd2kSearchMaxMoreRequests);
+	thePrefs.SetKadFileSearchTotal(m_iKadFileSearchTotal);
 	thePrefs.SetKadSearchKeywordTotal(m_iKadSearchKeywordTotal);
+	thePrefs.SetKadFileSearchLifetime(m_iKadFileSearchLifetime);
+	thePrefs.SetKadSearchKeywordLifetime(m_iKadSearchKeywordLifetime);
 	thePrefs.SetShowCloseButtonOnSearchTabs(m_bShowCloseButtonOnSearchTabs);
 	theApp.emuledlg->searchwnd->m_pwndResults->searchselect.m_bShowCloseButton = m_bShowCloseButtonOnSearchTabs;
 
@@ -1637,7 +2027,7 @@ BOOL CPPgMod::OnApply()
 		if (was != m_bAutoShareSubdirs) {
 			CemuleDlg* pDlg = theApp.emuledlg;
 			if (pDlg && pDlg->sharedfileswnd && ::IsWindow(pDlg->sharedfileswnd->m_hWnd))
-				::PostMessage(pDlg->sharedfileswnd->m_hWnd, UM_AUTO_RELOAD_SHARED_FILES, 1, 0);
+				pDlg->sharedfileswnd->PostAutoReloadSharedFilesAsync(1);
 		}
 	}
 	if (thePrefs.GetDontShareExtensions() != m_bDontShareExtensions) {
@@ -1689,6 +2079,24 @@ BOOL CPPgMod::OnApply()
 		thePrefs.SetSharePermissionColorRows(m_bSharePermissionColorRows);
 		bReloadSharedFilesCtrl = true;
 	}
+	thePrefs.SetHighBandwidthUploadPolicy(m_bHighBandwidthUploadPolicy);
+	if (static_cast<int>(thePrefs.GetHighBandwidthTargetUploadClients()) != m_iHighBandwidthTargetUploadClients)
+		thePrefs.SetHighBandwidthTargetUploadClients(static_cast<uint32>(m_iHighBandwidthTargetUploadClients));
+	if (static_cast<int>(thePrefs.GetHighBandwidthUploadSlotElasticPercent()) != m_iHighBandwidthUploadSlotElasticPercent)
+		thePrefs.SetHighBandwidthUploadSlotElasticPercent(static_cast<uint32>(m_iHighBandwidthUploadSlotElasticPercent));
+	thePrefs.SetAutoHighBandwidthDownloadBuffer(m_bAutoHighBandwidthDownloadBuffer);
+	thePrefs.SetHighBandwidthSlowUploadThresholdFactor(fHighBandwidthSlowUploadThresholdFactor);
+	thePrefs.SetHighBandwidthSlowUploadGraceSeconds(static_cast<UINT>(m_iHighBandwidthSlowUploadGraceSeconds));
+	thePrefs.SetHighBandwidthSlowUploadWarmupSeconds(static_cast<UINT>(m_iHighBandwidthSlowUploadWarmupSeconds));
+	thePrefs.SetHighBandwidthZeroUploadGraceSeconds(static_cast<UINT>(m_iHighBandwidthZeroUploadGraceSeconds));
+	thePrefs.SetHighBandwidthSlowUploadCooldownSeconds(static_cast<UINT>(m_iHighBandwidthSlowUploadCooldownSeconds));
+	thePrefs.SetLowRatioQueueScoreBoost(m_bLowRatioQueueScoreBoost);
+	thePrefs.SetLowRatioQueueScoreThreshold(fLowRatioQueueScoreThreshold);
+	thePrefs.SetLowRatioQueueScoreBonus(static_cast<UINT>(m_iLowRatioQueueScoreBonus));
+	thePrefs.SetUploadSessionTransferLimitMode(static_cast<ESessionTransferLimitMode>(m_iUploadSessionTransferLimitMode));
+	thePrefs.SetUploadSessionTransferLimitPercent(static_cast<UINT>(m_iUploadSessionTransferLimitPercent));
+	thePrefs.SetUploadSessionTransferLimitMiB(static_cast<UINT>(m_iUploadSessionTransferLimitMiB));
+	thePrefs.SetUploadSessionTimeLimitSeconds(static_cast<UINT>(m_iUploadSessionTimeLimitSeconds));
 	thePrefs.SetAdjustNTFSDaylightFileTime(m_bAdjustNTFSDaylightFileTime); // Official preference
 	thePrefs.SetAllowDSTTimeTolerance(m_bAllowDSTTimeTolerance);
 	if (bRefreshShareManagement && theApp.sharedfiles != NULL) {
@@ -1711,7 +2119,7 @@ BOOL CPPgMod::OnApply()
 		CemuleDlg* pDlg = theApp.emuledlg;
 		if (pDlg && pDlg->sharedfileswnd && ::IsWindow(pDlg->sharedfileswnd->m_hWnd)) {
 			pDlg->sharedfileswnd->sharedfilesctrl.ReloadList(false, LSF_SELECTION);
-			pDlg->sharedfileswnd->sharedfilesctrl.UpdateWindow();
+			pDlg->sharedfileswnd->sharedfilesctrl.Invalidate(FALSE);
 		}
 	}
 
@@ -1802,7 +2210,6 @@ BOOL CPPgMod::OnApply()
 	thePrefs.m_bupdatequeuelist = !m_bUpdateQueue;
 	thePrefs.dontRecreateGraphs = m_bRepaint;
 	thePrefs.m_bShowUpDownIconInTaskbar = m_bShowUpDownIconInTaskbar;
-	thePrefs.m_bForceSpeedsToKB = m_bForceSpeedsToKB;
 	thePrefs.iMaxLogBuff = iMaxLogBuff * 1024;
 	thePrefs.m_iLogFileFormat = (ELogFileFormat)m_iLogFileFormat;
 	thePrefs.m_strDateTimeFormat4Log = m_strDateTimeFormat4Log;
@@ -1919,31 +2326,86 @@ void CPPgMod::Localize()
 		LocalizeEditLabel(m_htiUITweaksKadSearchSortHistory, _T("UI_TWEAKS_MAX_SORT_KADSEARCH"));
 		LocalizeItemInfoText(m_htiUITweaksKadSearchSortHistory, _T("UI_TWEAKS_MAX_SORT_INFO"));
 
-		LocalizeItemText(m_htiGeoLite2, _T("GEOLITE2_MAIN"));
-		LocalizeItemInfoText(m_htiGeoLite2, _T("GEOLITE2_MAIN_INFO"));
-		LocalizeItemText(m_htiGeoLite2NameDisable, _T("GEOLITE2_DISABLED"));
-		LocalizeItemInfoText(m_htiGeoLite2NameDisable, _T("GEOLITE2_DISABLED_INFO"));
-		LocalizeItemText(m_htiGeoLite2CountryCode, _T("GEOLITE2_COUNTRYCODE"));
-		LocalizeItemInfoText(m_htiGeoLite2CountryCode, _T("GEOLITE2_COUNTRYCODE_INFO"));
-		LocalizeItemText(m_htiGeoLite2Country, _T("GEOLITE2_COUNTRY"));
-		LocalizeItemInfoText(m_htiGeoLite2Country, _T("GEOLITE2_COUNTRY_INFO"));
-		LocalizeItemText(m_htiGeoLite2CountryCity, _T("GEOLITE2_COUNTRYCITY"));
-		LocalizeItemInfoText(m_htiGeoLite2CountryCity, _T("GEOLITE2_COUNTRYCITY_INFO"));
-		LocalizeItemText(m_htiGeoLite2ShowFlag, _T("GEOLITE2_FLAGS"));
-		LocalizeItemInfoText(m_htiGeoLite2ShowFlag, _T("GEOLITE2_FLAGS_INFO"));
+		LocalizeItemText(m_htiIPGeolocation, _T("IPGEOLOCATION_MAIN"));
+		LocalizeItemInfoText(m_htiIPGeolocation, _T("IPGEOLOCATION_MAIN_INFO"));
+		LocalizeItemText(m_htiIPGeolocationNameDisable, _T("IPGEOLOCATION_DISABLED"));
+		LocalizeItemInfoText(m_htiIPGeolocationNameDisable, _T("IPGEOLOCATION_DISABLED_INFO"));
+		LocalizeItemText(m_htiIPGeolocationCountryCode, _T("IPGEOLOCATION_COUNTRYCODE"));
+		LocalizeItemInfoText(m_htiIPGeolocationCountryCode, _T("IPGEOLOCATION_COUNTRYCODE_INFO"));
+		LocalizeItemText(m_htiIPGeolocationCountry, _T("IPGEOLOCATION_COUNTRY"));
+		LocalizeItemInfoText(m_htiIPGeolocationCountry, _T("IPGEOLOCATION_COUNTRY_INFO"));
+		LocalizeItemText(m_htiIPGeolocationCountryCity, _T("IPGEOLOCATION_COUNTRYCITY"));
+		LocalizeItemInfoText(m_htiIPGeolocationCountryCity, _T("IPGEOLOCATION_COUNTRYCITY_INFO"));
+		LocalizeItemText(m_htiIPGeolocationShowFlag, _T("IPGEOLOCATION_FLAGS"));
+		LocalizeItemInfoText(m_htiIPGeolocationShowFlag, _T("IPGEOLOCATION_FLAGS_INFO"));
+		LocalizeItemText(m_htiIPGeolocationAutoUpdate, _T("AUTO_UPDATE"));
+		LocalizeItemInfoText(m_htiIPGeolocationAutoUpdate, _T("IPGEOLOCATION_AUTO_UPDATE_INFO"));
+		LocalizeEditLabel(m_htiIPGeolocationUpdateURL, _T("IPGEOLOCATION_UPDATE_URL"));
+		LocalizeItemInfoText(m_htiIPGeolocationUpdateURL, _T("IPGEOLOCATION_UPDATE_URL_INFO"));
+		LocalizeEditLabel(m_htiIPGeolocationPeriodDays, _T("IPGEOLOCATION_PERIOD_DAYS"));
+		LocalizeItemInfoText(m_htiIPGeolocationPeriodDays, _T("IPGEOLOCATION_PERIOD_DAYS_INFO"));
+		LocalizeItemText(m_htiIPGeolocationUpdateNow, _T("IPGEOLOCATION_UPDATE_NOW"));
+		LocalizeItemInfoText(m_htiIPGeolocationUpdateNow, _T("IPGEOLOCATION_UPDATE_NOW_INFO"));
 
 		LocalizeItemText(m_htiConTweaks, _T("CON_TWEAKS"));
 		LocalizeItemInfoText(m_htiConTweaks, _T("CON_TWEAKS_INFO"));
+
+		LocalizeItemText(m_htiUploadSettings, _T("UPLOAD_SETTINGS"));
+		LocalizeItemInfoText(m_htiUploadSettings, _T("UPLOAD_SETTINGS_INFO"));
+		LocalizeItemText(m_htiHighBandwidthUploadPolicy, _T("HIGH_BANDWIDTH_UPLOAD_POLICY"));
+		LocalizeItemInfoText(m_htiHighBandwidthUploadPolicy, _T("HIGH_BANDWIDTH_UPLOAD_POLICY_INFO"));
+		LocalizeEditLabel(m_htiHighBandwidthTargetUploadClients, _T("HIGH_BANDWIDTH_TARGET_UPLOAD_CLIENTS"));
+		LocalizeItemInfoText(m_htiHighBandwidthTargetUploadClients, _T("HIGH_BANDWIDTH_TARGET_UPLOAD_CLIENTS_INFO"));
+		LocalizeEditLabel(m_htiHighBandwidthUploadSlotElasticPercent, _T("HIGH_BANDWIDTH_UPLOAD_SLOT_ELASTIC_PERCENT"));
+		LocalizeItemInfoText(m_htiHighBandwidthUploadSlotElasticPercent, _T("HIGH_BANDWIDTH_UPLOAD_SLOT_ELASTIC_PERCENT_INFO"));
+		LocalizeItemText(m_htiAutoHighBandwidthDownloadBuffer, _T("AUTO_HIGH_BANDWIDTH_DOWNLOAD_BUFFER"));
+		LocalizeItemInfoText(m_htiAutoHighBandwidthDownloadBuffer, _T("AUTO_HIGH_BANDWIDTH_DOWNLOAD_BUFFER_INFO"));
+		LocalizeEditLabel(m_htiHighBandwidthSlowUploadThresholdFactor, _T("HIGH_BANDWIDTH_SLOW_UPLOAD_THRESHOLD_FACTOR"));
+		LocalizeItemInfoText(m_htiHighBandwidthSlowUploadThresholdFactor, _T("HIGH_BANDWIDTH_SLOW_UPLOAD_THRESHOLD_FACTOR_INFO"));
+		LocalizeEditLabel(m_htiHighBandwidthSlowUploadGraceSeconds, _T("HIGH_BANDWIDTH_SLOW_UPLOAD_GRACE_SECONDS"));
+		LocalizeItemInfoText(m_htiHighBandwidthSlowUploadGraceSeconds, _T("HIGH_BANDWIDTH_SLOW_UPLOAD_GRACE_SECONDS_INFO"));
+		LocalizeEditLabel(m_htiHighBandwidthSlowUploadWarmupSeconds, _T("HIGH_BANDWIDTH_SLOW_UPLOAD_WARMUP_SECONDS"));
+		LocalizeItemInfoText(m_htiHighBandwidthSlowUploadWarmupSeconds, _T("HIGH_BANDWIDTH_SLOW_UPLOAD_WARMUP_SECONDS_INFO"));
+		LocalizeEditLabel(m_htiHighBandwidthZeroUploadGraceSeconds, _T("HIGH_BANDWIDTH_ZERO_UPLOAD_GRACE_SECONDS"));
+		LocalizeItemInfoText(m_htiHighBandwidthZeroUploadGraceSeconds, _T("HIGH_BANDWIDTH_ZERO_UPLOAD_GRACE_SECONDS_INFO"));
+		LocalizeEditLabel(m_htiHighBandwidthSlowUploadCooldownSeconds, _T("HIGH_BANDWIDTH_SLOW_UPLOAD_COOLDOWN_SECONDS"));
+		LocalizeItemInfoText(m_htiHighBandwidthSlowUploadCooldownSeconds, _T("HIGH_BANDWIDTH_SLOW_UPLOAD_COOLDOWN_SECONDS_INFO"));
+		LocalizeItemText(m_htiLowRatioQueueScoreBoost, _T("LOW_RATIO_QUEUE_SCORE_BOOST"));
+		LocalizeItemInfoText(m_htiLowRatioQueueScoreBoost, _T("LOW_RATIO_QUEUE_SCORE_BOOST_INFO"));
+		LocalizeEditLabel(m_htiLowRatioQueueScoreThreshold, _T("LOW_RATIO_QUEUE_SCORE_THRESHOLD"));
+		LocalizeItemInfoText(m_htiLowRatioQueueScoreThreshold, _T("LOW_RATIO_QUEUE_SCORE_THRESHOLD_INFO"));
+		LocalizeEditLabel(m_htiLowRatioQueueScoreBonus, _T("LOW_RATIO_QUEUE_SCORE_BONUS"));
+		LocalizeItemInfoText(m_htiLowRatioQueueScoreBonus, _T("LOW_RATIO_QUEUE_SCORE_BONUS_INFO"));
+		LocalizeItemText(m_htiUploadSessionTransferLimit, _T("UPLOAD_SESSION_TRANSFER_LIMIT"));
+		LocalizeItemInfoText(m_htiUploadSessionTransferLimit, _T("UPLOAD_SESSION_TRANSFER_LIMIT_INFO"));
+		LocalizeItemText(m_htiUploadSessionTransferLimitDisabled, _T("UPLOAD_SESSION_TRANSFER_LIMIT_DISABLED"));
+		LocalizeItemInfoText(m_htiUploadSessionTransferLimitDisabled, _T("UPLOAD_SESSION_TRANSFER_LIMIT_DISABLED_INFO"));
+		LocalizeItemText(m_htiUploadSessionTransferLimitPercent, _T("UPLOAD_SESSION_TRANSFER_LIMIT_PERCENT"));
+		LocalizeItemInfoText(m_htiUploadSessionTransferLimitPercent, _T("UPLOAD_SESSION_TRANSFER_LIMIT_PERCENT_INFO"));
+		LocalizeEditLabel(m_htiUploadSessionTransferLimitPercentValue, _T("UPLOAD_SESSION_TRANSFER_LIMIT_PERCENT_VALUE"));
+		LocalizeItemInfoText(m_htiUploadSessionTransferLimitPercentValue, _T("UPLOAD_SESSION_TRANSFER_LIMIT_PERCENT_VALUE_INFO"));
+		LocalizeItemText(m_htiUploadSessionTransferLimitMiB, _T("UPLOAD_SESSION_TRANSFER_LIMIT_MIB"));
+		LocalizeItemInfoText(m_htiUploadSessionTransferLimitMiB, _T("UPLOAD_SESSION_TRANSFER_LIMIT_MIB_INFO"));
+		LocalizeEditLabel(m_htiUploadSessionTransferLimitMiBValue, _T("UPLOAD_SESSION_TRANSFER_LIMIT_MIB_VALUE"));
+		LocalizeItemInfoText(m_htiUploadSessionTransferLimitMiBValue, _T("UPLOAD_SESSION_TRANSFER_LIMIT_MIB_VALUE_INFO"));
+		LocalizeEditLabel(m_htiUploadSessionTimeLimitSeconds, _T("UPLOAD_SESSION_TIME_LIMIT_SECONDS"));
+		LocalizeItemInfoText(m_htiUploadSessionTimeLimitSeconds, _T("UPLOAD_SESSION_TIME_LIMIT_SECONDS_INFO"));
 
 		LocalizeItemText(m_htiConnectionChecker, _T("CONNECTION_CHECK"));
 		LocalizeItemInfoText(m_htiConnectionChecker, _T("CONNECTION_CHECK_INFO"));
 		LocalizeItemText(m_htiConnectionCheckerActivate, _T("CONNECTION_CHECK_ACTIVATE"));
 		LocalizeItemInfoText(m_htiConnectionCheckerActivate, _T("CONNECTION_CHECK_ACTIVATE_INFO"));
-		LocalizeEditLabel(m_htiConnectionCheckerServer, _T("CONNECTION_CHECK_SERVER"));
+		LocalizeEditLabel(m_htiConnectionCheckerServer, _T("URL_ADDR"));
 		LocalizeItemInfoText(m_htiConnectionCheckerServer, _T("CONNECTION_CHECK_SERVER_INFO"));
 		
 		LocalizeItemText(m_htiEnableNatTraversal, _T("ENABLE_NATT"));
 		LocalizeItemInfoText(m_htiEnableNatTraversal, _T("ENABLE_NATT_INFO"));
+		LocalizeItemText(m_htiNatTraversalProtocol, _T("NATT_TRANSFER_PROTOCOL"));
+		LocalizeItemInfoText(m_htiNatTraversalProtocol, _T("NATT_TRANSFER_PROTOCOL_INFO"));
+		LocalizeItemText(m_htiNatTraversalProtocolPreferQuic, _T("NATT_PROTOCOL_PREFER_QUIC"));
+		LocalizeItemInfoText(m_htiNatTraversalProtocolPreferQuic, _T("NATT_PROTOCOL_PREFER_QUIC_INFO"));
+		LocalizeItemText(m_htiNatTraversalProtocolUtpOnly, _T("NATT_PROTOCOL_UTP_ONLY"));
+		LocalizeItemInfoText(m_htiNatTraversalProtocolUtpOnly, _T("NATT_PROTOCOL_UTP_ONLY_INFO"));
 
 		LocalizeEditLabel(m_htiNatTraversalPortWindow, _T("NATT_PORT_WINDOW"));
 		LocalizeItemInfoText(m_htiNatTraversalPortWindow, _T("NATT_PORT_WINDOW_INFO"));
@@ -1974,42 +2436,54 @@ void CPPgMod::Localize()
 		LocalizeEditLabel(m_htiReAskFileSrc, _T("REASK_FILE_SRC"));
 		LocalizeItemInfoText(m_htiReAskFileSrc, _T("REASK_FILE_SRC_INFO"));
 
-		LocalizeItemText(m_htiDownloadChecker, _T("DOWNLOAD_CHECK"));
-		LocalizeItemInfoText(m_htiDownloadChecker, _T("DOWNLOAD_CHECK_INFO"));
-		LocalizeItemText(m_htiDownloadCheckerPassive, _T("DOWNLOAD_CHECK_PASSIVE"));
-		LocalizeItemInfoText(m_htiDownloadCheckerPassive, _T("DOWNLOAD_CHECK_PASSIVE_INFO"));
-		LocalizeItemText(m_htiDownloadCheckerAlwaysAsk, _T("DOWNLOAD_CHECK_ALWAYS_ASK"));
-		LocalizeItemInfoText(m_htiDownloadCheckerAlwaysAsk, _T("DOWNLOAD_CHECK_ALWAYS_ASK_INFO"));
-		LocalizeItemText(m_htiDownloadCheckerReject, _T("DOWNLOAD_CHECK_REJECT"));
-		LocalizeItemInfoText(m_htiDownloadCheckerReject, _T("DOWNLOAD_CHECK_REJECT_INFO"));
-		LocalizeItemText(m_htiDownloadCheckerAccept, _T("DOWNLOAD_CHECK_ACCEPT"));
-		LocalizeItemInfoText(m_htiDownloadCheckerAccept, _T("DOWNLOAD_CHECK_ACCEPT_INFO"));
-		LocalizeEditLabel(m_htiDownloadCheckerAcceptPercentage, _T("DOWNLOAD_CHECK_ACCEPT_PERCENTAGE"));
-		LocalizeItemInfoText(m_htiDownloadCheckerAcceptPercentage, _T("DOWNLOAD_CHECK_ACCEPT_PERCENTAGE_INFO"));
-		LocalizeItemText(m_htiDownloadCheckerRejectCanceled, _T("DOWNLOAD_CHECK_REJECT_CANCELED"));
-		LocalizeItemInfoText(m_htiDownloadCheckerRejectCanceled, _T("DOWNLOAD_CHECK_REJECT_CANCELED_INFO"));
-		LocalizeItemText(m_htiDownloadCheckerRejectSameHash, _T("DOWNLOAD_CHECK_REJECT_SAME_HASH"));
-		LocalizeItemInfoText(m_htiDownloadCheckerRejectSameHash, _T("DOWNLOAD_CHECK_REJECT_SAME_HASH_INFO"));
-		LocalizeItemText(m_htiDownloadCheckerRejectBlacklisted, _T("DOWNLOAD_CHECK_REJECT_BLACKLISTED"));
-		LocalizeItemInfoText(m_htiDownloadCheckerRejectBlacklisted, _T("DOWNLOAD_CHECK_REJECT_BLACKLISTED_INFO"));
-		LocalizeItemText(m_htiDownloadCheckerCaseInsensitive, _T("DOWNLOAD_CHECK_CASE_INSENSITIVE"));
-		LocalizeItemInfoText(m_htiDownloadCheckerCaseInsensitive, _T("DOWNLOAD_CHECK_CASE_INSENSITIVE_INFO"));
-		LocalizeItemText(m_htiDownloadCheckerIgnoreExtension, _T("DOWNLOAD_CHECK_IGNORE_EXTENSION"));
-		LocalizeItemInfoText(m_htiDownloadCheckerIgnoreExtension, _T("DOWNLOAD_CHECK_IGNORE_EXTENSION_INFO"));
-		LocalizeItemText(m_htiDownloadCheckerIgnoreTags, _T("DOWNLOAD_CHECK_IGNORE_TAGS"));
-		LocalizeItemInfoText(m_htiDownloadCheckerIgnoreTags, _T("DOWNLOAD_CHECK_IGNORE_TAGS_INFO"));
-		LocalizeItemText(m_htiDownloadCheckerDontIgnoreNumericTags, _T("DOWNLOAD_CHECK_DONT_IGNORE_NUMERIC_TAGS"));
-		LocalizeItemInfoText(m_htiDownloadCheckerDontIgnoreNumericTags, _T("DOWNLOAD_CHECK_DONT_IGNORE_NUMERIC_TAGS_INFO"));
-		LocalizeItemText(m_htiDownloadCheckerIgnoreNonAlphaNumeric, _T("DOWNLOAD_CHECK_IGNORE_NON_ALPHANUMERIC"));
-		LocalizeItemInfoText(m_htiDownloadCheckerIgnoreNonAlphaNumeric, _T("DOWNLOAD_CHECK_IGNORE_NON_ALPHANUMERIC_INFO"));
-		LocalizeEditLabel(m_htiDownloadCheckerMinimumComparisonLength, _T("DOWNLOAD_CHECK_MINIMUM_COMPARISON_LENGTH"));
-		LocalizeItemInfoText(m_htiDownloadCheckerMinimumComparisonLength, _T("DOWNLOAD_CHECK_MINIMUM_COMPARISON_LENGTH_INFO"));
-		LocalizeItemText(m_htiDownloadCheckerSkipIncompleteFileConfirmation, _T("DOWNLOAD_CHECK_SKIP_INCOMPLETE_CONFIRMATION"));
-		LocalizeItemInfoText(m_htiDownloadCheckerSkipIncompleteFileConfirmation, _T("DOWNLOAD_CHECK_SKIP_INCOMPLETE_CONFIRMATION_INFO"));
-		LocalizeItemText(m_htiDownloadCheckerMarkAsBlacklisted, _T("DOWNLOAD_CHECK_MARK_AS_BLACKLISTED"));
-		LocalizeItemInfoText(m_htiDownloadCheckerMarkAsBlacklisted, _T("DOWNLOAD_CHECK_MARK_AS_BLACKLISTED_INFO"));
-		LocalizeItemText(m_htiDownloadCheckerAutoMarkAsBlacklisted, _T("DOWNLOAD_CHECK_AUTO_MARK_AS_BLACKLISTED"));
-		LocalizeItemInfoText(m_htiDownloadCheckerAutoMarkAsBlacklisted, _T("DOWNLOAD_CHECK_AUTO_MARK_AS_BLACKLISTED_INFO"));
+		LocalizeItemText(m_htiDownloadValidator, _T("DOWNLOAD_VALIDATOR"));
+		LocalizeItemInfoText(m_htiDownloadValidator, _T("DOWNLOAD_VALIDATOR_INFO"));
+		LocalizeItemText(m_htiDownloadValidatorPassive, _T("DOWNLOAD_VALIDATOR_PASSIVE"));
+		LocalizeItemInfoText(m_htiDownloadValidatorPassive, _T("DOWNLOAD_VALIDATOR_PASSIVE_INFO"));
+		LocalizeItemText(m_htiDownloadValidatorAlwaysAsk, _T("DOWNLOAD_VALIDATOR_ALWAYS_ASK"));
+		LocalizeItemInfoText(m_htiDownloadValidatorAlwaysAsk, _T("DOWNLOAD_VALIDATOR_ALWAYS_ASK_INFO"));
+		LocalizeItemText(m_htiDownloadValidatorReject, _T("DOWNLOAD_VALIDATOR_REJECT"));
+		LocalizeItemInfoText(m_htiDownloadValidatorReject, _T("DOWNLOAD_VALIDATOR_REJECT_INFO"));
+		LocalizeItemText(m_htiDownloadValidatorAccept, _T("DOWNLOAD_VALIDATOR_ACCEPT"));
+		LocalizeItemInfoText(m_htiDownloadValidatorAccept, _T("DOWNLOAD_VALIDATOR_ACCEPT_INFO"));
+		LocalizeEditLabel(m_htiDownloadValidatorAcceptPercentage, _T("DOWNLOAD_VALIDATOR_ACCEPT_PERCENTAGE"));
+		LocalizeItemInfoText(m_htiDownloadValidatorAcceptPercentage, _T("DOWNLOAD_VALIDATOR_ACCEPT_PERCENTAGE_INFO"));
+		LocalizeItemText(m_htiDownloadValidatorRejectCanceled, _T("DOWNLOAD_VALIDATOR_REJECT_CANCELED"));
+		LocalizeItemInfoText(m_htiDownloadValidatorRejectCanceled, _T("DOWNLOAD_VALIDATOR_REJECT_CANCELED_INFO"));
+		LocalizeItemText(m_htiDownloadValidatorRejectSameHash, _T("DOWNLOAD_VALIDATOR_REJECT_SAME_HASH"));
+		LocalizeItemInfoText(m_htiDownloadValidatorRejectSameHash, _T("DOWNLOAD_VALIDATOR_REJECT_SAME_HASH_INFO"));
+		LocalizeItemText(m_htiDownloadValidatorRejectBlacklisted, _T("DOWNLOAD_VALIDATOR_REJECT_BLACKLISTED"));
+		LocalizeItemInfoText(m_htiDownloadValidatorRejectBlacklisted, _T("DOWNLOAD_VALIDATOR_REJECT_BLACKLISTED_INFO"));
+		LocalizeItemText(m_htiDownloadValidatorCaseInsensitive, _T("DOWNLOAD_VALIDATOR_CASE_INSENSITIVE"));
+		LocalizeItemInfoText(m_htiDownloadValidatorCaseInsensitive, _T("DOWNLOAD_VALIDATOR_CASE_INSENSITIVE_INFO"));
+		LocalizeItemText(m_htiDownloadValidatorIgnoreExtension, _T("DOWNLOAD_VALIDATOR_IGNORE_EXTENSION"));
+		LocalizeItemInfoText(m_htiDownloadValidatorIgnoreExtension, _T("DOWNLOAD_VALIDATOR_IGNORE_EXTENSION_INFO"));
+		LocalizeItemText(m_htiDownloadValidatorIgnoreTags, _T("DOWNLOAD_VALIDATOR_IGNORE_TAGS"));
+		LocalizeItemInfoText(m_htiDownloadValidatorIgnoreTags, _T("DOWNLOAD_VALIDATOR_IGNORE_TAGS_INFO"));
+		LocalizeItemText(m_htiDownloadValidatorDontIgnoreNumericTags, _T("DOWNLOAD_VALIDATOR_DONT_IGNORE_NUMERIC_TAGS"));
+		LocalizeItemInfoText(m_htiDownloadValidatorDontIgnoreNumericTags, _T("DOWNLOAD_VALIDATOR_DONT_IGNORE_NUMERIC_TAGS_INFO"));
+		LocalizeItemText(m_htiDownloadValidatorIgnoreNonAlphaNumeric, _T("DOWNLOAD_VALIDATOR_IGNORE_NON_ALPHANUMERIC"));
+		LocalizeItemInfoText(m_htiDownloadValidatorIgnoreNonAlphaNumeric, _T("DOWNLOAD_VALIDATOR_IGNORE_NON_ALPHANUMERIC_INFO"));
+		LocalizeEditLabel(m_htiDownloadValidatorMinimumComparisonLength, _T("DOWNLOAD_VALIDATOR_MINIMUM_COMPARISON_LENGTH"));
+		LocalizeItemInfoText(m_htiDownloadValidatorMinimumComparisonLength, _T("DOWNLOAD_VALIDATOR_MINIMUM_COMPARISON_LENGTH_INFO"));
+		LocalizeItemText(m_htiDownloadValidatorDateTimeMatching, _T("DOWNLOAD_VALIDATOR_DATETIME_MATCHING"));
+		LocalizeItemInfoText(m_htiDownloadValidatorDateTimeMatching, _T("DOWNLOAD_VALIDATOR_DATETIME_MATCHING_INFO"));
+		LocalizeItemText(m_htiDownloadValidatorDateTimeUseYearRange, _T("DOWNLOAD_VALIDATOR_DATETIME_USE_YEAR_RANGE"));
+		LocalizeItemInfoText(m_htiDownloadValidatorDateTimeUseYearRange, _T("DOWNLOAD_VALIDATOR_DATETIME_USE_YEAR_RANGE_INFO"));
+		LocalizeEditLabel(m_htiDownloadValidatorDateTimeYearStart, _T("DOWNLOAD_VALIDATOR_DATETIME_YEAR_START"));
+		LocalizeItemInfoText(m_htiDownloadValidatorDateTimeYearStart, _T("DOWNLOAD_VALIDATOR_DATETIME_YEAR_START_INFO"));
+		LocalizeEditLabel(m_htiDownloadValidatorDateTimeYearEnd, _T("DOWNLOAD_VALIDATOR_DATETIME_YEAR_END"));
+		LocalizeItemInfoText(m_htiDownloadValidatorDateTimeYearEnd, _T("DOWNLOAD_VALIDATOR_DATETIME_YEAR_END_INFO"));
+		LocalizeItemText(m_htiDownloadValidatorDateTimeCheckSeconds, _T("DOWNLOAD_VALIDATOR_DATETIME_CHECK_SECONDS"));
+		LocalizeItemInfoText(m_htiDownloadValidatorDateTimeCheckSeconds, _T("DOWNLOAD_VALIDATOR_DATETIME_CHECK_SECONDS_INFO"));
+		LocalizeItemText(m_htiDownloadValidatorDateTimeIncludeFollowingNumericValues, _T("DOWNLOAD_VALIDATOR_DATETIME_INCLUDE_FOLLOWING_NUMERIC_VALUES"));
+		LocalizeItemInfoText(m_htiDownloadValidatorDateTimeIncludeFollowingNumericValues, _T("DOWNLOAD_VALIDATOR_DATETIME_INCLUDE_FOLLOWING_NUMERIC_VALUES_INFO"));
+		LocalizeItemText(m_htiDownloadValidatorSkipIncompleteFileConfirmation, _T("DOWNLOAD_VALIDATOR_SKIP_INCOMPLETE_CONFIRMATION"));
+		LocalizeItemInfoText(m_htiDownloadValidatorSkipIncompleteFileConfirmation, _T("DOWNLOAD_VALIDATOR_SKIP_INCOMPLETE_CONFIRMATION_INFO"));
+		LocalizeItemText(m_htiDownloadValidatorMarkAsBlacklisted, _T("DOWNLOAD_VALIDATOR_MARK_AS_BLACKLISTED"));
+		LocalizeItemInfoText(m_htiDownloadValidatorMarkAsBlacklisted, _T("DOWNLOAD_VALIDATOR_MARK_AS_BLACKLISTED_INFO"));
+		LocalizeItemText(m_htiDownloadValidatorAutoMarkAsBlacklisted, _T("DOWNLOAD_VALIDATOR_AUTO_MARK_AS_BLACKLISTED"));
+		LocalizeItemInfoText(m_htiDownloadValidatorAutoMarkAsBlacklisted, _T("DOWNLOAD_VALIDATOR_AUTO_MARK_AS_BLACKLISTED_INFO"));
 
 		LocalizeItemText(m_htiDownloadInspector, _T("DOWNLOAD_INSPECTOR"));
 		LocalizeItemInfoText(m_htiDownloadInspector, _T("DOWNLOAD_INSPECTOR_INFO"));
@@ -2027,6 +2501,12 @@ void CPPgMod::Localize()
 		LocalizeItemInfoText(m_htiDownloadInspectorInvalidExt, _T("REPLACE_INVALID_FILE_EXTENSION_INFO"));
 		LocalizeItemText(m_htiDownloadInspectorAutoRenameToMajorityName, _T("DOWNLOAD_INSPECTOR_AUTO_RENAME_TO_MAJORITY_NAME"));
 		LocalizeItemInfoText(m_htiDownloadInspectorAutoRenameToMajorityName, _T("DOWNLOAD_INSPECTOR_AUTO_RENAME_TO_MAJORITY_NAME_INFO"));
+		LocalizeItemText(m_htiDownloadInspectorAutoRenameToMajorityNameForNewDownloadsOnly, _T("DOWNLOAD_INSPECTOR_AUTO_RENAME_TO_MAJORITY_NAME_NEW_DOWNLOADS_ONLY"));
+		LocalizeItemInfoText(m_htiDownloadInspectorAutoRenameToMajorityNameForNewDownloadsOnly, _T("DOWNLOAD_INSPECTOR_AUTO_RENAME_TO_MAJORITY_NAME_NEW_DOWNLOADS_ONLY_INFO"));
+		LocalizeEditLabel(m_htiDownloadInspectorAutoRenameToMajorityNameRequiredPercent, _T("PERCENT_THRESHOLD"));
+		LocalizeItemInfoText(m_htiDownloadInspectorAutoRenameToMajorityNameRequiredPercent, _T("DOWNLOAD_INSPECTOR_AUTO_RENAME_TO_MAJORITY_NAME_REQUIRED_PERCENT_THRESHOLD_INFO"));
+		LocalizeEditLabel(m_htiDownloadInspectorAutoRenameToMajorityNameMinimumVotes, _T("DOWNLOAD_INSPECTOR_AUTO_RENAME_TO_MAJORITY_NAME_MINIMUM_VOTES"));
+		LocalizeItemInfoText(m_htiDownloadInspectorAutoRenameToMajorityNameMinimumVotes, _T("DOWNLOAD_INSPECTOR_AUTO_RENAME_TO_MAJORITY_NAME_MINIMUM_VOTES_INFO"));
 		LocalizeItemText(m_htiDownloadInspectorAutoDelete, _T("DOWNLOAD_INSPECTOR_AUTO_DELETE"));
 		LocalizeItemInfoText(m_htiDownloadInspectorAutoDelete, _T("DOWNLOAD_INSPECTOR_AUTO_DELETE_INFO"));
 		LocalizeItemText(m_htiDownloadInspectorAutoDeleteAddedBefore, _T("DOWNLOAD_INSPECTOR_AUTO_DELETE_ADDED_BEFORE"));
@@ -2043,7 +2523,7 @@ void CPPgMod::Localize()
 		LocalizeItemInfoText(m_htiDownloadInspectorAutoDeleteLastReceivedBeforeDays, _T("DOWNLOAD_INSPECTOR_AUTO_DELETE_LAST_RECEIVED_BEFORE_INFO"));
 		LocalizeItemText(m_htiDownloadInspectorAutoDeleteDownloadedLessThanPercent, _T("DOWNLOAD_INSPECTOR_AUTO_DELETE_DOWNLOADED_LESS_THAN_PERCENT"));
 		LocalizeItemInfoText(m_htiDownloadInspectorAutoDeleteDownloadedLessThanPercent, _T("DOWNLOAD_INSPECTOR_AUTO_DELETE_DOWNLOADED_LESS_THAN_PERCENT_INFO"));
-		LocalizeEditLabel(m_htiDownloadInspectorAutoDeleteDownloadedLessThanPercentValue, _T("DOWNLOAD_INSPECTOR_AUTO_DELETE_PERCENT_THRESHOLD"));
+		LocalizeEditLabel(m_htiDownloadInspectorAutoDeleteDownloadedLessThanPercentValue, _T("PERCENT_THRESHOLD"));
 		LocalizeItemInfoText(m_htiDownloadInspectorAutoDeleteDownloadedLessThanPercentValue, _T("DOWNLOAD_INSPECTOR_AUTO_DELETE_DOWNLOADED_LESS_THAN_PERCENT_INFO"));
 		LocalizeItemText(m_htiDownloadInspectorAutoDeleteDownloadedLessThanMb, _T("DOWNLOAD_INSPECTOR_AUTO_DELETE_DOWNLOADED_LESS_THAN_MB"));
 		LocalizeItemInfoText(m_htiDownloadInspectorAutoDeleteDownloadedLessThanMb, _T("DOWNLOAD_INSPECTOR_AUTO_DELETE_DOWNLOADED_LESS_THAN_MB_INFO"));
@@ -2072,8 +2552,18 @@ void CPPgMod::Localize()
 		LocalizeItemInfoText(m_htiGroupKnownAtTheBottom, _T("GROUP_KNOWN_AT_THE_BOTTOM_INFO"));
 		LocalizeEditLabel(m_htiSpamThreshold, _T("SPAM_THRESHOLD"));
 		LocalizeItemInfoText(m_htiSpamThreshold, _T("SPAM_THRESHOLD_INFO"));
+		LocalizeEditLabel(m_htiEd2kSearchMaxResults, _T("ED2K_SEARCH_MAX_RESULTS"));
+		LocalizeItemInfoText(m_htiEd2kSearchMaxResults, _T("ED2K_SEARCH_MAX_RESULTS_INFO"));
+		LocalizeEditLabel(m_htiEd2kSearchMaxMoreRequests, _T("ED2K_SEARCH_MAX_MORE_REQUESTS"));
+		LocalizeItemInfoText(m_htiEd2kSearchMaxMoreRequests, _T("ED2K_SEARCH_MAX_MORE_REQUESTS_INFO"));
+		LocalizeEditLabel(m_htiKadFileSearchTotal, _T("KAD_FILE_SEARCH_TOTAL"));
+		LocalizeItemInfoText(m_htiKadFileSearchTotal, _T("KAD_FILE_SEARCH_TOTAL_INFO"));
 		LocalizeEditLabel(m_htiKadSearchKeywordTotal, _T("KAD_SEARCH_KEYWORD_TOTAL"));
 		LocalizeItemInfoText(m_htiKadSearchKeywordTotal, _T("KAD_SEARCH_KEYWORD_TOTAL_INFO"));
+		LocalizeEditLabel(m_htiKadFileSearchLifetime, _T("KAD_FILE_SEARCH_LIFETIME"));
+		LocalizeItemInfoText(m_htiKadFileSearchLifetime, _T("KAD_FILE_SEARCH_LIFETIME_INFO"));
+		LocalizeEditLabel(m_htiKadSearchKeywordLifetime, _T("KAD_SEARCH_KEYWORD_LIFETIME"));
+		LocalizeItemInfoText(m_htiKadSearchKeywordLifetime, _T("KAD_SEARCH_KEYWORD_LIFETIME_INFO"));
 		LocalizeItemText(m_htiShowCloseButtonOnSearchTabs, _T("SHOW_CLOSE_BUTTON_ON_SEARCH_TABS"));
 		LocalizeItemInfoText(m_htiShowCloseButtonOnSearchTabs, _T("SHOW_CLOSE_BUTTON_ON_SEARCH_TABS_INFO"));
 
@@ -2326,8 +2816,6 @@ void CPPgMod::Localize()
 		LocalizeItemText(m_htiShowUpDownIconInTaskbar, _T("SHOWUPDOWNICONINTASKBAR"));
 		LocalizeItemInfoText(m_htiShowUpDownIconInTaskbar, _T("SHOWUPDOWNICONINTASKBAR_INFO"));
 
-		LocalizeItemText(m_htiForceSpeedsToKB, _T("FORCESPEEDSTOKB"));
-		LocalizeItemInfoText(m_htiForceSpeedsToKB, _T("FORCESPEEDSTOKB_INFO"));
 
 		LocalizeItemText(m_htiLog, _T("SV_LOG"));
 		LocalizeItemInfoText(m_htiLog, _T("SV_LOG_INFO"));
@@ -2442,20 +2930,48 @@ void CPPgMod::OnDestroy()
 	m_htiUITweaksKadContactSortHistory = NULL;
 	m_htiUITweaksKadSearchSortHistory = NULL;
 
-	m_htiGeoLite2 = NULL;
-	m_htiGeoLite2NameDisable = NULL;
-	m_htiGeoLite2CountryCode = NULL;
-	m_htiGeoLite2Country = NULL;
-	m_htiGeoLite2CountryCity = NULL;
-	m_htiGeoLite2ShowFlag = NULL;
+	m_htiIPGeolocation = NULL;
+	m_htiIPGeolocationNameDisable = NULL;
+	m_htiIPGeolocationCountryCode = NULL;
+	m_htiIPGeolocationCountry = NULL;
+	m_htiIPGeolocationCountryCity = NULL;
+	m_htiIPGeolocationShowFlag = NULL;
+	m_htiIPGeolocationAutoUpdate = NULL;
+	m_htiIPGeolocationUpdateURL = NULL;
+	m_htiIPGeolocationUpdateNow = NULL;
+	m_htiIPGeolocationPeriodDays = NULL;
 
 	m_htiConTweaks = NULL;
+
+	m_htiUploadSettings = NULL;
+	m_htiHighBandwidthUploadPolicy = NULL;
+	m_htiHighBandwidthTargetUploadClients = NULL;
+	m_htiHighBandwidthUploadSlotElasticPercent = NULL;
+	m_htiAutoHighBandwidthDownloadBuffer = NULL;
+	m_htiHighBandwidthSlowUploadThresholdFactor = NULL;
+	m_htiHighBandwidthSlowUploadGraceSeconds = NULL;
+	m_htiHighBandwidthSlowUploadWarmupSeconds = NULL;
+	m_htiHighBandwidthZeroUploadGraceSeconds = NULL;
+	m_htiHighBandwidthSlowUploadCooldownSeconds = NULL;
+	m_htiLowRatioQueueScoreBoost = NULL;
+	m_htiLowRatioQueueScoreThreshold = NULL;
+	m_htiLowRatioQueueScoreBonus = NULL;
+	m_htiUploadSessionTransferLimit = NULL;
+	m_htiUploadSessionTransferLimitDisabled = NULL;
+	m_htiUploadSessionTransferLimitPercent = NULL;
+	m_htiUploadSessionTransferLimitPercentValue = NULL;
+	m_htiUploadSessionTransferLimitMiB = NULL;
+	m_htiUploadSessionTransferLimitMiBValue = NULL;
+	m_htiUploadSessionTimeLimitSeconds = NULL;
 
 	m_htiConnectionChecker = NULL;
 	m_htiConnectionCheckerActivate = NULL;
 	m_htiConnectionCheckerServer = NULL;
 	
 	m_htiEnableNatTraversal = NULL;
+	m_htiNatTraversalProtocol = NULL;
+	m_htiNatTraversalProtocolPreferQuic = NULL;
+	m_htiNatTraversalProtocolUtpOnly = NULL;
 	m_htiNatTraversalPortWindow = NULL;
 	m_htiNatTraversalSweepWindow = NULL;
 	m_htiNatTraversalJitterMinMs = NULL;
@@ -2470,24 +2986,30 @@ void CPPgMod::OnDestroy()
 
 	m_htiReAskFileSrc = NULL;
 
-	m_htiDownloadChecker = NULL;
-	m_htiDownloadCheckerPassive = NULL;
-	m_htiDownloadCheckerAlwaysAsk = NULL;
-	m_htiDownloadCheckerReject = NULL;
-	m_htiDownloadCheckerAccept = NULL;
-	m_htiDownloadCheckerAcceptPercentage = NULL;
-	m_htiDownloadCheckerRejectCanceled = NULL;
-	m_htiDownloadCheckerRejectSameHash = NULL;
-	m_htiDownloadCheckerRejectBlacklisted = NULL;
-	m_htiDownloadCheckerCaseInsensitive = NULL;
-	m_htiDownloadCheckerIgnoreExtension = NULL;
-	m_htiDownloadCheckerIgnoreTags = NULL;
-	m_htiDownloadCheckerDontIgnoreNumericTags = NULL;
-	m_htiDownloadCheckerIgnoreNonAlphaNumeric = NULL;
-	m_htiDownloadCheckerMinimumComparisonLength = NULL;
-	m_htiDownloadCheckerSkipIncompleteFileConfirmation = NULL;
-	m_htiDownloadCheckerMarkAsBlacklisted = NULL;
-	m_htiDownloadCheckerAutoMarkAsBlacklisted = NULL;
+	m_htiDownloadValidator = NULL;
+	m_htiDownloadValidatorPassive = NULL;
+	m_htiDownloadValidatorAlwaysAsk = NULL;
+	m_htiDownloadValidatorReject = NULL;
+	m_htiDownloadValidatorAccept = NULL;
+	m_htiDownloadValidatorAcceptPercentage = NULL;
+	m_htiDownloadValidatorRejectCanceled = NULL;
+	m_htiDownloadValidatorRejectSameHash = NULL;
+	m_htiDownloadValidatorRejectBlacklisted = NULL;
+	m_htiDownloadValidatorCaseInsensitive = NULL;
+	m_htiDownloadValidatorIgnoreExtension = NULL;
+	m_htiDownloadValidatorIgnoreTags = NULL;
+	m_htiDownloadValidatorDontIgnoreNumericTags = NULL;
+	m_htiDownloadValidatorIgnoreNonAlphaNumeric = NULL;
+	m_htiDownloadValidatorMinimumComparisonLength = NULL;
+	m_htiDownloadValidatorSkipIncompleteFileConfirmation = NULL;
+	m_htiDownloadValidatorMarkAsBlacklisted = NULL;
+	m_htiDownloadValidatorAutoMarkAsBlacklisted = NULL;
+	m_htiDownloadValidatorDateTimeMatching = NULL;
+	m_htiDownloadValidatorDateTimeUseYearRange = NULL;
+	m_htiDownloadValidatorDateTimeYearStart = NULL;
+	m_htiDownloadValidatorDateTimeYearEnd = NULL;
+	m_htiDownloadValidatorDateTimeCheckSeconds = NULL;
+	m_htiDownloadValidatorDateTimeIncludeFollowingNumericValues = NULL;
 
 	m_htiDownloadInspector = NULL;
 	m_htiDownloadInspectorDisable = NULL;
@@ -2497,6 +3019,9 @@ void CPPgMod::OnDestroy()
 	m_htiDownloadInspectorDRM = NULL;
 	m_htiDownloadInspectorInvalidExt = NULL;
 	m_htiDownloadInspectorAutoRenameToMajorityName = NULL;
+	m_htiDownloadInspectorAutoRenameToMajorityNameForNewDownloadsOnly = NULL;
+	m_htiDownloadInspectorAutoRenameToMajorityNameRequiredPercent = NULL;
+	m_htiDownloadInspectorAutoRenameToMajorityNameMinimumVotes = NULL;
 	m_htiDownloadInspectorAutoDelete = NULL;
 	m_htiDownloadInspectorAutoDeleteAddedBefore = NULL;
 	m_htiDownloadInspectorAutoDeleteAddedBeforeDays = NULL;
@@ -2521,6 +3046,9 @@ void CPPgMod::OnDestroy()
 	m_bDownloadInspectorDRM = NULL;
 	m_bDownloadInspectorInvalidExt = NULL;
 	m_bDownloadInspectorAutoRenameToMajorityName = NULL;
+	m_bDownloadInspectorAutoRenameToMajorityNameForNewDownloadsOnly = NULL;
+	m_iDownloadInspectorAutoRenameToMajorityNameRequiredPercent = NULL;
+	m_iDownloadInspectorAutoRenameToMajorityNameMinimumVotes = NULL;
 	m_bDownloadInspectorAutoDeleteEnabled = NULL;
 	m_bDownloadInspectorAutoDeleteAddedBeforeEnabled = NULL;
 	m_iDownloadInspectorAutoDeleteAddedBeforeDays = NULL;
@@ -2543,7 +3071,12 @@ void CPPgMod::OnDestroy()
 	m_htiSearchTweaksGroup = NULL;
 	m_htiGroupKnownAtTheBottom = NULL;
 	m_htiSpamThreshold = NULL;
+	m_htiEd2kSearchMaxResults = NULL;
+	m_htiEd2kSearchMaxMoreRequests = NULL;
+	m_htiKadFileSearchTotal = NULL;
 	m_htiKadSearchKeywordTotal = NULL;
+	m_htiKadFileSearchLifetime = NULL;
+	m_htiKadSearchKeywordLifetime = NULL;
 	m_htiShowCloseButtonOnSearchTabs = NULL;
 
 	m_htiServerTweaksGroup = NULL;
@@ -2649,7 +3182,6 @@ void CPPgMod::OnDestroy()
 	m_htiDebugSearchResultDetailLevel = NULL;
 	m_htiDisplay = NULL;
 	m_htiDontCompressAvi = NULL;
-	m_htiForceSpeedsToKB = NULL;
 	m_htiHighresTimer = NULL;
 	m_htiICH = NULL;
 	m_htiIconflashOnNewMessage = NULL;
@@ -2696,17 +3228,71 @@ LRESULT CPPgMod::OnTreeOptsCtrlNotify(WPARAM wParam, LPARAM lParam)
 {
 	if (wParam == IDC_MOD_OPTS) {
 		TREEOPTSCTRLNOTIFY *pton = (TREEOPTSCTRLNOTIFY*)lParam;
+		if (pton != NULL) {
+			if (pton->hItem == m_htiIPGeolocationUpdateNow) {
+				OnIPGeolocationUpdateNow();
+				return TRUE;
+			}
+			if (pton->hItem == m_htiNatTraversalProtocolPreferQuic || pton->hItem == m_htiNatTraversalProtocolUtpOnly)
+				UpdateNatTraversalProtocolUi();
+			if (pton->hItem == m_htiDownloadValidatorDateTimeMatching)
+				UpdateDownloadValidatorDateTimeUi();
+		}
 		SetModified();
 	}
 	return 0;
+}
+
+void CPPgMod::UpdateNatTraversalProtocolUi()
+{
+	if (!m_bInitializedTreeOpts || m_htiNatTraversalProtocol == NULL)
+		return;
+
+	m_ctrlTreeOptions.Invalidate(FALSE);
+}
+
+void CPPgMod::UpdateDownloadValidatorDateTimeUi()
+{
+	if (!m_bInitializedTreeOpts || m_htiDownloadValidatorDateTimeMatching == NULL)
+		return;
+
+	BOOL bDateTimeMatching = FALSE;
+	m_ctrlTreeOptions.GetCheckBox(m_htiDownloadValidatorDateTimeMatching, bDateTimeMatching);
+
+	if (m_htiDownloadValidatorDateTimeUseYearRange != NULL)
+		m_ctrlTreeOptions.SetCheckBoxEnable(m_htiDownloadValidatorDateTimeUseYearRange, bDateTimeMatching);
+	if (m_htiDownloadValidatorDateTimeCheckSeconds != NULL)
+		m_ctrlTreeOptions.SetCheckBoxEnable(m_htiDownloadValidatorDateTimeCheckSeconds, bDateTimeMatching);
+	if (m_htiDownloadValidatorDateTimeIncludeFollowingNumericValues != NULL)
+		m_ctrlTreeOptions.SetCheckBoxEnable(m_htiDownloadValidatorDateTimeIncludeFollowingNumericValues, bDateTimeMatching);
+	m_ctrlTreeOptions.Invalidate(FALSE);
 }
 
 void CPPgMod::OnHelp()
 {
 }
 
+void CPPgMod::OnIPGeolocationUpdateNow()
+{
+	m_ctrlTreeOptions.HandleChildControlLosingFocus();
+	if (!UpdateData(TRUE))
+		return;
+
+	m_sIPGeolocationUpdateURL.Trim();
+	if (m_sIPGeolocationUpdateURL.IsEmpty()) {
+		CDarkMode::MessageBox(GetResString(_T("IPGEOLOCATION_UPDATE_NO_URL")), MB_ICONWARNING);
+		return;
+	}
+
+	(void)CIPGeolocation::UpdateIPGeolocationFromURL(m_sIPGeolocationUpdateURL, true);
+}
+
 BOOL CPPgMod::OnCommand(WPARAM wParam, LPARAM lParam)
 {
+	if (LOWORD(wParam) == IDC_IPGEOLOCATION_UPDATE_NOW) {
+		OnIPGeolocationUpdateNow();
+		return TRUE;
+	}
 	return (wParam == ID_HELP) ? OnHelpInfo(NULL) : __super::OnCommand(wParam, lParam);
 }
 

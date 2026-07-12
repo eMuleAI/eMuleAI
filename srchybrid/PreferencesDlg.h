@@ -36,6 +36,7 @@ public:
 
 	CPPgGeneral		m_wndGeneral;
 	CPPgConnection	m_wndConnection;
+	CPPgNetworkInterface	m_wndNetworkInterface;
 	CPPgServer		m_wndServer;
 	CPPgDirectories	m_wndDirectories;
 	CPPgFiles		m_wndFiles;

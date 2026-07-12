@@ -304,10 +304,8 @@ BOOL CFriendListCtrl::OnCommand(WPARAM wParam, LPARAM)
 		break;
 	case MP_FRIENDSLOT:
 		if (cur_friend) {
-			bool bIsAlready = cur_friend->GetFriendSlot();
-			theApp.friendlist->RemoveAllFriendSlots();
-			if (!bIsAlready)
-				cur_friend->SetFriendSlot(true);
+			cur_friend->SetFriendSlot(!cur_friend->GetFriendSlot());
+			theApp.friendlist->SaveList();
 		}
 		break;
 	case MP_SHOWLIST_AUTO_QUERY:
@@ -496,8 +494,8 @@ BOOL CFriendListCtrl::OnCommand(WPARAM wParam, LPARAM)
 					break;
 
 				Kademlia::CPrefs* pKadPrefs = Kademlia::CKademlia::GetPrefs();
-				if (!Kademlia::CKademlia::IsRunning() || !Kademlia::CKademlia::IsConnected() || pKadPrefs == NULL) {
-					AddLogLine(false, _T("[Buddy]: Kad not connected; cannot send serving buddy request."));
+					if (!Kademlia::CKademlia::IsRunning() || !Kademlia::CKademlia::IsConnected() || pKadPrefs == NULL) {
+						AddLogLine(false, GetResString(_T("KAD_SERVING_BUDDY_KAD_NOT_CONNECTED")));
 					break;
 				}
 
@@ -538,14 +536,14 @@ BOOL CFriendListCtrl::OnCommand(WPARAM wParam, LPARAM)
 					}
 				}
 
-				if (!bHaveContact) {
-					AddLogLine(false, _T("[Buddy]: Serving buddy request not sent: friend has no Kad contact info (KadID/UDP port)."));
+					if (!bHaveContact) {
+						AddLogLine(false, GetResString(_T("KAD_SERVING_BUDDY_NO_CONTACT_INFO")));
 					break;
 				}
 
 				Kademlia::CKademliaUDPListener* pKadUDP = Kademlia::CKademlia::TryGetUDPListener();
-				if (pKadUDP == NULL || Kademlia::CKademlia::GetPrefs() != pKadPrefs || !Kademlia::CKademlia::IsRunning()) {
-					AddLogLine(false, _T("[Buddy]: Kad runtime not ready; serving buddy request canceled."));
+					if (pKadUDP == NULL || Kademlia::CKademlia::GetPrefs() != pKadPrefs || !Kademlia::CKademlia::IsRunning()) {
+						AddLogLine(false, GetResString(_T("KAD_SERVING_BUDDY_RUNTIME_NOT_READY")));
 					break;
 				}
 
@@ -562,7 +560,7 @@ BOOL CFriendListCtrl::OnCommand(WPARAM wParam, LPARAM)
 				// Send packet
 				pKadUDP->SendPacket(fileIO, KADEMLIA_FINDSERVINGBUDDY_REQ, uDstIP, uDstUDPPort, Kademlia::CKadUDPKey(), pCryptTarget);
 				pKadPrefs->SetFindServingBuddy(true); // Hint Kad core to start/continue serving buddy discovery.
-				AddLogLine(false, _T("[Buddy]: Serving buddy request sent to %s:%u"), (LPCTSTR)ipstr(htonl(uDstIP)), uDstUDPPort); // uDstIP is in host order; ipstr(uint32) expects network order
+					AddLogLine(false, GetResString(_T("KAD_SERVING_BUDDY_REQUEST_SENT")), (LPCTSTR)ipstr(htonl(uDstIP)), uDstUDPPort); // uDstIP is in host order; ipstr(uint32) expects network order
 			}
 			break;
 
@@ -573,15 +571,17 @@ BOOL CFriendListCtrl::OnCommand(WPARAM wParam, LPARAM)
 				break;
 
 			CUpDownClient* pLinked = cur_friend->GetLinkedClient(true);
-			if (!pLinked) {
-				AddLogLine(false, _T("[eServer Buddy]: Cannot send request - no linked client for this friend."));
+				if (!pLinked) {
+					AddLogLine(false, GetResString(_T("ESERVER_BUDDY_NO_LINKED_CLIENT")));
 				break;
 			}
 
-			// Debug: show current state
-			AddLogLine(false, _T("[eServer Buddy]: Friend client state: socket=%s connected=%s SupportsEServerBuddy=%d HasSlot=%d InfoPackets=%d"),
-				pLinked->socket ? _T("yes") : _T("no"),
-				(pLinked->socket && pLinked->socket->IsConnected()) ? _T("yes") : _T("no"),
+				// Debug: show current state
+				const CString strYes(GetResString(_T("YES")));
+				const CString strNo(GetResString(_T("NO")));
+				AddLogLine(false, GetResString(_T("ESERVER_BUDDY_CLIENT_STATE")),
+					pLinked->socket ? (LPCTSTR)strYes : (LPCTSTR)strNo,
+					(pLinked->socket && pLinked->socket->IsConnected()) ? (LPCTSTR)strYes : (LPCTSTR)strNo,
 				pLinked->SupportsEServerBuddy() ? 1 : 0,
 				pLinked->HasEServerBuddySlot() ? 1 : 0,
 				pLinked->GetInfoPacketsReceived());
@@ -589,7 +589,7 @@ BOOL CFriendListCtrl::OnCommand(WPARAM wParam, LPARAM)
 			// Check if linked client has a valid TCP connection
 			if (!pLinked->socket || !pLinked->socket->IsConnected()) {
 				// Try to connect first
-				AddLogLine(false, _T("[eServer Buddy]: Friend not connected, trying to connect first..."));
+					AddLogLine(false, GetResString(_T("ESERVER_BUDDY_FRIEND_NOT_CONNECTED")));
 				pLinked->TryToConnect(true);
 				break;
 			}
@@ -602,27 +602,27 @@ BOOL CFriendListCtrl::OnCommand(WPARAM wParam, LPARAM)
 					CUpDownClient* pActive = theApp.clientlist->FindClientByUserHash(cur_friend->m_abyUserhash);
 					if (pActive && pActive != pLinked && pActive->GetInfoPacketsReceived() > 0) {
 						// Found active client, update friend's linked client
-						AddLogLine(false, _T("[eServer Buddy]: Found active client with completed Hello, updating friend link..."));
+							AddLogLine(false, GetResString(_T("ESERVER_BUDDY_FOUND_ACTIVE_CLIENT")));
 						cur_friend->SetLinkedClient(pActive);
 						pLinked = pActive;
 						// Re-check after update
 						if (pLinked->SupportsEServerBuddy()) {
 							// Good, now we can proceed
-							AddLogLine(false, _T("[eServer Buddy]: Friend now shows eServer Buddy support."));
+								AddLogLine(false, GetResString(_T("ESERVER_BUDDY_SUPPORT_NOW_AVAILABLE")));
 						} else {
-							AddLogLine(false, _T("[eServer Buddy]: Friend does not support eServer Buddy protocol (InfoPackets=%d)."), 
+								AddLogLine(false, GetResString(_T("ESERVER_BUDDY_UNSUPPORTED_PROTOCOL")),
 								pLinked->GetInfoPacketsReceived());
 							break;
 						}
 					} else {
 						// No active client found, send Hello to initiate handshake
-						AddLogLine(false, _T("[eServer Buddy]: Hello handshake not completed, sending Hello packet..."));
-						pLinked->SendHelloPacket();
-						AddLogLine(false, _T("[eServer Buddy]: Please try again after Hello exchange completes."));
+							AddLogLine(false, GetResString(_T("ESERVER_BUDDY_HELLO_NOT_COMPLETED")));
+							pLinked->SendHelloPacket();
+							AddLogLine(false, GetResString(_T("ESERVER_BUDDY_RETRY_AFTER_HELLO")));
 						break;
 					}
 				} else {
-					AddLogLine(false, _T("[eServer Buddy]: Friend does not support eServer Buddy protocol (InfoPackets=%d)."), 
+						AddLogLine(false, GetResString(_T("ESERVER_BUDDY_UNSUPPORTED_PROTOCOL")),
 						pLinked->GetInfoPacketsReceived());
 					break;
 				}
@@ -630,15 +630,15 @@ BOOL CFriendListCtrl::OnCommand(WPARAM wParam, LPARAM)
 
 			// Check if friend has available slot
 			if (!pLinked->HasEServerBuddySlot()) {
-				AddLogLine(false, _T("[eServer Buddy]: Friend has no available buddy slots."));
+					AddLogLine(false, GetResString(_T("ESERVER_BUDDY_NO_AVAILABLE_SLOTS")));
 				break;
 			}
 
 			// Send eServer Buddy Request
 			if (pLinked->SendEServerBuddyRequest()) {
-				AddLogLine(false, _T("[eServer Buddy]: Buddy request sent to %s"), (LPCTSTR)pLinked->GetUserName());
-			} else {
-				AddLogLine(false, _T("[eServer Buddy]: Failed to send buddy request to %s"), (LPCTSTR)pLinked->GetUserName());
+					AddLogLine(false, GetResString(_T("ESERVER_BUDDY_REQUEST_SENT_FRIEND")), (LPCTSTR)pLinked->GetUserName());
+				} else {
+					AddLogLine(false, GetResString(_T("ESERVER_BUDDY_REQUEST_FAILED_FRIEND")), (LPCTSTR)pLinked->GetUserName());
 			}
 		}
 		break;

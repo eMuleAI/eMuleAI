@@ -35,11 +35,12 @@ their client on the eMule forum.
 #include "opcodes.h"
 #include "preferences.h"
 #include "emule.h"
-#include "emuledlg.h"
 #include "serverlist.h"
 #include "Log.h"
 #include "MD5Sum.h"
 #include "OtherFunctions.h"
+#include "PartFileWriteThread.h"
+#include "SafeFile.h"
 #include "kademlia/kademlia/Prefs.h"
 #include "kademlia/kademlia/kademlia.h"
 #include "kademlia/kademlia/indexed.h"
@@ -53,6 +54,8 @@ static char THIS_FILE[] = __FILE__;
 #endif
 
 using namespace Kademlia;
+
+static volatile LONG s_lKadPrefsSaveGeneration = 0;
 
 CPrefs::CPrefs()
 {
@@ -122,15 +125,24 @@ void CPrefs::ReadFile()
 void CPrefs::WriteFile()
 {
 	try {
-		CSafeBufferedFile file;
-		if (file.Open(m_sFilename, CFile::modeWrite | CFile::modeCreate | CFile::typeBinary | CFile::shareDenyWrite, NULL)) {
-			::setvbuf(file.m_pStream, NULL, _IOFBF, 16384);
-			file.WriteUInt32(m_uIP);
-			file.WriteUInt16(0); //This is no longer used.
-			file.WriteUInt128(m_uClientID);
-			file.WriteUInt8(0); //This is to tell older clients there are no tags.
-			file.Close();
-		}
+		CSafeMemFile file;
+		file.WriteUInt32(m_uIP);
+		file.WriteUInt16(0); //This is no longer used.
+		file.WriteUInt128(m_uClientID);
+		file.WriteUInt8(0); //This is to tell older clients there are no tags.
+
+		AsyncDiskWriteData* pData = new AsyncDiskWriteData;
+		pData->lGeneration = InterlockedIncrement(&s_lKadPrefsSaveGeneration);
+		pData->plGeneration = &s_lKadPrefsSaveGeneration;
+		pData->strTempPath = m_sFilename + _T(".tmp");
+		pData->strFinalPath = m_sFilename;
+		pData->strLogName = _T("preferencesKad.dat");
+		pData->strPayloadName = _T("kad-prefs");
+		pData->eConflictPolicy = AsyncDiskWriteConflictLastSnapshotWins;
+		const ULONGLONG uLength = file.GetLength();
+		if (uLength != 0)
+			pData->data.assign(file.GetBuffer(), file.GetBuffer() + static_cast<size_t>(uLength));
+		CPartFileWriteThread::QueueOrWriteDiskSnapshot(pData);
 	} catch (CException *ex) {
 		ASSERT(0);
 		ex->Delete();
@@ -151,6 +163,17 @@ void CPrefs::SetIPAddress(uint32 uVal)
 		m_uIP = uVal;
 	else
 		m_uIPLast = uVal;
+}
+
+void CPrefs::ForceIPAddress(uint32 uVal)
+{
+	m_uIP = uVal;
+	m_uIPLast = uVal;
+}
+
+void CPrefs::ResetIPAddress()
+{
+	ForceIPAddress(0);
 }
 
 
@@ -181,13 +204,13 @@ void CPrefs::SetFirewalled()
 	//current state to prevent false reports during the recheck.
 	m_bLastFirewallState = (m_uFirewalled < 2);
 	m_uFirewalled = 0;
-	theApp.emuledlg->ShowConnectionState();
+	theApp.QueueKadConnectionStateChangedEvent(_T("kad-firewall-reset"));
 }
 
 void CPrefs::IncFirewalled()
 {
 	++m_uFirewalled;
-	theApp.emuledlg->ShowConnectionState();
+	theApp.QueueKadConnectionStateChangedEvent(_T("kad-firewall-count"));
 }
 
 bool CPrefs::GetFindServingBuddy()

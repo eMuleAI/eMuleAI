@@ -107,7 +107,7 @@ namespace
 
 	CString NormalizePreviewCommandPath(LPCTSTR pszCommand)
 	{
-		CString strCommand(pszCommand != NULL ? pszCommand : EMPTY);
+		CString strCommand(pszCommand != NULL ? pszCommand : (LPCTSTR)EMPTY);
 		strCommand.Trim();
 		strCommand.Trim(_T(" \t\""));
 		ExpandEnvironmentStrings(strCommand);
@@ -129,7 +129,7 @@ namespace
 
 	CString NormalizePreviewDisplayName(LPCTSTR pszName)
 	{
-		CString strName(pszName != NULL ? pszName : EMPTY);
+		CString strName(pszName != NULL ? pszName : (LPCTSTR)EMPTY);
 		strName.Trim();
 		if (strName.IsEmpty())
 			return strName;
@@ -146,14 +146,14 @@ namespace
 	CPreviewApps* g_pPreviewApps = NULL;
 }
 
-CPreviewApps& BB_GetPreviewApps()
+CPreviewApps& GetPreviewAppsStorage()
 {
 	if (g_pPreviewApps == NULL)
 		g_pPreviewApps = new CPreviewApps;
 	return *g_pPreviewApps;
 }
 
-void BB_FreePreviewApps() noexcept
+void FreePreviewAppsStorage() noexcept
 {
 	delete g_pPreviewApps;
 	g_pPreviewApps = NULL;
@@ -373,7 +373,7 @@ int CPreviewApps::GetAllMenuEntries(CMenuXP &rMenu, const CPartFile *file, LPCTS
 {
 	UpdateApps(true);
 	int count = min((int)m_aApps.GetCount(), MP_PREVIEW_APP_MAX - MP_PREVIEW_APP_MIN + 1);
-	bool bEnabled = (file && (uint64)file->GetCompletedSize() >= 16ull * 1024);
+	bool bEnabled = (file && (uint64)file->GetCompletedSize() > 0);
 	CString strExcludedCommand = NormalizePreviewCommandPath(pszExcludeCommand);
 	int iAddedEntries = 0;
 	for (int i = 0; i < count; ++i) {

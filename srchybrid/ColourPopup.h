@@ -26,7 +26,7 @@ class CColourPicker;
 typedef struct
 {
 	COLORREF crColour;
-	TCHAR	 *szName;
+	LPCTSTR	 szName;
 }
 ColourTableEntry;
 

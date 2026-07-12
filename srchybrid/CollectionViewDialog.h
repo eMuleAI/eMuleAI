@@ -49,6 +49,7 @@ protected:
 	CStatic m_CollectionViewListLabel;
 	CStatic m_CollectionViewListIcon;
 	CButton m_CollectionDownload;
+	CButton m_CollectionDownloadSelected;
 	CButton m_CollectionExit;
 	CEdit m_CollectionViewAuthor;
 	CEdit m_CollectionViewAuthorKey;
@@ -57,7 +58,10 @@ protected:
 	HICON m_icoWnd;
 	HICON m_icoColl;
 
+	void DownloadAll();
 	void DownloadSelected();
+	void StartDownload(bool bSelectedOnly);
+	void UpdateDownloadSelectedButtonState();
 
 	virtual BOOL OnInitDialog();
 	virtual void DoDataExchange(CDataExchange *pDX);    // DDX/DDV support
@@ -65,5 +69,7 @@ protected:
 	DECLARE_MESSAGE_MAP()
 	afx_msg void OnBnClickedOk();
 	afx_msg void OnBnClickedViewCollection();
+	afx_msg void OnBnClickedViewCollectionSelected();
+	afx_msg void OnLvnItemChangedCollectionList(LPNMHDR, LRESULT *pResult);
 	afx_msg void OnNmDblClkCollectionList(LPNMHDR, LRESULT *pResult);
 };

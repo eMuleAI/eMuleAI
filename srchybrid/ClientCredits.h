@@ -145,6 +145,8 @@ public:
 protected:
 	void	LoadList();
 	void	SaveList();
+	LONG	NextClientCreditsSaveGeneration() { return InterlockedIncrement(&m_lClientCreditsSaveGeneration); }
+	LONG	GetClientCreditsSaveGeneration() const { return InterlockedCompareExchange(const_cast<volatile LONG*>(&m_lClientCreditsSaveGeneration), 0, 0); }
 	void	InitalizeCrypting();
 	static bool CreateKeyPair();
 #ifdef _DEBUG
@@ -157,4 +159,5 @@ private:
 	DWORD			m_nLastSaved;
 	byte			m_abyMyPublicKey[80];
 	uint8			m_nMyPublicKeyLen;
+	volatile LONG	m_lClientCreditsSaveGeneration;
 };

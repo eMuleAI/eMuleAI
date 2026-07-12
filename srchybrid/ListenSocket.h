@@ -88,7 +88,9 @@ public:
 	CListenSocket();
 	virtual	~CListenSocket();
 
-	bool	StartListening();
+	bool	StartListening(bool bAllowRandomPortRetry = false);
+	bool	RecreateListeningSocket();
+	void	CloseForIpGuardBlock();
 	void	StopListening();
 	virtual void OnAccept(int nErrorCode);
 	void	Process();
@@ -96,6 +98,7 @@ public:
 	void	AddSocket(CClientReqSocket *toadd);
 	UINT	GetOpenSockets()			{ return static_cast<UINT>(socket_list.GetCount()); }
 	void	KillAllSockets();
+	void	DisconnectAllSockets(LPCTSTR pszReason);
 	bool	TooManySockets(bool bIgnoreInterval = false);
 	uint32	GetMaxConnectionReached()	{ return maxconnectionreached; }
 	bool    IsValidSocket(CClientReqSocket *totest);
@@ -103,7 +106,14 @@ public:
 	void	RecalculateStats();
 	void	ReStartListening();
 	void	Debug_ClientDeleted(CUpDownClient *deleted);
-	bool	Rebind();
+	enum ERebindResult
+	{
+		RebindNoChange,
+		RebindSucceeded,
+		RebindFailedKeptOldSocket,
+		RebindRequiresRestart
+	};
+	ERebindResult Rebind(bool bForce = false);
 	bool	SendPortTestReply(char result, bool disconnect = false);
 
 	void	UpdateConnectionsStatus();

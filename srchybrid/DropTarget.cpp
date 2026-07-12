@@ -18,6 +18,7 @@
 #include "stdafx.h"
 #include "emule.h"
 #include "emuledlg.h"
+#include "DownloadQueue.h"
 #include "DropTarget.h"
 #include "OtherFunctions.h"
 #include <intshcut.h>
@@ -163,6 +164,7 @@ HRESULT CMainFrameDropTarget::PasteHTMLDocument(IHTMLDocument2 *doc, PASTEURLDAT
 	if (doc->get_links(&links) == S_OK) {
 		long lLinks;
 		if (links->get_length(&lLinks) == S_OK && lLinks > 0) {
+			CStringArray astrLinks;
 			iURLElements += lLinks;
 			CComVariant vaIndex(0L);
 			CComVariant vaNull(0L);
@@ -174,13 +176,14 @@ HRESULT CMainFrameDropTarget::PasteHTMLDocument(IHTMLDocument2 *doc, PASTEURLDAT
 					if (SUCCEEDED(item->QueryInterface(&anchor))) {
 						CComBSTR bstrHref;
 						if (anchor->get_href(&bstrHref) == S_OK && bstrHref.Length() > 0 && IsUrlSchemeSupportedW(bstrHref)) {
-							theApp.emuledlg->ProcessED2KLink(CString(bstrHref));
+							astrLinks.Add(CString(bstrHref));
 							hrPasteResult = S_OK;
 						}
 						anchor.Release(); // free memory
 					}
 				}
 			}
+			theApp.ProcessED2KLinkArrayChunked(astrLinks);
 		}
 		links.Release(); // conserve memory
 	}
@@ -232,6 +235,7 @@ HRESULT CMainFrameDropTarget::PasteHTMLDocument(IHTMLDocument2 *doc, PASTEURLDAT
 				}
 
 				// Search all white-space terminated strings and check for a valid URL-scheme
+				CStringArray astrLinks;
 				while (*pwsz != L'\0') {
 					while (*pwsz != L'\0' && iswspace(*pwsz)) // Skip white spaces
 						++pwsz;
@@ -242,8 +246,7 @@ HRESULT CMainFrameDropTarget::PasteHTMLDocument(IHTMLDocument2 *doc, PASTEURLDAT
 							++pwszEnd;
 						int iLen = (int)(pwszEnd - pwsz);
 						if (iLen > 0) {
-							CString strURL(pwsz, iLen);
-							theApp.emuledlg->ProcessED2KLink(strURL);
+							astrLinks.Add(CString(pwsz, iLen));
 							hrPasteResult = S_OK;
 							pwsz += iLen;
 						}
@@ -255,6 +258,7 @@ HRESULT CMainFrameDropTarget::PasteHTMLDocument(IHTMLDocument2 *doc, PASTEURLDAT
 					while (*pwsz != L'\0' && iswspace(*pwsz)) // Skip white spaces
 						++pwsz;
 				}
+				theApp.ProcessED2KLinkArrayChunked(astrLinks);
 			}
 		}
 	}
@@ -342,13 +346,8 @@ HRESULT CMainFrameDropTarget::PasteText(CLIPFORMAT cfData, COleDataObject &data)
 			hrPasteResult = S_FALSE; // default: nothing was pasted
 			if (_strnicmp(pszUrlA, "ed2k://|", 8) == 0 || _strnicmp(pszUrlA, "magnet:?", 8) == 0) {
 				const CString strData(pszUrlA);
-				for (int iPos = 0; iPos >= 0;) {
-					const CString &sLink(strData.Tokenize(_T("\r\n"), iPos));
-					if (!sLink.IsEmpty()) {
-						theApp.emuledlg->ProcessED2KLink(sLink);
-						hrPasteResult = S_OK;
-					}
-				}
+				theApp.ProcessED2KLinksChunked(strData);
+				hrPasteResult = S_OK;
 			}
 			::GlobalUnlock(hMem);
 		}
@@ -373,8 +372,10 @@ HRESULT CMainFrameDropTarget::AddUrlFileContents(LPCTSTR pszFileName)
 					LPWSTR pwszUrl;
 					hrResult = pIUrl->GetURL(&pwszUrl);
 					if (hrResult == S_OK) {
-						if (pwszUrl != NULL && pwszUrl[0] != L'\0' && IsUrlSchemeSupportedW(pwszUrl))
-							theApp.emuledlg->ProcessED2KLink(pwszUrl);
+						if (pwszUrl != NULL && pwszUrl[0] != L'\0' && IsUrlSchemeSupportedW(pwszUrl)) {
+							const CString strUrl(pwszUrl);
+							theApp.ProcessED2KLinksChunked(strUrl);
+						}
 						else
 							hrResult = S_FALSE;
 						::CoTaskMemFree(pwszUrl);

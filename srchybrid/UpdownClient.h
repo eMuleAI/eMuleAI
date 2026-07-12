@@ -1,4 +1,4 @@
-﻿//This file is part of eMule AI
+//This file is part of eMule AI
 //Copyright (C)2002-2026 Merkur ( strEmail.Format("%s@%s", "devteam", "emule-project.net") / https://www.emule-project.net )
 //Copyright (C)2026 eMule AI
 //
@@ -20,7 +20,7 @@
 #include "ClientStateDefs.h"
 #include "opcodes.h"
 #include "OtherFunctions.h"
-#include "eMuleAI/GeoLite2.h"
+#include "eMuleAI/IPGeolocation.h"
 #include "resource.h"
 #include "ListenSocket.h"
 #include "eMuleAI/Shield.h"
@@ -29,6 +29,10 @@
 constexpr DWORD NAT_TRAVERSAL_WRITABLE_WARN_MS = 1500;
 // Grace window (milliseconds) before allowing a new rendezvous attempt while an existing uTP handshake is active.
 constexpr DWORD NAT_TRAVERSAL_HANDSHAKE_GUARD_MS = 4000;
+// Extra grace for QUIC before demoting the same endpoint to uTP.
+constexpr DWORD NAT_TRAVERSAL_QUIC_FALLBACK_MS = 45000;
+// Per-peer cooldown after a QUIC NAT-T handshake failure.
+constexpr DWORD NAT_TRAVERSAL_QUIC_FAILURE_TTL_MS = 120000;
 // Global cap for transient uTP errors on eServer relay NAT traversal.
 constexpr uint8 ESERVER_RELAY_NATT_TRANSIENT_ERROR_LIMIT = 3;
 constexpr DWORD ESERVER_RELAY_NATT_TRANSIENT_WINDOW_MS = 70000;
@@ -99,6 +103,7 @@ enum ESharedFilesStatusCodes {
 };
 
 typedef DWORD ClientRuntimeID;
+typedef LONG ClientRuntimeGeneration;
 
 struct Pending_Block_Struct
 {
@@ -127,6 +132,13 @@ struct PartFileStamp
 
 #define	MAKE_CLIENT_VERSION(mjr, min, upd) \
 	((((UINT)(mjr)*100U + (UINT)(min))*10U + (UINT)(upd))*100U)
+
+enum ENatTraversalTransport
+{
+	NATT_TRANSPORT_NONE = 0,
+	NATT_TRANSPORT_UTP,
+	NATT_TRANSPORT_QUIC
+};
 
 class CUpDownClient : public CObject
 {
@@ -179,6 +191,7 @@ public:
 	void			StartDownload();
 	void			TriggerFileRequestIfNeeded();
 	virtual void	CheckDownloadTimeout();
+	void		CheckHashsetRequestTimeout();
 	virtual void	SendCancelTransfer();
 	virtual bool	IsEd2kClient() const							{ return true; }
 	virtual bool	Disconnected(LPCTSTR pszReason, bool bFromSocket = false);
@@ -188,6 +201,9 @@ public:
 	virtual void	OnSocketConnected(int nErrorCode);
 	bool			CheckHandshakeFinished() const;
 	ClientRuntimeID	GetRuntimeID() const							{ return m_uRuntimeID; }
+	ClientRuntimeGeneration GetRuntimeGeneration() const						{ return ::InterlockedCompareExchange(const_cast<volatile LONG*>(&m_lRuntimeGeneration), 0, 0); }
+	bool			IsRuntimeGenerationCurrent(ClientRuntimeGeneration lGeneration) const { return lGeneration != 0 && GetRuntimeGeneration() == lGeneration; }
+	void			InvalidateRuntimeGeneration();
 	ClientRuntimeID	GetArchivedClientRuntimeID() const				{ return m_uArchivedClientRuntimeID; }
 	CUpDownClient*	AcquireArchivedClient() const;
 	bool			TryAcquireRuntimeReference(bool* pbNeedsFinalize = NULL);
@@ -208,7 +224,7 @@ public:
 	}
 	void			CheckFailedFileIdReqs(const uchar *aucFileHash);
 	uint32			GetUserIDHybrid() const							{ return m_nUserIDHybrid; }
-	void			SetUserIDHybrid(uint32 val)						{ m_nUserIDHybrid = val; }
+	void			SetUserIDHybrid(uint32 val);
 	LPCTSTR			GetUserName() const								{ return m_pszUsername; }
 	void			SetUserName(LPCTSTR pszNewName);
 
@@ -219,18 +235,19 @@ public:
 	void			UpdateIP(const CAddress& val);
 	void			SetIP(CAddress& val);   //Only use this when you know the real IP or when your clearing it.
 	void			SetIPv6(const CAddress& val);
+	void			RefreshUploadQueueWaitingIndex();
 	const CAddress& GetConnectIP() const { return m_ConnectIP; }
 
 	inline bool		HasLowID() const								{ return ::IsLowID(m_nUserIDHybrid); }
-	void			SetConnectIP(CAddress val)						{ m_ConnectIP = val; ResetGeoLite2(val); }
+	void			SetConnectIP(CAddress val);
 	uint16			GetUserPort() const								{ return m_nUserPort; }
-	void			SetUserPort(uint16 val)							{ m_nUserPort = val; }
+	void			SetUserPort(uint16 val);
 	uint64			GetTransferredUp() const						{ return m_nTransferredUp; }
 	uint64			GetTransferredDown() const						{ return m_nTransferredDown; }
 	uint32			GetServerIP() const								{ return m_dwServerIP; }
-	void			SetServerIP(uint32 nIP)							{ m_dwServerIP = nIP; }
+	void			SetServerIP(uint32 nIP);
 	uint16			GetServerPort() const							{ return m_nServerPort; }
-	void			SetServerPort(uint16 nPort)						{ m_nServerPort = nPort; }
+	void			SetServerPort(uint16 nPort);
 	const uchar*	GetUserHash() const								{ return (uchar*)m_achUserHash; }
 	void			SetUserHash(const uchar *pucUserHash, bool bLoadArchive = true);
 	bool			HasValidHash() const							{ return !isnulmd4(m_achUserHash); }
@@ -238,6 +255,9 @@ public:
 	const uchar*	GetServingBuddyID() const						{ return (uchar*)m_achServingBuddyID; }
 	void			SetServingBuddyID(const uchar *pucServingBuddyID);
 	bool			HasValidServingBuddyID() const					{ return m_bServingBuddyIDValid; }
+	const uchar*	GetEServerBuddyKadID() const					{ return (uchar*)m_achEServerBuddyKadID; }
+	void			SetEServerBuddyKadID(const uchar *pucKadID);
+	bool			HasValidEServerBuddyKadID() const				{ return m_bEServerBuddyKadIDValid; }
 	void			SetServingBuddyIP(const CAddress& val)			{ m_ServingBuddyIP = val; }
 	const CAddress&	GetServingBuddyIP() const						{ return m_ServingBuddyIP; }
 	void			SetServingBuddyPort(uint16 val)					{ m_nServingBuddyPort = val; }
@@ -245,6 +265,13 @@ public:
 	// NAT-T assist: remember last requester endpoint seen at OP_CALLBACK
 	void			SetLastCallbackRequesterIP(const CAddress& ip)	{ m_LastCallbackRequesterIP = ip; }
 	const CAddress&	GetLastCallbackRequesterIP() const			{ return m_LastCallbackRequesterIP; }
+	void			SetAllowAnyBindOnNextServerCallbackConnect(bool val)	{ m_bAllowAnyBindOnNextServerCallbackConnect = val; }
+	bool			ConsumeAllowAnyBindOnNextServerCallbackConnect()
+	{
+		const bool bRet = m_bAllowAnyBindOnNextServerCallbackConnect;
+		m_bAllowAnyBindOnNextServerCallbackConnect = false;
+		return bRet;
+	}
 	EClientSoftware	GetClientSoft() const							{ return m_clientSoft; }
 	const CString&	GetClientSoftVer() const						{ return m_strClientSoftware; }
 	const CString&	GetClientModVer() const							{ return m_strModVersion; }
@@ -280,12 +307,12 @@ public:
 	const CString&	GetClientFilename() const						{ return m_strClientFilename; }
 	void			SetClientFilename(const CString &fileName)		{ m_strClientFilename = fileName; }
 	uint16			GetUDPPort() const								{ return m_nUDPPort; }
-	void			SetUDPPort(uint16 nPort)						{ m_nUDPPort = nPort; }
+	void			SetUDPPort(uint16 nPort);
 	uint8			GetUDPVersion() const							{ return m_byUDPVer; }
 	void			SetUDPVersion(uint8 val)						{ m_byUDPVer = val; }
 	bool			SupportsUDP() const								{ return GetUDPVersion() != 0 && m_nUDPPort != 0; }
 	uint16			GetKadPort() const								{ return m_nKadPort; }
-	void			SetKadPort(uint16 nPort)						{ m_nKadPort = nPort; }
+	void			SetKadPort(uint16 nPort);
 	uint8			GetExtendedRequestsVersion() const				{ return m_byExtendedRequestsVer; }
 	void			RequestSharedFileList();
 	void			ProcessSharedFileList(const uchar *pachPacket, uint32 nSize, LPCTSTR pszDirectory = NULL);
@@ -369,6 +396,37 @@ public:
 	void			SetDirectUDPCallbackSupport(bool bVal)			{ m_fDirectUDPCallback = static_cast<UINT>(bVal); }
 	const bool		GetNatTraversalSupport() const					{ return m_ModMiscOptions.Fields.SupportsNatTraversal; }
 	void			SetNatTraversalSupport(bool bVal)				{ m_ModMiscOptions.Fields.SupportsNatTraversal = bVal ? 1 : 0; }
+	const bool		GetNatTraversalQuicSupport() const				{ return m_ModMiscOptions.Fields.SupportsNatTraversalQuic; }
+	void			SetNatTraversalQuicSupport(bool bVal)			{ m_ModMiscOptions.Fields.SupportsNatTraversalQuic = bVal ? 1 : 0; }
+	bool			HasReceivedHelloInfo() const					{ return !m_strHelloInfo.IsEmpty(); }
+	bool			HasAnyNatTraversalSupport() const;
+	ENatTraversalTransport GetPreferredNatTraversalTransport() const;
+	bool			HasCompatibleNatTraversalTransportWith(const CUpDownClient* pOther) const;
+	void			SetDirectNatTraversalCaps(uint8 byOptions);
+	void			ClearDirectNatTraversalCaps();
+	void			InvalidateDirectNatTraversalCaps();
+	void			MarkDirectNatTraversalCapsProbeSent();
+	void			MarkDirectNatTraversalCapsProbeSent(const CAddress& ip, uint16 port);
+	bool			HasDirectNatTraversalCapsProbeForEndpoint(const CAddress& ip, uint16 port) const;
+	bool			HasDirectNatTraversalCapsProbeTimedOut(DWORD dwTimeout) const;
+	bool			HasLegacyUtpNatTraversalOnly() const		{ return GetNatTraversalSupport() && !GetNatTraversalQuicSupport(); }
+	bool			CanUseLegacyUtpAfterDirectCapsTimeout(DWORD dwTimeout) const;
+	bool			IsNatTraversalQuicTemporarilyDisabledFor(const CAddress& ip, uint16 port) const;
+	bool			IsNatTraversalQuicTemporarilyDisabled() const;
+	void			MarkNatTraversalQuicFailed(const CAddress& ip, uint16 port, LPCTSTR pszReason);
+	void			ClearNatTraversalQuicFailure();
+	ENatTraversalTransport GetPreferredNatTraversalTransportForEndpoint(const CAddress& ip, uint16 port) const;
+	ENatTraversalTransport GetEffectiveNatTraversalTransportForEndpoint(const CAddress& ip, uint16 port) const;
+	void			PinNatRendezvousUtpTransport();
+	void			ClearNatRendezvousTransportPin();
+	bool			IsCurrentNatTraversalTransportCompatible() const;
+	bool			ResetNatTraversalSocketForTransportChange(LPCTSTR pszReason, bool bQueueRetry);
+	bool			ResetFailedUtpTransportForRetry(LPCTSTR pszReason);
+	bool			ResetPendingNatTraversalForEndpointChange(LPCTSTR pszReason);
+	bool			HasDirectNatTraversalCaps() const				{ return m_bDirectNatTraversalCaps; }
+	bool			NeedsDirectNatTraversalCapsRefresh() const	{ return m_bDirectNatTraversalCapsRefreshRequired; }
+	bool			HasDirectNatTraversalQuicSupport() const		{ return m_bDirectNatTraversalCaps && ((m_byDirectNatTraversalOptions & CONNECT_OPT_NAT_TRAVERSAL_QUIC) != 0); }
+	bool			HasDirectNatTraversalUtpSupport() const			{ return m_bDirectNatTraversalCaps && ((m_byDirectNatTraversalOptions & CONNECT_OPT_NAT_TRAVERSAL_UTP) != 0); }
 	bool			SupportsIPv6() const							{ return m_ModMiscOptions.Fields.SupportsIPv6; }
 	const uint8		GetConnectOptions(const bool bEncryption, const bool bCallback, const bool bNATTraversal) const; // by WiZaRd
 	bool			SupportsServingBuddyPull() const				{ return m_ModMiscOptions.Fields.SupportsServingBuddyPull; }
@@ -377,6 +435,7 @@ public:
 	DWORD			m_dwLastServingBuddyPullReq;
 	uint8			m_uServingBuddyPullTries;
 	ClientRuntimeID	m_uRuntimeID;
+	volatile LONG	m_lRuntimeGeneration;
 	volatile LONG	m_lRuntimeReferenceCount;
 	volatile LONG	m_lDeletePending;
 	volatile LONG	m_lDeleteFinalized;
@@ -389,14 +448,19 @@ public:
 		uint32			GetReportedServerIP() const						{ return m_dwReportedServerIP; }
 		void			SetReportedServerIP(uint32 dwServerIP)			{ m_dwReportedServerIP = dwServerIP; }
 		DWORD			GetEServerBuddyRetryAfter() const				{ return m_dwEServerBuddyRetryAfter; }
-		bool			CanQueryEServerBuddySlot() const;				// Can we request this client as buddy?
+		bool			CanQueryEServerBuddySlot(bool bIgnoreCachedSlot = false) const;	// Can we request this client as buddy?
 		void			OnEServerBuddyRejected();						// Called when buddy request rejected due to slot full
 		void			OnEServerBuddyRejectedGeneric();				// Called when buddy request rejected for non-slot reasons
+		void			OnEServerBuddyProofRejected();				// Called when buddy request rejected due to missing or invalid magic proof
+		void			ClearEServerBuddyRetryAfter();				// Clear transient buddy retry cooldown after fresh server proof
 		void			OnEServerBuddyAccepted();						// Called when buddy request accepted
 		bool			CanAcceptBuddyRequest();						// Rate limiting: can we accept request from this client?
 		bool			CanAcceptEServerRelayRequest();					// Rate limiting: can we accept relay request from this client?
-		bool			SendEServerBuddyRequest();						// Send buddy request to this client
+		bool			CanAcceptEServerPeerInfo();					// Rate limiting: can we accept cross-buddy peer info from this client?
+		bool			SendEServerBuddyRequest(bool bIgnoreCachedSlot = false);	// Send buddy request to this client
+		bool			CanRouteViaServingEServerBuddy(const CUpDownClient* pServingBuddy) const;
 		bool			SendEServerRelayRequest(CUpDownClient* pTarget);	// Send relay request via our buddy
+		bool			SendEServerRelayRequestToBuddy(CUpDownClient* pTarget, CUpDownClient* pBuddy);	// Send relay request via an explicit buddy
 		bool			SendEServerUdpProbe();							// UDP probe to discover our external UDP port
 		static uint32	GetEServerBuddyMagicEpoch(time_t tNowUtc = 0);
 		static uint32	SelectEServerBuddyMagicBucket(bool bBootstrap, uint32 uEpoch, const uchar* pSeedHash, uint32 uRoundSalt = 0);
@@ -405,6 +469,7 @@ public:
 		static bool		VerifyEServerBuddyMagicProof(uint32 dwNonce, const uchar* pucProof);
 		void			SetEServerExtPortProbeToken(DWORD token)			{ m_dwEServerExtPortProbeToken = token; }
 		DWORD			GetEServerExtPortProbeToken() const				{ return m_dwEServerExtPortProbeToken; }
+		DWORD			GetEServerExtPortProbeSent() const				{ return m_dwEServerExtPortProbeSent; }
 		void			SetObservedExternalUdpPort(uint16 port);
 	uint16			GetObservedExternalUdpPort() const				{ return m_nObservedExternalUdpPort; }
 	DWORD			GetObservedExternalUdpPortTime() const			{ return m_dwObservedExternalUdpPortTime; }
@@ -412,9 +477,12 @@ public:
 	void			SetLastEServerBuddyValidServerPing(DWORD tick)	{ m_dwLastEServerBuddyValidServerPing = tick; }
 	void			TouchEServerBuddyValidServerPing()				{ m_dwLastEServerBuddyValidServerPing = ::GetTickCount(); }
 	DWORD			GetLastEServerBuddyValidServerPing() const		{ return m_dwLastEServerBuddyValidServerPing; }
-	void			SetPendingEServerRelayTarget(CUpDownClient* pTarget) { m_pPendingEServerRelayTarget = pTarget; }
+	bool			SetPendingEServerRelayTarget(CUpDownClient* pTarget);
+	void			ClearPendingEServerRelayTarget();
 	CUpDownClient*	GetPendingEServerRelayTarget() const { return m_pPendingEServerRelayTarget; }
 	void			ProcessPendingEServerRelay();	// Called on buddy connect to send pending relay
+	bool			HasRecentEServerRelayRequestToBuddy(const CUpDownClient* pBuddy, DWORD dwMaxAge) const;
+	bool			QueueDirectNatTraversalAfterEServerRelayFailure(LPCTSTR pszReason);
 
 	void			SetConnectOptions(uint8 byOptions, bool bEncryption = true, bool bCallback = true); // shortcut, sets crypt, callback etc based from the tag value we receive
 	const bool		AnyCallbackAvailable() const;
@@ -454,6 +522,20 @@ public:
 	void			SetLastUpRequest()								{ m_dwLastUpRequest = ::GetTickCount(); }
 	void			SetCollectionUploadSlot(bool bValue);
 	bool			HasCollectionUploadSlot() const					{ return m_bCollectionUploadSlot; }
+	enum EHighBandwidthUploadCooldownReason
+	{
+		HBUCR_None = 0,
+		HBUCR_RequestIdle,
+		HBUCR_NoRequest,
+		HBUCR_Stalled,
+		HBUCR_SlowSlot
+	};
+
+	void			ResetHighBandwidthSlowUploadTracking();
+	bool			IsHighBandwidthSlowUploadCooldownActive(DWORD curTick) const;
+	bool			CanProbeHighBandwidthSlowUploadCooldown(DWORD curTick) const;
+	void			SetHighBandwidthSlowUploadCooldown(DWORD curTick, DWORD dwCooldown, EHighBandwidthUploadCooldownReason eReason = HBUCR_SlowSlot);
+	bool			ShouldRecycleHighBandwidthSlowUpload(uint32 uTargetDatarate, DWORD curTick, DWORD dwSlowGrace, DWORD dwWarmup, DWORD dwZeroGrace, DWORD dwCooldown, float fThresholdFactor);
 
 	uint64			GetSessionUp() const							{ return m_nTransferredUp - m_nCurSessionUp; }
 	void			ResetSessionUp() {
@@ -467,7 +549,7 @@ public:
 	void			ResetSessionDown()								{ m_nCurSessionDown = m_nTransferredDown; m_nCurSessionPayloadDown = 0; }
 	uint64			GetQueueSessionPayloadUp() const				{ return m_nCurQueueSessionPayloadUp; } // Data uploaded/transmitted
 	uint64			GetQueueSessionUploadAdded() const				{ return m_addedPayloadQueueSession; } // Data put into upload buffers
-	uint64			GetPayloadInBuffer() const						{ return m_addedPayloadQueueSession - m_nCurQueueSessionPayloadUp; }
+	uint64			GetPayloadInBuffer() const						{ return m_addedPayloadQueueSession > m_nCurQueueSessionPayloadUp ? m_addedPayloadQueueSession - m_nCurQueueSessionPayloadUp : 0; }
 	void			SetQueueSessionUploadAdded(uint64 uVal)			{ m_addedPayloadQueueSession = uVal; }
 	const bool		ProcessExtendedInfo(CSafeMemFile &packet, CKnownFile* tempreqfile, bool isUDP = false);
 	uint16			GetUpPartCount() const							{ return m_nUpPartCount; }
@@ -573,6 +655,9 @@ public:
 	//KadIPCheck
 	EKadState		GetKadState() const								{ return m_eKadState; }
 	void			SetKadState(const EKadState nNewS)				{ m_eKadState = nNewS; }
+	void			StartIncomingServedBuddyWait()					{ m_dwIncomingServedBuddyRequestTick = ::GetTickCount(); }
+	void			ClearIncomingServedBuddyWait()					{ m_dwIncomingServedBuddyRequestTick = 0; }
+	DWORD			GetIncomingServedBuddyRequestTick() const		{ return m_dwIncomingServedBuddyRequestTick; }
 
 	//File Comment
 	bool			HasFileComment() const							{ return !m_strFileComment.IsEmpty(); }
@@ -584,6 +669,18 @@ public:
 	void			SetFileRating(uint8 uRating)					{ m_uFileRating = uRating; }
 
 	// Barry - Process zip file as it arrives, don't need to wait until end of block
+	struct SCompressedBlockParseResult
+	{
+		SCompressedBlockParseResult();
+
+		BYTE*	m_pBuffer;
+		uint32	m_uBufferSize;
+		uint64	m_uStartOffset;
+		uint64	m_uEndOffset;
+		int		m_iZLibResult;
+		bool	m_bValid;
+	};
+	bool			ParseCompressedBlockPacket(Pending_Block_Struct *block, const BYTE *zipped, uint32 lenZipped, SCompressedBlockParseResult *pResult);
 	int				unzip(Pending_Block_Struct *block, const BYTE *zipped, uint32 lenZipped, BYTE **unzipped, uint32 *lenUnzipped, int iRecursion = 0);
 	void			UpdateDisplayedInfo(bool force = false);
 	int				GetFileListRequested() const					{ return m_iFileListRequested; }
@@ -626,8 +723,8 @@ public:
 
 	const CString	GetGeolocationData(const bool bForceCountryCity = false) const;
 	int				GetCountryFlagIndex() const;
-	void			ResetGeoLite2();
-	void			ResetGeoLite2(const CAddress& dwIP);
+	void			ResetIPGeolocation();
+	void			ResetIPGeolocation(const CAddress& dwIP);
 
 #ifdef _DEBUG
 	// Diagnostic Support
@@ -728,6 +825,8 @@ public:
 	time_t	m_tPunishmentStartTime = 0; //Set initial value to "no ban"
 	bool	GetAntiUploaderCaseThree() { return m_bAntiUploaderCaseThree; }
 	bool	m_bUploaderPunishmentPreventionActive;
+	bool	m_bUploaderPunishmentPrevented;
+	bool	m_bFriendPunishmentPrevented;
 	time_t	tFirstSeen;
 
 	void SetClientNote();
@@ -835,7 +934,9 @@ protected:
 	//--group aligned to int32
 	uint16	m_nServingBuddyPort;
 	bool	m_bServingBuddyIDValid;
+	bool	m_bEServerBuddyKadIDValid;
 	bool	m_bUnicodeSupport;
+	bool	m_bAllowAnyBindOnNextServerCallbackConnect;
 	//--group aligned to int32
 
 	//uint32	m_nBuddyIP;
@@ -843,6 +944,7 @@ protected:
 	CAddress m_LastCallbackRequesterIP;
 	DWORD	m_dwLastBuddyPingPongTime;
 	uchar	m_achServingBuddyID[MDX_DIGEST_SIZE];
+	uchar	m_achEServerBuddyKadID[MDX_DIGEST_SIZE];
 	CString m_strHelloInfo;
 	CString m_strMuleInfo;
 	CString m_strCaptchaChallenge;
@@ -859,7 +961,15 @@ protected:
 	DWORD	m_dwEServerBuddyFirstRequest;	// Rate limiting: window start time
 	UINT	m_nEServerRelayRequestCount;	// Rate limiting: relay request count in window
 	DWORD	m_dwEServerRelayFirstRequest;	// Rate limiting: relay window start time
+	UINT	m_nEServerPeerInfoCount;	// Rate limiting: cross-buddy peer info count in window
+	DWORD	m_dwEServerPeerInfoFirstRequest;	// Rate limiting: peer info window start time
+	DWORD	m_dwLastEServerRelayRequestSent;	// Last outbound relay request for duplicate suppression
+	uint32	m_dwLastEServerRelayRequestTargetLowID;	// Last outbound relay target LowID
+	uint32	m_dwLastEServerRelayRequestBuddyIP;	// Last outbound relay buddy endpoint context
+	uchar	m_achLastEServerRelayRequestFileHash[MDX_DIGEST_SIZE];	// Last outbound relay file hash
 	CUpDownClient* m_pPendingEServerRelayTarget;	// Target waiting for buddy reconnect to send relay
+	uint32	m_dwPendingEServerRelayTargetLowID;	// Stored identity for pending relay target
+	uchar	m_achPendingEServerRelayFileHash[MDX_DIGEST_SIZE];	// Stored file context for pending relay target
 	DWORD	m_dwEServerExtPortProbeToken;	// Token for UDP probe verification (buddy -> served)
 	DWORD	m_dwEServerExtPortProbeSent;	// Last UDP probe sent tick
 	uint16	m_nObservedExternalUdpPort;		// Observed external UDP port (on buddy)
@@ -868,6 +978,9 @@ protected:
 
 	// NAT-T rendezvous retry scheduling
 	DWORD	m_dwNattNextRetryTick;
+	DWORD	m_dwNatTRendezvousStartTick;
+	uint8	m_uNatTRendezvousAttempts;
+	uchar	m_achNatTRendezvousFileHash[MDX_DIGEST_SIZE];
 	DWORD	m_dwUtpConnectionStartTick;  // Track uTP connection start for timeout handling
 	DWORD	m_dwUtpQueuedPacketsTime;    // Track when packets were queued for delayed flush
 	bool	m_bUtpWritable;
@@ -879,6 +992,11 @@ protected:
 	bool	m_bUtpProactiveHelloSent;  // Track if proactive hello already sent for inbound uTP
 	DWORD	m_dwUtpLastInboundTick;
 	EUtpFrameType	m_uUtpLastFrameType;
+	void*	m_pNatTraversalSecureIdentLayer;
+	void*	m_pLastNatTraversalFileRequestLayer;
+	DWORD	m_dwLastNatTraversalFileRequestTick;
+	uchar	m_achLastNatTraversalFileRequestHash[MDX_DIGEST_SIZE];
+	bool	m_bNatFileRequestCloseRetryUsed;
 	// Hello resend tracking for uTP when HelloAnswer is pending
 	DWORD	m_dwHelloLastSentTick;
 	uint8	m_uHelloResendCount;
@@ -892,9 +1010,21 @@ protected:
 	bool	m_bAwaitingDirectCallback;
 	bool	m_bAllowRendezvousAfterCallback;
 	DWORD	m_dwDirectCallbackAttemptTick;
+	DWORD	m_dwIncomingServedBuddyRequestTick;
 	bool	m_bEServerRelayNatTGuardActive;
 	DWORD	m_dwEServerRelayNatTWindowStart;
 	uint8	m_uEServerRelayTransientErrors;
+	bool	m_bDirectNatTraversalCaps;
+	uint8	m_byDirectNatTraversalOptions;
+	DWORD	m_dwDirectNatTraversalCapsTick;
+	DWORD	m_dwDirectNatTraversalCapsProbeTick;
+	CAddress m_DirectNatTraversalCapsProbeIP;
+	uint16	m_uDirectNatTraversalCapsProbePort;
+	bool	m_bDirectNatTraversalCapsRefreshRequired;
+	bool	m_bNatRendezvousUtpTransportPinned;
+	CAddress m_NatTraversalQuicFailedIP;
+	uint16	m_uNatTraversalQuicFailedPort;
+	DWORD	m_dwNatTraversalQuicFailedTick;
 
 	CTypedPtrList<CPtrList, Packet*> m_WaitingPackets_list;
 	CList<PartFileStamp> m_DontSwap_list;
@@ -948,7 +1078,11 @@ public:
 	bool		IsNatTRetryDue(DWORD now) const { return !m_bNatTFatalConnect && m_uNattRetryLeft > 0 && (int)(now - m_dwNattNextRetryTick) >= 0; }
 	void		ScheduleNextNatTRetry(DWORD now, DWORD jmin, DWORD jmax);
 	void		DoNatTRetry();
+	void		ResetNatTRendezvousSession();
+	bool		RegisterNatTRendezvousAttempt();
+	void		AbortNatTRendezvousAttempt(LPCTSTR pszReason);
 	void		QueueDeferredNatConnect(const CAddress& ip, uint16 port, uint16 window = 0);
+	bool		RefreshNatObservedEndpoint(const CAddress& ip, uint16 port, LPCTSTR pszReason);
 	void		FlagNatTFatalConnectFailure();
 	void		ClearNatTFatalConnectFailure();
 	void		ArmEServerRelayNatTGuard();
@@ -977,7 +1111,10 @@ public:
 	DWORD		m_dwDownStartTime;
 	DWORD		m_dwLastBlockReceived;
 	DWORD		m_dwLastNatStallRecover;
+	DWORD		m_dwHashsetRequestSent;
+	DWORD		m_dwLastOutOfPartReqsResyncTick;
 	UINT		m_uNatStallRecoverBurst;
+	UINT		m_uNoPendingBlockReaskBurst;
 	DWORD		m_dwLastNatKeepAliveSent;	// Uploader side NAT keep-alive timestamp
 	UINT		m_cDownAsked;
 	UINT		m_nTotalUDPPackets;
@@ -999,6 +1136,11 @@ public:
 	UINT		m_nUpDatarate;
 	uint64		m_nSumForAvgUpDataRate;
 	CList<TransferredData> m_AverageUDR_list;
+	DWORD		m_dwLastHighBandwidthSlowUploadTick;
+	DWORD		m_dwLastHighBandwidthPayloadTick;
+	DWORD		m_dwHighBandwidthSlowUploadCooldownUntil;
+	EHighBandwidthUploadCooldownReason m_eHighBandwidthUploadCooldownReason;
+	uint64		m_uLastHighBandwidthPayloadUp;
 
 	//////////////////////////////////////////////////////////
 	// Download data rate computation

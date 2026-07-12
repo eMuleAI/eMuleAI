@@ -16,6 +16,7 @@
 //along with this program; if not, write to the Free Software
 //Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 #include "stdafx.h"
+#include <cstdio>
 #include "emule.h"
 #include "KademliaWnd.h"
 #include "KadContactListCtrl.h"
@@ -30,6 +31,7 @@
 #include "Ini2.h"
 #include "CustomAutoComplete.h"
 #include "OtherFunctions.h"
+#include "Opcodes.h"
 #include "emuledlg.h"
 #include "clientlist.h"
 #include "log.h"
@@ -57,6 +59,206 @@ static char THIS_FILE[] = __FILE__;
 #define	WND1_BUTTON_WIDTH	250
 #define	WND1_BUTTON_HEIGHT	22	// don't set the height to something different than 22 unless you know exactly what you are doing!
 #define	WND1_NUM_BUTTONS	2
+
+namespace
+{
+	struct SNodesDatCandidateInfo
+	{
+		SNodesDatCandidateInfo()
+			: m_uUsableContacts(0)
+			, m_bBootstrapOnly(false)
+		{
+		}
+
+		uint32 m_uUsableContacts;
+		bool m_bBootstrapOnly;
+	};
+
+	const uint32 KNODESDAT_VERSION3 = 3u;
+	const uint32 KNODESDAT_BOOTSTRAP_EDITION = 1u;
+	const size_t KNODESDAT_HEADER_SIZE = sizeof(uint32);
+	const size_t KNODESDAT_BOOTSTRAP_HEADER_SIZE = sizeof(uint32) * 3;
+	const size_t KNODESDAT_V1_RECORD_SIZE = 16u + sizeof(uint32) + sizeof(uint16) + sizeof(uint16) + sizeof(uint8);
+	const size_t KNODESDAT_V2_RECORD_SIZE = 16u + sizeof(uint32) + sizeof(uint16) + sizeof(uint16) + sizeof(uint8) + sizeof(uint32) + sizeof(uint32) + sizeof(uint8);
+	const uint32 KNODESDAT_MAX_CANDIDATE_CONTACTS = 50000u;
+	const __int64 KNODESDAT_MAX_CANDIDATE_FILE_SIZE = 8ll * 1024ll * 1024ll;
+
+	bool ReadExact(FILE *pFile, void *pBuffer, size_t uBytes)
+	{
+		return pFile != NULL && fread(pBuffer, 1, uBytes, pFile) == uBytes;
+	}
+
+	bool IsReasonableNodesDatContactCount(uint32 uRecordCount)
+	{
+		return uRecordCount <= KNODESDAT_MAX_CANDIDATE_CONTACTS;
+	}
+
+	bool HasEnoughNodesDatPayload(const __int64 nFileLength, const __int64 nFilePosition, uint32 uRecordCount, size_t uRecordSize)
+	{
+		return nFileLength >= 0 && nFilePosition >= 0 && nFileLength >= nFilePosition && static_cast<unsigned __int64>(nFileLength - nFilePosition) >= static_cast<unsigned __int64>(uRecordCount) * uRecordSize;
+	}
+
+	bool HasExactNodesDatPayload(const __int64 nFileLength, const __int64 nFilePosition, uint32 uRecordCount, size_t uRecordSize)
+	{
+		return nFileLength >= 0 && nFilePosition >= 0 && nFileLength >= nFilePosition && static_cast<unsigned __int64>(nFileLength - nFilePosition) == static_cast<unsigned __int64>(uRecordCount) * uRecordSize;
+	}
+
+	bool IsStructurallyUsableKadContact(uint32 uStoredIP, uint16 uUDPPort, uint8 uContactVersion)
+	{
+		const uint32 uHostIP = htonl(uStoredIP);
+		return IsGoodIPPort(uHostIP, uUDPPort) && !(uUDPPort == 53 && uContactVersion <= KADEMLIA_VERSION5_48a);
+	}
+
+	bool InspectBootstrapNodesDatCandidate(FILE *pFile, const __int64 nFileLength, SNodesDatCandidateInfo &rInfo)
+	{
+		uint32 uRecordCount = 0;
+		if (!ReadExact(pFile, &uRecordCount, sizeof uRecordCount))
+			return false;
+		if (!IsReasonableNodesDatContactCount(uRecordCount))
+			return false;
+		if (!HasExactNodesDatPayload(nFileLength, _ftelli64(pFile), uRecordCount, KNODESDAT_V1_RECORD_SIZE))
+			return false;
+
+		rInfo.m_bBootstrapOnly = true;
+		for (uint32 uIndex = 0; uIndex < uRecordCount; ++uIndex) {
+			byte abyID[16];
+			uint32 uStoredIP = 0;
+			uint16 uUDPPort = 0;
+			uint16 uTCPPort = 0;
+			uint8 uContactVersion = 0;
+
+			if (!ReadExact(pFile, abyID, sizeof abyID)
+				|| !ReadExact(pFile, &uStoredIP, sizeof uStoredIP)
+				|| !ReadExact(pFile, &uUDPPort, sizeof uUDPPort)
+				|| !ReadExact(pFile, &uTCPPort, sizeof uTCPPort)
+				|| !ReadExact(pFile, &uContactVersion, sizeof uContactVersion))
+				return false;
+
+			UNREFERENCED_PARAMETER(uTCPPort);
+			if (uContactVersion > 1 && IsStructurallyUsableKadContact(uStoredIP, uUDPPort, uContactVersion))
+				++rInfo.m_uUsableContacts;
+		}
+		return true;
+	}
+
+	bool InspectNodesDatCandidateFile(const CString &strFilename, SNodesDatCandidateInfo &rInfo)
+	{
+		rInfo = SNodesDatCandidateInfo();
+
+		FILE *pFile = OpenFileStreamSharedReadLongPath(strFilename, false);
+		if (pFile == NULL)
+			return false;
+
+		if (_fseeki64(pFile, 0, SEEK_END) != 0) {
+			fclose(pFile);
+			return false;
+		}
+		const __int64 nFileLength = _ftelli64(pFile);
+		if (nFileLength < static_cast<__int64>(KNODESDAT_HEADER_SIZE) || nFileLength > KNODESDAT_MAX_CANDIDATE_FILE_SIZE || _fseeki64(pFile, 0, SEEK_SET) != 0) {
+			fclose(pFile);
+			return false;
+		}
+
+		uint32 uNumContacts = 0;
+		uint32 uVersion = 0;
+		if (!ReadExact(pFile, &uNumContacts, sizeof uNumContacts)) {
+			fclose(pFile);
+			return false;
+		}
+
+		if (uNumContacts == 0) {
+			if (nFileLength < static_cast<__int64>(sizeof(uint32) * 2) || !ReadExact(pFile, &uVersion, sizeof uVersion)) {
+				fclose(pFile);
+				return false;
+			}
+
+			if (uVersion == KNODESDAT_VERSION3 && nFileLength >= static_cast<__int64>(KNODESDAT_BOOTSTRAP_HEADER_SIZE)) {
+				uint32 uBootstrapEdition = 0;
+				if (!ReadExact(pFile, &uBootstrapEdition, sizeof uBootstrapEdition)) {
+					fclose(pFile);
+					return false;
+				}
+				if (uBootstrapEdition == KNODESDAT_BOOTSTRAP_EDITION) {
+					const bool bBootstrapSuccess = InspectBootstrapNodesDatCandidate(pFile, nFileLength, rInfo);
+					fclose(pFile);
+					return bBootstrapSuccess;
+				}
+			}
+
+			if (uVersion < 1 || uVersion > 3 || !ReadExact(pFile, &uNumContacts, sizeof uNumContacts)) {
+				fclose(pFile);
+				return false;
+			}
+		}
+
+		if (!IsReasonableNodesDatContactCount(uNumContacts)) {
+			fclose(pFile);
+			return false;
+		}
+
+		const size_t uRecordSize = (uVersion >= 2) ? KNODESDAT_V2_RECORD_SIZE : KNODESDAT_V1_RECORD_SIZE;
+		if (!HasEnoughNodesDatPayload(nFileLength, _ftelli64(pFile), uNumContacts, uRecordSize)) {
+			fclose(pFile);
+			return false;
+		}
+
+		for (uint32 uIndex = 0; uIndex < uNumContacts; ++uIndex) {
+			byte abyID[16];
+			uint32 uStoredIP = 0;
+			uint16 uUDPPort = 0;
+			uint16 uTCPPort = 0;
+			byte byType = 0;
+			uint8 uContactVersion = 0;
+
+			if (!ReadExact(pFile, abyID, sizeof abyID)
+				|| !ReadExact(pFile, &uStoredIP, sizeof uStoredIP)
+				|| !ReadExact(pFile, &uUDPPort, sizeof uUDPPort)
+				|| !ReadExact(pFile, &uTCPPort, sizeof uTCPPort)) {
+				fclose(pFile);
+				return false;
+			}
+
+			UNREFERENCED_PARAMETER(uTCPPort);
+			if (uVersion >= 1) {
+				if (!ReadExact(pFile, &uContactVersion, sizeof uContactVersion)) {
+					fclose(pFile);
+					return false;
+				}
+			} else if (!ReadExact(pFile, &byType, sizeof byType)) {
+				fclose(pFile);
+				return false;
+			}
+
+			if (uVersion >= 2) {
+				uint32 uUDPKey = 0;
+				uint32 uUDPKeyIP = 0;
+				uint8 uVerified = 0;
+				if (!ReadExact(pFile, &uUDPKey, sizeof uUDPKey)
+					|| !ReadExact(pFile, &uUDPKeyIP, sizeof uUDPKeyIP)
+					|| !ReadExact(pFile, &uVerified, sizeof uVerified)) {
+					fclose(pFile);
+					return false;
+				}
+			}
+
+			if (uVersion == 0 && byType >= 4)
+				continue;
+
+			if (IsStructurallyUsableKadContact(uStoredIP, uUDPPort, uContactVersion))
+				++rInfo.m_uUsableContacts;
+		}
+
+		fclose(pFile);
+		return true;
+	}
+
+	CString GetNodesDatFilename()
+	{
+		CString strNodesDatFilename(thePrefs.GetMuleDirectory(EMULE_CONFIGDIR));
+		strNodesDatFilename.Append(_T("nodes.dat"));
+		return strNodesDatFilename;
+	}
+}
 
 // KademliaWnd dialog
 
@@ -205,7 +407,7 @@ BOOL CKademliaWnd::OnInitDialog()
 	AddOrReplaceAnchor(this, IDC_KADSEARCHLIST, MIDDLE_LEFT, BOTTOM_RIGHT);
 	AddOrReplaceAnchor(this, IDC_KADSEARCHLAB, MIDDLE_LEFT);
 
-	// Resize the edit controls to fit the down-arrow button before anchors are snapshotted
+	// Resize the edit controls to fit the down-arrow button before anchors are stored
 	if (thePrefs.GetUseAutocompletion()) {
 		CWnd* pIPPort = GetDlgItem(IDC_BOOTSTRAPIPPORT);
 		if (pIPPort) {
@@ -361,6 +563,11 @@ void CKademliaWnd::OnEnSetfocusBootstrapNodesdat()
 
 void CKademliaWnd::OnBnClickedBootstrapbutton()
 {
+	if (theApp.emuledlg != NULL && !theApp.emuledlg->CanUseP2PConnectionCommands()) {
+		theApp.emuledlg->LogP2PConnectionCommandBlocked(true);
+		return;
+	}
+
 	uint8 bSelection = EBootstrapSelection::B_KNOWN;
 
 	if (IsDlgButtonChecked(IDC_RADIP)) {
@@ -388,6 +595,10 @@ void CKademliaWnd::OnBnClickedBootstrapbutton()
 		if (m_pacONBSIPs && m_pacONBSIPs->IsBound())
 			m_pacONBSIPs->AddItem(strIPPort, 0);
 
+		AddLogLine(true, GetResString(_T("KAD_BOOTSTRAP_FROM_IP")), (LPCTSTR)EscPercent(strIPPort));
+		if (theApp.emuledlg != NULL)
+			theApp.emuledlg->FlushQueuedUiLogLines();
+
 		if (!Kademlia::CKademlia::IsRunning()) {
 			Kademlia::CKademlia::Start();
 			theApp.emuledlg->ShowConnectionState();
@@ -414,8 +625,15 @@ void CKademliaWnd::OnBnClickedBootstrapbutton()
 		if (m_pacONBSURLs && m_pacONBSURLs->IsBound())
 			m_pacONBSURLs->AddItem(strURL, 0);
 
+		AddLogLine(true, GetResString(_T("KAD_BOOTSTRAP_FROM_URL")), (LPCTSTR)EscPercent(strURL));
+		if (theApp.emuledlg != NULL)
+			theApp.emuledlg->FlushQueuedUiLogLines();
+
 		UpdateNodesDatFromURL(strURL);
 	} else if (!Kademlia::CKademlia::IsRunning()) {
+		AddLogLine(true, GetResString(_T("KAD_BOOTSTRAP_FROM_KNOWN_CLIENTS")));
+		if (theApp.emuledlg != NULL)
+			theApp.emuledlg->FlushQueuedUiLogLines();
 		Kademlia::CKademlia::Start();
 		theApp.emuledlg->ShowConnectionState();
 	}
@@ -447,16 +665,17 @@ void CKademliaWnd::OnBnClickedFirewallcheckbutton()
 void CKademliaWnd::OnBnConnect()
 {
 	const bool bShouldConnect = !(Kademlia::CKademlia::IsConnected() || Kademlia::CKademlia::IsRunning());
-	if (bShouldConnect) {
-		if (!HasNodesDatContacts()) {
-			CDarkMode::MessageBox(GetResString(_T("EMULE_AI_NODESDAT_REQUIRED_CONNECT")), MB_OK | MB_ICONINFORMATION);
-		}
-	}
-
 	if (!bShouldConnect)
 		Kademlia::CKademlia::Stop();
-	else
+	else {
+		if (theApp.emuledlg != NULL && !theApp.emuledlg->CanUseP2PConnectionCommands()) {
+			theApp.emuledlg->LogP2PConnectionCommandBlocked(true);
+			return;
+		}
+		if (!HasNodesDatContacts())
+			CDarkMode::MessageBox(GetResString(_T("EMULE_AI_NODESDAT_REQUIRED_CONNECT")), MB_OK | MB_ICONINFORMATION);
 		Kademlia::CKademlia::Start();
+	}
 	theApp.emuledlg->ShowConnectionState();
 }
 
@@ -563,14 +782,19 @@ void CKademliaWnd::StopUpdateContacts()
 
 bool CKademliaWnd::ContactAdd(const Kademlia::CContact *contact)
 {
+	ASSERT(contact != NULL);
+	if (contact == NULL)
+		return false;
+
 	if (contact->IsBootstrapContact() != m_bBootstrapListMode) {
 		if (contact->IsBootstrapContact()) {
 			ASSERT(0);
 			return false;
 		}
-		// we have real contacts to add, remove all the bootstrap contacts and cancel the mode
+		// We have real contacts to add, remove all bootstrap contacts and cancel the mode.
 		m_bBootstrapListMode = false;
-		m_contactListCtrl->DeleteAllItems();
+		m_contactHistogramCtrl->ResetContactHistogram();
+		m_contactListCtrl->ClearContactRows();
 	}
 	if (!m_bBootstrapListMode)
 		m_contactHistogramCtrl->ContactAdd(contact);
@@ -579,7 +803,7 @@ bool CKademliaWnd::ContactAdd(const Kademlia::CContact *contact)
 
 void CKademliaWnd::ContactRem(const Kademlia::CContact *contact)
 {
-	if (contact->IsBootstrapContact() == m_bBootstrapListMode) {
+	if (contact != NULL && contact->IsBootstrapContact() == m_bBootstrapListMode) {
 		if (!m_bBootstrapListMode)
 			m_contactHistogramCtrl->ContactRem(contact);
 		m_contactListCtrl->ContactRem(contact);
@@ -588,32 +812,74 @@ void CKademliaWnd::ContactRem(const Kademlia::CContact *contact)
 
 void CKademliaWnd::ContactRef(const Kademlia::CContact *contact)
 {
-	if (contact->IsBootstrapContact() == m_bBootstrapListMode)
+	if (contact != NULL && contact->IsBootstrapContact() == m_bBootstrapListMode)
 		m_contactListCtrl->ContactRef(contact);
+}
+
+void CKademliaWnd::SearchAdd(const Kademlia::CSearch *search)
+{
+	searchList->SearchAdd(search);
+}
+
+void CKademliaWnd::SearchRem(const Kademlia::CSearch *search)
+{
+	searchList->SearchRem(search);
+}
+
+void CKademliaWnd::SearchRef(const Kademlia::CSearch *search)
+{
+	searchList->SearchRef(search);
 }
 
 void CKademliaWnd::UpdateNodesDatFromURL(const CString &strURL)
 {
+	CString strTrimmedURL(strURL);
+	strTrimmedURL.Trim();
+	if (strTrimmedURL.IsEmpty() || strTrimmedURL.Find(_T("://")) < 0) {
+		LogError(LOG_STATUSBAR, GetResString(_T("INVALIDURL")));
+		return;
+	}
+
 	CString strTempFilename(thePrefs.GetMuleDirectory(EMULE_CONFIGDIR));
-	strTempFilename.AppendFormat(_T("temp-%lu-nodes.dat"), ::GetTickCount());
+	strTempFilename.AppendFormat(_T("temp-%lu-%lu-nodes.dat"), ::GetCurrentProcessId(), ::GetTickCount());
 
 	// try to download nodes.dat
-	Log(GetResString(_T("DOWNLOADING_NODESDAT_FROM")), (LPCTSTR)strURL);
+	AddLogLine(true, GetResString(_T("DOWNLOADING_NODESDAT_FROM")), (LPCTSTR)EscPercent(strTrimmedURL));
+	if (theApp.emuledlg != NULL)
+		theApp.emuledlg->FlushQueuedUiLogLines();
 	CHttpDownloadDlg dlgDownload;
 	dlgDownload.m_strTitle = GetResString(_T("DOWNLOADING_NODESDAT"));
-	dlgDownload.m_sURLToDownload = strURL;
+	dlgDownload.m_sURLToDownload = strTrimmedURL;
 	dlgDownload.m_sFileToDownloadInto = strTempFilename;
 	if (dlgDownload.DoModal() != IDOK) {
-		LogError(LOG_STATUSBAR, GetResString(_T("ERR_FAILEDDOWNLOADNODES")), (LPCTSTR)strURL);
+		LogError(LOG_STATUSBAR, GetResString(_T("ERR_FAILEDDOWNLOADNODES")), (LPCTSTR)strTrimmedURL);
+		return;
+	}
+
+	SNodesDatCandidateInfo fileInfo;
+	if (!InspectNodesDatCandidateFile(strTempFilename, fileInfo) || fileInfo.m_uUsableContacts == 0) {
+		(void)::DeleteFile(PreparePathForWin32LongPath(strTempFilename));
+		LogError(LOG_STATUSBAR, GetResString(_T("ERR_KADCONTACTS")));
+		DebugLogWarning(_T("Rejected downloaded nodes.dat from %s before live Kad import"), (LPCTSTR)strTrimmedURL);
+		return;
+	}
+
+	const CString strTargetFilename(GetNodesDatFilename());
+	DWORD dwReplaceError = ERROR_SUCCESS;
+	if (!ReplaceFileAtomically(strTempFilename, strTargetFilename, &dwReplaceError)) {
+		(void)::DeleteFile(PreparePathForWin32LongPath(strTempFilename));
+		LogError(LOG_STATUSBAR, GetResString(_T("ERR_FAILEDDOWNLOADNODES")), (LPCTSTR)strTrimmedURL);
+		DebugLogError(_T("Failed to store downloaded nodes.dat from %s: %s"), (LPCTSTR)strTrimmedURL, (LPCTSTR)GetErrorMessage(dwReplaceError));
 		return;
 	}
 
 	if (!Kademlia::CKademlia::IsRunning()) {
 		Kademlia::CKademlia::Start();
 		theApp.emuledlg->ShowConnectionState();
-	}
-	Kademlia::CKademlia::GetRoutingZone()->ReadFile(strTempFilename);
-	(void)_tremove(strTempFilename);
+	} else
+		Kademlia::CKademlia::GetRoutingZone()->ReadFile(strTargetFilename);
+
+	DebugLog(_T("Updated nodes.dat from %s with %u usable contact%s"), (LPCTSTR)strTrimmedURL, fileInfo.m_uUsableContacts, fileInfo.m_uUsableContacts == 1 ? _T("") : _T("s"));
 }
 
 BOOL CKademliaWnd::OnHelpInfo(HELPINFO*)
@@ -655,9 +921,9 @@ void CKademliaWnd::OnNMDblclkSearchlist(LPNMHDR pNMHDR, LRESULT *pResult)
 {
 	LPNMITEMACTIVATE pItemInfo = (LPNMITEMACTIVATE)pNMHDR;
 	if (pItemInfo->iItem >= 0) {
-		Kademlia::CSearch *pSearch = (Kademlia::CSearch*)searchList->GetItemData(pItemInfo->iItem);
-		if (pSearch != NULL) {
-			SetSearchGraph(pSearch->GetLookupHistory(), true);
+		Kademlia::CLookupHistory *pLookupHistory = searchList->GetLookupHistoryForItem(pItemInfo->iItem);
+		if (pLookupHistory != NULL) {
+			SetSearchGraph(pLookupHistory, true);
 			thePrefs.SetAutoShowLookups(false);
 		}
 	}
@@ -668,9 +934,9 @@ void CKademliaWnd::OnListModifiedSearchlist(LPNMHDR, LRESULT *pResult)
 {
 	POSITION pos = searchList->GetFirstSelectedItemPosition();
 	if (pos != NULL) {
-		Kademlia::CSearch *pSearch = (Kademlia::CSearch*)searchList->GetItemData(searchList->GetNextSelectedItem(pos));
-		if (pSearch != NULL)
-			SetSearchGraph(pSearch->GetLookupHistory(), false);
+		Kademlia::CLookupHistory *pLookupHistory = searchList->GetLookupHistoryForItem(searchList->GetNextSelectedItem(pos));
+		if (pLookupHistory != NULL)
+			SetSearchGraph(pLookupHistory, false);
 	}
 	*pResult = 0;
 }
@@ -741,10 +1007,9 @@ void CKademliaWnd::SetBootstrapListMode()
 	else
 		ASSERT(0);
 }
-void CKademliaWnd::ResetGeoLite2()
+void CKademliaWnd::ResetIPGeolocation()
 {
-	for (int i = 0; i != m_contactListCtrl->GetItemCount(); i++)
-		((Kademlia::CContact*)m_contactListCtrl->GetItemData(i))->ResetGeoLite2();
+	m_contactListCtrl->Invalidate();
 }
 
 void CKademliaWnd::ResetHistory()

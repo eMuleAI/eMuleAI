@@ -200,14 +200,14 @@ bool CServerSocket::ProcessPacket(const BYTE *packet, uint32 size, uint8 opcode)
 						LogError(LOG_STATUSBAR, _T("%s %s (%s:%u) - %s")
 							, (LPCTSTR)GetResString(_T("ERROR"))
 							, pServer ? (LPCTSTR)pServer->GetListName() : (LPCTSTR)GetResString(_T("PW_SERVER"))
-							, cur_server ? cur_server->GetAddress() : EMPTY
+							, cur_server ? (LPCTSTR)cur_server->GetAddress() : (LPCTSTR)EMPTY
 							, cur_server ? cur_server->GetPort() : 0, (LPCTSTR)message.Mid(5).Trim(_T(" :")));
 						bOutputMessage = false;
 					} else if (_tcsncmp(message, _T("WARNING"), 7) == 0) {
 						LogWarning(LOG_STATUSBAR, _T("%s %s (%s:%u) - %s")
 							, (LPCTSTR)GetResString(_T("WARNING"))
 							, pServer ? (LPCTSTR)pServer->GetListName() : (LPCTSTR)GetResString(_T("PW_SERVER"))
-							, cur_server ? cur_server->GetAddress() : EMPTY
+							, cur_server ? (LPCTSTR)cur_server->GetAddress() : (LPCTSTR)EMPTY
 							, cur_server ? cur_server->GetPort() : 0, (LPCTSTR)message.Mid(7).Trim(_T(" :")));
 						bOutputMessage = false;
 					}
@@ -368,15 +368,19 @@ bool CServerSocket::ProcessPacket(const BYTE *packet, uint32 size, uint8 opcode)
 				if (thePrefs.GetDebugServerTCPLevel() > 0)
 					Debug(_T("ServerMsg - OP_SearchResult\n"));
 				CServer *cur_srv = (serverconnect) ? serverconnect->GetCurrentServer() : NULL;
+				const uint32 nServerIP = cur_srv ? cur_srv->GetIP() : 0;
+				const uint16 nServerPort = cur_srv ? cur_srv->GetPort() : (uint16)0;
+				if (theApp.QueueServerSearchAnswerNetworkCommand(packet, size, true/*pServer ? pServer->GetUnicodeSupport() : false*/, nServerIP, nServerPort))
+					break;
 				bool bMoreResultsAvailable;
-				UINT uSearchResults = theApp.searchlist->ProcessSearchAnswer(packet, size, true/*pServer ? pServer->GetUnicodeSupport() : false*/, cur_srv ? cur_srv->GetIP() : 0, cur_srv ? cur_srv->GetPort() : (uint16)0, &bMoreResultsAvailable);
+				UINT uSearchResults = theApp.searchlist->ProcessSearchAnswer(packet, size, true/*pServer ? pServer->GetUnicodeSupport() : false*/, nServerIP, nServerPort, &bMoreResultsAvailable);
 				theApp.emuledlg->searchwnd->LocalEd2kSearchEnd(uSearchResults, bMoreResultsAvailable);
 				break;
 			}
 		case OP_FOUNDSOURCES_OBFU:
 		case OP_FOUNDSOURCES:
 			if (thePrefs.GetDebugServerTCPLevel() > 0)
-				Debug(_T("ServerMsg - OP_FoundSources%s; Sources=%u  %s\n"), (opcode == OP_FOUNDSOURCES_OBFU) ? _T("_OBFU") : EMPTY, (UINT)packet[16], (LPCTSTR)DbgGetFileInfo(packet));
+				Debug(_T("ServerMsg - OP_FoundSources%s; Sources=%u  %s\n"), (opcode == OP_FOUNDSOURCES_OBFU) ? (LPCTSTR)_T("_OBFU") : (LPCTSTR)EMPTY, (UINT)packet[16], (LPCTSTR)DbgGetFileInfo(packet));
 
 			ASSERT(cur_server);
 			if (cur_server) {
@@ -386,8 +390,8 @@ bool CServerSocket::ProcessPacket(const BYTE *packet, uint32 size, uint8 opcode)
 				if (theApp.clientlist->ProcessEServerBuddyMagicSourceAnswer(fileid, sources, (opcode == OP_FOUNDSOURCES_OBFU), cur_server->GetIP(), cur_server->GetPort()))
 					break;
 				CPartFile *file = theApp.downloadqueue->GetFileByID(fileid);
-				if (file)
-					file->AddSources(&sources, cur_server->GetIP(), cur_server->GetPort(), (opcode == OP_FOUNDSOURCES_OBFU));
+				if (file != NULL)
+					theApp.QueueDownloadFoundSourcesNetworkCommand(file, packet, size, sources.GetPosition(), cur_server->GetIP(), cur_server->GetPort(), (opcode == OP_FOUNDSOURCES_OBFU));
 			}
 			break;
 		case OP_SERVERSTATUS:
@@ -574,6 +578,7 @@ bool CServerSocket::ProcessPacket(const BYTE *packet, uint32 size, uint8 opcode)
 					}
 				}
 
+				client->SetAllowAnyBindOnNextServerCallbackConnect(true);
 				client->TryToConnect();
 			}
 			break;

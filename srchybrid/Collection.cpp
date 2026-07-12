@@ -39,6 +39,23 @@ static char THIS_FILE[] = __FILE__;
 #define COLLECTION_FILE_VERSION1_INITIAL		0x01
 #define COLLECTION_FILE_VERSION2_LARGEFILES		0x02
 
+namespace
+{
+	bool IsTextCollectionDataLine(const CString &sLine)
+	{
+		CString sTrimmedLine(sLine);
+		sTrimmedLine.Trim();
+		return !sTrimmedLine.IsEmpty() && sTrimmedLine[0] != _T('#');
+	}
+
+	bool IsTextCollectionEd2kLine(const CString &sLine)
+	{
+		CString sTrimmedLine(sLine);
+		sTrimmedLine.Trim();
+		return sTrimmedLine.Left(7).CompareNoCase(_T("ed2k://")) == 0;
+	}
+}
+
 CCollection::CCollection()
 	: m_bTextFormat()
 	, m_nKeySize()
@@ -266,17 +283,31 @@ bool CCollection::InitCollectionFromFile(const CString &sFilePath, const CString
 						}
 
 						int start = 0;
+						bool bHasTextCollectionData = false;
+						int iLineNumber = 0;
 						while (start < wtext.GetLength()) {
 							int nl = wtext.Find(L'\n', start);
 							CString sLine = (nl == -1) ? CString(wtext.Mid(start)) : CString(wtext.Mid(start, nl - start));
 							sLine.TrimRight(_T("\r\n"));
-							if (sLine.Find(_T('#')) != 0) {
+							++iLineNumber;
+							if (IsTextCollectionDataLine(sLine)) {
+								bHasTextCollectionData = true;
+								if (!IsTextCollectionEd2kLine(sLine)) {
+									LogWarning(LOG_STATUSBAR, GetResString(_T("COLLECTION_INVALID_NOT_ED2K_LINK")), (LPCTSTR)EscPercent(sFilePath), iLineNumber);
+									::CloseHandle(hTxt);
+									return false;
+								}
 								try {
 									CCollectionFile *pCollectionFile = new CCollectionFile();
-									if (pCollectionFile->InitFromLink(sLine))
+									CString strLinkError;
+									if (pCollectionFile->InitFromLink(sLine, &strLinkError, false))
 										AddFileToCollection(pCollectionFile, false);
-									else
+									else {
+										LogWarning(LOG_STATUSBAR, GetResString(_T("COLLECTION_INVALID_LINK_PARSE_FAILED")), (LPCTSTR)EscPercent(sFilePath), iLineNumber, (LPCTSTR)EscPercent(strLinkError));
 										delete pCollectionFile;
+										::CloseHandle(hTxt);
+										return false;
+									}
 								} catch (CException *e) {
 									e->Delete();
 									ASSERT(0);
@@ -288,6 +319,11 @@ bool CCollection::InitCollectionFromFile(const CString &sFilePath, const CString
 							}
 							if (nl == -1) break;
 							start = nl + 1;
+						}
+						if (!bHasTextCollectionData) {
+							LogWarning(LOG_STATUSBAR, GetResString(_T("COLLECTION_INVALID_NOT_COLLECTION")), (LPCTSTR)EscPercent(sFilePath));
+							::CloseHandle(hTxt);
+							return false;
 						}
 
 						// No collection name tag; use file name without extension.

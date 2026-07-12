@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 #include "Preferences.h"
 #include "resource.h"
 #include "eMuleAI/DarkMode.h"
@@ -9,6 +9,7 @@
 
 class CIni;
 class CMemoryDC;
+class COperationOverlayWnd;
 class CMuleListCtrl;
 
 enum EListStateField {
@@ -19,24 +20,19 @@ enum EListStateField {
 	LSF_ALL = 0x07
 };
 
-enum EListRestorePolicy {
-	LRP_RestoreScroll = 0,
-	LRP_RestoreScroll_NoSelectedFocus,
-	LRP_RestoreScroll_PreserveTopBottom,
-	LRP_RestoreSelection,
-	LRP_RestoreSingleSelection
-};
-
 template<typename TObject>
 class CListState
 {
 public:
 	CArray<TObject*, TObject*> m_aSelectedItems;	// Selected items
-	int m_nFirstSelectedtem = -1;					// First selected item's index, default is -1 for no selection
 	uint32  m_nSortItem = 0;						// Sort column index
-	uint32  m_nScrollPosition = 0;					// Vertical scroll position
+	int m_nScrollPosition = -1;					// Vertical scroll position
 	int m_nHScrollPosition = 0;						// Horizontal scroll position
-	TObject* m_pFirstVisibleItem = nullptr;			// First visible item when state was saved
+	CArray<TObject*, TObject*> m_aVisibleItems;		// Visible items in row order
+	TObject* m_pFocusedItem = nullptr;				// Focused item
+	TObject* m_pSelectionMarkItem = nullptr;		// Selection anchor item
+	bool    m_bAllItemsSelected = false;			// True when every item was selected
+	bool    m_bAtBottom = false;					// Last item was visible
 	bool    m_bSortAscending = true;				// Sort direction
 	CList<int, int> m_liSortHistory;				// Multisort history
 	uint32  m_nValidFields = LSF_ALL;				// Saved fields bitmask
@@ -67,7 +63,7 @@ public:
 		SaveListStateInternal(nListID, nFlags);
 	}
 
-	void EndListStateBatch(uint32 nListID, uint32 nFlags, bool bKeepState, const EListRestorePolicy eRestorePolicy = LRP_RestoreSelection)
+	void EndListStateBatch(uint32 nListID, uint32 nFlags, bool bKeepState)
 	{
 		if (m_uListStateBatchDepth == 0)
 			return;
@@ -81,7 +77,7 @@ public:
 		m_uListStateBatchSavedFlags = LSF_NONE;
 
 		if (uRestoreFlags != LSF_NONE)
-			RestoreListStateInternal(nListID, uRestoreFlags, bKeepState, eRestorePolicy);
+			RestoreListStateInternal(nListID, uRestoreFlags, bKeepState);
 	}
 
 	bool IsListStateBatchActive(uint32 nListID) const
@@ -113,17 +109,95 @@ public:
 	}
 
 	// Restore a previously saved list state.
-	void RestoreListState(uint32 nListID, uint32 nFlags, bool bKeepState, const EListRestorePolicy eRestorePolicy = LRP_RestoreSelection)
+	void RestoreListState(uint32 nListID, uint32 nFlags, bool bKeepState)
 	{
 		if (IsListStateBatchActive(nListID))
 			return;
 
-		RestoreListStateInternal(nListID, nFlags, bKeepState, eRestorePolicy);
+		RestoreListStateInternal(nListID, nFlags, bKeepState);
 	}
 
 private:
+	static uint32 NormalizeListStateFlags(uint32 nFlags)
+	{
+		if (nFlags != LSF_ALL && (nFlags & LSF_SELECTION) != 0)
+			nFlags |= LSF_SCROLL;
+		return nFlags;
+	}
+
+	static bool IsItemCurrentlyVisible(Derived& self, int iItem)
+	{
+		if (iItem < 0 || iItem >= self.GetItemCount())
+			return false;
+
+		CRect rcClient;
+		CRect rcItem;
+		self.GetClientRect(&rcClient);
+		return self.GetItemRect(iItem, &rcItem, LVIR_BOUNDS)
+			&& rcItem.bottom > rcClient.top
+			&& rcItem.top < rcClient.bottom;
+	}
+
+	static int ResolveSavedBottomAnchor(Derived& self, const CListState<ItemT>* pState)
+	{
+		if (pState == nullptr || self.GetItemCount() <= 0)
+			return -1;
+
+		int iBottomAnchor = -1;
+		for (INT_PTR i = pState->m_aVisibleItems.GetCount(); i > 0; --i) {
+			if (self.m_ListedItemsMap.Lookup(pState->m_aVisibleItems[i - 1], iBottomAnchor))
+				break;
+		}
+		return iBottomAnchor >= 0 ? iBottomAnchor : self.GetItemCount() - 1;
+	}
+
+	static int ResolveSavedTopIndex(Derived& self, const CListState<ItemT>* pState)
+	{
+		const int iItemCount = self.GetItemCount();
+		if (pState == nullptr || iItemCount <= 0)
+			return -1;
+		if (pState->m_nScrollPosition <= 0)
+			return 0;
+
+		for (INT_PTR i = 0; i < pState->m_aVisibleItems.GetCount(); ++i) {
+			int iVisibleItemIndex = -1;
+			if (self.m_ListedItemsMap.Lookup(pState->m_aVisibleItems[i], iVisibleItemIndex))
+				return iVisibleItemIndex;
+		}
+		return max(0, min(pState->m_nScrollPosition, iItemCount - 1));
+	}
+
+	static bool ShouldLockWindowUpdateForRestore(Derived& self, const CListState<ItemT>* pState, uint32 uEffectiveFlags)
+	{
+		if ((uEffectiveFlags & LSF_SCROLL) == 0 || pState == nullptr || !::IsWindow(self.GetSafeHwnd()))
+			return false;
+
+		if (self.GetItemCount() > 0) {
+			if (pState->m_bAtBottom) {
+				const int iBottomAnchor = ResolveSavedBottomAnchor(self, pState);
+				if (iBottomAnchor >= 0 && !IsItemCurrentlyVisible(self, iBottomAnchor))
+					return true;
+			} else {
+				const int iWantedTop = ResolveSavedTopIndex(self, pState);
+				if (iWantedTop >= 0 && self.GetTopIndex() != iWantedTop)
+					return true;
+			}
+		}
+
+		SCROLLINFO siHorz = { sizeof(siHorz) };
+		if (!self.GetScrollInfo(SB_HORZ, &siHorz, SIF_POS | SIF_RANGE | SIF_PAGE))
+			return false;
+
+		int iMaxHPos = siHorz.nMax;
+		if (siHorz.nPage > 0)
+			iMaxHPos = max(siHorz.nMin, siHorz.nMax - static_cast<int>(siHorz.nPage) + 1);
+		const int iWantHPos = max(siHorz.nMin, min(pState->m_nHScrollPosition, iMaxHPos));
+		return siHorz.nPos != iWantHPos;
+	}
+
 	void SaveListStateInternal(uint32 nListID, uint32 nFlags)
 	{
+		nFlags = NormalizeListStateFlags(nFlags);
 		if (!nFlags)
 			return; // Nothing to save
 
@@ -140,16 +214,27 @@ private:
 
 		// Save the current selection
 		if (nFlags & LSF_SELECTION) {
-			for (POSITION pos = self.GetFirstSelectedItemPosition(); pos != NULL;) {
-				int idx = self.GetNextSelectedItem(pos);
-				if (idx >= 0 && idx < static_cast<int>(self.m_ListedItemsVector.size())) {
+			const int iItemCount = self.GetItemCount();
+			const int iSelectedCount = self.GetSelectedCount();
+			if (iItemCount > 0 && iSelectedCount == iItemCount) {
+				pCur->m_bAllItemsSelected = true;
+				for (int idx = 0; idx < iItemCount && idx < static_cast<int>(self.m_ListedItemsVector.size()); ++idx)
 					pCur->m_aSelectedItems.Add(self.m_ListedItemsVector[idx]);
-					if (pCur->m_nFirstSelectedtem == -1)
-						pCur->m_nFirstSelectedtem = idx;
-					else
-						pCur->m_nFirstSelectedtem = min(pCur->m_nFirstSelectedtem, idx);
+			} else {
+				for (POSITION pos = self.GetFirstSelectedItemPosition(); pos != NULL;) {
+					int idx = self.GetNextSelectedItem(pos);
+					if (idx >= 0 && idx < static_cast<int>(self.m_ListedItemsVector.size()))
+						pCur->m_aSelectedItems.Add(self.m_ListedItemsVector[idx]);
 				}
 			}
+
+			const int iFocusedItem = self.GetNextItem(-1, LVNI_FOCUSED);
+			if (iFocusedItem >= 0 && iFocusedItem < static_cast<int>(self.m_ListedItemsVector.size()))
+				pCur->m_pFocusedItem = self.m_ListedItemsVector[iFocusedItem];
+
+			const int iSelectionMark = self.GetSelectionMark();
+			if (iSelectionMark >= 0 && iSelectionMark < static_cast<int>(self.m_ListedItemsVector.size()))
+				pCur->m_pSelectionMarkItem = self.m_ListedItemsVector[iSelectionMark];
 		}
 
 		// Save the current sort order
@@ -164,8 +249,12 @@ private:
 		if (nFlags & LSF_SCROLL) {
 			const int iTopIndex = self.GetTopIndex();
 			pCur->m_nScrollPosition = iTopIndex;
-			if (iTopIndex >= 0 && iTopIndex < static_cast<int>(self.m_ListedItemsVector.size()))
-				pCur->m_pFirstVisibleItem = self.m_ListedItemsVector[iTopIndex];
+			const int iItemCount = self.GetItemCount();
+			const int iRowsPerPage = self.GetCountPerPage();
+			pCur->m_bAtBottom = self.IsAtBottom();
+			const int iLastVisibleIndex = min(iItemCount - 1, iTopIndex + max(1, iRowsPerPage));
+			for (int i = iTopIndex; i >= 0 && i <= iLastVisibleIndex && i < static_cast<int>(self.m_ListedItemsVector.size()); ++i)
+				pCur->m_aVisibleItems.Add(self.m_ListedItemsVector[i]);
 
 			SCROLLINFO siHorz = { sizeof(siHorz) };
 			if (self.GetScrollInfo(SB_HORZ, &siHorz, SIF_POS))
@@ -175,7 +264,7 @@ private:
 		m_mapListStates.SetAt(static_cast<int>(nListID), pCur); // Store the state in the map
 	}
 
-	void RestoreListStateInternal(uint32 nListID, uint32 nFlags, bool bKeepState, const EListRestorePolicy eRestorePolicy)
+	void RestoreListStateInternal(uint32 nListID, uint32 nFlags, bool bKeepState)
 	{
 		if (!nFlags)
 			return;  // Nothing to restore
@@ -186,22 +275,10 @@ private:
 		if (!m_mapListStates.Lookup(static_cast<int>(nListID), pState) || !pState)
 			return; // Nothing stored for this ID
 
-		uint32 m_uEffectiveFlags = (nFlags == LSF_ALL) ? pState->m_nValidFields : nFlags; // Effective flags to restore
-		int m_iPrevTop = self.GetTopIndex(); // Save the previous top item index
-		const bool bRestoreSingleSelection = (eRestorePolicy == LRP_RestoreSingleSelection);
-		const bool bPreferSelectedItemForScroll = (eRestorePolicy == LRP_RestoreSelection || bRestoreSingleSelection);
-		const bool bFocusSelectedItems = (eRestorePolicy == LRP_RestoreSelection || eRestorePolicy == LRP_RestoreScroll || bRestoreSingleSelection);
-		const bool bPreserveSelectionFocus = (eRestorePolicy == LRP_RestoreScroll_PreserveTopBottom);
-		const bool bKeepEdgeRowsVisible = (eRestorePolicy == LRP_RestoreScroll_PreserveTopBottom);
-		const int m_iPrevItemCount = self.GetItemCount();
-		const int m_iPrevRowsPerPage = self.GetCountPerPage();
-		const bool m_bKeepTopVisible = bKeepEdgeRowsVisible && m_iPrevTop <= 0;
-		bool m_bKeepBottomVisible = false;
-		if (bKeepEdgeRowsVisible && m_iPrevItemCount > 0 && m_iPrevRowsPerPage > 0 && m_iPrevTop >= 0)
-			m_bKeepBottomVisible = (m_iPrevTop + m_iPrevRowsPerPage >= m_iPrevItemCount);
+		const uint32 uEffectiveFlags = (nFlags == LSF_ALL) ? pState->m_nValidFields : NormalizeListStateFlags(nFlags); // Effective flags to restore
 
 		// Restore sort order
-		if (m_uEffectiveFlags & LSF_SORT) {
+		if (uEffectiveFlags & LSF_SORT) {
 			self.m_liSortHistory.RemoveAll();
 			for (POSITION pos = pState->m_liSortHistory.GetHeadPosition(); pos != NULL; )
 				self.m_liSortHistory.AddTail(pState->m_liSortHistory.GetNext(pos));
@@ -210,104 +287,60 @@ private:
 			self.SortItems(self.SortProc, MAKELONG(pState->m_nSortItem, !pState->m_bSortAscending));
 		}
 
-		// Restore selection
-		int m_iFirstSelIndex = -1;
-		if (m_uEffectiveFlags & LSF_SELECTION) {
+		// Restore selection before the viewport so focus changes cannot override the final scroll position.
+		if (uEffectiveFlags & LSF_SELECTION) {
 			self.SetItemState(-1, 0, LVIS_FOCUSED | LVIS_SELECTED); // Clear all previous selections
 
-			if (bRestoreSingleSelection) {
-				for (INT_PTR i = 0; i < pState->m_aSelectedItems.GetCount(); ++i) {
-					int idx;
-					if (self.m_ListedItemsMap.Lookup(pState->m_aSelectedItems[i], idx)) {
-						m_iFirstSelIndex = idx;
-						break;
-					}
-				}
+			bool bAllSavedItemsStillVisible = pState->m_bAllItemsSelected
+				&& pState->m_aSelectedItems.GetCount() == static_cast<INT_PTR>(self.GetItemCount());
+			for (INT_PTR i = 0; bAllSavedItemsStillVisible && i < pState->m_aSelectedItems.GetCount(); ++i) {
+				int idx;
+				if (!self.m_ListedItemsMap.Lookup(pState->m_aSelectedItems[i], idx))
+					bAllSavedItemsStillVisible = false;
+			}
 
-				// If no selected item survived, keep focus anchored close to the previous first selection.
-				if (m_iFirstSelIndex == -1 && self.GetItemCount() > 0 && pState->m_nFirstSelectedtem != -1)
-					m_iFirstSelIndex = min(max(pState->m_nFirstSelectedtem, 0), self.GetItemCount() - 1);
-
-				if (m_iFirstSelIndex != -1) {
-					UINT m_uState = LVIS_SELECTED;
-					if (bFocusSelectedItems)
-						m_uState |= LVIS_FOCUSED;
-					self.SetItemState(m_iFirstSelIndex, m_uState, LVIS_FOCUSED | LVIS_SELECTED);
-				}
-			} else {
+			if (bAllSavedItemsStillVisible && self.GetItemCount() > 0)
+				self.SetItemState(-1, LVIS_SELECTED, LVIS_SELECTED);
+			else {
 				// Restore selected items
 				for (INT_PTR i = 0; i < pState->m_aSelectedItems.GetCount(); ++i) {
 					int idx;
-					if (self.m_ListedItemsMap.Lookup(pState->m_aSelectedItems[i], idx)) {
-						if (m_iFirstSelIndex == -1 || idx < m_iFirstSelIndex)
-							m_iFirstSelIndex = idx; // Remember the first selected item index
-
-						UINT m_uState = LVIS_SELECTED;
-						if (bFocusSelectedItems)
-							m_uState |= LVIS_FOCUSED;
-						self.SetItemState(idx, m_uState, LVIS_FOCUSED | LVIS_SELECTED);
-					}
-				}
-
-				// If no selection was restored, try to restore the first selected item from the state
-				if (m_iFirstSelIndex == -1 && pState->m_nFirstSelectedtem != -1 && pState->m_nFirstSelectedtem < self.GetItemCount()) {
-					m_iFirstSelIndex = pState->m_nFirstSelectedtem;
-					UINT m_uState = LVIS_SELECTED;
-					if (bFocusSelectedItems)
-						m_uState |= LVIS_FOCUSED;
-					self.SetItemState(m_iFirstSelIndex, m_uState, LVIS_FOCUSED | LVIS_SELECTED);
+					if (self.m_ListedItemsMap.Lookup(pState->m_aSelectedItems[i], idx))
+						self.SetItemState(idx, LVIS_SELECTED, LVIS_SELECTED);
 				}
 			}
 
-			if (m_iFirstSelIndex != -1)
-				self.SetSelectionMark(m_iFirstSelIndex);
+			int iFocusedIndex = -1;
+			if (pState->m_pFocusedItem != nullptr && self.m_ListedItemsMap.Lookup(pState->m_pFocusedItem, iFocusedIndex))
+				self.SetItemState(iFocusedIndex, LVIS_FOCUSED, LVIS_FOCUSED);
+
+			int iSelectionMark = -1;
+			if (pState->m_pSelectionMarkItem != nullptr)
+				self.m_ListedItemsMap.Lookup(pState->m_pSelectionMarkItem, iSelectionMark);
+			self.SetSelectionMark(iSelectionMark);
 		}
+
+		// List-view scroll messages move visible pixels even while WM_SETREDRAW is disabled.
+		// Lock only when the saved viewport actually needs to move.
+		const bool bWindowUpdateLocked = ShouldLockWindowUpdateForRestore(self, pState, uEffectiveFlags)
+			&& ::LockWindowUpdate(self.GetSafeHwnd()) != FALSE;
 
 		// Restore scroll position
-		if (m_uEffectiveFlags & LSF_SCROLL) {
-			int m_iWantTop = -1;
-			if (pState->m_pFirstVisibleItem != nullptr)
-				self.m_ListedItemsMap.Lookup(pState->m_pFirstVisibleItem, m_iWantTop);
-			if (m_iWantTop < 0) {
-				if (bPreferSelectedItemForScroll && m_iFirstSelIndex != -1)
-					m_iWantTop = m_iFirstSelIndex;
-				else
-					m_iWantTop = static_cast<int>(pState->m_nScrollPosition);
-			}
-			if (m_iWantTop > 0 && m_iWantTop < self.GetItemCount()) {
-				const int m_iRowsPerPage = self.GetCountPerPage();
-				if (m_iRowsPerPage > 0) {
-					int m_iBottomIndex = m_iWantTop + m_iRowsPerPage - 1;
-					if (m_iBottomIndex >= self.GetItemCount())
-						m_iBottomIndex = self.GetItemCount() - 1;
-					self.EnsureVisible(m_iBottomIndex, FALSE); // Ensure the bottom item is visible
-				} else
-					self.EnsureVisible(m_iWantTop, FALSE); // Ensure the item is visible
-
-				int m_iCurTop = self.GetTopIndex();
-				if (m_iCurTop != m_iWantTop) {
-					CRect rcTop, rcNext;
-					if (self.GetItemRect(m_iCurTop, &rcTop, LVIR_BOUNDS)
-						&& m_iCurTop + 1 < self.GetItemCount()
-						&& self.GetItemRect(m_iCurTop + 1, &rcNext, LVIR_BOUNDS)) {
-						const int m_iRowH = rcNext.top - rcTop.top; // Exact row height
-						if (m_iRowH > 0)
-							self.Scroll(CSize(0, (m_iWantTop - m_iCurTop) * m_iRowH));
-					}
+		if (uEffectiveFlags & LSF_SCROLL) {
+			if (self.GetItemCount() > 0) {
+				if (pState->m_bAtBottom) {
+					const int iBottomAnchor = ResolveSavedBottomAnchor(self, pState);
+					if (iBottomAnchor >= 0 && !IsItemCurrentlyVisible(self, iBottomAnchor))
+						self.EnsureVisible(iBottomAnchor, FALSE);
+				} else {
+					const int iWantedTop = ResolveSavedTopIndex(self, pState);
+					if (iWantedTop >= 0 && self.GetTopIndex() != iWantedTop)
+						self.ScrollToTopIndex(iWantedTop);
 				}
 			}
-		} else if (m_iPrevTop >= 0 && m_iPrevTop < self.GetItemCount())
-			self.EnsureVisible(m_iPrevTop, FALSE); // If scroll position is not restored, ensure the previous top item is visible
-
-		// Preserve top or bottom edge visibility when requested.
-		if (bKeepEdgeRowsVisible && self.GetItemCount() > 0) {
-			if (m_bKeepTopVisible)
-				self.EnsureVisible(0, FALSE);
-			else if (m_bKeepBottomVisible)
-				self.EnsureVisible(self.GetItemCount() - 1, FALSE);
 		}
 
-		if (m_uEffectiveFlags & LSF_SCROLL) {
+		if (uEffectiveFlags & LSF_SCROLL) {
 			// Owner-data list rebuilds may reset the horizontal origin even if columns stay unchanged.
 			SCROLLINFO siHorz = { sizeof(siHorz) };
 			if (self.GetScrollInfo(SB_HORZ, &siHorz, SIF_POS | SIF_RANGE | SIF_PAGE)) {
@@ -321,72 +354,19 @@ private:
 			}
 		}
 
-		if ((m_uEffectiveFlags & LSF_SELECTION) && bPreserveSelectionFocus && m_iFirstSelIndex >= 0 && m_iFirstSelIndex < self.GetItemCount()) {
-			// Keep keyboard navigation anchored to the restored selection without forcing it into view.
-			self.SetItemState(-1, 0, LVIS_FOCUSED);
-			self.SetItemState(m_iFirstSelIndex, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
-			self.SetSelectionMark(m_iFirstSelIndex);
-		}
-
-		// Keep keyboard focus on a visible row without forcing the view to the selected row.
-		if ((m_uEffectiveFlags & LSF_SELECTION) && !bFocusSelectedItems && !bPreserveSelectionFocus && self.GetItemCount() > 0) {
-			int m_iFocusIndex = self.GetTopIndex();
-			if (m_iFocusIndex < 0 || m_iFocusIndex >= self.GetItemCount())
-				m_iFocusIndex = 0;
-			if (m_iFocusIndex >= 0 && m_iFocusIndex < self.GetItemCount())
-				self.SetItemState(m_iFocusIndex, LVIS_FOCUSED, LVIS_FOCUSED);
-		}
+		if (bWindowUpdateLocked)
+			::LockWindowUpdate(NULL);
 
 		// If we are not keeping the state, delete it
-			if (!bKeepState) {
-				delete pState;
-				m_mapListStates.RemoveKey(static_cast<int>(nListID));
-			}
+		if (!bKeepState) {
+			delete pState;
+			m_mapListStates.RemoveKey(static_cast<int>(nListID));
 		}
+	}
 
 	uint32 m_uListStateBatchDepth = 0;
 	uint32 m_uListStateBatchListID = 0;
 	uint32 m_uListStateBatchSavedFlags = LSF_NONE;
-};
-
-struct update_info_struct {
-	DWORD	 dwUpdate;
-	DWORD	 bNeedToUpdate;
-};
-
-struct update_req_struct {
-	LPARAM	 lpItem;
-	DWORD	 dwRequestTime;
-};
-
-///////////////////////////////////////////////////////////////////////////////
-// CUpdateItemThread
-class CUpdateItemThread : public CWinThread
-{
-	DECLARE_DYNCREATE(CUpdateItemThread)
-protected:
-	CUpdateItemThread();
-	~CUpdateItemThread();
-
-public:
-	virtual	BOOL	InitInstance() { return true; }
-	virtual int		Run();
-	void	EndThread();
-	void	SetListCtrl(CMuleListCtrl* listctrl);
-	void	AddItemToUpdate(const LPARAM item);
-	void	AddItemUpdated(const LPARAM item);
-	bool	IsRunning() const;
-
-private:
-	CMuleListCtrl* m_listctrl;
-	CList<update_req_struct> queueditem;
-	CList<LPARAM>	updateditem;
-	CMap<LPARAM, LPARAM, update_info_struct*, update_info_struct*> ListItems;
-	CCriticalSection	listitemlocker;
-	CCriticalSection	queueditemlocker;
-	CCriticalSection	updateditemlocker;
-	CEvent	newitemEvent;
-	volatile LONG	m_bRun;
 };
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -414,9 +394,13 @@ private:
 class CMuleListCtrl : public CListCtrl
 {
 	DECLARE_DYNAMIC(CMuleListCtrl)
+	friend class COperationOverlayWnd;
 	friend class CToolTipCtrlX;
 
 public:
+	static constexpr UINT MULELIST_BULK_OPERATION_OVERLAY_MIN_ITEM_COUNT = 3;
+	static constexpr DWORD MULELIST_BULK_OPERATION_OVERLAY_DELAY_MS = 1000;
+
 	CMuleListCtrl(PFNLVCOMPARE pfnCompare = SortProc, LPARAM iParamSort = 0);
 	virtual	~CMuleListCtrl();
 
@@ -427,7 +411,7 @@ public:
 	void SetPrefsKey(LPCTSTR lpszName)			{ m_Name = lpszName; };
 
 	// Keep the cached owner-draw colors aligned with the underlying list-view state.
-	void RefreshThemeColors();
+	virtual void RefreshThemeColors();
 
 	// Save to preferences
 	void SaveSettings(const bool bCalledBySaveAppState = false);
@@ -542,7 +526,8 @@ public:
 	
 	// Override this function to handle post-update sorting for maintaining sort order
 	virtual bool ShouldMaintainSortOrderOnUpdate() const { return GetSortItem() != -1; }
-	virtual void MaintainSortOrderAfterUpdate() { }
+	virtual void MaintainSortOrderAfterUpdate();
+	void MaintainSortOrderAfterThrottledUpdate();
 
 	enum ArrowType
 	{
@@ -585,16 +570,59 @@ public:
 		none
 	};
 	EUpdateMode SetUpdateMode(EUpdateMode eUpdateMode);
+	void BeginBulkInsert();
+	void EndBulkInsert();
+	bool IsBulkInsertActive() const				{ return m_uBulkInsertDepth > 0; }
 	void SetAutoSizeWidth(int iAutoSizeWidth)	{ m_iAutoSizeWidth = iAutoSizeWidth; };
 
 	int InsertColumn(int nCol, LPCTSTR lpszColumnHeading, int nFormat = LVCFMT_LEFT, int nWidth = -1, int nSubItem = -1, bool bHiddenByDefault = false);
 
+
+	struct SVisibleItemRange
+	{
+		SVisibleItemRange() : m_iFirst(-1), m_iLast(-1) {}
+		SVisibleItemRange(int iFirst, int iLast) : m_iFirst(iFirst), m_iLast(iLast) {}
+		bool IsValid() const { return m_iFirst >= 0 && m_iLast >= m_iFirst; }
+		int m_iFirst;
+		int m_iLast;
+	};
+
+	struct SAsyncRedrawRange
+	{
+		SAsyncRedrawRange() : m_bFull(false), m_iFirst(-1), m_iLast(-1) {}
+		void Clear() { m_bFull = false; m_iFirst = -1; m_iLast = -1; }
+		void MarkFull() { m_bFull = true; m_iFirst = -1; m_iLast = -1; }
+		void Merge(int iFirst, int iLast);
+		bool m_bFull;
+		int m_iFirst;
+		int m_iLast;
+	};
+
+
 	HIMAGELIST ApplyImageList(HIMAGELIST himl);
-	void RequestItemUpdateAsync(LPARAM item) const;
+	void BeginListModelGeneration(LONG lModelGeneration, bool bClearRows);
+	static CString MakeListSortKey(const CString& strSortText, bool bUndefined = false);
+	static int CompareListSortKeys(const CString& strSortKey1, const CString& strSortKey2);
+	static int ApplyListSortDirection(int iSortResult, bool bDescending);
+	SVisibleItemRange GetVisibleItemRange() const;
+	bool IsAtBottom() const;
+	void ScrollToTopIndex(int iTopIndex);
+	void SetItemCountAndKeepPageFilled(size_t itemCount, DWORD dwFlags);
+	bool IsItemIndexVisible(int iIndex) const;
+	bool GetNextBackgroundItemRange(int& iNextIndex, int iMaxIndex, int iRowsPerSlice, int& iFirst, int& iLast) const;
+	void RequestRowRedrawAsync(int iStart, int iEnd);
+	void RequestFullRedrawAsync();
 	void ShutdownUpdateThread();
 	void AutoSelectItem();
 	void SetSkinKey(LPCTSTR pszKey)			{ m_strSkinKey = pszKey; }
 	const CString& GetSkinKey() const		{ return m_strSkinKey; }
+
+	void ShowOperationOverlay(const CString& strTitle, const CString& strDetail, UINT uDone, UINT uTotal, bool bCanCancel, const CString& strCancelText);
+	void UpdateOperationOverlay(const CString& strTitle, const CString& strDetail, UINT uDone, UINT uTotal, bool bCanCancel = true);
+	void HideOperationOverlay();
+	bool IsOperationOverlayVisible() const;
+	void SetOperationOverlaySuppressed(bool bSuppressed);
+	bool IsOperationOverlaySuppressed() const;
 
 	virtual CObject* GetItemObject(int iIndex) const
 	{
@@ -624,26 +652,30 @@ protected:
 	virtual bool GetPersistentInfoTipText(const SPersistentInfoTipContext& context, CString& strText);
 	virtual bool GetDefaultPersistentInfoTipText(const SPersistentInfoTipContext& context, CString& strText);
 	virtual int GetDefaultPersistentInfoTipExtraLeftPadding(const SPersistentInfoTipContext& context) const;
+	virtual void OnOperationOverlayCancel();
 
 	DECLARE_MESSAGE_MAP()
 	afx_msg void OnKeyDown(UINT nChar, UINT nRepCnt, UINT nFlags);
 	afx_msg void DrawItem(LPDRAWITEMSTRUCT lpDrawItemStruct);
 	afx_msg void MeasureItem(LPMEASUREITEMSTRUCT lpMeasureItemStruct);
 	afx_msg BOOL OnEraseBkgnd(CDC *pDC);
+	void FillUnusedClientArea(CDC *pDC);
 	afx_msg void OnMouseMove(UINT nFlags, CPoint point);
+	afx_msg void OnLButtonDown(UINT nFlags, CPoint point);
+	afx_msg BOOL OnSetCursor(CWnd* pWnd, UINT nHitTest, UINT message);
+	afx_msg void OnPaint();
+	afx_msg void OnSize(UINT nType, int cx, int cy);
+	afx_msg void OnShowWindow(BOOL bShow, UINT nStatus);
 	afx_msg void OnSysColorChange();
 	afx_msg void OnLvnGetInfoTip(LPNMHDR pNMHDR, LRESULT *pResult);
 	afx_msg void OnDestroy();
 	afx_msg LRESULT OnMouseHover(WPARAM wParam, LPARAM lParam);
 	afx_msg LRESULT OnMouseLeave(WPARAM wParam, LPARAM lParam);
 	afx_msg LRESULT OnAsyncInvalidate(WPARAM, LPARAM);
-	afx_msg LRESULT OnAsyncUpdateItem(WPARAM, LPARAM);
 	afx_msg void OnTimer(UINT_PTR nIDEvent);
 
-	enum { WM_MULELISTCTRL_INVALIDATE = WM_APP + 4021, WM_MULELISTCTRL_UPDATE_ITEM = WM_APP + 4022 };
+	enum { WM_MULELISTCTRL_INVALIDATE = WM_APP + 4021 };
 	void RequestInvalidateAsync() const;
-	void QueueItemUpdate(LPARAM item) const;
-	void QueueItemUpdated(LPARAM item) const;
 	bool TryGetPersistentInfoTipContext(CPoint point, SPersistentInfoTipContext& context);
 	bool TryGetPersistentInfoTip(CPoint point, SPersistentInfoTipContext& context, CString* pstrText);
 	void EnsureThemeAwareInfoTipCtrl();
@@ -655,6 +687,7 @@ protected:
 	void RefreshPersistentInfoTipFromPoint(CPoint point);
 	void UpdatePersistentInfoTipTracking(CPoint point);
 	bool IsSamePersistentInfoTipTarget(const SPersistentInfoTipContext& left, const SPersistentInfoTipContext& right) const;
+	bool IsPersistentInfoTipContextCurrent(const SPersistentInfoTipContext& context) const;
 	bool ResolvePersistentInfoTipHotArea(SPersistentInfoTipContext& context) const;
 	bool IsPointWithinPersistentInfoTipHotArea(CPoint point, const SPersistentInfoTipContext& context) const;
 	void StartPersistentInfoTipLeaveTimer();
@@ -678,6 +711,20 @@ protected:
 	void DrawFocusRect(CDC *pDC, LPCRECT rcItem, BOOL bItemFocused, BOOL bCtrlFocused, BOOL bItemSelected);
 	void InitItemMemDC(CMemoryDC *dc, LPDRAWITEMSTRUCT lpDrawItemStruct, BOOL &bCtrlFocused);
 	void LocaliseHeaderCtrl(const LPCTSTR* const uids, size_t cnt);
+	void DrawOperationOverlay(CDC *pDC);
+	bool GetOperationOverlayRect(CRect& rcOverlay) const;
+	void EnsureOperationOverlayWindow();
+	void DestroyOperationOverlayWindow();
+	void UpdateOperationOverlayWindow();
+	bool GetOperationOverlayCancelRect(CRect& rcCancel) const;
+	void InvalidateOperationOverlay();
+	void RedrawOperationOverlayArea(const CRect& rcInvalidate, bool bErase);
+	bool IsOperationOverlayDelayEligible(UINT uTotal) const;
+	bool IsOperationOverlayDelayElapsed(DWORD dwNow) const;
+	void ApplyOperationOverlayVisibilityPolicy(bool bWasVisible, DWORD dwNow);
+	void ScheduleOperationOverlayDelayTimer(DWORD dwNow);
+	void CancelOperationOverlayDelayTimer();
+	void TryShowDelayedOperationOverlay(DWORD dwNow);
 
 	static inline bool HaveIntersection(const RECT &rc1, const RECT &rc2)
 	{
@@ -723,8 +770,10 @@ protected:
 	void OnFindStart();
 	void OnFindNext();
 	void OnFindPrev();
-	mutable CCriticalSection m_updatethreadlocker;
-	CUpdateItemThread* m_updatethread;
+	CCriticalSection m_asyncRedrawLock;
+	SAsyncRedrawRange m_asyncRedrawRange;
+	bool m_bAsyncRedrawMessagePending;
+	LONG m_lListModelGeneration;
 	DWORD m_dwLastAsyncSortTick;
 
 private:
@@ -736,6 +785,7 @@ private:
 		int iLocation;
 		bool bHidden;
 	};
+
 
 	MULE_COLUMN *m_aColumns;
 	int          m_iColumnsTracked;
@@ -752,6 +802,7 @@ private:
 	ArrowType m_atSortArrow;
 
 	int		  m_iRedrawCount;
+	UINT	  m_uBulkInsertDepth;
 	CList<DWORD_PTR, DWORD_PTR> m_Params;
 	CToolTipCtrlX m_wndInfoTip;
 	CToolTipCtrlX m_wndPersistentInfoTip;
@@ -761,6 +812,38 @@ private:
 	bool m_bPersistentInfoTipVisible;
 	bool m_bTrackingMouseHover;
 	bool m_bTrackingMouseLeave;
+
+	struct SOperationOverlayState
+	{
+		SOperationOverlayState()
+			: bVisible(false)
+			, bCanCancel(false)
+			, bCancelHot(false)
+			, bSuppressed(false)
+			, bDelayedShow(false)
+			, uDone(0)
+			, uTotal(0)
+			, uAnimationPhase(0)
+			, dwFirstUpdateTick(0)
+		{
+		}
+
+		bool bVisible;
+		bool bCanCancel;
+		bool bCancelHot;
+		bool bSuppressed;
+		bool bDelayedShow;
+		UINT uDone;
+		UINT uTotal;
+		UINT uAnimationPhase;
+		DWORD dwFirstUpdateTick;
+		CString strTitle;
+		CString strDetail;
+		CString strCancelText;
+		CRect rcLastOverlay;
+	};
+	SOperationOverlayState m_operationOverlay;
+	COperationOverlayWnd* m_pOperationOverlayWnd;
 
 	DWORD_PTR GetParamAt(POSITION pos, int iPos)
 	{

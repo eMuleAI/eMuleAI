@@ -294,6 +294,17 @@ namespace
 
 		return MAKELANGID(LANG_ENGLISH, SUBLANG_ENGLISH_US);
 	}
+
+	void ApplyWindowsUiLanguage(LANGID languageId)
+	{
+		(void)::SetThreadUILanguage(languageId);
+
+		typedef void (WINAPI *PFNInitMUILanguage)(LANGID);
+		HMODULE hComCtl = ::GetModuleHandleW(L"comctl32.dll");
+		PFNInitMUILanguage pInitMUILanguage = hComCtl != NULL ? reinterpret_cast<PFNInitMUILanguage>(::GetProcAddress(hComCtl, "InitMUILanguage")) : NULL;
+		if (pInitMUILanguage != NULL)
+			pInitMUILanguage(languageId);
+	}
 }
 
 // Public API: resolve a localized string by string key.
@@ -380,6 +391,9 @@ void CPreferences::SetLanguage()
 		SetActiveLanguageByIndex(Translations::kDefaultLanguage);
 		m_wLanguageID = MAKELANGID(LANG_ENGLISH, SUBLANG_ENGLISH_US);
 	}
+
+	// Keep Windows-created controls aligned with the selected application language.
+	ApplyWindowsUiLanguage(m_wLanguageID);
 }
 
 static HHOOK s_hRTLWindowsLayoutOldCbtFilterHook = NULL;

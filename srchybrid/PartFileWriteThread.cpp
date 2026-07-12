@@ -16,6 +16,7 @@
 //Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 
 #include "StdAfx.h"
+#include <winioctl.h>
 #include "OtherFunctions.h"
 #include <timeapi.h>
 #include "updownclient.h"
@@ -25,9 +26,11 @@
 #include "partfile.h"
 #include "log.h"
 #include "preferences.h"
+#include "Ini2.h"
 #include "Statistics.h"
 #include <io.h>
 #include "eMuleAI/SourceSaver.h"
+#include "emuledlg.h"
 
 #ifdef _DEBUG
 #define new DEBUG_NEW
@@ -41,13 +44,153 @@ static char THIS_FILE[] = __FILE__;
 
 IMPLEMENT_DYNCREATE(CPartFileWriteThread, CWinThread)
 
+namespace
+{
+	const DWORD PART_FILE_WRITE_THREAD_STOP_POLL_MS = 50;
+	const DWORD PART_FILE_WRITE_THREAD_STOP_SLOW_LOG_MS = 5000;
+
+	bool IsMissingBackupSourceError(DWORD dwError)
+	{
+		return dwError == ERROR_FILE_NOT_FOUND || dwError == ERROR_PATH_NOT_FOUND;
+	}
+
+	bool IsPartMetBackupSourceMissing(const CString& strSourcePath)
+	{
+		if (::GetFileAttributes(PreparePathForWin32LongPath(strSourcePath)) != INVALID_FILE_ATTRIBUTES)
+			return false;
+		return IsMissingBackupSourceError(::GetLastError());
+	}
+
+	bool IsIniFilePath(const CString& strPath)
+	{
+		return strPath.GetLength() >= 4 && strPath.Right(4).CompareNoCase(_T(".ini")) == 0;
+	}
+
+	bool TryGetNumberedPartFilePathParts(const CString& strPartFilePath, CString& strTempDir, int& iPartNumber)
+	{
+		int iSlash = strPartFilePath.ReverseFind(_T('\\'));
+		const int iAltSlash = strPartFilePath.ReverseFind(_T('/'));
+		if (iAltSlash > iSlash)
+			iSlash = iAltSlash;
+
+		const CString strFileName = iSlash >= 0 ? strPartFilePath.Mid(iSlash + 1) : strPartFilePath;
+		if (strFileName.GetLength() <= 5 || strFileName.Right(5).CompareNoCase(_T(".part")) != 0)
+			return false;
+
+		const CString strNumber = strFileName.Left(strFileName.GetLength() - 5);
+		if (strNumber.IsEmpty())
+			return false;
+		for (int i = 0; i < strNumber.GetLength(); ++i) {
+			const TCHAR ch = strNumber[i];
+			if (ch < _T('0') || ch > _T('9'))
+				return false;
+		}
+
+		const long lPartNumber = _tcstol(strNumber, NULL, 10);
+		if (lPartNumber <= 0 || lPartNumber > 0x7ffffffe)
+			return false;
+
+		strTempDir = iSlash >= 0 ? strPartFilePath.Left(iSlash + 1) : CString();
+		iPartNumber = static_cast<int>(lPartNumber);
+		return true;
+	}
+
+	void BuildNumberedPartFilePath(const CString& strTempDir, int iPartNumber, CString& strPartFilePath)
+	{
+		strPartFilePath.Format(_T("%s%03i.part"), (LPCTSTR)strTempDir, iPartNumber);
+	}
+
+	void TraceAsyncDiskWriteResult(LPCTSTR pszName, LONG lGeneration, LPCTSTR pszResult, LPCTSTR pszReason, LPCTSTR pszTempPath, LPCTSTR pszFinalPath, bool bShutdownFallback, DWORD dwLastError = 0)
+	{
+		AddDebugLogLine(DLP_LOW, false, _T("[AsyncDiskWrite] name=\"%s\" generation=%ld result=%s reason=%s error=%lu shutdownFallback=%u temp=\"%s\" final=\"%s\"\n"),
+			pszName != NULL ? pszName : _T(""), lGeneration, pszResult != NULL ? pszResult : _T(""), pszReason != NULL ? pszReason : _T(""), dwLastError,
+			bShutdownFallback ? 1U : 0U, pszTempPath != NULL ? pszTempPath : _T(""), pszFinalPath != NULL ? pszFinalPath : _T(""));
+		theApp.QueueAsyncDiskWriteResultEvent(pszName, lGeneration, pszResult, pszReason, pszTempPath, pszFinalPath, bShutdownFallback, dwLastError);
+	}
+
+	static const INT_PTR kMaxQueuedAsyncDiskWrites = 512;
+	static const INT_PTR kMaxDeferredAsyncDiskWrites = 64;
+	static const INT_PTR kMaxQueuedPartFileDiskJobs = 512;
+	static const LONG kMaxPendingPartFileCreateJobs = 512;
+	static const LONG kMaxPendingPartFileDeleteJobs = 512;
+
+	class CInterlockedDecrementOnExit
+	{
+	public:
+		explicit CInterlockedDecrementOnExit(volatile LONG* pValue)
+			: m_pValue(pValue)
+		{
+		}
+		~CInterlockedDecrementOnExit()
+		{
+			if (m_pValue != NULL)
+				InterlockedDecrement(m_pValue);
+		}
+	private:
+		CInterlockedDecrementOnExit(const CInterlockedDecrementOnExit&);
+		CInterlockedDecrementOnExit& operator=(const CInterlockedDecrementOnExit&);
+		volatile LONG* m_pValue;
+	};
+}
+
+FlushPartMetData::FlushPartMetData()
+	: lGeneration()
+	, bDontOverrideBak()
+	, uPartFileVersion()
+{
+	md4clr(abyMD4Hash);
+}
+
+FlushPartMetData::~FlushPartMetData()
+{
+	for (std::vector<CTag*>::iterator it = taglist.begin(); it != taglist.end(); ++it)
+		delete *it;
+	taglist.clear();
+}
+
+AsyncDiskWriteData::AsyncDiskWriteData()
+	: lGeneration()
+	, plGeneration()
+	, bShutdownFallback(false)
+	, eShutdownPolicy(AsyncDiskWriteShutdownSyncFallback)
+	, eConflictPolicy(AsyncDiskWriteConflictOrdered)
+	, eReplacePolicy(AsyncDiskWriteReplaceFinal)
+{
+}
+
+PartFileCreateData::PartFileCreateData()
+	: uRuntimeID()
+	, bSparsePartFile()
+{
+	md4clr(abyHash);
+}
+
+PartFileCreateResult::PartFileCreateResult()
+	: uRuntimeID()
+	, hFile(INVALID_HANDLE_VALUE)
+	, dwFileAttributes()
+	, tCreated()
+	, tLastModified()
+	, dwError()
+{
+	md4clr(abyHash);
+}
+
+PartFileDeleteData::PartFileDeleteData()
+	: uDownloadRemoveSequence(0)
+	, uDownloadRemoveCorrelationId(0)
+{
+}
+
 CPartFileWriteThread::CPartFileWriteThread()
-	: m_eventThreadEnded(FALSE, TRUE)
+	: m_bVerbose(thePrefs.GetVerbose())
+	, m_iCommitFiles(thePrefs.GetCommitFiles())
+	, m_eventThreadEnded(FALSE, TRUE)
 	, m_hPort()
 	, m_Run(RUN_STOP)
 	, m_bNewData()
-	, m_bVerbose(thePrefs.GetVerbose())
-	, m_iCommitFiles(thePrefs.GetCommitFiles())
+	, m_lPartFileCreateJobsPending()
+	, m_lPartFileDeleteJobsPending()
 {
 		AfxBeginThread(RunProc, (LPVOID)this, THREAD_PRIORITY_BELOW_NORMAL);
 }
@@ -61,12 +204,28 @@ CPartFileWriteThread::~CPartFileWriteThread()
 		ToWrite currItem = m_FlushList.RemoveHead();
 		delete currItem.pFlushPartMetData;
 		delete currItem.pSaveSourcesData;
+		delete currItem.pAsyncDiskWriteData;
+		delete currItem.pPartFileCreateData;
+		delete currItem.pPartFileDeleteData;
 	}
 
 	while (!m_listToWrite.IsEmpty()) {
 		ToWrite currItem = m_listToWrite.RemoveHead();
 		delete currItem.pFlushPartMetData;
 		delete currItem.pSaveSourcesData;
+		delete currItem.pAsyncDiskWriteData;
+		delete currItem.pPartFileCreateData;
+		delete currItem.pPartFileDeleteData;
+	}
+
+	while (!m_deferredAsyncDiskWriteJobs.IsEmpty())
+		delete m_deferredAsyncDiskWriteJobs.RemoveHead();
+
+	while (!m_partFileCreateResults.IsEmpty()) {
+		PartFileCreateResult* pResult = m_partFileCreateResults.RemoveHead();
+		if (pResult != NULL && pResult->hFile != INVALID_HANDLE_VALUE)
+			::CloseHandle(pResult->hFile);
+		delete pResult;
 	}
 }
 
@@ -78,16 +237,43 @@ UINT AFX_CDECL CPartFileWriteThread::RunProc(LPVOID pParam)
 
 void CPartFileWriteThread::EndThread()
 {
-	m_Run = RUN_STOP;
-	PostQueuedCompletionStatus(m_hPort, 0, 0, NULL);
-	m_eventThreadEnded.Lock();
+	if (m_eventThreadEnded.Lock(0))
+		return;
+
+	InterlockedExchange8(&m_Run, RUN_STOP);
+	const DWORD dwStarted = ::GetTickCount();
+	bool bStopPosted = false;
+	bool bStopPostFailureLogged = false;
+	bool bSlowLogged = false;
+	for (;;) {
+		HANDLE hPort = m_hPort;
+		if (!bStopPosted && hPort != NULL) {
+			if (::PostQueuedCompletionStatus(hPort, 0, 0, NULL))
+				bStopPosted = true;
+			else if (!bStopPostFailureLogged) {
+				AddDebugLogLine(DLP_HIGH, false, _T("Part file write thread stop signal failed. error=%lu\n"), ::GetLastError());
+				bStopPostFailureLogged = true;
+			}
+		}
+		if (m_eventThreadEnded.Lock(PART_FILE_WRITE_THREAD_STOP_POLL_MS))
+			return;
+		if (!bSlowLogged && ::GetTickCount() - dwStarted >= PART_FILE_WRITE_THREAD_STOP_SLOW_LOG_MS) {
+			AddDebugLogLine(DLP_HIGH, false, _T("Part file write thread shutdown is still waiting. elapsed=%lu run=%d port=%p stopPosted=%u\n"), ::GetTickCount() - dwStarted, (int)m_Run, hPort, bStopPosted ? 1U : 0U);
+			bSlowLogged = true;
+		}
+		InterlockedExchange8(&m_Run, RUN_STOP);
+	}
 }
 
 UINT CPartFileWriteThread::RunInternal()
 {
 	m_hPort = ::CreateIoCompletionPort(INVALID_HANDLE_VALUE, 0, 0, 1);
-	if (!m_hPort)
-		return ::GetLastError();
+	if (!m_hPort) {
+		const DWORD dwError = ::GetLastError();
+		m_Run = RUN_STOP;
+		m_eventThreadEnded.SetEvent();
+		return dwError;
+	}
 
 	DWORD dwWrite = 0;
 	ULONG_PTR completionKey = 0;
@@ -99,17 +285,22 @@ UINT CPartFileWriteThread::RunInternal()
 	{
 		m_Run = RUN_WORK;
 		//move buffer lists into the local storage
-		if (!m_FlushList.IsEmpty()) {
+		{
 			CSingleLock sFlushListLock(&m_lockFlushList, TRUE);
-			CSingleLock sDeletedFilesListLock(&m_DeletedFilesListLock, TRUE);
-			while (!m_FlushList.IsEmpty()) {
-				const ToWrite& item = m_FlushList.RemoveHead();
-				CPartFile* pFile = item.pFile;
-				if (pFile && !m_DeletedFilesList.Find(pFile)) // File is valid and not deleted
-					m_listToWrite.AddTail(item);
+			if (!m_FlushList.IsEmpty() || !m_deferredAsyncDiskWriteJobs.IsEmpty()) {
+				CSingleLock sDeletedFilesListLock(&m_DeletedFilesListLock, TRUE);
+				while (!m_FlushList.IsEmpty()) {
+					const ToWrite& item = m_FlushList.RemoveHead();
+					CPartFile* pFile = item.pFile;
+					if (item.pAsyncDiskWriteData || item.pPartFileCreateData || item.pPartFileDeleteData || (pFile && !m_DeletedFilesList.Find(pFile)))
+						m_listToWrite.AddTail(item);
+					else
+						CleanUp(item, NULL);
+				}
+				PruneDeletedFilesListLocked();
+				MoveDeferredAsyncDiskWriteJobsToDrainList(m_listToWrite);
+				InterlockedExchange8(&m_bNewData, 0);
 			}
-			m_DeletedFilesList.RemoveAll(); // We used all current items this list, now we can clear whole list.
-			InterlockedExchange8(&m_bNewData, 0);
 		}
 
 		//start new I/O
@@ -129,6 +320,7 @@ UINT CPartFileWriteThread::RunInternal()
 			PostQueuedCompletionStatus(m_hPort, 0, WAKEUP, NULL);
 	}
 	m_Run = RUN_STOP;
+	DrainPendingAsyncDiskSnapshotsForShutdown();
 
 	//Improper termination of asynchronous I/O follows...
 	//close file handles to release I/O completion port
@@ -142,6 +334,44 @@ UINT CPartFileWriteThread::RunInternal()
 	return 0;
 }
 
+void CPartFileWriteThread::DrainPendingAsyncDiskSnapshotsForShutdown()
+{
+	CList<ToWrite> jobsToDrain;
+	{
+		CSingleLock sFlushListLock(&m_lockFlushList, TRUE);
+		for (POSITION pos = m_FlushList.GetHeadPosition(); pos != NULL;) {
+			POSITION posCurrent = pos;
+			ToWrite item = m_FlushList.GetNext(pos);
+			if (item.pAsyncDiskWriteData == NULL && item.pPartFileCreateData == NULL && item.pPartFileDeleteData == NULL)
+				continue;
+			m_FlushList.RemoveAt(posCurrent);
+			jobsToDrain.AddTail(item);
+		}
+		MoveDeferredAsyncDiskWriteJobsToDrainList(jobsToDrain);
+	}
+
+	for (POSITION pos = m_listToWrite.GetHeadPosition(); pos != NULL;) {
+		POSITION posCurrent = pos;
+		ToWrite item = m_listToWrite.GetNext(pos);
+		if (item.pAsyncDiskWriteData == NULL && item.pPartFileCreateData == NULL && item.pPartFileDeleteData == NULL)
+			continue;
+		m_listToWrite.RemoveAt(posCurrent);
+		jobsToDrain.AddTail(item);
+	}
+
+	while (!jobsToDrain.IsEmpty()) {
+		ToWrite item = jobsToDrain.RemoveHead();
+		if (item.pAsyncDiskWriteData != NULL) {
+			item.pAsyncDiskWriteData->bShutdownFallback = true;
+			(void)WriteDiskSnapshotNow(*item.pAsyncDiskWriteData, true);
+		} else if (item.pPartFileCreateData != NULL)
+			ProcessPartFileCreate(item.pPartFileCreateData);
+		else if (item.pPartFileDeleteData != NULL)
+			ProcessPartFileDelete(item.pPartFileDeleteData);
+		CleanUp(item, NULL);
+	}
+}
+
 void CPartFileWriteThread::WriteBuffers()
 {
 	//process internal list
@@ -151,6 +381,21 @@ void CPartFileWriteThread::WriteBuffers()
 
 		CPartFile* pFile = item.pFile;
 		try {
+			if (item.pAsyncDiskWriteData) {
+				WriteDiskSnapshot(item.pAsyncDiskWriteData);
+				CleanUp(item, NULL);
+				continue;
+			}
+			if (item.pPartFileCreateData) {
+				ProcessPartFileCreate(item.pPartFileCreateData);
+				CleanUp(item, NULL);
+				continue;
+			}
+			if (item.pPartFileDeleteData) {
+				ProcessPartFileDelete(item.pPartFileDeleteData);
+				CleanUp(item, NULL);
+				continue;
+			}
 			CSingleLock sDeletedFilesListLock(&m_DeletedFilesListLock, TRUE);
 			if (!pFile || m_DeletedFilesList.Find(pFile)) { // File is invalid or deleted
 				CleanUp(item, NULL); // Since file isn't valid, we pass NULL here not to make unnecessary file checks again.
@@ -190,6 +435,7 @@ void CPartFileWriteThread::WriteBuffers()
 					pOvWrite->oOverlap.hEvent = 0;
 					pOvWrite->pFile = pFile;
 					pOvWrite->pBuffer = pBuffer;
+					pOvWrite->pos = NULL;
 
 					static const BYTE zero = 0;
 					if (!::WriteFile(pFile->m_hWrite, pBuffer->data ? pBuffer->data : &zero, (DWORD)(pBuffer->end - pBuffer->start + 1), NULL, (LPOVERLAPPED)pOvWrite)) {
@@ -210,34 +456,36 @@ void CPartFileWriteThread::WriteBuffers()
 					theApp.QueueDebugLogLineEx(LOG_ERROR, _T("WriteBuffers error: CPartFile cannot be written"));
 			} 
 			else if (item.pFlushPartMetData) { // Flush part met file
+				FlushPartMetData* pData = item.pFlushPartMetData;
 				CSingleLock sSavePartFileLock(&pFile->m_SavePartFileLock, TRUE);
 				CSingleLock sSavePartFilePrefsLock(&m_lockSavePartFilePrefs, TRUE);
-				if (!pFile->PartMetFileData)
-					continue;
-
-				if (pFile->PartMetFileData->m_fullname.Right(9) != _T(".part.met")) {
+				if (pData == NULL || pData->lGeneration != pFile->GetPartMetSaveGeneration()) {
 					CleanUp(item, pFile);
 					continue;
 				}
-				// search part file
-				const CString& searchpath(RemoveFileExtension(pFile->PartMetFileData->m_fullname));
+
+				if (pData->strFullName.Right(9) != _T(".part.met")) {
+					CleanUp(item, pFile);
+					continue;
+				}
+				const CString searchpath(RemoveFileExtension(pData->strFullName));
 				CFileFind ff;
 				BOOL bFound = ff.FindFile(searchpath);
 				if (bFound)
 					ff.FindNextFile();
 				if (!bFound || ff.IsDirectory()) {
-					theApp.QueueLogLine(false, GetResString(_T("ERR_SAVEMET")) + _T(" - %s"), (LPCTSTR)EscPercent(pFile->PartMetFileData->m_partmetfilename), (LPCTSTR)EscPercent(pFile->PartMetFileData->m_strFileName), (LPCTSTR)GetResString(_T("ERR_PART_FNF")));
+					theApp.QueueLogLine(false, GetResString(_T("ERR_SAVEMET")) + _T(" - %s"), (LPCTSTR)EscPercent(pData->strPartMetFileName), (LPCTSTR)EscPercent(pData->strFileName), (LPCTSTR)GetResString(_T("ERR_PART_FNF")));
 					CleanUp(item, pFile);
 					continue;
 				}
 
-				if (!theApp.CanWritePartMetFiles(pFile->GetTmpPath())) {
+				if (!theApp.CanWritePartMetFiles(pData->strTmpPath)) {
 					CleanUp(item, pFile);
 					continue;
 				}
-				// get file date
-				time_t	m_tLastModified = 0;
-				time_t	m_tUtcLastModified = 0;
+
+				time_t m_tLastModified = 0;
+				time_t m_tUtcLastModified = 0;
 				FILETIME lwtime;
 				ff.GetLastWriteTime(&lwtime);
 				m_tLastModified = (time_t)FileTimeToUnixTime(lwtime);
@@ -246,55 +494,49 @@ void CPartFileWriteThread::WriteBuffers()
 				m_tUtcLastModified = m_tLastModified;
 				if (m_tUtcLastModified == (time_t)-1) {
 					if (m_bVerbose)
-						theApp.QueueDebugLogLine(false, _T("Failed to get file date of \"%s\" (%s)"), (LPCTSTR)EscPercent(pFile->PartMetFileData->m_partmetfilename), (LPCTSTR)EscPercent(pFile->PartMetFileData->m_strFileName));
+						theApp.QueueDebugLogLine(false, _T("Failed to get file date of \"%s\" (%s)"), (LPCTSTR)EscPercent(pData->strPartMetFileName), (LPCTSTR)EscPercent(pData->strFileName));
 				} else
 					AdjustNTFSDaylightFileTime(m_tUtcLastModified, ff.GetFilePath());
 				ff.Close();
 
-				const CString& strTmpFile(pFile->PartMetFileData->m_fullname + PARTMET_TMP_EXT);
+				const CString strTmpFile(pData->strFullName + PARTMET_TMP_EXT);
 
-				// save file data to part.met file
 				CSafeBufferedFile file;
 				CFileException fex;
 				if (!file.Open(strTmpFile, CFile::modeWrite | CFile::modeCreate | CFile::typeBinary | CFile::shareDenyWrite, &fex)) {
 					CString s;
-					s.Format(GetResString(_T("ERR_SAVEMET")), (LPCTSTR)pFile->PartMetFileData->m_partmetfilename, (LPCTSTR)EscPercent(pFile->PartMetFileData->m_strFileName));
+					s.Format(GetResString(_T("ERR_SAVEMET")), (LPCTSTR)pData->strPartMetFileName, (LPCTSTR)EscPercent(pData->strFileName));
 					theApp.QueueLogLine(false, _T("%s%s"), (LPCTSTR)EscPercent(s), (LPCTSTR)EscPercent(CExceptionStrDash(fex)));
-					(void)theApp.CanWritePartMetFiles(pFile->GetTmpPath(), true);
+					(void)theApp.CanWritePartMetFiles(pData->strTmpPath, true);
 					CleanUp(item, pFile);
 					continue;
 				}
 				::setvbuf(file.m_pStream, NULL, _IOFBF, 16384);
 
 				try {
-					//version
-					// only use 64 bit tags, when PARTFILE_VERSION_LARGEFILE is set!
-					file.WriteUInt8(pFile->PartMetFileData->m_uPartFileVersion);
-
-					//date
-					file.WriteUInt32(m_tUtcLastModified);
-
-					//hash
-					ASSERT(!isnulmd4(pFile->PartMetFileData->m_abyMD4Hash));
-					file.WriteHash16(pFile->PartMetFileData->m_abyMD4Hash);
-					UINT uParts = (UINT)pFile->PartMetFileData->m_aMD4HashSet.GetCount();
+					file.WriteUInt8(pData->uPartFileVersion);
+					file.WriteUInt32((uint32)m_tUtcLastModified);
+					file.WriteHash16(pData->abyMD4Hash);
+					const UINT uParts = (UINT)pData->aMD4HashSet.size();
 					file.WriteUInt16((uint16)uParts);
 					for (UINT i = 0; i < uParts; ++i)
-						file.WriteHash16(pFile->PartMetFileData->m_aMD4HashSet[i]);
+						file.WriteHash16(pData->aMD4HashSet[i].abyHash);
 
 					UINT uTagCount = 0;
 					ULONG uTagCountFilePos = (ULONG)file.GetPosition();
 					file.WriteUInt32(uTagCount);
 
-					CTag nametag(FT_FILENAME, pFile->PartMetFileData->m_strFileName);
+					CTag nametag(FT_FILENAME, pData->strFileName);
 					nametag.WriteTagToFile(file, UTF8strOptBOM);
 					++uTagCount;
 
-					for (INT_PTR j = 0; j < pFile->PartMetFileData->m_taglist.GetCount(); ++j)
-						if (pFile->PartMetFileData->m_taglist[j]->IsStr() || pFile->PartMetFileData->m_taglist[j]->IsInt() || pFile->PartMetFileData->m_taglist[j]->IsInt64() || pFile->PartMetFileData->m_taglist[j]->IsBlob()) {
-							pFile->PartMetFileData->m_taglist[j]->WriteTagToFile(file, UTF8strOptBOM);
+					for (std::vector<CTag*>::const_iterator it = pData->taglist.begin(); it != pData->taglist.end(); ++it) {
+						CTag* pTag = *it;
+						if (pTag != NULL && (pTag->IsStr() || pTag->IsInt() || pTag->IsInt64() || pTag->IsBlob())) {
+							pTag->WriteTagToFile(file, UTF8strOptBOM);
 							++uTagCount;
 						}
+					}
 
 					file.Seek(uTagCountFilePos, CFile::begin);
 					file.WriteUInt32(uTagCount);
@@ -302,68 +544,122 @@ void CPartFileWriteThread::WriteBuffers()
 					CommitAndClose(file);
 				} catch (CFileException* ex) {
 					CString strError;
-					strError.Format(GetResString(_T("ERR_SAVEMET")), (LPCTSTR)pFile->PartMetFileData->m_partmetfilename, (LPCTSTR)EscPercent(pFile->PartMetFileData->m_strFileName));
+					strError.Format(GetResString(_T("ERR_SAVEMET")), (LPCTSTR)pData->strPartMetFileName, (LPCTSTR)EscPercent(pData->strFileName));
 					theApp.QueueLogLine(false, _T("%s%s"), (LPCTSTR)EscPercent(strError), (LPCTSTR)EscPercent(CExceptionStrDash(*ex)));
 					ex->Delete();
-
-					// remove the partially written or otherwise damaged temporary file,
-					// need to close the file before removing it.
-					file.Abort(); //Call 'Abort' instead of 'Close' to avoid ASSERT.
-					(void)_tremove(strTmpFile);
-					(void)theApp.CanWritePartMetFiles(pFile->GetTmpPath(), true);
+					file.Abort();
+					(void)DeleteFileLongPath(strTmpFile);
+					(void)theApp.CanWritePartMetFiles(pData->strTmpPath, true);
+					CleanUp(item, pFile);
+					continue;
+				} catch (...) {
+					file.Abort();
+					(void)DeleteFileLongPath(strTmpFile);
+					(void)theApp.CanWritePartMetFiles(pData->strTmpPath, true);
 					CleanUp(item, pFile);
 					continue;
 				}
 
-					// Preserve the previous part.met snapshot before replacing it.
-					const CString strBakFile(pFile->PartMetFileData->m_fullname + PARTMET_BAK_EXT);
-					const CString strBakTmpFile(strBakFile + PARTMET_TMP_EXT);
-					DWORD dwBakError = ERROR_SUCCESS;
-					if (!CopyFileToTempAndReplace(pFile->PartMetFileData->m_fullname, strBakFile, strBakTmpFile, item.pFlushPartMetData->bDontOverrideBak, &dwBakError)) {
-						if (!item.pFlushPartMetData->bDontOverrideBak && theApp.CanWritePartMetFiles(pFile->GetTmpPath(), true)) {
-							theApp.QueueDebugLogLine(false, _T("Failed to create backup of %s (%s) - %s"),
-								(LPCTSTR)EscPercent(pFile->PartMetFileData->m_fullname), (LPCTSTR)EscPercent(pFile->PartMetFileData->m_strFileName), (LPCTSTR)EscPercent(GetErrorMessage(dwBakError)));
-						}
-					}
-
-					// after successfully writing the temporary part.met file...
-					DWORD dwReplaceError = ERROR_SUCCESS;
-					if (!ReplaceFileAtomically(strTmpFile, pFile->PartMetFileData->m_fullname, &dwReplaceError)) {
-						(void)theApp.CanWritePartMetFiles(pFile->GetTmpPath(), true);
-						if (m_bVerbose)
-							theApp.QueueDebugLogLine(false, _T("Failed to move temporary part.met file \"%s\" to \"%s\" - %s"),
-								(LPCTSTR)EscPercent(strTmpFile), (LPCTSTR)EscPercent(pFile->PartMetFileData->m_fullname), (LPCTSTR)EscPercent(GetErrorMessage(dwReplaceError)));
-
-						CString strError;
-						strError.Format(GetResString(_T("ERR_SAVEMET")), (LPCTSTR)pFile->PartMetFileData->m_partmetfilename, (LPCTSTR)EscPercent(pFile->PartMetFileData->m_strFileName));
-						strError.AppendFormat(_T(" - %s"), (LPCTSTR)EscPercent(GetErrorMessage(dwReplaceError)));
-						theApp.QueueLogLine(false, _T("%s"), (LPCTSTR)strError);
-						CleanUp(item, pFile);
-						continue;
-					}
+				if (pData->lGeneration != pFile->GetPartMetSaveGeneration()) {
+					(void)DeleteFileLongPath(strTmpFile);
 					CleanUp(item, pFile);
-				} else if (item.pSaveSourcesData) { // Save sources
+					continue;
+				}
+
+				const CString strBakFile(pData->strFullName + PARTMET_BAK_EXT);
+				const CString strBakTmpFile(strBakFile + PARTMET_TMP_EXT);
+				DWORD dwBakError = ERROR_SUCCESS;
+				if (!IsPartMetBackupSourceMissing(pData->strFullName) && !CopyFileToTempAndReplace(pData->strFullName, strBakFile, strBakTmpFile, pData->bDontOverrideBak, &dwBakError)) {
+					if (!pData->bDontOverrideBak && theApp.CanWritePartMetFiles(pData->strTmpPath, true)) {
+						theApp.QueueDebugLogLine(false, _T("Failed to create backup of %s (%s) - %s"),
+							(LPCTSTR)EscPercent(pData->strFullName), (LPCTSTR)EscPercent(pData->strFileName), (LPCTSTR)EscPercent(GetErrorMessage(dwBakError)));
+					}
+				}
+
+				DWORD dwReplaceError = ERROR_SUCCESS;
+				if (!ReplaceFileAtomically(strTmpFile, pData->strFullName, &dwReplaceError)) {
+					(void)theApp.CanWritePartMetFiles(pData->strTmpPath, true);
+					if (m_bVerbose)
+						theApp.QueueDebugLogLine(false, _T("Failed to move temporary part.met file \"%s\" to \"%s\" - %s"),
+							(LPCTSTR)EscPercent(strTmpFile), (LPCTSTR)EscPercent(pData->strFullName), (LPCTSTR)EscPercent(GetErrorMessage(dwReplaceError)));
+
+					CString strError;
+					strError.Format(GetResString(_T("ERR_SAVEMET")), (LPCTSTR)pData->strPartMetFileName, (LPCTSTR)EscPercent(pData->strFileName));
+					strError.AppendFormat(_T(" - %s"), (LPCTSTR)EscPercent(GetErrorMessage(dwReplaceError)));
+					theApp.QueueLogLine(false, _T("%s"), (LPCTSTR)strError);
+					CleanUp(item, pFile);
+					continue;
+				}
+				CleanUp(item, pFile);
+			} else if (item.pSaveSourcesData) { // Save sources
+				SaveSourcesData* pData = item.pSaveSourcesData;
 				CSingleLock sSaveSourcesLock(&pFile->m_SaveSourcesLock, TRUE);
+				if (pData == NULL) {
+					CleanUp(item, pFile);
+					continue;
+				}
+
+				const CString strTmpSourcesFilePath(pData->strSourcesFilePath + _T(".tmp"));
+				if (pData->lGeneration != pFile->GetSaveSourcesGeneration()) {
+					(void)DeleteFileLongPath(strTmpSourcesFilePath);
+					TraceAsyncDiskWriteResult(_T("SLS"), pData->lGeneration, _T("skipped"), _T("stale-generation"), strTmpSourcesFilePath, pData->strSourcesFilePath, false);
+					CleanUp(item, pFile);
+					continue;
+				}
+
 				CString strLine;
 				CStdioFile f;
-				if (f.Open(pFile->m_sourcesaver.szslsfilepath, CFile::modeCreate | CFile::modeWrite | CFile::typeText)) {
-					f.WriteString(_T("#format: SourceIP/LowID:SourcePort,ExpirationDate(yymmddhhmm),SourceExchangeVersion,ServerIP,ServerPort;\r\n"));
-					f.WriteString(_T("#") + pFile->GetED2kLink() + _T("\r\n")); //MORPH - Added by IceCream, Storing ED2K link in Save Source files, To recover corrupted met by skynetman
+				CFileException fex;
+				if (!f.Open(PreparePathForWin32LongPath(strTmpSourcesFilePath), CFile::modeCreate | CFile::modeWrite | CFile::typeText, &fex)) {
+					TraceAsyncDiskWriteResult(_T("SLS"), pData->lGeneration, _T("failed"), _T("open-temp"), strTmpSourcesFilePath, pData->strSourcesFilePath, false);
+					CleanUp(item, pFile);
+					continue;
+				}
 
-					while (!pFile->srcstosave.IsEmpty()) {
-						CSourceSaver::CSourceData* cur_src = pFile->srcstosave.RemoveHead();
-						if (cur_src->sourceID) // Only LowID's are set nonzero. For this case ID is saved and loaded instead of Low ID for this case.
-							strLine.Format(_T("%i:%i,%s,%i,%s:%i;\r\n"), cur_src->sourceID, cur_src->sourcePort, cur_src->expiration, cur_src->nSrcExchangeVer, ipstr(cur_src->serverip), cur_src->serverport);
-						else // IPv4 or IPv6 is saved and loaded instead of LowID for this case
-							strLine.Format(_T("%s:%i,%s,%i,%s:%i;\r\n"), cur_src->sourceIP.ToStringC(), cur_src->sourcePort, cur_src->expiration, cur_src->nSrcExchangeVer, ipstr(cur_src->serverip), cur_src->serverport);
-						delete cur_src;
+				try {
+					f.WriteString(_T("#format: SourceIP/LowID:SourcePort,ExpirationDate(yymmddhhmm),SourceExchangeVersion,ServerIP,ServerPort;\r\n"));
+					f.WriteString(_T("#") + pData->strED2kLink + _T("\r\n"));
+
+					for (std::vector<SSaveSourceSnapshotRow>::const_iterator it = pData->rows.begin(); it != pData->rows.end(); ++it) {
+						if (it->sourceID)
+							strLine.Format(_T("%i:%i,%s,%i,%s:%i;\r\n"), it->sourceID, it->sourcePort, it->expiration, it->nSrcExchangeVer, ipstr(it->serverip), it->serverport);
+						else
+							strLine.Format(_T("%s:%i,%s,%i,%s:%i;\r\n"), it->sourceIP.ToStringC(), it->sourcePort, it->expiration, it->nSrcExchangeVer, ipstr(it->serverip), it->serverport);
 						f.WriteString(strLine);
 					}
 
 					f.Close();
+				} catch (CFileException *ex) {
+					ex->Delete();
+					f.Abort();
+					(void)DeleteFileLongPath(strTmpSourcesFilePath);
+					TraceAsyncDiskWriteResult(_T("SLS"), pData->lGeneration, _T("failed"), _T("write-temp"), strTmpSourcesFilePath, pData->strSourcesFilePath, false);
+					CleanUp(item, pFile);
+					continue;
+				} catch (...) {
+					f.Abort();
+					(void)DeleteFileLongPath(strTmpSourcesFilePath);
+					TraceAsyncDiskWriteResult(_T("SLS"), pData->lGeneration, _T("failed"), _T("write-temp"), strTmpSourcesFilePath, pData->strSourcesFilePath, false);
+					CleanUp(item, pFile);
+					continue;
 				}
+
+				if (pData->lGeneration != pFile->GetSaveSourcesGeneration()) {
+					(void)DeleteFileLongPath(strTmpSourcesFilePath);
+					TraceAsyncDiskWriteResult(_T("SLS"), pData->lGeneration, _T("skipped"), _T("stale-generation"), strTmpSourcesFilePath, pData->strSourcesFilePath, false);
+					CleanUp(item, pFile);
+					continue;
+				}
+				if (!MoveFileExLongPath(strTmpSourcesFilePath, pData->strSourcesFilePath, MOVEFILE_REPLACE_EXISTING)) {
+					(void)DeleteFileLongPath(strTmpSourcesFilePath);
+					TraceAsyncDiskWriteResult(_T("SLS"), pData->lGeneration, _T("failed"), _T("publish-final"), strTmpSourcesFilePath, pData->strSourcesFilePath, false);
+					CleanUp(item, pFile);
+					continue;
+				}
+				TraceAsyncDiskWriteResult(_T("SLS"), pData->lGeneration, _T("success"), _T("published"), strTmpSourcesFilePath, pData->strSourcesFilePath, false);
 				CleanUp(item, pFile);
 			}
+
 		} catch (CException *ex) {
 			if (m_bVerbose)
 				theApp.QueueDebugLogLine(false, _T("CPartFileWriteThread::WriteBuffers - %s"), (LPCTSTR)EscPercent(CExceptionStrDash(*ex)));
@@ -379,6 +675,445 @@ void CPartFileWriteThread::WriteBuffers()
 	}
 }
 
+
+bool CPartFileWriteThread::HasPendingIOForFile(const CPartFile* pFile) const
+{
+	if (pFile == NULL)
+		return false;
+	for (POSITION pos = m_listPendingIO.GetHeadPosition(); pos != NULL;) {
+		const OverlappedWrite_Struct* pPendingIO = m_listPendingIO.GetNext(pos);
+		if (pPendingIO != NULL && pPendingIO->pFile == pFile)
+			return true;
+	}
+	return false;
+}
+
+void CPartFileWriteThread::PruneDeletedFilesListLocked()
+{
+	for (POSITION pos = m_DeletedFilesList.GetHeadPosition(); pos != NULL;) {
+		POSITION posCurrent = pos;
+		CPartFile* pDeletedFile = m_DeletedFilesList.GetNext(pos);
+		if (!HasPendingIOForFile(pDeletedFile))
+			m_DeletedFilesList.RemoveAt(posCurrent);
+	}
+}
+
+bool CPartFileWriteThread::AddDiskWriteJob(AsyncDiskWriteData* pData, bool* pbRejectedByQueuePressure)
+{
+	if (pbRejectedByQueuePressure != NULL)
+		*pbRejectedByQueuePressure = false;
+	if (pData == NULL)
+		return false;
+	if (!IsRunning() || theApp.IsClosing() || theApp.GetBackendLifecycleState() >= CemuleApp::BackendLifecycleDrainingDiskIo)
+		return false;
+
+	CSingleLock sFlushListLock(&m_lockFlushList, TRUE);
+	if (pData->eConflictPolicy == AsyncDiskWriteConflictLastSnapshotWins && !pData->strFinalPath.IsEmpty()) {
+		for (POSITION pos = m_FlushList.GetHeadPosition(); pos != NULL;) {
+			POSITION posCurrent = pos;
+			ToWrite& item = m_FlushList.GetNext(pos);
+			AsyncDiskWriteData* pQueuedData = item.pAsyncDiskWriteData;
+			if (pQueuedData != NULL && pQueuedData->eConflictPolicy == AsyncDiskWriteConflictLastSnapshotWins && pQueuedData->strFinalPath.CompareNoCase(pData->strFinalPath) == 0) {
+				delete pQueuedData;
+				m_FlushList.RemoveAt(posCurrent);
+			}
+		}
+		RemoveDeferredAsyncDiskWriteJobsByFinalPath(pData->strFinalPath);
+	}
+	if (m_FlushList.GetCount() >= kMaxQueuedAsyncDiskWrites) {
+		if (AddDeferredAsyncDiskWriteJob(pData)) {
+			WakeUpCall();
+			return true;
+		}
+		if (pbRejectedByQueuePressure != NULL)
+			*pbRejectedByQueuePressure = true;
+		AddDebugLogLine(DLP_HIGH, false, _T("Async disk write queue pressure rejected snapshot without dropping unrelated targets. count=%Id deferred=%Id\n"), m_FlushList.GetCount(), m_deferredAsyncDiskWriteJobs.GetCount());
+		return false;
+	}
+	m_FlushList.AddTail(ToWrite{ NULL, NULL, NULL, NULL, pData, NULL, NULL });
+	WakeUpCall();
+	return true;
+}
+
+bool CPartFileWriteThread::AddPartFileCreateJob(PartFileCreateData* pData)
+{
+	if (pData == NULL)
+		return false;
+	if (!IsRunning() || theApp.IsClosing() || theApp.GetBackendLifecycleState() >= CemuleApp::BackendLifecycleDrainingDiskIo)
+		return false;
+
+	CSingleLock sFlushListLock(&m_lockFlushList, TRUE);
+	const LONG lPendingCreateJobs = InterlockedCompareExchange(&m_lPartFileCreateJobsPending, 0, 0);
+	if (lPendingCreateJobs >= kMaxPendingPartFileCreateJobs) {
+		AddDebugLogLine(DLP_HIGH, false, _T("Part-file create queue rejected job under pressure. count=%Id pending=%ld\n"), m_FlushList.GetCount(), lPendingCreateJobs);
+		return false;
+	}
+	if (m_FlushList.GetCount() >= kMaxQueuedPartFileDiskJobs) {
+		AddDebugLogLine(DLP_HIGH, false, _T("Part-file create queue rejected job under pressure. count=%Id pending=%ld\n"), m_FlushList.GetCount(), lPendingCreateJobs);
+		return false;
+	}
+	m_FlushList.AddTail(ToWrite{ NULL, NULL, NULL, NULL, NULL, pData, NULL });
+	InterlockedIncrement(&m_lPartFileCreateJobsPending);
+	WakeUpCall();
+	return true;
+}
+
+bool CPartFileWriteThread::AddPartFileDeleteJob(PartFileDeleteData* pData)
+{
+	if (pData == NULL)
+		return false;
+	if (!IsRunning() || theApp.IsClosing() || theApp.GetBackendLifecycleState() >= CemuleApp::BackendLifecycleDrainingDiskIo)
+		return false;
+
+	CSingleLock sFlushListLock(&m_lockFlushList, TRUE);
+	const LONG lPendingDeleteJobs = InterlockedCompareExchange(&m_lPartFileDeleteJobsPending, 0, 0);
+	if (lPendingDeleteJobs >= kMaxPendingPartFileDeleteJobs) {
+		AddDebugLogLine(DLP_HIGH, false, _T("Part-file delete queue rejected job under pressure. count=%Id pending=%ld\n"), m_FlushList.GetCount(), lPendingDeleteJobs);
+		return false;
+	}
+	if (m_FlushList.GetCount() >= kMaxQueuedPartFileDiskJobs) {
+		AddDebugLogLine(DLP_HIGH, false, _T("Part-file delete queue rejected job under pressure. count=%Id pending=%ld\n"), m_FlushList.GetCount(), lPendingDeleteJobs);
+		return false;
+	}
+	m_FlushList.AddTail(ToWrite{ NULL, NULL, NULL, NULL, NULL, NULL, pData });
+	InterlockedIncrement(&m_lPartFileDeleteJobsPending);
+	WakeUpCall();
+	return true;
+}
+
+bool CPartFileWriteThread::AddDeferredAsyncDiskWriteJob(AsyncDiskWriteData* pData)
+{
+	if (pData == NULL || pData->eConflictPolicy != AsyncDiskWriteConflictLastSnapshotWins || pData->strFinalPath.IsEmpty())
+		return false;
+	if (m_deferredAsyncDiskWriteJobs.GetCount() >= kMaxDeferredAsyncDiskWrites) {
+		AddDebugLogLine(DLP_HIGH, false, _T("Async disk write deferred retry queue rejected snapshot under pressure. deferred=%Id final=\"%s\"\n"), m_deferredAsyncDiskWriteJobs.GetCount(), (LPCTSTR)pData->strFinalPath);
+		return false;
+	}
+	m_deferredAsyncDiskWriteJobs.AddTail(pData);
+	AddDebugLogLine(DLP_LOW, false, _T("Async disk write snapshot deferred under queue pressure. deferred=%Id final=\"%s\"\n"), m_deferredAsyncDiskWriteJobs.GetCount(), (LPCTSTR)pData->strFinalPath);
+	return true;
+}
+
+bool CPartFileWriteThread::PopPartFileCreateResult(PartFileCreateResult*& pResult)
+{
+	pResult = NULL;
+	CSingleLock lock(&m_partFileCreateResultsLock, TRUE);
+	if (m_partFileCreateResults.IsEmpty())
+		return false;
+	pResult = m_partFileCreateResults.RemoveHead();
+	return pResult != NULL;
+}
+
+bool CPartFileWriteThread::TakeQueuedPartFileCreateJob(DWORD uRuntimeID, const uchar* pucHash, PartFileCreateData*& pData)
+{
+	pData = NULL;
+	if (pucHash == NULL)
+		return false;
+
+	CSingleLock sFlushListLock(&m_lockFlushList, TRUE);
+	for (POSITION pos = m_FlushList.GetHeadPosition(); pos != NULL;) {
+		POSITION posCurrent = pos;
+		ToWrite& item = m_FlushList.GetNext(pos);
+		PartFileCreateData* pQueuedData = item.pPartFileCreateData;
+		if (pQueuedData != NULL && pQueuedData->uRuntimeID == uRuntimeID && md4equ(pQueuedData->abyHash, pucHash)) {
+			pData = pQueuedData;
+			item.pPartFileCreateData = NULL;
+			m_FlushList.RemoveAt(posCurrent);
+			InterlockedDecrement(&m_lPartFileCreateJobsPending);
+			return true;
+		}
+	}
+	return false;
+}
+
+bool CPartFileWriteThread::HasPendingPartFileDiskJobs()
+{
+	if (InterlockedCompareExchange(&m_lPartFileCreateJobsPending, 0, 0) != 0 || InterlockedCompareExchange(&m_lPartFileDeleteJobsPending, 0, 0) != 0)
+		return true;
+	CSingleLock lock(&m_partFileCreateResultsLock, TRUE);
+	return !m_partFileCreateResults.IsEmpty();
+}
+
+void CPartFileWriteThread::RemoveDeferredAsyncDiskWriteJobsByFinalPath(const CString& strFinalPath)
+{
+	if (strFinalPath.IsEmpty())
+		return;
+
+	for (POSITION pos = m_deferredAsyncDiskWriteJobs.GetHeadPosition(); pos != NULL;) {
+		POSITION posCurrent = pos;
+		AsyncDiskWriteData* pDeferredData = m_deferredAsyncDiskWriteJobs.GetNext(pos);
+		if (pDeferredData != NULL && pDeferredData->strFinalPath.CompareNoCase(strFinalPath) == 0) {
+			delete pDeferredData;
+			m_deferredAsyncDiskWriteJobs.RemoveAt(posCurrent);
+		}
+	}
+}
+
+void CPartFileWriteThread::MoveDeferredAsyncDiskWriteJobsToDrainList(CList<ToWrite>& jobsToDrain)
+{
+	while (!m_deferredAsyncDiskWriteJobs.IsEmpty())
+		jobsToDrain.AddTail(ToWrite{ NULL, NULL, NULL, NULL, m_deferredAsyncDiskWriteJobs.RemoveHead(), NULL, NULL });
+}
+
+bool CPartFileWriteThread::QueueOrWriteDiskSnapshot(AsyncDiskWriteData* pData)
+{
+	if (pData == NULL)
+		return false;
+
+	const bool bClosing = theApp.IsClosing();
+	CPartFileWriteThread* pThread = theApp.m_pPartFileWriteThread;
+	bool bRejectedByQueuePressure = false;
+	if (!bClosing && pThread != NULL && pThread->IsRunning()) {
+		if (pThread->AddDiskWriteJob(pData, &bRejectedByQueuePressure))
+			return true;
+		if (bRejectedByQueuePressure) {
+			TraceAsyncDiskWriteResult(pData->strLogName.IsEmpty() ? _T("unknown") : (LPCTSTR)pData->strLogName, pData->lGeneration, _T("skipped"), _T("queue-pressure"), pData->strTempPath, pData->strFinalPath, false);
+			delete pData;
+			return false;
+		}
+	}
+
+	if (bClosing && pData->eShutdownPolicy == AsyncDiskWriteShutdownAbort) {
+		TraceAsyncDiskWriteResult(pData->strLogName.IsEmpty() ? _T("unknown") : (LPCTSTR)pData->strLogName, pData->lGeneration, _T("skipped"), _T("shutdown-abort"), pData->strTempPath, pData->strFinalPath, true);
+		delete pData;
+		return false;
+	}
+
+	pData->bShutdownFallback = bClosing;
+	const bool bResult = WriteDiskSnapshotNow(*pData, true);
+	delete pData;
+	return bResult;
+}
+
+bool CPartFileWriteThread::WriteDiskSnapshotNow(const AsyncDiskWriteData& data, bool bCheckGeneration)
+{
+	const LPCTSTR pszLogName = data.strLogName.IsEmpty() ? _T("unknown") : (LPCTSTR)data.strLogName;
+	if (data.strTempPath.IsEmpty() || data.strFinalPath.IsEmpty()) {
+		TraceAsyncDiskWriteResult(pszLogName, data.lGeneration, _T("failed"), _T("invalid-path"), data.strTempPath, data.strFinalPath, data.bShutdownFallback, ERROR_INVALID_PARAMETER);
+		return false;
+	}
+
+	const CString strLongTempPath = PreparePathForWin32LongPath(data.strTempPath);
+	const CString strLongFinalPath = PreparePathForWin32LongPath(data.strFinalPath);
+	const CString strLongBackupPath = data.strBackupPath.IsEmpty() ? CString() : PreparePathForWin32LongPath(data.strBackupPath);
+
+	if (bCheckGeneration && data.plGeneration != NULL && data.lGeneration != InterlockedCompareExchange(const_cast<volatile LONG*>(data.plGeneration), 0, 0)) {
+		(void)::DeleteFile(strLongTempPath);
+		TraceAsyncDiskWriteResult(pszLogName, data.lGeneration, _T("skipped"), _T("stale-generation"), data.strTempPath, data.strFinalPath, data.bShutdownFallback);
+		return false;
+	}
+
+	CFile file;
+	CFileException fex;
+	if (!file.Open(strLongTempPath, CFile::modeWrite | CFile::modeCreate | CFile::typeBinary | CFile::shareDenyWrite, &fex)) {
+		if (!data.strLogName.IsEmpty())
+			theApp.QueueDebugLogLine(false, _T("Failed to open temporary file for %s - %s"), (LPCTSTR)data.strLogName, (LPCTSTR)EscPercent(CExceptionStrDash(fex)));
+		TraceAsyncDiskWriteResult(pszLogName, data.lGeneration, _T("failed"), _T("open-temp"), data.strTempPath, data.strFinalPath, data.bShutdownFallback, static_cast<DWORD>(fex.m_lOsError));
+		return false;
+	}
+
+	try {
+		DWORD dwLastShutdownPump = ::GetTickCount();
+		if (!data.data.empty())
+			file.Write(&data.data[0], (UINT)data.data.size());
+		for (std::vector<std::vector<BYTE> >::const_iterator it = data.chunks.begin(); it != data.chunks.end(); ++it) {
+			if (!it->empty())
+				file.Write(&(*it)[0], (UINT)it->size());
+			if (data.bShutdownFallback && theApp.emuledlg != NULL) {
+				const DWORD dwNow = ::GetTickCount();
+				if (static_cast<DWORD>(dwNow - dwLastShutdownPump) >= 50) {
+					theApp.emuledlg->PumpShutdownProgressDialog();
+					dwLastShutdownPump = dwNow;
+				}
+			}
+		}
+		file.Flush();
+		if (data.bShutdownFallback && theApp.emuledlg != NULL)
+			theApp.emuledlg->PumpShutdownProgressDialog();
+		file.Close();
+	} catch (CFileException* ex) {
+		const DWORD dwWriteError = static_cast<DWORD>(ex->m_lOsError);
+		if (!data.strLogName.IsEmpty())
+			theApp.QueueDebugLogLine(false, _T("Failed to write %s - %s"), (LPCTSTR)data.strLogName, (LPCTSTR)EscPercent(CExceptionStrDash(*ex)));
+		ex->Delete();
+		file.Abort();
+		(void)::DeleteFile(strLongTempPath);
+		TraceAsyncDiskWriteResult(pszLogName, data.lGeneration, _T("failed"), _T("write-temp"), data.strTempPath, data.strFinalPath, data.bShutdownFallback, dwWriteError);
+		return false;
+	} catch (...) {
+		file.Abort();
+		(void)::DeleteFile(strLongTempPath);
+		TraceAsyncDiskWriteResult(pszLogName, data.lGeneration, _T("failed"), _T("write-temp"), data.strTempPath, data.strFinalPath, data.bShutdownFallback, ERROR_WRITE_FAULT);
+		return false;
+	}
+
+	if (bCheckGeneration && data.plGeneration != NULL && data.lGeneration != InterlockedCompareExchange(const_cast<volatile LONG*>(data.plGeneration), 0, 0)) {
+		(void)::DeleteFile(strLongTempPath);
+		TraceAsyncDiskWriteResult(pszLogName, data.lGeneration, _T("skipped"), _T("stale-generation"), data.strTempPath, data.strFinalPath, data.bShutdownFallback);
+		return false;
+	}
+
+	CSingleLock iniWriteLock(&GetIniFileWriteLock());
+	if (IsIniFilePath(data.strFinalPath))
+		iniWriteLock.Lock();
+
+	if (data.eReplacePolicy == AsyncDiskWriteBackupThenReplace && !data.strBackupPath.IsEmpty() && !MoveFileEx(strLongFinalPath, strLongBackupPath, MOVEFILE_REPLACE_EXISTING)) {
+		const DWORD dwBackupError = ::GetLastError();
+		if (dwBackupError != ERROR_FILE_NOT_FOUND && dwBackupError != ERROR_PATH_NOT_FOUND)
+			TraceAsyncDiskWriteResult(pszLogName, data.lGeneration, _T("warning"), _T("backup-move"), data.strTempPath, data.strFinalPath, data.bShutdownFallback, dwBackupError);
+	}
+
+	if (!MoveFileEx(strLongTempPath, strLongFinalPath, MOVEFILE_REPLACE_EXISTING)) {
+		const DWORD dwPublishError = ::GetLastError();
+		if (!data.strLogName.IsEmpty())
+			theApp.QueueDebugLogLine(false, _T("Failed to publish %s - %s"), (LPCTSTR)data.strLogName, (LPCTSTR)EscPercent(GetErrorMessage(dwPublishError)));
+		(void)::DeleteFile(strLongTempPath);
+		TraceAsyncDiskWriteResult(pszLogName, data.lGeneration, _T("failed"), _T("publish-final"), data.strTempPath, data.strFinalPath, data.bShutdownFallback, dwPublishError);
+		return false;
+	}
+	TraceAsyncDiskWriteResult(pszLogName, data.lGeneration, _T("success"), _T("published"), data.strTempPath, data.strFinalPath, data.bShutdownFallback);
+	return true;
+}
+
+
+bool CPartFileWriteThread::DeletePartFileDiskSnapshotNow(const PartFileDeleteData& data)
+{
+	static LPCTSTR const pszErrfmt = _T(" - %s");
+	bool bSucceeded = true;
+	if (!data.strFullName.IsEmpty() && !DeleteFileLongPath(data.strFullName)) {
+		const DWORD dwError = ::GetLastError();
+		if (dwError != ERROR_FILE_NOT_FOUND && dwError != ERROR_PATH_NOT_FOUND) {
+			bSucceeded = false;
+			CString sFmt(GetResString(_T("ERR_DELETE")));
+			sFmt.AppendFormat(pszErrfmt, (LPCTSTR)GetErrorMessage(dwError));
+			theApp.QueueLogLine(false, _T("%s: %s"), (LPCTSTR)sFmt, (LPCTSTR)data.strFullName);
+		}
+	}
+
+	if (!data.strPartFilePath.IsEmpty() && !DeleteFileLongPath(data.strPartFilePath)) {
+		const DWORD dwError = ::GetLastError();
+		if (dwError != ERROR_FILE_NOT_FOUND && dwError != ERROR_PATH_NOT_FOUND) {
+			bSucceeded = false;
+			CString sFmt(GetResString(_T("ERR_DELETE")));
+			sFmt.AppendFormat(pszErrfmt, (LPCTSTR)GetErrorMessage(dwError));
+			theApp.QueueLogLine(false, _T("%s: %s"), (LPCTSTR)sFmt, (LPCTSTR)data.strPartFilePath);
+		}
+	}
+
+	if (!data.strBackupPath.IsEmpty() && PathFileExistsLongPath(data.strBackupPath) && !DeleteFileLongPath(data.strBackupPath)) {
+		bSucceeded = false;
+		CString sFmt(GetResString(_T("ERR_DELETE")));
+		sFmt.AppendFormat(pszErrfmt, (LPCTSTR)GetErrorMessage(::GetLastError()));
+		theApp.QueueLogLine(false, _T("%s: %s"), (LPCTSTR)sFmt, (LPCTSTR)data.strBackupPath);
+	}
+
+	if (!data.strSourceCachePath.IsEmpty() && !DeleteFileLongPath(data.strSourceCachePath)) {
+		const DWORD dwError = ::GetLastError();
+		if (dwError != ERROR_FILE_NOT_FOUND && dwError != ERROR_PATH_NOT_FOUND) {
+			bSucceeded = false;
+				theApp.QueueLogLine(true, GetResString(_T("FAILED_TO_DELETE_FILE_MANUALLY")), (LPCTSTR)data.strSourceCachePath);
+		}
+	}
+
+	if (!data.strTmpPath.IsEmpty() && PathFileExistsLongPath(data.strTmpPath) && !DeleteFileLongPath(data.strTmpPath)) {
+		bSucceeded = false;
+		CString sFmt(GetResString(_T("ERR_DELETE")));
+		sFmt.AppendFormat(pszErrfmt, (LPCTSTR)GetErrorMessage(::GetLastError()));
+		theApp.QueueLogLine(false, _T("%s: %s"), (LPCTSTR)sFmt, (LPCTSTR)data.strTmpPath);
+	}
+
+	if (!data.strFileName.IsEmpty())
+		theApp.QueueLogLine(false, GetResString(_T("REMOVEDDOWNLOAD")), (LPCTSTR)EscPercent(data.strFileName), (LPCTSTR)EscPercent(data.strED2kLink));
+	return bSucceeded;
+}
+
+bool CPartFileWriteThread::CreatePartFileDiskSnapshotNow(const PartFileCreateData& data, PartFileCreateResult& result)
+{
+	result.uRuntimeID = data.uRuntimeID;
+	md4cpy(result.abyHash, data.abyHash);
+	result.strPartFilePath = data.strPartFilePath;
+	result.hFile = INVALID_HANDLE_VALUE;
+	result.dwError = ERROR_INVALID_PARAMETER;
+
+	if (data.strPartFilePath.IsEmpty())
+		return false;
+
+	CString strTempDir;
+	int iPartNumber = 0;
+	const bool bCanRetryWithNextPartNumber = TryGetNumberedPartFilePathParts(data.strPartFilePath, strTempDir, iPartNumber);
+	CString strCreatePartFilePath(data.strPartFilePath);
+	HANDLE hFile = INVALID_HANDLE_VALUE;
+	for (;;) {
+		const CString longPath = PreparePathForWin32LongPath(strCreatePartFilePath);
+		hFile = ::CreateFile(longPath, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, NULL);
+		if (hFile != INVALID_HANDLE_VALUE)
+			break;
+
+		result.dwError = ::GetLastError();
+		if (!bCanRetryWithNextPartNumber || (result.dwError != ERROR_FILE_EXISTS && result.dwError != ERROR_ALREADY_EXISTS) || iPartNumber >= 0x7ffffffe)
+			return false;
+		BuildNumberedPartFilePath(strTempDir, ++iPartNumber, strCreatePartFilePath);
+	}
+	result.strPartFilePath = strCreatePartFilePath;
+
+	if (data.bSparsePartFile) {
+		DWORD dwReturnedBytes = 0;
+		if (!DeviceIoControl(hFile, FSCTL_SET_SPARSE, NULL, 0, NULL, 0, &dwReturnedBytes, NULL)) {
+			const DWORD dwError = ::GetLastError();
+			if (dwError != ERROR_INVALID_FUNCTION && thePrefs.GetVerboseLogPriority() <= DLP_VERYLOW)
+				theApp.QueueDebugLogLine(false, _T("Failed to apply NTFS sparse file attribute to file \"%s\" - %s"), (LPCTSTR)EscPercent(result.strPartFilePath), (LPCTSTR)EscPercent(GetErrorMessage(dwError, 1)));
+		}
+	}
+
+	FILETIME ft_ctime, ft_mtime;
+	if (GetFileTime(hFile, &ft_ctime, (LPFILETIME)NULL, &ft_mtime)) {
+		result.tCreated = (time_t)FileTimeToUnixTime(ft_ctime);
+		result.tLastModified = (time_t)FileTimeToUnixTime(ft_mtime);
+		if (result.tLastModified - result.tCreated > 1) {
+			result.tCreated = result.tLastModified;
+			VERIFY(SetFileTime(hFile, &ft_mtime, (LPFILETIME)NULL, (LPFILETIME)NULL));
+		}
+	} else {
+		result.tCreated = result.tLastModified = time(NULL);
+		if (thePrefs.GetVerbose())
+			theApp.QueueDebugLogLine(false, _T("Failed to get file date for \"%s\" - %s"), (LPCTSTR)EscPercent(result.strPartFilePath), (LPCTSTR)GetErrorMessage(::GetLastError(), 1));
+	}
+
+	result.dwFileAttributes = ::GetFileAttributes(PreparePathForWin32LongPath(result.strPartFilePath));
+	if (result.dwFileAttributes == INVALID_FILE_ATTRIBUTES)
+		result.dwFileAttributes = 0;
+	result.dwError = ERROR_SUCCESS;
+	result.hFile = hFile;
+	return true;
+}
+
+void CPartFileWriteThread::ProcessPartFileCreate(PartFileCreateData* pData)
+{
+	CInterlockedDecrementOnExit pendingCounter(&m_lPartFileCreateJobsPending);
+	if (pData == NULL)
+		return;
+
+	PartFileCreateResult* pResult = new PartFileCreateResult;
+	(void)CreatePartFileDiskSnapshotNow(*pData, *pResult);
+	CSingleLock lock(&m_partFileCreateResultsLock, TRUE);
+	m_partFileCreateResults.AddTail(pResult);
+}
+
+void CPartFileWriteThread::ProcessPartFileDelete(PartFileDeleteData* pData)
+{
+	CInterlockedDecrementOnExit pendingCounter(&m_lPartFileDeleteJobsPending);
+	if (pData != NULL) {
+		const bool bDeleted = DeletePartFileDiskSnapshotNow(*pData);
+		if (pData->uDownloadRemoveSequence != 0 || pData->uDownloadRemoveCorrelationId != 0)
+			theApp.QueueDownloadListCommandEvent(CemuleApp::ApplicationEventDownloadRemoveDiskCleanupCompleted, 0, bDeleted ? 1U : 0U, bDeleted ? 0U : 1U, 0, 1, pData->uDownloadRemoveSequence, pData->uDownloadRemoveCorrelationId, CemuleApp::BackendCommandSourceDiskIo, CemuleApp::BackendCommandOrderingDownloadList, _T("download-list:remove-disk-cleanup"));
+	}
+}
+
+bool CPartFileWriteThread::WriteDiskSnapshot(AsyncDiskWriteData* pData)
+{
+	return pData != NULL && WriteDiskSnapshotNow(*pData, true);
+}
+
 void CPartFileWriteThread::WriteCompletionRoutine(DWORD dwBytesWritten, const OverlappedWrite_Struct *pOvWrite)
 {
 	if (pOvWrite == NULL) {
@@ -389,16 +1124,41 @@ void CPartFileWriteThread::WriteCompletionRoutine(DWORD dwBytesWritten, const Ov
 
 	try {
 		if (m_Run) {
+			POSITION posPendingIO = m_listPendingIO.Find(const_cast<OverlappedWrite_Struct*>(pOvWrite));
+			if (posPendingIO == NULL) {
+				AddDebugLogLine(DLP_HIGH, false, _T("Completed part-file write was not found in the pending I/O list. file=%p buffer=%p"), pOvWrite->pFile, pOvWrite->pBuffer);
+				delete pOvWrite;
+				return;
+			}
+			m_listPendingIO.RemoveAt(posPendingIO);
+			{
+				CSingleLock sDeletedFilesListLock(&m_DeletedFilesListLock, TRUE);
+				if (m_DeletedFilesList.Find(pFile)) {
+					PruneDeletedFilesListLocked();
+					delete pOvWrite;
+					return;
+				}
+			}
 			PartFileBufferedData *pBuffer = pOvWrite->pBuffer;
-			const DWORD dwWrite = (DWORD)(pBuffer->end - pBuffer->start + 1);
-
-			ASSERT(pOvWrite->pos);
-			m_listPendingIO.RemoveAt(pOvWrite->pos);
-			if (dwBytesWritten && dwWrite == dwBytesWritten) {
+			if (pBuffer == NULL) {
 				if (pFile) {
 					--pFile->m_iWrites;
+					ASSERT(pFile->m_iWrites >= 0);
+				}
+				AddDebugLogLine(DLP_HIGH, false, _T("Completed part-file write has no buffer. file=%p"), pFile);
+				delete pOvWrite;
+				return;
+			}
+			const DWORD dwWrite = (DWORD)(pBuffer->end - pBuffer->start + 1);
+			if (pFile) {
+				--pFile->m_iWrites;
+				ASSERT(pFile->m_iWrites >= 0);
+			}
+
+			if (dwBytesWritten && dwWrite == dwBytesWritten) {
+				if (pFile) {
 					if (pBuffer->data) { //write data
-						ASSERT(pBuffer->flushed = PB_PENDING && pFile->m_iWrites >= 0);
+						ASSERT(pBuffer->flushed == PB_PENDING);
 						pBuffer->flushed = PB_WRITTEN;
 					} else { //full file allocation
 						ASSERT(dwBytesWritten == 1);
@@ -408,11 +1168,23 @@ void CPartFileWriteThread::WriteCompletionRoutine(DWORD dwBytesWritten, const Ov
 					}
 				}
 			} else {
-				pBuffer->flushed = PB_ERROR; //error code is unknown
+				if (pBuffer->data)
+					pBuffer->flushed = PB_ERROR; //error code is unknown
+				else
+					delete pBuffer;
 				Debug(_T("  Completed write size: expected %lu, written %lu\n"), dwWrite, dwBytesWritten);
 			}
-		} else if (pFile)
-			RemFile(pFile);
+		} else if (pFile) {
+			bool bFileDeleted = false;
+			{
+				CSingleLock sDeletedFilesListLock(&m_DeletedFilesListLock, TRUE);
+				bFileDeleted = m_DeletedFilesList.Find(pFile) != NULL;
+				if (bFileDeleted)
+					PruneDeletedFilesListLocked();
+			}
+			if (!bFileDeleted)
+				RemFile(pFile);
+		}
 	} catch (CException *ex) {
 		ex->Delete();
 		ASSERT(0);
@@ -490,5 +1262,10 @@ void CPartFileWriteThread::CleanUp(const ToWrite& item, CPartFile* pFile) {
 			}
 		}
 		delete item.pSaveSourcesData;
-	}
+	} else if (item.pAsyncDiskWriteData)
+		delete item.pAsyncDiskWriteData;
+	else if (item.pPartFileCreateData)
+		delete item.pPartFileCreateData;
+	else if (item.pPartFileDeleteData)
+		delete item.pPartFileDeleteData;
 }

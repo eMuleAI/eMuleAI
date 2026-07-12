@@ -65,6 +65,7 @@ namespace Kademlia
 		static void ProcessInvalidResponse(const CUInt128& uTarget, uint32 uFromIP, uint16 uFromPort); // Deal with problematic contacts
 		static uint8 GetRequestContactCountFor(const CUInt128& uTarget); // Find the amount of contacts this search will accept
 		static uint8 GetExpectedResponseContactCount(const CUInt128 &uTarget);
+		static uint8 GetExpectedResponseContactCount(const CUInt128 &uTarget, uint32 uFromIP, uint16 uFromPort);
 		static void ProcessResult(const CUInt128 &uTarget, const CUInt128 &uAnswer, TagList &rlistInfo, uint32 uFromIP, uint16 uFromPort);
 		static void ProcessPublishResult(const CUInt128 &uTarget, const uint8 uLoad, const bool bLoadResponse);
 		static void GetWords(LPCWSTR sz, WordList &rlistWords);

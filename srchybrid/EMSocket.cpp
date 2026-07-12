@@ -30,6 +30,7 @@
 #include "emuleDlg.h"
 #include "Log.h"
 #include "eMuleAI/UtpSocket.h"
+#include "eMuleAI/QuicNatSocket.h"
 #include "ListenSocket.h"
 
 #ifdef _DEBUG
@@ -41,7 +42,19 @@ static char THIS_FILE[] = __FILE__;
 
 namespace
 {
-	inline void EMTrace(char *fmt, ...)
+	constexpr uint32 kDefaultTcpUploadSendBufferBytes = 128u * 1024u;
+	constexpr uint32 kMaxTcpUploadSendBufferBytes = 32u * 1024u * 1024u;
+
+	uint32 ClampTcpUploadSendBufferBytes(uint32 uBufferBytes)
+	{
+		if (uBufferBytes < kDefaultTcpUploadSendBufferBytes)
+			return kDefaultTcpUploadSendBufferBytes;
+		if (uBufferBytes > kMaxTcpUploadSendBufferBytes)
+			return kMaxTcpUploadSendBufferBytes;
+		return uBufferBytes;
+	}
+
+	inline void EMTrace(const char *fmt, ...)
 	{
 #ifdef EMSOCKET_DEBUG
 		va_list argptr;
@@ -114,9 +127,11 @@ CEMSocket::CEMSocket()
 	, m_bBusy()
 	, m_hasSent()
 	, m_bUseBigSendBuffers()
+	, m_uRequestedSendBufferBytes()
 	, m_bUseOverlappedSend(true)
 	, m_bPendingSendOv()
 	, m_pUtpLayer()
+	, m_pQuicNatLayer()
 {
 	lastCalledSend = timeGetTime();
 	lastSent = lastCalledSend > SEC2MS(1) ? lastCalledSend - SEC2MS(1) : 0;
@@ -145,19 +160,19 @@ CEMSocket::~CEMSocket()
 CUtpSocket* CEMSocket::InitUtpSupport()
 {
 	if (thePrefs.GetLogNatTraversalEvents())
-		DebugLog(_T("[NATTTESTMODE: InitUtpSupport] Entry: m_pUtpLayer=%p\n"), m_pUtpLayer);
+		DebugLog(_T("[NatTraversal: InitUtpSupport] Entry: m_pUtpLayer=%p\n"), m_pUtpLayer);
 	if (m_pUtpLayer == NULL) {
 		m_pUtpLayer = new CUtpSocket;
 		if (thePrefs.GetLogNatTraversalEvents())
-			DebugLog(_T("[NATTTESTMODE: InitUtpSupport] Created CUtpSocket: %p\n"), m_pUtpLayer);
+			DebugLog(_T("[NatTraversal: InitUtpSupport] Created CUtpSocket: %p\n"), m_pUtpLayer);
 		AddLayer(m_pUtpLayer);
 		if (thePrefs.GetLogNatTraversalEvents())
-			DebugLog(_T("[NATTTESTMODE: InitUtpSupport] AddLayer done: m_pUtpLayer=%p\n"), m_pUtpLayer);
+			DebugLog(_T("[NatTraversal: InitUtpSupport] AddLayer done: m_pUtpLayer=%p\n"), m_pUtpLayer);
 		// Disable overlapped send for uTP as it uses UDP transport with async sends
 		m_bUseOverlappedSend = false;
 	} else {
 		if (thePrefs.GetLogNatTraversalEvents())
-			DebugLog(_T("[NATTTESTMODE: InitUtpSupport] WARNING: m_pUtpLayer already exists=%p\n"), m_pUtpLayer);
+			DebugLog(_T("[NatTraversal: InitUtpSupport] WARNING: m_pUtpLayer already exists=%p\n"), m_pUtpLayer);
 		ASSERT(0);
 	}
 	return m_pUtpLayer;
@@ -171,21 +186,52 @@ BOOL CEMSocket::HaveUtpLayer(bool bActive)
 	return CEncryptedStreamSocket::HaveUtpLayer(bActive);
 }
 
+bool CEMSocket::HasFailedUtpTransport() const
+{
+	return m_pUtpLayer != NULL && m_pUtpLayer->HasTransportFailed();
+}
+
+CQuicNatSocket* CEMSocket::InitQuicNatSupport()
+{
+	if (!CQuicNatSocket::IsRuntimeAvailable())
+		return NULL;
+
+	if (m_pQuicNatLayer == NULL) {
+		m_pQuicNatLayer = new CQuicNatSocket;
+		AddLayer(m_pQuicNatLayer);
+		m_bUseOverlappedSend = false;
+	} else
+		ASSERT(0);
+	return m_pQuicNatLayer;
+}
+
+BOOL CEMSocket::HaveQuicNatLayer(bool bActive)
+{
+	if (m_pQuicNatLayer != NULL)
+		return TRUE;
+	return CEncryptedStreamSocket::HaveQuicNatLayer(bActive);
+}
+
+BOOL CEMSocket::HaveNatTraversalLayer(bool bActive)
+{
+	return HaveUtpLayer(bActive) || HaveQuicNatLayer(bActive);
+}
+
 // deadlake PROXYSUPPORT
 // By Maverick: Connection initialization is done by class itself
 bool CEMSocket::Connect(const CString &sHostAddress, UINT nHostPort)
 {
-	// NOTE: InitProxySupport must be called BEFORE checking uTP layer, because
-	// proxy layer adds itself to the front of the layer chain, which would bypass uTP layer.
-	// However, when uTP is enabled, we should NOT initialize proxy support as it interferes with NAT-T.
-	if (m_pUtpLayer == NULL) {
+	// NOTE: InitProxySupport must be called BEFORE checking NAT-T layer, because
+	// proxy layer adds itself to the front of the layer chain, which would bypass NAT-T layer.
+	// However, when NAT-T is enabled, we should NOT initialize proxy support as it interferes with NAT-T.
+	if (m_pUtpLayer == NULL && m_pQuicNatLayer == NULL) {
 		InitProxySupport();
 	}
 	
-	// If uTP layer is attached, delegate to layer chain
-	if (m_pUtpLayer != NULL) {
+	// If a NAT-T layer is attached, delegate to layer chain
+	if (m_pUtpLayer != NULL || m_pQuicNatLayer != NULL) {
 		if (thePrefs.GetLogNatTraversalEvents())
-			AddDebugLogLine(DLP_VERYLOW, false, _T("[uTP-DEBUG] CEMSocket::Connect(string): have uTP layer, delegating to chain"));
+			AddDebugLogLine(DLP_VERYLOW, false, _T("[NatTraversal] CEMSocket::Connect(string): have NAT-T layer, delegating to chain"));
 		return CAsyncSocketEx::Connect(sHostAddress, nHostPort);
 	}
 	return CEncryptedStreamSocket::Connect(sHostAddress, nHostPort);
@@ -196,17 +242,17 @@ bool CEMSocket::Connect(const CString &sHostAddress, UINT nHostPort)
 // By Maverick: Connection initialization is done by class itself
 BOOL CEMSocket::Connect(const LPSOCKADDR pSockAddr, int iSockAddrLen)
 {
-	// NOTE: InitProxySupport must be called BEFORE checking uTP layer, because
-	// proxy layer adds itself to the front of the layer chain, which would bypass uTP layer.
-	// However, when uTP is enabled, we should NOT initialize proxy support as it interferes with NAT-T.
-	if (m_pUtpLayer == NULL) {
+	// NOTE: InitProxySupport must be called BEFORE checking NAT-T layer, because
+	// proxy layer adds itself to the front of the layer chain, which would bypass NAT-T layer.
+	// However, when NAT-T is enabled, we should NOT initialize proxy support as it interferes with NAT-T.
+	if (m_pUtpLayer == NULL && m_pQuicNatLayer == NULL) {
 		InitProxySupport();
 	}
 	
-	// If uTP layer is attached, delegate to layer chain (which will call CUtpSocket::Connect)
-	if (m_pUtpLayer != NULL) {
+	// If a NAT-T layer is attached, delegate to layer chain.
+	if (m_pUtpLayer != NULL || m_pQuicNatLayer != NULL) {
 		if (thePrefs.GetLogNatTraversalEvents())
-			AddDebugLogLine(DLP_VERYLOW, false, _T("[uTP-DEBUG] CEMSocket::Connect(sockaddr): have uTP layer, delegating to chain"));
+			AddDebugLogLine(DLP_VERYLOW, false, _T("[NatTraversal] CEMSocket::Connect(sockaddr): have NAT-T layer, delegating to chain"));
 		return CAsyncSocketEx::Connect(pSockAddr, iSockAddrLen);
 	}
 	return CEncryptedStreamSocket::Connect(pSockAddr, iSockAddrLen);
@@ -307,7 +353,7 @@ BOOL CEMSocket::AsyncSelect(long lEvent)
 		EMTrace("  FD_WRITE");
 #endif
 	// deadlake changed to AsyncSocketEx PROXYSUPPORT
-	if (m_SocketData.hSocket != INVALID_SOCKET || HaveUtpLayer())
+	if (m_SocketData.hSocket != INVALID_SOCKET || HaveNatTraversalLayer())
 		return CEncryptedStreamSocket::AsyncSelect(lEvent);
 	return true;
 }
@@ -319,7 +365,7 @@ void CEMSocket::OnReceive(int nErrorCode)
 	// uTP callbacks can re-enter while packet assembly state is still in use.
 	if (m_bInOnReceive) {
 		m_bDeferredOnReceive = true;
-		if (HaveUtpLayer() && thePrefs.GetLogNatTraversalEvents())
+		if (HaveNatTraversalLayer() && thePrefs.GetLogNatTraversalEvents())
 			DebugLog(_T("[NatTraversal][EMSocket::OnReceive] Re-entrant receive deferred"));
 		return;
 	}
@@ -327,9 +373,18 @@ void CEMSocket::OnReceive(int nErrorCode)
 	m_bInOnReceive = true;
 
 	for (;;) {
-		// Safe diagnostic for uTP packet receive investigation
-		if (HaveUtpLayer() && thePrefs.GetLogNatTraversalEvents())
-			DebugLog(_T("[NatTraversal][EMSocket::OnReceive] ENTRY: err=%d conn=%d"), nErrorCode, (int)byConnected);
+		// Throttle hot path uTP receive diagnostics. Per callback logging is too noisy during active transfers.
+		if (HaveNatTraversalLayer() && thePrefs.GetLogNatTraversalEvents()) {
+			static DWORD s_dwLastUtpReceiveEntryLog = 0;
+			static UINT s_uSuppressedUtpReceiveEntryLogs = 0;
+			const DWORD dwNow = ::GetTickCount();
+			if (s_dwLastUtpReceiveEntryLog == 0 || dwNow - s_dwLastUtpReceiveEntryLog >= SEC2MS(2)) {
+				DebugLog(_T("[NatTraversal][EMSocket::OnReceive] ENTRY: err=%d conn=%d suppressed=%u"), nErrorCode, (int)byConnected, s_uSuppressedUtpReceiveEntryLogs);
+				s_dwLastUtpReceiveEntryLog = dwNow;
+				s_uSuppressedUtpReceiveEntryLogs = 0;
+			} else
+				++s_uSuppressedUtpReceiveEntryLogs;
+		}
 
 		// Check for an error code
 		if (nErrorCode != 0 && nErrorCode != WSAESHUTDOWN) {
@@ -540,9 +595,9 @@ void CEMSocket::SendPacket(Packet *packet, bool controlpacket, uint32 actualPayl
 	}
 
 	sendLocker.Lock();
-	bool bUtpNotReady = HaveUtpLayer() && byConnected != EMS_CONNECTED;
-	if (bUtpNotReady && thePrefs.GetLogNatTraversalEvents())
-		DebugLog(_T("[NatTraversal] CEMSocket::SendPacket: queueing packet while uTP not yet connected (ctrl=%d), socket=%p"), (int)controlpacket, this);
+	bool bNatTraversalNotReady = HaveNatTraversalLayer() && byConnected != EMS_CONNECTED;
+	if (bNatTraversalNotReady && thePrefs.GetLogNatTraversalEvents())
+		DebugLog(_T("[NatTraversal] CEMSocket::SendPacket: queueing packet while NAT-T not yet connected (ctrl=%d), socket=%p"), (int)controlpacket, this);
 
 	if (controlpacket) {
 		controlpacket_queue.AddTail(packet);
@@ -649,18 +704,10 @@ SocketSentBytes CEMSocket::SendStd(uint32 maxNumberOfBytesToSend, uint32 minFrag
 	SocketSentBytes ret = { 0, 0, true };
 
 	sendLocker.Lock();
-	// For uTP, bypass encryption layer ready check as uTP uses UDP transport
-	// and eMule's TCP encryption negotiation doesn't apply. uTP has its own encryption.
-	bool bUtpBypassEncryption = HaveUtpLayer();
-	
-	// Debug logging for uTP packet send investigation
-	if (bUtpBypassEncryption && thePrefs.GetLogNatTraversalEvents()) {
-		DebugLog(_T("[NatTraversal][SendStd] uTP bypass: connected=%d encReady=%d ctrlQ=%d stdQ=%d sendbuf=%p useOvSend=%d"),
-			(int)(byConnected == EMS_CONNECTED), (int)IsEncryptionLayerReady(),
-			controlpacket_queue.GetCount(), standardpacket_queue.GetCount(), sendbuffer, (int)m_bUseOverlappedSend);
-	}
-	
-	if (byConnected == EMS_CONNECTED && (bUtpBypassEncryption || IsEncryptionLayerReady())) {
+	// For NAT-T transports, eMule's TCP encryption negotiation does not apply.
+	bool bNatTraversalBypassEncryption = HaveNatTraversalLayer();
+
+	if (byConnected == EMS_CONNECTED && (bNatTraversalBypassEncryption || IsEncryptionLayerReady())) {
 		if (minFragSize < 1)
 			minFragSize = 1;
 
@@ -715,8 +762,8 @@ SocketSentBytes CEMSocket::SendStd(uint32 maxNumberOfBytesToSend, uint32 minFrag
 				delete curPacket;
 
 				// encrypting which cannot be done transparent by base class
-				// Skip encryption for uTP as it uses UDP transport with its own encryption
-				if (!bUtpBypassEncryption)
+				// Skip TCP encryption for NAT-T because it uses UDP transport
+				if (!bNatTraversalBypassEncryption)
 					CryptPrepareSendData((uchar*)sendbuffer, sendblen);
 			}
 
@@ -752,9 +799,9 @@ SocketSentBytes CEMSocket::SendStd(uint32 maxNumberOfBytesToSend, uint32 minFrag
 					if (result == (uint32)SOCKET_ERROR) {
 						uint32 error = (uint32)CAsyncSocket::GetLastError();
 						if (error == WSAEWOULDBLOCK) {
-							// uTP can miss extra writable callbacks across congestion transitions.
-							// Do not latch file-socket scheduling on m_bBusy for uTP.
-							m_bBusy = !bUtpBypassEncryption;
+							// NAT-T can miss extra writable callbacks across congestion transitions.
+							// Do not latch file-socket scheduling on m_bBusy for NAT-T.
+							m_bBusy = !bNatTraversalBypassEncryption;
 
 							sendLocker.Unlock();
 
@@ -769,9 +816,9 @@ SocketSentBytes CEMSocket::SendStd(uint32 maxNumberOfBytesToSend, uint32 minFrag
 					m_hasSent = true;
 
 					sent += result;
-					// Keep uTP sends within the throttler budget for this pass.
+					// Keep NAT-T sends within the throttler budget for this pass.
 					// TCP keeps legacy behavior to avoid changing long-standing flow semantics.
-					if (bUtpBypassEncryption)
+					if (bNatTraversalBypassEncryption)
 						sentBytes += result;
 					else
 						sentBytes = result;
@@ -841,18 +888,10 @@ SocketSentBytes CEMSocket::SendOv(uint32 maxNumberOfBytesToSend, uint32 minFragS
 	SocketSentBytes ret = {0, 0, true};
 
 	sendLocker.Lock();
-	// For uTP, bypass encryption layer ready check as uTP uses UDP transport
-	// and eMule's TCP encryption negotiation doesn't apply. uTP has its own encryption.
-	bool bUtpBypassEncryption = HaveUtpLayer();
-	
-	// Debug logging for uTP packet send investigation
-	if (bUtpBypassEncryption && thePrefs.GetLogNatTraversalEvents()) {
-		DebugLog(_T("[NatTraversal][SendOv] uTP bypass: connected=%d encReady=%d ctrlQ=%d stdQ=%d sendbuf=%p"),
-			(int)(byConnected == EMS_CONNECTED), (int)IsEncryptionLayerReady(),
-			controlpacket_queue.GetCount(), standardpacket_queue.GetCount(), sendbuffer);
-	}
-	
-	if (byConnected == EMS_CONNECTED && (bUtpBypassEncryption || IsEncryptionLayerReady()) && !IsBusyExtensiveCheck() && maxNumberOfBytesToSend > 0) {
+	// For NAT-T transports, eMule's TCP encryption negotiation does not apply.
+	bool bNatTraversalBypassEncryption = HaveNatTraversalLayer();
+
+	if (byConnected == EMS_CONNECTED && (bNatTraversalBypassEncryption || IsEncryptionLayerReady()) && !IsBusyExtensiveCheck() && maxNumberOfBytesToSend > 0) {
 		if (minFragSize < 1)
 			minFragSize = 1;
 
@@ -899,8 +938,8 @@ SocketSentBytes CEMSocket::SendOv(uint32 maxNumberOfBytesToSend, uint32 minFragS
 				pCurBuf.buf = curPacket->DetachPacket();
 				delete curPacket;
 				// encrypting which cannot be done transparently in the base class
-				// Skip encryption for uTP as it uses UDP transport with its own encryption
-				if (!bUtpBypassEncryption)
+				// Skip TCP encryption for NAT-T because it uses UDP transport
+				if (!bNatTraversalBypassEncryption)
 					CryptPrepareSendData((uchar*)pCurBuf.buf, pCurBuf.len);
 				m_aBufferSend.Add(pCurBuf);
 				nBytesLeft -= pCurBuf.len;
@@ -920,8 +959,8 @@ SocketSentBytes CEMSocket::SendOv(uint32 maxNumberOfBytesToSend, uint32 minFragS
 						// yay
 						pCurBuf.len = curPacket->GetRealPacketSize();
 						pCurBuf.buf = curPacket->DetachPacket();
-						// Skip encryption for uTP as it uses UDP transport with its own encryption
-						if (!bUtpBypassEncryption)
+						// Skip TCP encryption for NAT-T because it uses UDP transport
+						if (!bNatTraversalBypassEncryption)
 							CryptPrepareSendData((uchar*)pCurBuf.buf, pCurBuf.len);// encryption cannot be done transparently in the base class
 						::InterlockedAdd((LONG*)&m_actualPayloadSizeSent, queueEntry.actualPayloadSize);
 						lastFinishedStandard = timeGetTime();
@@ -932,8 +971,8 @@ SocketSentBytes CEMSocket::SendOv(uint32 maxNumberOfBytesToSend, uint32 minFragS
 						sendblen = curPacket->GetRealPacketSize();
 						sendbuffer = curPacket->DetachPacket();
 						sent = 0;
-						// Skip encryption for uTP as it uses UDP transport with its own encryption
-						if (!bUtpBypassEncryption)
+						// Skip TCP encryption for NAT-T because it uses UDP transport
+						if (!bNatTraversalBypassEncryption)
 							CryptPrepareSendData((uchar*)sendbuffer, sendblen); //  encryption cannot be done transparently in the base class
 						pCurBuf.len = min(sendblen - sent, (uint32)nBytesLeft);
 						pCurBuf.buf = new CHAR[pCurBuf.len];
@@ -1056,7 +1095,7 @@ int CEMSocket::Receive(void *lpBuf, int nBufLen, int nFlags)
 		}
 		break;
 	case SOCKET_ERROR:
-		char *p = NULL;
+		const char *p = NULL;
 		switch (CAsyncSocket::GetLastError()) {
 		case WSANOTINITIALISED:
 			ASSERT(0);
@@ -1107,6 +1146,8 @@ void CEMSocket::RemoveAllLayers()
 	CEncryptedStreamSocket::RemoveAllLayers();
 	delete m_pUtpLayer;
 	m_pUtpLayer = NULL;
+	delete m_pQuicNatLayer;
+	m_pQuicNatLayer = NULL;
 	delete m_pProxyLayer;
 	m_pProxyLayer = NULL;
 }
@@ -1126,7 +1167,7 @@ int CEMSocket::OnLayerCallback(std::vector<t_callbackMsg> &callbacks)
 					if (thePrefs.GetVerbose() && iter->str && iter->str[0] != '\0')
 						m_strLastProxyError.AppendFormat(_T(" - %hs"), iter->str);
 				}
-				LogWarning(LOG_DEFAULT, _T("Proxy Error: %s"), (LPCTSTR)m_strLastProxyError);
+					LogWarning(LOG_DEFAULT, GetResString(_T("PROXY_ERROR_LOG")), (LPCTSTR)m_strLastProxyError);
 			}
 		}
 		delete[] iter->str;
@@ -1153,6 +1194,38 @@ void CEMSocket::TruncateQueues()
 		delete standardpacket_queue.RemoveHead().packet;
 
 	sendLocker.Unlock();
+}
+
+void CEMSocket::ResetTransportStateForReconnect()
+{
+	// A replacement transport starts a new byte stream. Do not carry partial
+	// packet parsing or queued data from the failed stream into the new one.
+	{
+		CSingleLock sendLock(&sendLocker, TRUE);
+		while (!controlpacket_queue.IsEmpty())
+			delete controlpacket_queue.RemoveHead();
+		while (!standardpacket_queue.IsEmpty())
+			delete standardpacket_queue.RemoveHead().packet;
+
+		delete[] sendbuffer;
+		sendbuffer = NULL;
+		sendblen = 0;
+		sent = 0;
+		m_actualPayloadSize = 0;
+		m_currentPacket_is_controlpacket = false;
+		m_currentPackageIsFromPartFile = false;
+		m_bBusy = false;
+		m_hasSent = false;
+	}
+
+	downloadLimit = 0;
+	downloadLimitEnable = false;
+	pendingOnReceive = false;
+	m_bDeferredOnReceive = false;
+	pendingHeaderSize = 0;
+	delete pendingPacket;
+	pendingPacket = NULL;
+	pendingPacketSize = 0;
 }
 
 bool CEMSocket::DropQueuedControlPacket(uint8 opcode, uint8 protocol)
@@ -1264,25 +1337,36 @@ CString CEMSocket::GetFullErrorMessage(DWORD dwError)
 // increases the send buffer to a bigger size
 bool CEMSocket::UseBigSendBuffer()
 {
-#define BIGSIZE (128 * 1024)
+	return UseBigSendBuffer(kDefaultTcpUploadSendBufferBytes);
+}
 
-	if (!m_bUseBigSendBuffers) {
-		int val = BIGSIZE;
+bool CEMSocket::UseBigSendBuffer(uint32 uBufferBytes)
+{
+	uBufferBytes = ClampTcpUploadSendBufferBytes(uBufferBytes);
+	if (!m_bUseBigSendBuffers || m_uRequestedSendBufferBytes < uBufferBytes) {
+		int val = static_cast<int>(uBufferBytes);
 		int oldval;
 		int vallen = sizeof oldval;
-		if (GetSockOpt(SO_SNDBUF, &oldval, &vallen))
-			if (BIGSIZE > oldval) {
+		if (GetSockOpt(SO_SNDBUF, &oldval, &vallen)) {
+			if (static_cast<int>(uBufferBytes) > oldval) {
 				SetSockOpt(SO_SNDBUF, &val, sizeof val);
 				vallen = sizeof val;
-				m_bUseBigSendBuffers = (GetSockOpt(SO_SNDBUF, &val, &vallen) && val >= BIGSIZE);
-#if defined(_DEBUG) || defined(_BETA) || defined(_DEVBUILD)
+				m_bUseBigSendBuffers = (GetSockOpt(SO_SNDBUF, &val, &vallen) && val > oldval);
 				if (m_bUseBigSendBuffers)
+					m_uRequestedSendBufferBytes = uBufferBytes;
+#if defined(_DEBUG) || defined(_BETA) || defined(_DEVBUILD)
+				if (m_bUseBigSendBuffers && val >= static_cast<int>(uBufferBytes))
 					theApp.QueueDebugLogLine(false, _T("Increased Sendbuffer for uploading socket from %u KiB to %u KiB"), oldval / 1024, val / 1024);
+				else if (m_bUseBigSendBuffers)
+					theApp.QueueDebugLogLine(false, _T("Upload send buffer requested %u KiB, Windows applied %u KiB"), uBufferBytes / 1024, val / 1024);
 				else
 					theApp.QueueDebugLogLine(false, _T("Failed to increase Sendbuffer for uploading socket, stays at %u KiB"), oldval / 1024);
 #endif
-			} else
+			} else {
 				m_bUseBigSendBuffers = true;
+				m_uRequestedSendBufferBytes = uBufferBytes;
+			}
+		}
 	}
 	return m_bUseBigSendBuffers;
 }
@@ -1359,8 +1443,8 @@ bool CEMSocket::IsEnoughFileDataQueued(uint32 nMinFilePayloadBytes) const
 
 bool CEMSocket::IsEncryptionLayerReady()
 {
-	// Guard uTP traffic until the initial Hello/HelloAnswer exchange completes.
-	if (HaveUtpLayer()) {
+	// Guard NAT-T traffic until the initial Hello/HelloAnswer exchange completes.
+	if (HaveNatTraversalLayer()) {
 		CClientReqSocket* pReqSock = DYNAMIC_DOWNCAST(CClientReqSocket, this);
 		CUpDownClient* pClient = (pReqSock != NULL) ? pReqSock->client : NULL;
 		if (pClient != NULL && pClient->IsHelloAnswerPending() && !pClient->IsUtpHelloQueued())

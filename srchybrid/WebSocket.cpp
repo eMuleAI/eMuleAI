@@ -286,6 +286,7 @@ UINT AFX_CDECL WebSocketAcceptedFunc(LPVOID pD)
 
 	HANDLE hEvent = CreateEvent(NULL, FALSE, TRUE, NULL);
 	if (hEvent) {
+		HANDLE pWait[] = { hEvent, s_hTerminate };
 		if (!WSAEventSelect(hSocket, hEvent, FD_READ | FD_CLOSE | FD_WRITE)) {
 			mbedtls_ssl_context ssl;
 			CWebSocket stWebSocket;
@@ -315,7 +316,6 @@ UINT AFX_CDECL WebSocketAcceptedFunc(LPVOID pD)
 						goto thread_exit;
 					}
 			}
-			HANDLE pWait[] = {hEvent, s_hTerminate};
 
 			while (WAIT_OBJECT_0 == ::WaitForMultipleObjects(DWORD(_countof(pWait)), pWait, FALSE, INFINITE)) {
 				while (stWebSocket.m_bValid) {
@@ -430,6 +430,9 @@ UINT AFX_CDECL WebSocketListeningFunc(LPVOID pThis)
 
 	srand((unsigned)time(NULL));
 
+	if (theApp.IsNetworkActivityBlockedByBind())
+		return 0;
+
 	SOCKET hSocket = WSASocket(AF_INET, SOCK_STREAM, IPPROTO_TCP, NULL, 0, 0);
 	if (INVALID_SOCKET != hSocket) {
 		SOCKADDR_IN stAddr;
@@ -459,7 +462,7 @@ UINT AFX_CDECL WebSocketListeningFunc(LPVOID pThis)
 										break;
 									}
 								if (!bAllowedIP) {
-									LogWarning(_T("Web Interface: Rejected connection attempt from %s"), (LPCTSTR)ipstr(their_addr.sin_addr.s_addr));
+						LogWarning(GetResString(_T("WEB_REJECTED_CONNECTION_ATTEMPT")), (LPCTSTR)ipstr(their_addr.sin_addr.s_addr));
 									VERIFY(!closesocket(hAccepted));
 									break;
 								}

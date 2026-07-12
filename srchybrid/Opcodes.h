@@ -18,9 +18,7 @@
 #pragma once
 
 #define MOD_NAME		_T("AI")
-#define MOD_MAIN_VER	1
-#define MOD_MIN_VER		4
-#define MOD_VERSION		MOD_NAME _T(" v") _CRT_WIDE(_CRT_STRINGIZE(MOD_MAIN_VER)) _T(".") _CRT_WIDE(_CRT_STRINGIZE(MOD_MIN_VER)) //#define MOD_VERSION		_T("AI v1.4")
+#define MOD_VERSION		_T("AI v1.5")
 #define MOD_REPO_BASE_URL _T("https://github.com/eMuleAI/eMuleAI")
 #define MOD_PAGES_BASE_URL _T("https://eMuleAI.github.io")
 
@@ -41,9 +39,11 @@
 	#define DEBUG_ONLY2(f) (f)
 #endif
 
-// These values are used for testing purposes only. Do not change them for release builds.
-//#define TESTMODE
-//#define NATTTESTMODE
+// These values are used for testing purposes only. Do not use them for release builds. 
+#ifdef _DEBUG
+	//#define TESTMODE
+	//#define NATTTESTMODE
+#endif
 
 // MOD Note: Do not change this part - Merkur
 #define	EMULE_PROTOCOL					0x01
@@ -94,7 +94,8 @@
 #define MAX_CLIENTCONNECTIONTRY	2
 #define	MAX_MORE_SEARCH_REQ		0			// 0 = unlimited. Server-side limits already cap results, no need for a client-side cap.
 #define CONNECTION_TIMEOUT		SEC2MS(30)	// Decreased to 30s (was 40s). Matches modern P2P handshake timeouts, failing faster on dead peers.
-#define	FILEREASKTIME			MIN2MS(15)	// Decreased to 15m (was 29m). Modern broadband handles more frequent queue/source updates easily. Set safely above the 10m minimum ban threshold.
+#define KAD_SERVED_BUDDY_PENDING_TIMEOUT	(CONNECTION_TIMEOUT * 4)	// Allow delayed inbound buddy TCP handshakes without holding a slot indefinitely.
+#define	FILEREASKTIME			MIN2MS(15)	// Decreased to 15m (was 29m). Modern links handle more frequent queue/source updates safely above the 10m minimum ban threshold.
 #define SERVERREASKTIME			MIN2MS(15)	//15 mins - don't set this too low, it won't speed up anything, but it could kill emule or your internet connection
 #define UDPSERVERREASKTIME		MIN2MS(30)	//30 mins
 #define	MAX_SERVERFAILCOUNT		10
@@ -129,7 +130,7 @@
 #define RSAKEYSIZE				384			//384 bits
 #define	MAX_SOURCES_FILE_SOFT	2000		// Increased to 2000 (was 750). Modern OS/routers handle many more concurrent connections.
 #define	MAX_SOURCES_FILE_UDP	300u		// Increased to 300 (was 50). UDP source collection is lightweight, old limit was too conservative.
-#define SESSIONMAXTRANS			(PARTSIZE * 10+20*1024) // Increased to 10 chunks (was 1). Improves efficiency for modern large files and fiber speeds.
+#define SESSIONMAXTRANS			(PARTSIZE+20*1024) // "Try to send complete chunks" always sends this amount of data
 #define SESSIONMAXTIME			HR2MS(1)	//1 hour
 #define	MAXFILECOMMENTLEN		128
 #define	PARTSIZE				9728000ui64
@@ -143,10 +144,13 @@
 #define CONFIGFOLDER			_T("config\\")
 #define MAXCONPER5SEC			60			// Increased to 60 (was 20). On today's faster systems and networks, 20 is overly conservative; 60 improves connection ramp-up while remaining reasonable.
 #define MAXCON5WIN9X			10
-#define	UPLOAD_CLIENT_MAXDATARATE	(5*1024*1024) // Increased to 5MBps (was 25KB). Speeds up file seeding on broadband networks.
+#define	UPLOAD_CLIENT_MAXDATARATE	(5*1024*1024) // Increased to 5MBps (was 25KB). Speeds up file seeding on high-speed networks.
 #define	MIN_UP_CLIENTS_ALLOWED	2			// min. clients allowed to download regardless of any other factors. Don't set this too high
-#define	MAX_UP_CLIENTS_ALLOWED	200			// Increased to 200 (was 100). Higher limits distribute fast upload speeds to more clients.
+#define	MAX_UP_CLIENTS_ALLOWED	100			// max. clients allowed regardless of any other factors; cannot be below MIN_UP_CLIENTS_ALLOWED+3
 #define DOWNLOADTIMEOUT			SEC2MS(50)  // Decreased to 50s (was 100s). Drops dead connections faster while allowing enough time for NAT-T hole punching.
+#define NAT_TRAVERSAL_RENDEZVOUS_MAX_ATTEMPTS 5	// Bound failed LowID-to-LowID rendezvous attempts before applying retry backoff.
+#define NAT_TRAVERSAL_RENDEZVOUS_TIMEOUT SEC2MS(120)	// Total rendezvous wait before a source is considered temporarily unreachable.
+#define NAT_TRAVERSAL_RENDEZVOUS_BACKOFF SEC2MS(60)	// Keep temporary direct-UDP failures on queue and retry later.
 #define CONSERVTIMEOUT			SEC2MS(25)	// age limit for pending connection attempts
 #define RARE_FILE				50
 #define BADCLIENTBAN			4
@@ -177,6 +181,20 @@
 #define OP_EMULEPROT			0xC5
 #define OP_UDPRESERVEDPROT1		0xA3	// reserved for later UDP headers (important for EncryptedDatagramSocket)
 #define OP_UDPRESERVEDPROT2		0xB2	// reserved for later UDP headers (important for EncryptedDatagramSocket)
+#define OP_NATT_FRAME_UTP			0x00	// Legacy uTP NAT-T frame carried inside OP_UDPRESERVEDPROT2
+#define OP_NATT_FRAME_QUIC			0x01	// QUIC NAT-T frame carried inside OP_UDPRESERVEDPROT2
+#define OP_NATT_FRAME_CAPS			0x02	// Direct peer NAT-T capability negotiation frame
+#define OP_NATT_FRAME_CAPS_ACK		0x03	// Direct peer NAT-T capability negotiation acknowledgement
+#define OP_NATT_FRAME_KEY			0xFF	// NAT-T key frame carried inside OP_UDPRESERVEDPROT2
+#define DIRECT_NATT_CAPS_LEGACY_TIMEOUT_MS	1500	// Wait before falling back to legacy uTP when peer has no QUIC capability
+
+#define CONNECT_OPT_CRYPT_SUPPORTED		0x01
+#define CONNECT_OPT_CRYPT_REQUESTED		0x02
+#define CONNECT_OPT_CRYPT_REQUIRED		0x04
+#define CONNECT_OPT_DIRECT_UDP_CALLBACK		0x08
+#define CONNECT_OPT_NATT_ENDPOINT_HINT		0x20
+#define CONNECT_OPT_NAT_TRAVERSAL_QUIC	0x40
+#define CONNECT_OPT_NAT_TRAVERSAL_UTP	0x80
 #define OP_MLDONKEYPROT			0x00
 #define	MET_HEADER				0x0E
 #define	MET_HEADER_I64TAGS		0x0F
@@ -324,8 +342,9 @@
 #define OP_HASHSETREQUEST2		0xB1	// <FileIdentifier><Options 1>
 #define OP_HASHSETANSWER2		0xB2	// <FileIdentifier><Options 1>[<HashSets> Options]
 
-// eServer Buddy Protocol (OP_EMULEPROT) - eMuleAI LowID-to-LowID relay
-// NOTE: Using 0xB3-0xBA range to avoid conflicts with OP_PACKEDPROT (0xD4) and FT_MEDIA_* tags (0xD0-0xD5)
+// eServer Buddy Protocol (OP_EMULEPROT) - eMuleAI LowID to LowID relay
+// NOTE: As of now none of the 0xB3-0xBB tags is banned by any major MOD so we can use safely them 
+// Also using this range to avoid conflicts with OP_PACKEDPROT (0xD4) and FT_MEDIA_* tags (0xD0-0xD5)
 #define OP_ESERVER_BUDDY_REQUEST	0xB3	// LowID→HighID: Request to become buddy
 #define OP_ESERVER_BUDDY_ACK		0xB4	// HighID→LowID: Accept/Reject buddy request
 #define OP_ESERVER_BUDDY_PING		0xB5	// Keep-alive + server check
@@ -340,14 +359,17 @@
 #define ESERVERBUDDY_REASK_TIME		MIN2MS(10)	// 10 min - retry after slot rejection
 #define ESERVERBUDDY_PING_TIME		MIN2MS(10)	// 10 min - maintenance/cleanup interval
 #define ESERVERBUDDY_KEEPALIVE_TIME	SEC2MS(20)	// 20 sec - keep buddy TCP sockets active
+#define ESERVERBUDDY_CONNECTING_TIMEOUT	(ESERVERBUDDY_KEEPALIVE_TIME * 2)	// Wait for buddy ACK before retrying another candidate
 #define ESERVERBUDDY_SOCKET_TIMEOUT_GRACE	SEC2MS(45)	// Extra timeout margin for established buddy links
 #define ESERVERBUDDY_RELAY_TIMEOUT	SEC2MS(15)	// 15 sec - relay operation timeout
+#define ESERVERBUDDY_RELAY_REASK_TIME	SEC2MS(8)	// Minimum delay before resending the same relay request
 #define ESERVERBUDDY_MAX_PENDING_RELAYS	10		// Max pending relay requests to prevent memory exhaustion
 #define ESERVERBUDDY_MAGIC_SEARCH_REASK_TIME SERVERREASKTIME	// Minimum delay between magic source queries
 #define ESERVERBUDDY_MAGIC_SEARCH_TIMEOUT (ESERVERBUDDY_KEEPALIVE_TIME * 2)	// Wait window for server source answer
 #define ESERVERBUDDY_MAGIC_MAX_CANDIDATE_RETRIES 3	// Retry budget for one magic source candidate
 #define ESERVERBUDDY_STALE_SERVER_GRACE_TIME (ESERVERBUDDY_KEEPALIVE_TIME * 5)	// Grace when peer is offline from any server
 #define ESERVERBUDDY_GENERIC_REJECT_RETRY SEC2MS(90)	// Short retry delay for non-slot buddy rejects
+#define ESERVERBUDDY_PROOF_REJECT_RETRY DAY2MS(1)	// Long cooldown for incompatible older eServer buddies
 #define ESERVERBUDDY_MAGIC_FINE_BUCKET_COUNT	4096u	// Fine rendezvous bucket count for scalable discovery
 #define ESERVERBUDDY_MAGIC_BOOTSTRAP_BUCKET_COUNT	8u	// Bootstrap bucket count for sparse-network discovery
 #define ESERVERBUDDY_MAGIC_EPOCH_SECONDS	(10u * 60u)	// Epoch duration (UTC) for lease-based publish
@@ -366,7 +388,10 @@
 #define ESERVERBUDDY_STATUS_ACCEPTED	0x01	// Buddy request accepted / relay success
 #define ESERVERBUDDY_STATUS_SLOTSFULL	0x02	// No available buddy slots
 #define ESERVERBUDDY_STATUS_FORWARDING	0x03	// Relay request forwarded, awaiting target response
+#define ESERVERBUDDY_REJECT_REASON_NONE	0x00	// Generic buddy request reject
+#define ESERVERBUDDY_REJECT_REASON_MAGIC_PROOF	0x01	// Missing or invalid magic proof
 #define ESERVERBUDDY_PING_FLAG_HIGHID	0x01	// Keep-alive sender is currently HighID on server
+#define ESERVERBUDDY_PING_FLAG_RESPONSE	0x02	// Keep-alive packet is a response and must not be echoed
 
 // eServer Buddy external UDP port discovery
 #define ESERVERBUDDY_FLAG_EXT_UDP_PORT	0x04	// Capability bit: supports external UDP port discovery
@@ -374,16 +399,18 @@
 #define ESERVERBUDDY_REQUEST_FLAG_MAGIC_PROOF	0x01	// OP_ESERVER_BUDDY_REQUEST extension: nonce+proof payload
 #define ESERVERBUDDY_REQUEST_FLAG_SERVER_INFO	0x02	// OP_ESERVER_BUDDY_REQUEST extension: current server ip+port appended after proof
 #define ESERVER_EXT_UDP_PORT_TTL		MIN2MS(5)	// Cache TTL for discovered external UDP port
+#define ESERVER_EXT_UDP_PORT_WAIT_TIME	1500		// Wait for target UDP probe before local port fallback
+#define ESERVERBUDDY_KAD_BRIDGE_RETRY	SEC2MS(90)	// Cooldown for trying existing buddy links as cross-protocol buddy candidates
 #define ESERVER_UDP_PROBE_MIN_INTERVAL	SEC2MS(60)	// Min interval between UDP probes
 #define ESERVER_UDP_PROBE_SIZE			20		// 16 byte hash + 4 byte token
 #define ESERVER_EXT_UDP_PORT_TAIL_SIZE	3		// uint16 port + uint8 source
 #define ESERVER_EXT_UDP_PORT_SRC_KAD	1		// External port source: KAD
 #define ESERVER_EXT_UDP_PORT_SRC_ESERVER_BUDDY	2	// External port source: eServer buddy
 
-// eServer Buddy legacy magic proof constants (kept stable for backward compatibility)
-#define ESERVERBUDDY_MAGIC_PROOF_FILE_NAME _T("m_file_v260301")
-#define ESERVERBUDDY_MAGIC_PROOF_FILE_SIZE 4042322167ui64
-#define ESERVERBUDDY_MAGIC_PROOF_FILE_HASH_BYTES { 0x9C, 0x4A, 0x7D, 0xE1, 0x21, 0x88, 0xF3, 0x5B, 0x70, 0x2C, 0xBE, 0x49, 0xD6, 0x0F, 0xA5, 0x13 }
+// eServer Buddy magic proof constants. This isolates buddies from older incompatible eServer buddy implementations.
+#define ESERVERBUDDY_MAGIC_PROOF_FILE_NAME _T("m_file_v260612")
+#define ESERVERBUDDY_MAGIC_PROOF_FILE_SIZE 3915061215ui64
+#define ESERVERBUDDY_MAGIC_PROOF_FILE_HASH_BYTES { 0x15, 0x06, 0x12, 0xA9, 0x4F, 0xC2, 0x71, 0x3D, 0x88, 0x5B, 0xE0, 0x26, 0xB4, 0x9A, 0x37, 0x5C }
 
 // Keep existing aliases to avoid touching all call sites at once.
 #define ESERVERBUDDY_MAGIC_FILE_NAME ESERVERBUDDY_MAGIC_PROOF_FILE_NAME
@@ -494,6 +521,7 @@
 #define FT_HIDEOS				"HIDEOS"
 #define FT_SELECTIVE_CHUNK		"SELECT_CHUNK"
 #define FT_SHAREONLYTHENEED		"SHARE_ONLY_THE_NEED"
+#define FT_LASTREQUESTED		"LastRequested"
 #define FT_SPREADSTART			0x70
 #define FT_SPREADEND			0x71
 #define FT_SPREADCOUNT			0x72
@@ -629,9 +657,10 @@
 #define CT_EMULE_SERVERTCP		0xBB // MOD SX
 #define CT_EMULE_CONOPTS		0xBE // MOD SX
 #define CT_EMULE_SERVINGBUDDYID	0xBF // MOD SX and addition to Hello
-// Note: as of now non of the 0xA? tags is banned by any major MOD so we can use safely them 
+
+// Note: As of now none of the 0xA? tags is banned by any major MOD so we can use safely them 
 #define CT_EMULE_SERVINGBUDDYIPV6 0xA0
-#define CT_MOD_RESERVED_1		0xA1
+#define CT_ESERVER_BUDDY_KADID	0xA1 // eServer Buddy bridge: peer's own KadID for keyed Kad buddy shortcut
 #define CT_MOD_RESERVED_2		0xA2
 #define CT_MOD_RESERVED_3		0xA3
 #define CT_MOD_RESERVED_4		0xA4
@@ -650,6 +679,7 @@
 #define	SOURCEEXCHANGEEXT_VERSION  1
 #define OP_RENDEZVOUS			0xA0
 #define OP_HOLEPUNCH			0xA1
+#define OP_NATT_ENDPOINT_HINT	0xAA
 #define	TAG_IPV6				"ip6"	// Unfirewalled IPv6
 #define	TAG_SERVINGBUDDYIPV6	"bi6"
 
@@ -660,10 +690,11 @@ union UModMiscOptions
 	{
 		UINT
 			SupportsExtendedXS			: 1, // Extended Source Exchange with variable source info
-			SupportsNatTraversal		: 1, // NAT-T Simple Traversal UDP through NATs 
+			SupportsNatTraversal		: 1, // Legacy uTP NAT-T simple traversal UDP through NATs
 			SupportsIPv6				: 1, // IPv6 Support
 			SupportsServingBuddyPull	: 1, // Vendor buddy-info pull (SERVINGBUDDYPULL)
-			Reserved					: 28;
+			SupportsNatTraversalQuic	: 1, // QUIC NAT-T data transport
+			Reserved					: 27;
 	}		Fields;
 };
 

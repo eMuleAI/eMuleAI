@@ -23,7 +23,7 @@
 #include "OtherFunctions.h"
 #include "emuledlg.h"
 #include "MemDC.h"
-#include "eMuleAI/GeoLite2.h"
+#include "eMuleAI/IPGeolocation.h"
 #include "eMuleAI/DarkMode.h"
 
 #ifdef _DEBUG
@@ -31,7 +31,6 @@
 #undef THIS_FILE
 static char THIS_FILE[] = __FILE__;
 #endif
-
 
 // CONContactListCtrl
 
@@ -107,8 +106,10 @@ void CKadContactListCtrl::Localize()
 	};
 
 	LocaliseHeaderCtrl(uids, _countof(uids));
-}
 
+	for (int iItem = GetItemCount(); --iItem >= 0;)
+		RequestContactRowRedraw(iItem);
+}
 
 void CKadContactListCtrl::UpdateKadContactCount()
 {
@@ -119,8 +120,21 @@ bool CKadContactListCtrl::ContactAdd(const Kademlia::CContact *contact)
 {
 	try {
 		ASSERT(contact != NULL);
-		int iItem = InsertItem(LVIF_TEXT | LVIF_PARAM, GetItemCount(), EMPTY, 0, 0, 0, (LPARAM)contact);
+		if (contact == NULL)
+			return false;
+
+		LVFINDINFO find;
+		find.flags = LVFI_PARAM;
+		find.lParam = reinterpret_cast<LPARAM>(contact);
+		int iItem = FindItem(&find);
 		if (iItem >= 0) {
+			ContactRef(contact);
+			return true;
+		}
+
+		iItem = InsertItem(LVIF_TEXT | LVIF_PARAM, GetItemCount(), EMPTY, 0, 0, 0, reinterpret_cast<LPARAM>(contact));
+		if (iItem >= 0) {
+			RequestContactRowRedraw(iItem);
 			UpdateKadContactCount();
 			return true;
 		}
@@ -134,9 +148,12 @@ void CKadContactListCtrl::ContactRem(const Kademlia::CContact *contact)
 {
 	try {
 		ASSERT(contact != NULL);
+		if (contact == NULL)
+			return;
+
 		LVFINDINFO find;
 		find.flags = LVFI_PARAM;
-		find.lParam = (LPARAM)contact;
+		find.lParam = reinterpret_cast<LPARAM>(contact);
 		int iItem = FindItem(&find);
 		if (iItem >= 0) {
 			DeleteItem(iItem);
@@ -151,15 +168,24 @@ void CKadContactListCtrl::ContactRef(const Kademlia::CContact *contact)
 {
 	try {
 		ASSERT(contact != NULL);
+		if (contact == NULL)
+			return;
+
 		LVFINDINFO find;
 		find.flags = LVFI_PARAM;
-		find.lParam = (LPARAM)contact;
+		find.lParam = reinterpret_cast<LPARAM>(contact);
 		int iItem = FindItem(&find);
 		if (iItem >= 0)
-			Update(iItem);
+			RequestContactRowRedraw(iItem);
 	} catch (...) {
 		ASSERT(0);
 	}
+}
+
+void CKadContactListCtrl::ClearContactRows()
+{
+	DeleteAllItems();
+	UpdateKadContactCount();
 }
 
 BOOL CKadContactListCtrl::OnCommand(WPARAM, LPARAM)
@@ -185,78 +211,47 @@ void CKadContactListCtrl::OnLvnColumnClick(LPNMHDR pNMHDR, LRESULT *pResult)
 }
 
 int CALLBACK CKadContactListCtrl::SortProc(const LPARAM lParam1, const LPARAM lParam2, const LPARAM lParamSort)
-{	
+{
 	const Kademlia::CContact *item1 = reinterpret_cast<Kademlia::CContact*>(lParam1);
 	const Kademlia::CContact *item2 = reinterpret_cast<Kademlia::CContact*>(lParam2);
 	if (item1 == NULL || item2 == NULL)
 		return 0;
 
-	int iResult;
-	switch (LOWORD(lParamSort)) {
-	case colIP: {
-		UINT uIP1 = htonl(item1->GetNetIP());
-		UINT uIP2 = htonl(item2->GetNetIP());
-		if (uIP1 < uIP2)
-			iResult = -1;
-		else if (uIP1 > uIP2)
-			iResult = 1;
-		else
-			iResult = 0;
-		break;
+	CKadContactListCtrl* pContactListCtrl = theApp.emuledlg != NULL && theApp.emuledlg->kademliawnd != NULL ? theApp.emuledlg->kademliawnd->m_contactListCtrl : NULL;
+	CString strSortKey1;
+	CString strSortKey2;
+	if (pContactListCtrl != NULL && pContactListCtrl->TryGetContactSortKey(item1, LOWORD(lParamSort), strSortKey1) && pContactListCtrl->TryGetContactSortKey(item2, LOWORD(lParamSort), strSortKey2)) {
+		int iSortResult = CMuleListCtrl::CompareListSortKeys(strSortKey1, strSortKey2);
+		iSortResult = CMuleListCtrl::ApplyListSortDirection(iSortResult, HIWORD(lParamSort) != 0);
+		if (iSortResult != 0)
+			return iSortResult;
 	}
-	case colID:
-		{
-			Kademlia::CUInt128 i1;
-			Kademlia::CUInt128 i2;
-			item1->GetClientID(i1);
-			item2->GetClientID(i2);
-			iResult = i1.CompareTo(i2);
-		}
-		break;
-	case colType:
-		iResult = item1->GetType() - item2->GetType();
-		if (iResult == 0)
-			iResult = item1->GetVersion() - item2->GetVersion();
-		break;
-	case colDistance:
-		{
-			Kademlia::CUInt128 distance1, distance2;
-			item1->GetDistance(distance1);
-			item2->GetDistance(distance2);
-			iResult = distance1.CompareTo(distance2);
-		}
-		break;
-	case colCountry: {
-		CString strCountry1 = item1->GetGeolocationData();
-		CString strCountry2 = item2->GetGeolocationData();
-		if (!strCountry1.IsEmpty() && !strCountry2.IsEmpty())
-			iResult = CompareLocaleStringNoCase(strCountry1, strCountry2);
-		else
-			iResult = strCountry1.IsEmpty() ? (strCountry2.IsEmpty() ? 0 : 1) : -1;
-		break;
-	}
-	default:
-		return 0;
-	}
-	return HIWORD(lParamSort) ? -iResult : iResult;
+
+	return 0;
 }
+
 void CKadContactListCtrl::DrawItem(LPDRAWITEMSTRUCT lpDrawItemStruct)
 {
 	if (!lpDrawItemStruct->itemData || theApp.IsClosing())
 		return;
 
 	CRect rcItem(lpDrawItemStruct->rcItem);
-	CMemoryDC dc(CDC::FromHandle(lpDrawItemStruct->hDC), rcItem);
+	CRect rcClientFullRow;
+	GetClientRect(&rcClientFullRow);
+	CRect rcPaint(rcClientFullRow.left, rcItem.top, rcClientFullRow.right, rcItem.bottom);
+	CMemoryDC dc(CDC::FromHandle(lpDrawItemStruct->hDC), rcPaint);
 	BOOL bCtrlFocused;
 	InitItemMemDC(dc, lpDrawItemStruct, bCtrlFocused);
 
 	// Set selected item background color
 	if ((lpDrawItemStruct->itemState & ODS_SELECTED) != 0)
-		dc.FillSolidRect(rcItem, GetCustomSysColor(COLOR_HIGHLIGHT));
+		dc.FillSolidRect(rcPaint, GetCustomSysColor(COLOR_HIGHLIGHT));
 
 	RECT rcClient;
 	GetClientRect(&rcClient);
 	Kademlia::CContact* contact = reinterpret_cast<Kademlia::CContact*>(lpDrawItemStruct->itemData);
+	if (contact == NULL)
+		return;
 
 	const CHeaderCtrl* pHeaderCtrl = GetHeaderCtrl();
 	int iCount = pHeaderCtrl->GetItemCount();
@@ -272,13 +267,15 @@ void CKadContactListCtrl::DrawItem(LPDRAWITEMSTRUCT lpDrawItemStruct)
 		rcItem.left = itemLeft;
 		rcItem.right = itemLeft + iColumnWidth - sm_iSubItemInset;
 		if (rcItem.left < rcItem.right && HaveIntersection(rcClient, rcItem)) {
-			const CString& sItem(GetItemDisplayText(contact, iColumn));
+			const CString sItem(GetItemDisplayText(contact, iColumn));
 			switch (iColumn) {
 				case colCountry:
 				{
-					if (theApp.geolite2->ShowCountryFlag()) {
+					if (theApp.ipgeolocation->ShowCountryFlag()) {
 						POINT point2 = { rcItem.left,rcItem.top + 1 };
-						theApp.geolite2->GetFlagImageList()->DrawIndirect(&theApp.geolite2->GetFlagImageDrawParams(dc, contact->GetCountryFlagIndex(), point2));
+						IMAGELISTDRAWPARAMS flagDrawParams = theApp.ipgeolocation->GetFlagImageDrawParams(dc, contact->GetCountryFlagIndex(), point2);
+
+						theApp.ipgeolocation->GetFlagImageList()->DrawIndirect(&flagDrawParams);
 						rcItem.left += 22;
 					}
 					rcItem.left += sm_iIconOffset;
@@ -293,10 +290,12 @@ void CKadContactListCtrl::DrawItem(LPDRAWITEMSTRUCT lpDrawItemStruct)
 					if (nImageShown < 3 && !contact->IsIpVerified())
 						nImageShown = 5; // if we have an active contact, which is however not IP verified (and therefore not used), show this icon instead
 					SafeImageListDraw(&m_ImageList, dc, nImageShown, point, ILD_NORMAL);
-					if (theApp.geolite2->ShowCountryFlag() && IsColumnHidden(colCountry)) {
+					if (theApp.ipgeolocation->ShowCountryFlag() && IsColumnHidden(colCountry)) {
 						rcItem.left += 20;
 						POINT point2 = { rcItem.left,rcItem.top + 1 };
-						theApp.geolite2->GetFlagImageList()->DrawIndirect(&theApp.geolite2->GetFlagImageDrawParams(dc, contact->GetCountryFlagIndex(), point2));
+						IMAGELISTDRAWPARAMS flagDrawParams = theApp.ipgeolocation->GetFlagImageDrawParams(dc, contact->GetCountryFlagIndex(), point2);
+
+						theApp.ipgeolocation->GetFlagImageList()->DrawIndirect(&flagDrawParams);
 						rcItem.left += sm_iSubItemInset;
 					}
 					rcItem.left += 17;
@@ -314,29 +313,76 @@ void CKadContactListCtrl::DrawItem(LPDRAWITEMSTRUCT lpDrawItemStruct)
 const CString CKadContactListCtrl::GetItemDisplayText(const Kademlia::CContact* contact, const int iSubItem) const
 {
 	CString sText;
+	if (contact == NULL)
+		return sText;
 	switch (iSubItem) {
 	case colIP:
-		sText.Format(L"%s", ipstr(contact->GetNetIP()));
+		sText.Format(_T("%s"), ipstr(contact->GetNetIP()));
 		break;
 	case colID:
 		contact->GetClientID(sText);
 		break;
 	case colType:
-		sText.Format(L"%i(%u)", contact->GetType(), contact->GetVersion());
+		sText.Format(_T("%i(%u)"), contact->GetType(), contact->GetVersion());
 		break;
 	case colDistance:
 		contact->GetDistance(sText);
 		break;
 	case colCountry:
-		sText.Format(L"%s", contact->GetGeolocationData());
+		sText.Format(_T("%s"), (LPCTSTR)contact->GetGeolocationData());
 		break;
 	}
 	return sText;
 }
 
+void CKadContactListCtrl::RequestContactRowRedraw(int iItem)
+{
+	if (iItem >= 0)
+		RequestRowRedrawAsync(iItem, iItem);
+}
+
+bool CKadContactListCtrl::TryGetContactText(const Kademlia::CContact *contact, int iSubItem, CString& strText) const
+{
+	if (contact == NULL) {
+		strText.Empty();
+		return false;
+	}
+	strText = GetItemDisplayText(contact, iSubItem);
+	return true;
+}
+
+bool CKadContactListCtrl::TryGetContactSortKey(const Kademlia::CContact *contact, int iSubItem, CString& strSortKey) const
+{
+	if (contact == NULL) {
+		strSortKey.Empty();
+		return false;
+	}
+	CString strSortText;
+	switch (iSubItem) {
+	case colIP:
+		strSortText.Format(_T("%010u"), htonl(contact->GetNetIP()));
+		strSortKey = MakeListSortKey(strSortText);
+		break;
+	case colID:
+		strSortKey = MakeListSortKey(contact->GetClientID().ToHexString());
+		break;
+	case colType:
+		strSortText.Format(_T("%03u:%010u"), contact->GetType(), contact->GetVersion());
+		strSortKey = MakeListSortKey(strSortText);
+		break;
+	case colDistance:
+		strSortKey = MakeListSortKey(contact->GetDistance().ToHexString());
+		break;
+	default:
+		strSortKey = MakeListSortKey(GetItemDisplayText(contact, iSubItem));
+		break;
+	}
+	return true;
+}
+
 int CKadContactListCtrl::GetDefaultPersistentInfoTipExtraLeftPadding(const SPersistentInfoTipContext& context) const
 {
-	if (!theApp.geolite2->ShowCountryFlag())
+	if (!theApp.ipgeolocation->ShowCountryFlag())
 		return 0;
 
 	if (context.iSubItem == colCountry)
@@ -347,7 +393,6 @@ int CKadContactListCtrl::GetDefaultPersistentInfoTipExtraLeftPadding(const SPers
 
 	return 0;
 }
-
 
 void CKadContactListCtrl::OnLvnGetDispInfo(NMHDR* pNMHDR, LRESULT* pResult)
 {
@@ -365,9 +410,12 @@ void CKadContactListCtrl::OnLvnGetDispInfo(NMHDR* pNMHDR, LRESULT* pResult)
 		//
 		NMLVDISPINFO* pDispInfo = reinterpret_cast<NMLVDISPINFO*>(pNMHDR);
 		if (pDispInfo->item.mask & LVIF_TEXT) {
-			Kademlia::CContact* pContact = reinterpret_cast<Kademlia::CContact*>(pDispInfo->item.lParam);
-			if (pContact != NULL)
-				_tcsncpy_s(pDispInfo->item.pszText, pDispInfo->item.cchTextMax, GetItemDisplayText(pContact, pDispInfo->item.iSubItem), _TRUNCATE);
+			const Kademlia::CContact *contact = reinterpret_cast<Kademlia::CContact*>(pDispInfo->item.lParam);
+			if (contact != NULL) {
+				CString strText;
+				TryGetContactText(contact, pDispInfo->item.iSubItem, strText);
+				_tcsncpy_s(pDispInfo->item.pszText, pDispInfo->item.cchTextMax, strText, _TRUNCATE);
+			}
 		}
 	}
 	*pResult = 0;

@@ -1,3 +1,6 @@
+//This file is part of eMule AI
+//Copyright (C)2026 eMule AI
+
 #pragma once
 
 class CMigrationWizardDlg : public CDialog

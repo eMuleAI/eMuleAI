@@ -71,16 +71,16 @@ static char THIS_FILE[] = __FILE__;
 
 using namespace Kademlia;
 
-
 CSearch::CSearch()
 	: m_uTarget()
 	, m_uClosestDistantFound()
 	, m_pSearchTerm()
 	, pNodeSpecialSearchRequester()
-	, pRequestedMoreNodesContact()
 	, m_pucSearchTermsData()
 	, m_uLastResponse(time(NULL))
 	, m_tCreated(m_uLastResponse)
+	, m_tPolicyLifetime(SEARCH_LIFETIME)
+	, m_uPolicyTotalLimit(0)
 	, m_uType(_UI32_MAX)
 	, m_uAnswers()
 	, m_uTotalRequestAnswers()
@@ -231,60 +231,26 @@ void CSearch::PrepareToStop()
 	if (m_bStoping)
 		return;
 
-	// Set base time by search type.
-	uint32 uBaseTime;
-	switch (m_uType) {
-	case NODE:
-	case NODECOMPLETE:
-	case NODESPECIAL:
-	case NODEFWCHECKUDP:
-		uBaseTime = SEARCHNODE_LIFETIME;
-		break;
-	case FILE:
-		uBaseTime = SEARCHFILE_LIFETIME;
-		break;
-	case KEYWORD:
-		uBaseTime = SEARCHKEYWORD_LIFETIME;
-		break;
-	case NOTES:
-		uBaseTime = SEARCHNOTES_LIFETIME;
-		break;
-	case STOREFILE:
-		uBaseTime = SEARCHSTOREFILE_LIFETIME;
-		break;
-	case STOREKEYWORD:
-		uBaseTime = SEARCHSTOREKEYWORD_LIFETIME;
-		break;
-	case STORENOTES:
-		uBaseTime = SEARCHSTORENOTES_LIFETIME;
-		break;
-	case FINDSERVINGBUDDY:
-		uBaseTime = SEARCHFINDSERVINGBUDDY_LIFETIME;
-		break;
-	case FINDSOURCE:
-		uBaseTime = SEARCHFINDSOURCE_LIFETIME;
-		break;
-	default:
-		uBaseTime = SEARCH_LIFETIME;
-	}
-
 	// Adjust created time so that search will be deleted within 15 seconds.
 	// This gives late results time to be processed.
-	m_tCreated = time(NULL) - uBaseTime + SEC(15);
+	m_tCreated = time(NULL) - m_tPolicyLifetime + SEC(15);
 	m_bStoping = true;
+
+	if (m_pLookupHistory != NULL)
+		m_pLookupHistory->SetSearchStopped();
 
 	//Update search within GUI.
 	theApp.emuledlg->kademliawnd->searchList->SearchRef(this);
-	if (m_pLookupHistory != NULL) {
-		m_pLookupHistory->SetSearchStopped();
+	if (m_pLookupHistory != NULL)
 		theApp.emuledlg->kademliawnd->UpdateSearchGraph(m_pLookupHistory);
-	}
 }
 
 void CSearch::JumpStart(bool force)
 {
 	// If we ran out of contacts, stop search.
 	if (m_mapPossible.empty() && m_mapTimePending.empty()) { // There might popup some new ones if there are some pending requests
+		if (TryRequestMoreResultsOnStall())
+			return;
 		PrepareToStop();
 		return;
 	}
@@ -305,6 +271,13 @@ void CSearch::JumpStart(bool force)
 			m_mapTimePending.erase(itTimePending++); // Reduce the pending count
 		} else
 			++itTimePending;
+	}
+
+	if (m_mapPossible.empty() && m_mapTimePending.empty()) {
+		if (TryRequestMoreResultsOnStall())
+			return;
+		PrepareToStop();
+		return;
 	}
 
 	// Check if pending responses are less than the amount we want to store then go on with storing
@@ -453,8 +426,11 @@ void CSearch::JumpStart(bool force)
 	}
 
 	// If out of contacts to try, clear possible to force stop
-	if (bTried == false)
+	if (bTried == false) {
+		if (TryRequestMoreResultsOnStall())
+			return;
 		m_mapPossible.clear();
+	}
 }
 
 void CSearch::ProcessResponse(uint32 uFromIP, uint16 uFromPort, const ContactArray &rlistResults)
@@ -918,7 +894,7 @@ bool CSearch::StorePacket(CContact* pFromContact)
 						listTag.push_back(new CKadTagUInt(TAG_FILESIZE, pFile->GetFileSize()));
 
 					if (thePrefs.GetLogNatTraversalEvents())
-						DebugLog(_T("[NATTTESTMODE: Publish] file=%s, type=%u, buddy=%s:%u, sbid=%s\n"), (LPCTSTR)pFile->GetFileName(), (unsigned)(pFile->GetFileSize() > OLD_MAX_EMULE_FILE_SIZE ? 5 : 3), (LPCTSTR)ipstr(theApp.clientlist->GetServingBuddy()->GetIP()), theApp.clientlist->GetServingBuddy()->GetUDPPort(), (LPCTSTR)md4str(uServingBuddyID.GetData()));
+						DebugLog(_T("[NatTraversal: Publish] file=%s, type=%u, buddy=%s:%u, sbid=%s\n"), (LPCTSTR)pFile->GetFileName(), (unsigned)(pFile->GetFileSize() > OLD_MAX_EMULE_FILE_SIZE ? 5 : 3), (LPCTSTR)ipstr(theApp.clientlist->GetServingBuddy()->GetIP()), theApp.clientlist->GetServingBuddy()->GetUDPPort(), (LPCTSTR)md4str(uServingBuddyID.GetData()));
 				}
 			} else {
 				// We are not firewalled.
@@ -1480,83 +1456,140 @@ void CSearch::SendFindValue(CContact *pContact, bool bReAskMore)
 		CSafeMemFile fileIO(33);
 		// The number of returned contacts is based on the type of search.
 		uint8 byContactCount = GetRequestContactCount();
-		if (bReAskMore)
-			if (pRequestedMoreNodesContact == NULL) {
-				pRequestedMoreNodesContact = pContact;
-				ASSERT(byContactCount == KADEMLIA_FIND_VALUE);
-				byContactCount = KADEMLIA_FIND_VALUE_MORE;
-			} else
+		if (bReAskMore) {
+			if (byContactCount != KADEMLIA_FIND_VALUE) {
 				ASSERT(0);
-
-			if (byContactCount <= 0)
 				return;
+			}
+			m_mapRequestedMoreNodes[pContact->GetClientID()] = true;
+			byContactCount = KADEMLIA_FIND_VALUE_MORE;
+		}
 
-			fileIO.WriteUInt8(byContactCount);
-			// Put the target we want into the packet.
-			fileIO.WriteUInt128(m_uTarget);
-			// Add the ID of the contact we are contacting for sanity checks on the other end.
-			fileIO.WriteUInt128(pContact->GetClientID());
-			// Inc the number of packets sent.
-			++m_uKadPacketSent;
-			// Update the search for the GUI.
-			theApp.emuledlg->kademliawnd->searchList->SearchRef(this);
+		if (byContactCount <= 0)
+			return;
 
-			if (pContact->GetVersion() >= KADEMLIA_VERSION2_47a) {
-				m_pLookupHistory->ContactAskedKad(pContact);
-				theApp.emuledlg->kademliawnd->UpdateSearchGraph(m_pLookupHistory);
-				if (pContact->GetVersion() >= KADEMLIA_VERSION6_49aBETA) {
-					CUInt128 uClientID = pContact->GetClientID();
-					CKademlia::GetUDPListener()->SendPacket(fileIO, KADEMLIA2_REQ, pContact->GetIPAddress(), pContact->GetUDPPort(), pContact->GetUDPKey(), &uClientID);
-				} else {
-					CKademlia::GetUDPListener()->SendPacket(fileIO, KADEMLIA2_REQ, pContact->GetIPAddress(), pContact->GetUDPPort(), CKadUDPKey(), NULL);
-					ASSERT(CKadUDPKey() == pContact->GetUDPKey());
+		fileIO.WriteUInt8(byContactCount);
+		// Put the target we want into the packet.
+		fileIO.WriteUInt128(m_uTarget);
+		// Add the ID of the contact we are contacting for sanity checks on the other end.
+		fileIO.WriteUInt128(pContact->GetClientID());
+		// Inc the number of packets sent.
+		++m_uKadPacketSent;
+		// Update the search for the GUI.
+		theApp.emuledlg->kademliawnd->searchList->SearchRef(this);
+
+		if (pContact->GetVersion() >= KADEMLIA_VERSION2_47a) {
+			m_pLookupHistory->ContactAskedKad(pContact);
+			theApp.emuledlg->kademliawnd->UpdateSearchGraph(m_pLookupHistory);
+			if (pContact->GetVersion() >= KADEMLIA_VERSION6_49aBETA) {
+				CUInt128 uClientID = pContact->GetClientID();
+				CKademlia::GetUDPListener()->SendPacket(fileIO, KADEMLIA2_REQ, pContact->GetIPAddress(), pContact->GetUDPPort(), pContact->GetUDPKey(), &uClientID);
+			} else {
+				CKademlia::GetUDPListener()->SendPacket(fileIO, KADEMLIA2_REQ, pContact->GetIPAddress(), pContact->GetUDPPort(), CKadUDPKey(), NULL);
+				ASSERT(CKadUDPKey() == pContact->GetUDPKey());
+			}
+			if (thePrefs.GetDebugClientKadUDPLevel() > 0) {
+				LPCSTR pszOp;
+				switch (m_uType) {
+				case NODE:
+					pszOp = "KADEMLIA2_REQ(NODE)";
+					break;
+				case NODECOMPLETE:
+					pszOp = "KADEMLIA2_REQ(NODECOMPLETE)";
+					break;
+				case NODESPECIAL:
+					pszOp = "KADEMLIA2_REQ(NODESPECIAL)";
+					break;
+				case NODEFWCHECKUDP:
+					pszOp = "KADEMLIA2_REQ(NODEFWCHECKUDP)";
+					break;
+				case FILE:
+					pszOp = "KADEMLIA2_REQ(FILE)";
+					break;
+				case KEYWORD:
+					pszOp = "KADEMLIA2_REQ(KEYWORD)";
+					break;
+				case STOREFILE:
+					pszOp = "KADEMLIA2_REQ(STOREFILE)";
+					break;
+				case STOREKEYWORD:
+					pszOp = "KADEMLIA2_REQ(STOREKEYWORD)";
+					break;
+				case STORENOTES:
+					pszOp = "KADEMLIA2_REQ(STORENOTES)";
+					break;
+				case NOTES:
+					pszOp = "KADEMLIA2_REQ(NOTES)";
+					break;
+				default:
+					pszOp = "KADEMLIA2_REQ()";
 				}
-				if (thePrefs.GetDebugClientKadUDPLevel() > 0) {
-					LPCSTR pszOp;
-					switch (m_uType) {
-					case NODE:
-						pszOp = "KADEMLIA2_REQ(NODE)";
-						break;
-					case NODECOMPLETE:
-						pszOp = "KADEMLIA2_REQ(NODECOMPLETE)";
-						break;
-					case NODESPECIAL:
-						pszOp = "KADEMLIA2_REQ(NODESPECIAL)";
-						break;
-					case NODEFWCHECKUDP:
-						pszOp = "KADEMLIA2_REQ(NODEFWCHECKUDP)";
-						break;
-					case FILE:
-						pszOp = "KADEMLIA2_REQ(FILE)";
-						break;
-					case KEYWORD:
-						pszOp = "KADEMLIA2_REQ(KEYWORD)";
-						break;
-					case STOREFILE:
-						pszOp = "KADEMLIA2_REQ(STOREFILE)";
-						break;
-					case STOREKEYWORD:
-						pszOp = "KADEMLIA2_REQ(STOREKEYWORD)";
-						break;
-					case STORENOTES:
-						pszOp = "KADEMLIA2_REQ(STORENOTES)";
-						break;
-					case NOTES:
-						pszOp = "KADEMLIA2_REQ(NOTES)";
-						break;
-					default:
-						pszOp = "KADEMLIA2_REQ()";
-					}
-					DebugSend(pszOp, pContact->GetIPAddress(), pContact->GetUDPPort());
-				}
-			} else
-				ASSERT(0);
+				DebugSend(pszOp, pContact->GetIPAddress(), pContact->GetUDPPort());
+			}
+		} else
+			ASSERT(0);
 	} catch (CIOException *ex) {
 		AddDebugLogLine(false, _T("Exception in CSearch::SendFindValue (IO error(%i))"), ex->m_iCause);
 		ex->Delete();
 	} catch (...) {
 		AddDebugLogLine(false, _T("Exception in CSearch::SendFindValue"));
 	}
+}
+
+CContact* CSearch::GetMoreResultsContact(CUInt128 *puDistance) const
+{
+	for (int iPass = 0; iPass < 2; ++iPass) {
+		const bool bRequireCloserContacts = iPass == 0;
+		for (std::map<Kademlia::CUInt128, bool>::const_iterator itResponded = m_mapResponded.begin(); itResponded != m_mapResponded.end(); ++itResponded) {
+			if (bRequireCloserContacts && !itResponded->second)
+				continue;
+
+			ContactMap::const_iterator itTried = m_mapTried.find(itResponded->first);
+			if (itTried == m_mapTried.end() || itTried->second == NULL)
+				continue;
+
+			CContact *pContact = itTried->second;
+			if (m_mapRequestedMoreNodes.find(pContact->GetClientID()) != m_mapRequestedMoreNodes.end())
+				continue;
+
+			if (puDistance != NULL)
+				*puDistance = itResponded->first;
+			return pContact;
+		}
+	}
+
+	return NULL;
+}
+
+bool CSearch::CanRequestMoreResults() const
+{
+	if (m_bStoping || GetRequestContactCount() != KADEMLIA_FIND_VALUE || m_mapRequestedMoreNodes.size() >= static_cast<size_t>(KADEMLIA_FIND_VALUE_MORE_REASKS))
+		return false;
+
+	return GetMoreResultsContact(NULL) != NULL;
+}
+
+bool CSearch::RequestMoreResults()
+{
+	if (m_bStoping || GetRequestContactCount() != KADEMLIA_FIND_VALUE || m_mapRequestedMoreNodes.size() >= static_cast<size_t>(KADEMLIA_FIND_VALUE_MORE_REASKS))
+		return false;
+
+	CUInt128 uDistance;
+	CContact *pContact = GetMoreResultsContact(&uDistance);
+	if (pContact == NULL)
+		return false;
+
+	SendFindValue(pContact, true);
+	m_mapTimePending[uDistance] = clock();
+	return true;
+}
+
+bool CSearch::TryRequestMoreResultsOnStall()
+{
+	if (!m_mapTimePending.empty() || !CanRequestMoreResults())
+		return false;
+
+	return RequestMoreResults();
 }
 
 void CSearch::AddFileID(const CUInt128 &uID)
@@ -1702,6 +1735,50 @@ uint32 CSearch::GetNodeLoad() const
 void CSearch::SetSearchType(uint32 uVal)
 {
 	m_uType = uVal;
+	switch (m_uType) {
+	case NODE:
+	case NODECOMPLETE:
+	case NODESPECIAL:
+	case NODEFWCHECKUDP:
+		m_tPolicyLifetime = SEARCHNODE_LIFETIME;
+		m_uPolicyTotalLimit = 0;
+		break;
+	case FILE:
+		m_tPolicyLifetime = thePrefs.GetKadFileSearchLifetime();
+		m_uPolicyTotalLimit = static_cast<uint32>(thePrefs.GetKadFileSearchTotal());
+		break;
+	case KEYWORD:
+		m_tPolicyLifetime = thePrefs.GetKadSearchKeywordLifetime();
+		m_uPolicyTotalLimit = static_cast<uint32>(thePrefs.GetKadSearchKeywordTotal());
+		break;
+	case NOTES:
+		m_tPolicyLifetime = SEARCHNOTES_LIFETIME;
+		m_uPolicyTotalLimit = SEARCHNOTES_TOTAL;
+		break;
+	case STOREFILE:
+		m_tPolicyLifetime = SEARCHSTOREFILE_LIFETIME;
+		m_uPolicyTotalLimit = SEARCHSTOREFILE_TOTAL;
+		break;
+	case STOREKEYWORD:
+		m_tPolicyLifetime = SEARCHSTOREKEYWORD_LIFETIME;
+		m_uPolicyTotalLimit = SEARCHSTOREKEYWORD_TOTAL;
+		break;
+	case STORENOTES:
+		m_tPolicyLifetime = SEARCHSTORENOTES_LIFETIME;
+		m_uPolicyTotalLimit = SEARCHSTORENOTES_TOTAL;
+		break;
+	case FINDSERVINGBUDDY:
+		m_tPolicyLifetime = SEARCHFINDSERVINGBUDDY_LIFETIME;
+		m_uPolicyTotalLimit = SEARCHFINDSERVINGBUDDY_TOTAL;
+		break;
+	case FINDSOURCE:
+		m_tPolicyLifetime = SEARCHFINDSOURCE_LIFETIME;
+		m_uPolicyTotalLimit = SEARCHFINDSOURCE_TOTAL;
+		break;
+	default:
+		m_tPolicyLifetime = SEARCH_LIFETIME;
+		m_uPolicyTotalLimit = 0;
+	}
 	m_pLookupHistory->SetSearchType(uVal);
 }
 
@@ -1798,4 +1875,22 @@ uint8 CSearch::GetRequestContactCount() const
 		ASSERT(0);
 	}
 	return 0;
+}
+
+uint8 CSearch::GetExpectedResponseContactCount(uint32 uFromIP, uint16 uFromPort) const
+{
+	const uint8 byDefaultContactCount = GetRequestContactCount();
+	if (byDefaultContactCount != KADEMLIA_FIND_VALUE)
+		return byDefaultContactCount;
+
+	for (ContactMap::const_iterator itTriedMap = m_mapTried.begin(); itTriedMap != m_mapTried.end(); ++itTriedMap) {
+		const CContact *pContact = itTriedMap->second;
+		if (pContact != NULL && pContact->GetIPAddress() == uFromIP && pContact->GetUDPPort() == uFromPort
+			&& m_mapRequestedMoreNodes.find(pContact->GetClientID()) != m_mapRequestedMoreNodes.end())
+		{
+			return KADEMLIA_FIND_VALUE_MORE;
+		}
+	}
+
+	return byDefaultContactCount;
 }

@@ -24,6 +24,7 @@
 #include "CatDialog.h"
 #include "UserMsgs.h"
 #include "eMuleAI/DarkMode.h" 
+#include "otherfunctions.h"
 #include "emuledlg.h"
 
 #ifdef _DEBUG
@@ -171,7 +172,7 @@ void CCatDialog::OnBnClickedOk()
 	if (!thePrefs.IsShareableDirectory(m_myCat->strIncomingPath))
 		m_myCat->strIncomingPath = thePrefs.GetMuleDirectory(EMULE_INCOMINGDIR);
 
-	if (!::PathFileExists(m_myCat->strIncomingPath) && !::CreateDirectory(m_myCat->strIncomingPath, 0)) {
+	if (!DirectoryExistsLongPath(m_myCat->strIncomingPath) && !::CreateDirectory(PrepareDirectoryPathForWin32LongPath(m_myCat->strIncomingPath), 0)) {
 		ErrorBalloon(IDC_INCOMING, _T("ERR_BADFOLDER"));
 		m_myCat->strIncomingPath = oldpath;
 		return;

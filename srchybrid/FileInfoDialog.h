@@ -53,6 +53,7 @@ protected:
 	virtual BOOL OnSetActive();
 
 	DECLARE_MESSAGE_MAP()
+	afx_msg BOOL OnEraseBkgnd(CDC* pDC);
 	afx_msg LRESULT OnMediaInfoResult(WPARAM, LPARAM);
 	afx_msg LRESULT OnDataChanged(WPARAM, LPARAM);
 	afx_msg void OnDestroy();

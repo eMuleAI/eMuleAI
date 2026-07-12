@@ -16,6 +16,7 @@
 //along with this program; if not, write to the Free Software
 //Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 #pragma once
+#include "emule.h"
 #include "MuleListCtrl.h"
 #include "eMuleAI/MenuXP.h"
 #include "ListCtrlItemWalk.h"
@@ -26,6 +27,7 @@
 
 class CSearchList;
 class CSearchFile;
+struct SSearchResultId;
 
 enum EFileSizeFormat
 {
@@ -63,17 +65,22 @@ public:
 	void	UpdateSources(CSearchFile *toupdate, const bool bSort);
 	void	AddResult(CSearchFile *toshow);
 	void	RemoveResult(CSearchFile* toremove, bool bUpdateTabCount);
+	void	StartChunkedRemoveSelectedSearchResults(CTypedPtrList<CPtrList, CSearchFile*> &selectedList);
+	void	CancelActiveChunkedSearchOperation();
 	void	ReloadList(const bool bSortCurrentList, const EListStateField LsfFlag);
+	void	QueueDeferredReload(const bool bSortCurrentList, const EListStateField LsfFlag, UINT uDelayMs);
 	void	RebuildListedItemsMap();
-	virtual DWORD_PTR GetVirtualItemData(int iItem) const override { return (iItem < 0 || static_cast<size_t>(iItem) >= m_ListedItemsVector.size() ? 0 : reinterpret_cast<DWORD_PTR>(m_ListedItemsVector[iItem])); } // Return null if index invalid, otherwise return the pointer
+	virtual DWORD_PTR GetVirtualItemData(int iItem) const override { return (iItem < 0 || static_cast<size_t>(iItem) >= m_ListedItemsVector.size() ? 0 : static_cast<DWORD_PTR>(iItem + 1)); } // Owner-data row data is a stable visible index, not a backend pointer
 	int		GetVirtualItemCount() const override { return m_ListedItemsVector.size(); }
 	CObject* GetItemObject(int iIndex) const;
+	virtual void OnOperationOverlayCancel() override;
 
 	std::vector<CSearchFile*> m_ListedItemsVector; // This vector is used to list, iterate and sort results.
 	typedef	CMap<CSearchFile*, CSearchFile*, int, int&> CListedItemsMap;
 	CListedItemsMap m_ListedItemsMap; // This map is used to lookup search results index.
 	void	Localize();
-	void	NoTabs()								{ m_nResultsID = 0; }
+	void	NoTabs()								{ m_nResultsID = 0; m_lListedItemsModelSequence = 0; }
+	bool	IsListedModelCurrent(uint32 nSearchID) const;
 	void	UpdateSearch(CSearchFile *toupdate);
 	void	UpdateTabHeader(uint32 nSearchID, CString strClientHash, bool bUpdateAllSharedListTabs);
 	EFileSizeFormat GetFileSizeFormat() const		{ return m_eFileSizeFormat; }
@@ -94,10 +101,14 @@ protected:
 	COLORREF	m_crSearchResultCancelled;
 	COLORREF	m_crShades[AVBLYSHADECOUNT];
 	EFileSizeFormat m_eFileSizeFormat;
+	bool m_bDeferredSearchReloadPending;
+	bool m_bDeferredSearchReloadSort;
+	EListStateField m_eDeferredSearchReloadState;
+	LONG m_lListedItemsModelSequence;
 
-
-	COLORREF GetSearchItemColor(/*const*/ CSearchFile* src);
+	COLORREF GetSearchItemColor(const CSearchFile* src) const;
 	bool	IsComplete(const CSearchFile *pFile, UINT uSources) const;
+	void	MarkListedModelCurrent();
 	CString GetCompleteSourcesDisplayString(const CSearchFile *pFile, UINT uSources, bool *pbComplete = NULL) const;
 	void	ExpandCollapseItem(int iItem, int iAction);
 	void	HideSources(CSearchFile *toCollapse);
@@ -106,8 +117,40 @@ protected:
 	void	SetAllIcons();
 	CString	FormatFileSize(ULONGLONG ullFileSize) const;
 	CString GetItemDisplayText(const CSearchFile *src, int iSubItem) const;
+	CString GetListedItemDisplayText(int iItem, int iSubItem) const;
+	void SortListedItemsRaw();
+	int CompareSearchFilesRaw(const CSearchFile *item1, const CSearchFile *item2, LPARAM lParamSort) const;
+	bool GroupListedItemsByBottomCandidates();
+	bool BuildSearchInfoTipText(int iItem, CString& strText) const;
+	CSearchFile* ResolveSearchFileByRowIndex(int iItem) const;
+	void CollectSelectedSearchFiles(CTypedPtrList<CPtrList, CSearchFile*> &selectedList) const;
+	bool ShouldShowSearchItemInList(const CSearchFile *pSearchFile) const;
+	void BuildVisibleSearchItems(const CTypedPtrList<CPtrList, CSearchFile*> &sourceList, std::vector<CSearchFile*> &visibleItems) const;
 	const bool	IsFilteredOut(const CSearchFile *pSearchFile) const;
-	const static CString CSearchListCtrl::GetKnownTypeStr(const CSearchFile* src);
+	static CString GetKnownTypeStr(const CSearchFile* src);
+	struct SChunkedSearchRemoveItem
+	{
+		SChunkedSearchRemoveItem();
+		uint32 nSearchID;
+		uchar abyFileHash[16];
+		bool bChild;
+		CString strFileName;
+	};
+	std::vector<SChunkedSearchRemoveItem> m_vecChunkedSearchRemoveItems;
+	INT_PTR m_iNextChunkedSearchRemoveItem;
+	UINT m_uChunkedSearchRemoveProcessed;
+	UINT m_uChunkedSearchRemoveStale;
+	UINT m_uChunkedSearchRemoveFailed;
+	DWORD m_dwChunkedSearchRemoveStartedTick;
+	DWORD m_dwChunkedSearchRemoveLastProgressTick;
+	bool m_bChunkedSearchRemoveActive;
+
+	bool BuildChunkedSearchRemoveItem(const CSearchFile *pFile, SChunkedSearchRemoveItem &item) const;
+	bool ResolveChunkedSearchRemoveItem(const SChunkedSearchRemoveItem &item, SSearchResultId &id, CSearchFile *&pFile) const;
+	void ClearChunkedSearchRemoveItems(bool bReloadVisibleList);
+	void ProcessChunkedSearchRemoveItems();
+	void FinishChunkedSearchRemoveItems(bool bAborted);
+
 	virtual bool UsePersistentInfoTips() const override { return true; }
 	virtual bool ShouldShowPersistentInfoTip(const SPersistentInfoTipContext& context) override;
 	virtual bool GetPersistentInfoTipText(const SPersistentInfoTipContext& context, CString& strText) override;
@@ -120,6 +163,7 @@ protected:
 
 	virtual BOOL OnCommand(WPARAM wParam, LPARAM);
 	virtual void DrawItem(LPDRAWITEMSTRUCT lpDrawItemStruct);
+	virtual void RefreshThemeColors() override;
 
 	static LPARAM	m_pSortParam;
 	int 			m_iDataSize;
@@ -129,6 +173,7 @@ protected:
 	afx_msg void OnContextMenu(CWnd*, CPoint point);
 	afx_msg void OnDestroy();
 	afx_msg void OnKeyDown(UINT nChar, UINT nRepCnt, UINT nFlags);
+	afx_msg void OnTimer(UINT_PTR nIDEvent);
 	afx_msg void OnLvnColumnClick(LPNMHDR pNMHDR, LRESULT *pResult);
 	afx_msg void OnLvnDeleteAllItems(LPNMHDR, LRESULT *pResult);
 	afx_msg void OnLvnGetDispInfo(LPNMHDR pNMHDR, LRESULT *pResult);
@@ -137,4 +182,6 @@ protected:
 	afx_msg void OnNmClick(LPNMHDR pNMHDR, LRESULT*);
 	afx_msg void OnNmDblClk(LPNMHDR, LRESULT*);
 	afx_msg void OnSysColorChange();
+	afx_msg void OnShowWindow(BOOL bShow, UINT nStatus);
+	afx_msg BOOL OnEraseBkgnd(CDC* pDC);
 };

@@ -41,6 +41,8 @@ their client on the eMule forum.
 #include "kademlia/net/KademliaUDPListener.h"
 #include "kademlia/utils/KadUDPKey.h"
 #include "kademlia/utils/MiscUtils.h"
+#include "PartFileWriteThread.h"
+#include "SafeFile.h"
 
 #ifdef _DEBUG
 #define new DEBUG_NEW
@@ -50,6 +52,55 @@ static char THIS_FILE[] = __FILE__;
 
 using namespace Kademlia;
 
+namespace
+{
+	volatile LONG s_lKadKeyIndexSaveGeneration = 0;
+	volatile LONG s_lKadSourceIndexSaveGeneration = 0;
+	volatile LONG s_lKadLoadIndexSaveGeneration = 0;
+
+	class CKadMemFileIO : public CDataIO
+	{
+	public:
+		explicit CKadMemFileIO(CSafeMemFile& file)
+			: m_file(file)
+		{
+		}
+
+		void ReadArray(LPVOID /*lpResult*/, uint32 /*uByteCount*/) override
+		{
+			throw new CIOException(ERR_BUFFER_TOO_SMALL);
+		}
+
+		void WriteArray(LPCVOID lpVal, uint32 uByteCount) override
+		{
+			m_file.Write(lpVal, uByteCount);
+		}
+
+		UINT GetAvailable() const override
+		{
+			return static_cast<UINT>(-1);
+		}
+
+	private:
+		CSafeMemFile& m_file;
+	};
+
+	bool QueueKadIndexSnapshot(CSafeMemFile& source, LPCTSTR pszFinalPath, LPCTSTR pszLogName, LPCTSTR pszPayloadName, volatile LONG* plGeneration)
+	{
+		AsyncDiskWriteData* pData = new AsyncDiskWriteData;
+		pData->lGeneration = ::InterlockedIncrement(plGeneration);
+		pData->plGeneration = plGeneration;
+		pData->strTempPath = CString(pszFinalPath) + _T(".tmp");
+		pData->strFinalPath = pszFinalPath;
+		pData->strLogName = pszLogName;
+		pData->strPayloadName = pszPayloadName;
+		pData->eConflictPolicy = AsyncDiskWriteConflictLastSnapshotWins;
+		const ULONGLONG uLength = source.GetLength();
+		if (uLength != 0)
+			pData->data.assign(source.GetBuffer(), source.GetBuffer() + static_cast<size_t>(uLength));
+		return CPartFileWriteThread::QueueOrWriteDiskSnapshot(pData);
+	}
+}
 
 CString CIndexed::m_sKeyFileName;
 CString CIndexed::m_sSourceFileName;
@@ -145,109 +196,105 @@ CIndexed::~CIndexed()
 			uint32 uTotalKey = 0;
 			uint32 uTotalLoad = 0;
 
-			CBufferedFileIO fileLoad;
-			if (fileLoad.Open(m_sLoadFileName, CFile::modeWrite | CFile::modeCreate | CFile::typeBinary | CFile::shareDenyWrite)) {
-				::setvbuf(fileLoad.m_pStream, NULL, _IOFBF, 32768);
-				static const uint32 uVersion = 1;
-				fileLoad.WriteUInt32(uVersion);
-				fileLoad.WriteUInt32((uint32)time(NULL));
-				fileLoad.WriteUInt32((uint32)m_mapLoad.GetCount());
-				CCKey key1;
-				for (POSITION pos = m_mapLoad.GetStartPosition(); pos != NULL;) {
-					Load *pLoad;
-					m_mapLoad.GetNextAssoc(pos, key1, pLoad);
-					fileLoad.WriteUInt128(pLoad->uKeyID);
-					fileLoad.WriteUInt32((uint32)pLoad->uTime);
-					++uTotalLoad;
-					delete pLoad;
-				}
-				fileLoad.Close();
-			} else
+			CSafeMemFile fileLoad;
+			static const uint32 uLoadVersion = 1;
+			fileLoad.WriteUInt32(uLoadVersion);
+			fileLoad.WriteUInt32((uint32)time(NULL));
+			fileLoad.WriteUInt32((uint32)m_mapLoad.GetCount());
+			CCKey key1;
+			for (POSITION pos = m_mapLoad.GetStartPosition(); pos != NULL;) {
+				Load *pLoad;
+				m_mapLoad.GetNextAssoc(pos, key1, pLoad);
+				fileLoad.WriteUInt128(pLoad->uKeyID);
+				fileLoad.WriteUInt32((uint32)pLoad->uTime);
+				++uTotalLoad;
+				delete pLoad;
+			}
+			if (!QueueKadIndexSnapshot(fileLoad, m_sLoadFileName, _T("load_index.dat"), _T("kad-load-index"), &s_lKadLoadIndexSaveGeneration))
 				DebugLogError(_T("Unable to store Kad file: %s"), (LPCTSTR)m_sLoadFileName);
 
-			CBufferedFileIO fileSource;
-			if (fileSource.Open(m_sSourceFileName, CFile::modeWrite | CFile::modeCreate | CFile::typeBinary | CFile::shareDenyWrite)) {
-				::setvbuf(fileSource.m_pStream, NULL, _IOFBF, 32768);
-				static const uint32 uVersion = 2;
-				fileSource.WriteUInt32(uVersion);
-				fileSource.WriteUInt32((uint32)(time(NULL) + KADEMLIAREPUBLISHTIMES));
-				fileSource.WriteUInt32((uint32)m_mapSources.GetCount());
-				CCKey key1;
-				for (POSITION pos = m_mapSources.GetStartPosition(); pos != NULL;) {
-					SrcHash *pCurrSrcHash;
-					m_mapSources.GetNextAssoc(pos, key1, pCurrSrcHash);
-					fileSource.WriteUInt128(pCurrSrcHash->uKeyID);
-					CKadSourcePtrList &keyHashSrcList(pCurrSrcHash->ptrlistSource);
-					fileSource.WriteUInt32((uint32)keyHashSrcList.GetCount());
-					while (!keyHashSrcList.IsEmpty()) {
-						Source *pCurrSource = keyHashSrcList.RemoveHead();
-						fileSource.WriteUInt128(pCurrSource->uSourceID);
-						CKadEntryPtrList &srcEntryList = pCurrSource->ptrlEntryList;
-						fileSource.WriteUInt32((uint32)srcEntryList.GetCount());
-						while (!srcEntryList.IsEmpty()) {
-							CEntry *pCurrName = srcEntryList.RemoveTail();
-							fileSource.WriteUInt32((uint32)pCurrName->m_tLifetime);
-							pCurrName->WriteTagList(&fileSource);
-							delete pCurrName;
-							++uTotalSource;
-						}
-						delete pCurrSource;
+			CSafeMemFile fileSource;
+			CKadMemFileIO dataSource(fileSource);
+			static const uint32 uSourceVersion = 2;
+			fileSource.WriteUInt32(uSourceVersion);
+			fileSource.WriteUInt32((uint32)(time(NULL) + KADEMLIAREPUBLISHTIMES));
+			fileSource.WriteUInt32((uint32)m_mapSources.GetCount());
+			for (POSITION pos = m_mapSources.GetStartPosition(); pos != NULL;) {
+				SrcHash *pCurrSrcHash;
+				m_mapSources.GetNextAssoc(pos, key1, pCurrSrcHash);
+				fileSource.WriteUInt128(pCurrSrcHash->uKeyID);
+				CKadSourcePtrList &keyHashSrcList(pCurrSrcHash->ptrlistSource);
+				fileSource.WriteUInt32((uint32)keyHashSrcList.GetCount());
+				while (!keyHashSrcList.IsEmpty()) {
+					Source *pCurrSource = keyHashSrcList.RemoveHead();
+					fileSource.WriteUInt128(pCurrSource->uSourceID);
+					CKadEntryPtrList &srcEntryList = pCurrSource->ptrlEntryList;
+					fileSource.WriteUInt32((uint32)srcEntryList.GetCount());
+					while (!srcEntryList.IsEmpty()) {
+						CEntry *pCurrName = srcEntryList.RemoveTail();
+						fileSource.WriteUInt32((uint32)pCurrName->m_tLifetime);
+						pCurrName->WriteTagList(&dataSource);
+						delete pCurrName;
+						++uTotalSource;
 					}
-					delete pCurrSrcHash;
+					delete pCurrSource;
 				}
-				fileSource.Close();
-			} else
+				delete pCurrSrcHash;
+			}
+			if (!QueueKadIndexSnapshot(fileSource, m_sSourceFileName, _T("src_index.dat"), _T("kad-source-index"), &s_lKadSourceIndexSaveGeneration))
 				DebugLogError(_T("Unable to store Kad file: %s"), (LPCTSTR)m_sSourceFileName);
 
-			CBufferedFileIO fileKey;
-			if (fileKey.Open(m_sKeyFileName, CFile::modeWrite | CFile::modeCreate | CFile::typeBinary | CFile::shareDenyWrite)) {
-				::setvbuf(fileKey.m_pStream, NULL, _IOFBF, 32768);
-				uint32 uVersion = 4;
-				fileKey.WriteUInt32(uVersion);
-				fileKey.WriteUInt32((uint32)(time(NULL) + KADEMLIAREPUBLISHTIMEK));
-				fileKey.WriteUInt128(Kademlia::CKademlia::GetPrefs()->GetKadID());
-				fileKey.WriteUInt32((uint32)m_mapKeyword.GetCount());
-				CCKey key1, key2;
-				for (POSITION pos = m_mapKeyword.GetStartPosition(); pos != NULL;) {
-					KeyHash *pCurrKeyHash;
-					m_mapKeyword.GetNextAssoc(pos, key1, pCurrKeyHash);
-					fileKey.WriteUInt128(pCurrKeyHash->uKeyID);
-					CSourceKeyMap &keySrcKeyMap = pCurrKeyHash->mapSource;
-					fileKey.WriteUInt32((uint32)keySrcKeyMap.GetCount());
-					for (POSITION pos2 = keySrcKeyMap.GetStartPosition(); pos2 != NULL;) {
-						Source *pCurrSource;
-						keySrcKeyMap.GetNextAssoc(pos2, key2, pCurrSource);
-						fileKey.WriteUInt128(pCurrSource->uSourceID);
-						CKadEntryPtrList &srcEntryList = pCurrSource->ptrlEntryList;
-						fileKey.WriteUInt32((uint32)srcEntryList.GetCount());
-						while (!srcEntryList.IsEmpty()) {
-							CKeyEntry *pCurrName = static_cast<CKeyEntry*>(srcEntryList.RemoveTail());
-							ASSERT(pCurrName->IsKeyEntry());
-							fileKey.WriteUInt32((uint32)pCurrName->m_tLifetime);
-							pCurrName->WritePublishTrackingDataToFile(&fileKey);
-							pCurrName->WriteTagList(&fileKey);
-							pCurrName->DirtyDeletePublishData();
-							delete pCurrName;
-							++uTotalKey;
-						}
-						delete pCurrSource;
+			CSafeMemFile fileKey;
+			CKadMemFileIO dataKey(fileKey);
+			uint32 uKeyVersion = 4;
+			fileKey.WriteUInt32(uKeyVersion);
+			fileKey.WriteUInt32((uint32)(time(NULL) + KADEMLIAREPUBLISHTIMEK));
+			fileKey.WriteUInt128(Kademlia::CKademlia::GetPrefs()->GetKadID());
+			fileKey.WriteUInt32((uint32)m_mapKeyword.GetCount());
+			CCKey key2;
+			for (POSITION pos = m_mapKeyword.GetStartPosition(); pos != NULL;) {
+				KeyHash *pCurrKeyHash;
+				m_mapKeyword.GetNextAssoc(pos, key1, pCurrKeyHash);
+				fileKey.WriteUInt128(pCurrKeyHash->uKeyID);
+				CSourceKeyMap &keySrcKeyMap = pCurrKeyHash->mapSource;
+				fileKey.WriteUInt32((uint32)keySrcKeyMap.GetCount());
+				for (POSITION pos2 = keySrcKeyMap.GetStartPosition(); pos2 != NULL;) {
+					Source *pCurrSource;
+					keySrcKeyMap.GetNextAssoc(pos2, key2, pCurrSource);
+					fileKey.WriteUInt128(pCurrSource->uSourceID);
+					CKadEntryPtrList &srcEntryList = pCurrSource->ptrlEntryList;
+					fileKey.WriteUInt32((uint32)srcEntryList.GetCount());
+					while (!srcEntryList.IsEmpty()) {
+						CKeyEntry *pCurrName = static_cast<CKeyEntry*>(srcEntryList.RemoveTail());
+						ASSERT(pCurrName->IsKeyEntry());
+						fileKey.WriteUInt32((uint32)pCurrName->m_tLifetime);
+						pCurrName->WritePublishTrackingDataToFile(&dataKey);
+						pCurrName->WriteTagList(&dataKey);
+						pCurrName->DirtyDeletePublishData();
+						delete pCurrName;
+						++uTotalKey;
 					}
-					delete pCurrKeyHash;
+					delete pCurrSource;
 				}
-				fileKey.Close();
-			} else
+				delete pCurrKeyHash;
+			}
+			if (!QueueKadIndexSnapshot(fileKey, m_sKeyFileName, _T("key_index.dat"), _T("kad-key-index"), &s_lKadKeyIndexSaveGeneration))
 				DebugLogError(_T("Unable to store Kad file: %s"), (LPCTSTR)m_sKeyFileName);
 
-			AddDebugLogLine(false, _T("Wrote %u source, %u keyword, and %u load entries"), uTotalSource, uTotalKey, uTotalLoad);
+			AddDebugLogLine(false, _T("Queued %u source, %u keyword, and %u load entries"), uTotalSource, uTotalKey, uTotalLoad);
 
 
 		} catch (CIOException *ex) {
 			AddDebugLogLine(false, _T("Exception in CIndexed::~CIndexed (IO error(%i))"), ex->m_iCause);
 			ex->Delete();
+		} catch (CException *ex) {
+			AddDebugLogLine(false, _T("Exception in CIndexed::~CIndexed%s"), (LPCTSTR)EscPercent(CExceptionStrDash(*ex)));
+			ex->Delete();
 		} catch (...) {
 			AddDebugLogLine(false, _T("Exception in CIndexed::~CIndexed"));
 		}
 	}
+
 
 	// leftover cleanup (same for both variants)
 	CKeyEntry::ResetGlobalTrackingMap();

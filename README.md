@@ -10,7 +10,7 @@ A modern fork of the classic open-source eMule P2P file sharing client.
 
 eMule AI modernizes the classic eMule experience with improvements focused on today's networks, hardware, and usability.
 
-For feature overviews, installation help, migration guidance, settings reference, NAT Traversal and uTP documentation, release notes, and troubleshooting, visit the official documentation hub:
+For feature overviews, installation help, migration guidance, settings reference, NAT Traversal documentation, release notes, and troubleshooting, visit the official documentation hub:
 
 https://emuleai.github.io
 
@@ -42,13 +42,11 @@ https://emuleai.github.io
 
 ## Optional External Resources
 
-Some features require user-supplied external files such as server.met, nodes.dat, ipfilter.dat, or GeoLite2-City.mmdb.
+Some features require user-supplied external files such as server.met, nodes.dat, ipfilter.dat.
 
 If you already have these files, copy them to the eMule AI config directory and restart the application.
 
 You can also load server.met from Servers -> Update server.met from URL, nodes.dat from Kad -> Nodes.dat from URL, and ipfilter.dat or ipfilter.zip from Options -> Security -> IP Filter -> Update from URL.
-
-GeoLite2-City.mmdb must be downloaded separately from MaxMind at %s and is subject to MaxMind's terms. After copying it to the eMule AI config directory, enable GeoLite2 in Settings and restart the application.
 
 Please use only sources you trust and review their origin, terms, license conditions, and legal status before use.
 
@@ -90,9 +88,9 @@ Many thanks to everyone who contributed to eMule over the years. Without their w
 
 **Developers:** Merkur, John aka. Unknown1, Ornis, Bluecow, Tecxx, Pach2, Juanjo, Dirus, Barry, zz, Some Support
 
-**Modders:** David Xanatos, Stulle, XMan, netfinity, WiZaRd, leuk_he, enkeyDev, SLUGFILLER, SiRoB, khaos, fox88, Enig123, TAHO, Pretender, Mighty Knife, Ottavio84, Dolphin, sFrQlXeRt, evcz, cyrex2001, zz_fly, Slaham, Spike, shadow2004, gomez82, JvA, Pawcio, lovelace, MoNKi, Avi3k, Commander, emulEspaña, Maella, VQB, J.C.Conner
+**Modders:** David Xanatos, Stulle, XMan, netfinity, WiZaRd, leuk_he, enkeyDev, SLUGFILLER, SiRoB, khaos, fox88, brand33d, Enig123, TAHO, Pretender, Mighty Knife, Ottavio84, Dolphin, sFrQlXeRt, evcz, cyrex2001, zz_fly, Slaham, Spike, shadow2004, gomez82, JvA, Pawcio, lovelace, MoNKi, Avi3k, Commander, emulEspaña, Maella, VQB, J.C.Conner
 
-**Testers:** Sony, Monk, Myxin, Mr Ozon, Daan, Elandal, Frozen_North, kayfam, Khandurian, Masta2002, mrLabr, Nesi-San, SeveredCross, Skynetman
+**Testers:** fangguihua1995, QICKV8, lzk87, Heliotropo, Havokdan, Andrey23, mistressadmin, enone, AnneDane, edelkas, Aokromes, superlent, tchara, OConnell, potes31, lapollarecord, tictoc9, arturx, Sony, Monk, Myxin, Mr Ozon, Daan, Elandal, Frozen_North, kayfam, Khandurian, Masta2002, mrLabr, Nesi-San, SeveredCross, Skynetman
 
 ## License
 

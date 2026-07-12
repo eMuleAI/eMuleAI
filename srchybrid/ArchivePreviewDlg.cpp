@@ -26,6 +26,7 @@
 #include "MenuCmds.h"
 #include "SharedFilesWnd.h"
 #include "eMuleAI/MenuXP.h"
+#include "eMuleAI/DarkMode.h"
 
 #ifdef _DEBUG
 #define new DEBUG_NEW
@@ -140,6 +141,218 @@ static LCX_COLUMN_INIT s_aColumns[] =
 
 #define	PREF_INI_SECTION	_T("ArchivePreviewDlg")
 
+BEGIN_MESSAGE_MAP(CArchivePreviewListCtrl, CListCtrlX)
+	ON_NOTIFY_REFLECT(NM_CUSTOMDRAW, OnNmCustomDraw)
+	ON_NOTIFY_EX(HDN_ITEMCHANGING, 0, OnHdrItemChanging)
+	ON_NOTIFY_EX(HDN_ITEMCHANGED, 0, OnHdrItemChanged)
+	ON_NOTIFY_EX(HDN_TRACK, 0, OnHdrTrack)
+	ON_NOTIFY_EX(HDN_ENDTRACK, 0, OnHdrEndTrack)
+END_MESSAGE_MAP()
+
+CArchivePreviewListCtrl::CArchivePreviewListCtrl()
+	: m_bReducedDarkCleanup()
+{
+}
+
+void CArchivePreviewListCtrl::RedrawAfterHeaderTrack()
+{
+	if (m_bReducedDarkCleanup && ::IsWindow(GetSafeHwnd()))
+		RedrawWindow(NULL, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_FRAME);
+}
+
+void CArchivePreviewListCtrl::DrawReducedDarkItem(LPNMLVCUSTOMDRAW pDraw)
+{
+	if (pDraw == NULL)
+		return;
+
+	CDC *pDC = CDC::FromHandle(pDraw->nmcd.hdc);
+	if (pDC == NULL)
+		return;
+
+	const int iItem = static_cast<int>(pDraw->nmcd.dwItemSpec);
+	CRect rcRow;
+	if (!GetItemRect(iItem, &rcRow, LVIR_BOUNDS))
+		return;
+
+	CRect rcClient;
+	GetClientRect(&rcClient);
+	rcRow.left = rcClient.left;
+	rcRow.right = rcClient.right;
+	rcRow.bottom = min(rcRow.bottom, rcClient.bottom);
+	if (rcRow.top >= rcRow.bottom)
+		return;
+
+	LVITEM lvi = {0};
+	lvi.mask = LVIF_IMAGE | LVIF_PARAM | LVIF_STATE;
+	lvi.iItem = iItem;
+	lvi.iSubItem = 0;
+	lvi.iImage = -1;
+	lvi.stateMask = LVIS_SELECTED | LVIS_FOCUSED;
+	GetItem(&lvi);
+
+	const bool bSelected = (lvi.state & LVIS_SELECTED) != 0;
+	const COLORREF crWindow = GetCustomSysColor(COLOR_WINDOW);
+	const COLORREF crText = bSelected ? GetCustomSysColor(COLOR_HIGHLIGHTTEXT) : (lvi.lParam == 1 ? RGB(128, 128, 128) : GetCustomSysColor(COLOR_WINDOWTEXT));
+	const int iSavedDC = pDC->SaveDC();
+	pDC->IntersectClipRect(&rcRow);
+	pDC->FillSolidRect(&rcRow, crWindow);
+
+	CRect rcSelection(0, 0, 0, 0);
+	if (bSelected && GetItemRect(iItem, &rcSelection, LVIR_BOUNDS)) {
+		rcSelection.left = rcClient.left;
+		rcSelection.right = min(rcSelection.right, rcClient.right);
+		rcSelection.bottom = min(rcSelection.bottom, rcClient.bottom);
+		if (rcSelection.top < rcSelection.bottom)
+			pDC->FillSolidRect(&rcSelection, GetCustomSysColor(COLOR_HIGHLIGHT));
+	}
+
+	pDC->SetBkMode(TRANSPARENT);
+	pDC->SetTextColor(crText);
+	pDC->SelectObject(GetFont());
+
+	CHeaderCtrl *pHeader = GetHeaderCtrl();
+	if (pHeader != NULL && ::IsWindow(pHeader->GetSafeHwnd())) {
+		const int iColumns = pHeader->GetItemCount();
+		for (int iColumn = 0; iColumn < iColumns; ++iColumn) {
+			CRect rcColumn;
+			if (!pHeader->GetItemRect(iColumn, &rcColumn))
+				continue;
+			if (rcColumn.Width() <= 0 || rcColumn.right <= rcClient.left || rcColumn.left >= rcClient.right)
+				continue;
+
+			CRect rcText(max(rcColumn.left, rcClient.left), rcRow.top, min(rcColumn.right, rcClient.right), rcRow.bottom);
+			if (iColumn == 0) {
+				CImageList *pImageList = GetImageList(LVSIL_SMALL);
+				if (pImageList != NULL && lvi.iImage >= 0) {
+					int iIconWidth = ::GetSystemMetrics(SM_CXSMICON);
+					int iIconHeight = ::GetSystemMetrics(SM_CYSMICON);
+					(void)::ImageList_GetIconSize(pImageList->GetSafeHandle(), &iIconWidth, &iIconHeight);
+					const CPoint ptIcon(rcText.left + 2, rcRow.top + max(0, (rcRow.Height() - iIconHeight) / 2));
+					pImageList->Draw(pDC, lvi.iImage, ptIcon, ILD_TRANSPARENT);
+					rcText.left = ptIcon.x + iIconWidth + 2;
+				}
+				else
+					rcText.left += 4;
+				rcText.right -= 4;
+			}
+			else
+				rcText.DeflateRect(4, 0);
+
+			if (rcText.left >= rcText.right)
+				continue;
+
+			CString strText = GetItemText(iItem, iColumn);
+			if (strText.IsEmpty())
+				continue;
+
+			UINT uAlignment = DT_LEFT;
+			LVCOLUMN lvc = {0};
+			lvc.mask = LVCF_FMT;
+			if (GetColumn(iColumn, &lvc)) {
+				if ((lvc.fmt & LVCFMT_JUSTIFYMASK) == LVCFMT_RIGHT)
+					uAlignment = DT_RIGHT;
+				else if ((lvc.fmt & LVCFMT_JUSTIFYMASK) == LVCFMT_CENTER)
+					uAlignment = DT_CENTER;
+			}
+
+			pDC->DrawText(strText, &rcText, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX | uAlignment);
+		}
+	}
+
+	if ((lvi.state & LVIS_FOCUSED) != 0 && ::GetFocus() == GetSafeHwnd()) {
+		CRect rcFocus(rcRow);
+		rcFocus.right = rcSelection.IsRectEmpty() ? rcRow.right : rcSelection.right;
+		pDC->DrawFocusRect(&rcFocus);
+	}
+
+	pDC->RestoreDC(iSavedDC);
+}
+
+void CArchivePreviewListCtrl::PaintReducedDarkEmptyArea(CDC *pDC)
+{
+	if (pDC == NULL)
+		return;
+
+	CRect rcClient;
+	GetClientRect(&rcClient);
+	CRect rcFill(rcClient);
+	const int iItemCount = GetItemCount();
+	if (iItemCount > 0) {
+		const int iTopItem = GetTopIndex();
+		const int iLastVisibleItem = min(iItemCount - 1, iTopItem + GetCountPerPage());
+		CRect rcLast;
+		if (GetItemRect(iLastVisibleItem, &rcLast, LVIR_BOUNDS))
+			rcFill.top = rcLast.bottom;
+	}
+	else {
+		CHeaderCtrl *pHeader = GetHeaderCtrl();
+		if (pHeader != NULL && ::IsWindow(pHeader->GetSafeHwnd())) {
+			CRect rcHeader;
+			pHeader->GetWindowRect(&rcHeader);
+			ScreenToClient(&rcHeader);
+			rcFill.top = rcHeader.bottom;
+		}
+	}
+
+	if (rcFill.top < rcFill.bottom)
+		pDC->FillSolidRect(&rcFill, GetCustomSysColor(COLOR_WINDOW));
+}
+
+void CArchivePreviewListCtrl::OnNmCustomDraw(NMHDR *pNMHDR, LRESULT *pResult)
+{
+	LPNMLVCUSTOMDRAW pDraw = reinterpret_cast<LPNMLVCUSTOMDRAW>(pNMHDR);
+
+	if (m_bReducedDarkCleanup && IsDarkModeEnabled()) {
+		switch (pDraw->nmcd.dwDrawStage) {
+		case CDDS_PREPAINT:
+			*pResult = CDRF_NOTIFYITEMDRAW | CDRF_NOTIFYPOSTPAINT;
+			return;
+		case CDDS_ITEMPREPAINT:
+			DrawReducedDarkItem(pDraw);
+			*pResult = CDRF_SKIPDEFAULT;
+			return;
+		case CDDS_POSTPAINT:
+			PaintReducedDarkEmptyArea(CDC::FromHandle(pDraw->nmcd.hdc));
+			*pResult = CDRF_DODEFAULT;
+			return;
+		}
+	}
+
+	if (pDraw->nmcd.dwDrawStage == CDDS_PREPAINT) {
+		*pResult = CDRF_NOTIFYITEMDRAW;
+		return;
+	}
+
+	if (pDraw->nmcd.dwDrawStage == CDDS_ITEMPREPAINT && pDraw->nmcd.lItemlParam == 1)
+		pDraw->clrText = RGB(128, 128, 128);
+
+	*pResult = CDRF_DODEFAULT;
+}
+
+BOOL CArchivePreviewListCtrl::OnHdrItemChanging(UINT, LPNMHDR, LRESULT*)
+{
+	RedrawAfterHeaderTrack();
+	return FALSE;
+}
+
+BOOL CArchivePreviewListCtrl::OnHdrItemChanged(UINT, LPNMHDR, LRESULT*)
+{
+	RedrawAfterHeaderTrack();
+	return FALSE;
+}
+
+BOOL CArchivePreviewListCtrl::OnHdrTrack(UINT, LPNMHDR, LRESULT*)
+{
+	RedrawAfterHeaderTrack();
+	return FALSE;
+}
+
+BOOL CArchivePreviewListCtrl::OnHdrEndTrack(UINT, LPNMHDR, LRESULT*)
+{
+	RedrawAfterHeaderTrack();
+	return FALSE;
+}
+
 IMPLEMENT_DYNAMIC(CArchivePreviewDlg, CResizablePage)
 
 BEGIN_MESSAGE_MAP(CArchivePreviewDlg, CResizablePage)
@@ -149,6 +362,8 @@ BEGIN_MESSAGE_MAP(CArchivePreviewDlg, CResizablePage)
 	ON_MESSAGE(UM_DATA_CHANGED, OnDataChanged)
 	ON_MESSAGE(UM_ARCHIVESCANDONE, ShowScanResults)
 	ON_WM_DESTROY()
+	ON_WM_ERASEBKGND()
+	ON_WM_SYSCOLORCHANGE()
 	ON_NOTIFY(LVN_DELETEALLITEMS, IDC_FILELIST, OnLvnDeleteAllItemsArchiveEntries)
 	ON_NOTIFY(NM_CUSTOMDRAW, IDC_FILELIST, OnNMCustomDrawArchiveEntries)
 	ON_WM_CONTEXTMENU()
@@ -234,7 +449,7 @@ BOOL CArchivePreviewDlg::OnInitDialog()
 	ASSERT(m_ContentList.GetStyle() & LVS_SORTASCENDING);
 	ASSERT(m_ContentList.GetStyle() & LVS_SHAREIMAGELISTS);
 	m_ContentList.SendMessage(LVM_SETIMAGELIST, LVSIL_SMALL, (LPARAM)theApp.GetSystemImageList());
-	m_ContentList.SetExtendedStyle(LVS_EX_FULLROWSELECT | LVS_EX_INFOTIP | LVS_EX_GRIDLINES);
+	UpdateArchiveListExtendedStyle();
 	m_ContentList.EnableHdrCtrlSortBitmaps();
 
 	m_ContentList.ReadColumnStats(_countof(s_aColumns), s_aColumns);
@@ -249,6 +464,92 @@ BOOL CArchivePreviewDlg::OnInitDialog()
 	m_progressbar.SetPos(0);
 
 	return TRUE;
+}
+
+bool CArchivePreviewDlg::IsReducedDarkArchivePage() const
+{
+	return m_bReducedDlg && IsDarkModeEnabled();
+}
+
+void CArchivePreviewDlg::UpdateArchiveListExtendedStyle()
+{
+	DWORD dwStyle = LVS_EX_FULLROWSELECT | LVS_EX_INFOTIP | LVS_EX_DOUBLEBUFFER;
+	// Native list-view gridlines and report column separators are not dark-mode aware in the reduced shared-files content page. Keep gridlines disabled there and clean the remaining separators in custom draw.
+	if (!IsReducedDarkArchivePage())
+		dwStyle |= LVS_EX_GRIDLINES;
+	m_ContentList.SetExtendedStyle(dwStyle);
+	m_ContentList.SetReducedDarkCleanup(IsReducedDarkArchivePage());
+	if (::IsWindow(m_ContentList.GetSafeHwnd()))
+		m_ContentList.RedrawWindow(NULL, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_FRAME);
+	UpdateReducedDarkProgressStyle();
+}
+
+void CArchivePreviewDlg::UpdateReducedDarkProgressStyle()
+{
+	if (!::IsWindow(m_progressbar.GetSafeHwnd()) || !m_bReducedDlg)
+		return;
+
+	const bool bShowProgress = !IsDarkModeEnabled() || m_activeTParams != NULL;
+	m_progressbar.ShowWindow(bShowProgress ? SW_SHOW : SW_HIDE);
+	if (!bShowProgress)
+		return;
+
+	if (IsDarkModeEnabled())
+		m_progressbar.ModifyStyle(WS_BORDER, 0, SWP_FRAMECHANGED);
+	else
+		m_progressbar.ModifyStyle(0, WS_BORDER, SWP_FRAMECHANGED);
+
+	m_progressbar.SetBkColor(GetCustomSysColor(COLOR_WINDOW));
+	m_progressbar.RedrawWindow(NULL, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_FRAME);
+}
+
+void CArchivePreviewDlg::PaintReducedDarkArchiveItemBackground(LPNMLVCUSTOMDRAW pDraw)
+{
+	if (pDraw == NULL)
+		return;
+
+	const int iItem = static_cast<int>(pDraw->nmcd.dwItemSpec);
+	CRect rcRow;
+	if (!m_ContentList.GetItemRect(iItem, &rcRow, LVIR_BOUNDS))
+		return;
+
+	CRect rcClient;
+	m_ContentList.GetClientRect(&rcClient);
+	rcRow.right = rcClient.right;
+	const bool bSelected = (m_ContentList.GetItemState(iItem, LVIS_SELECTED) & LVIS_SELECTED) != 0;
+	CDC *pDC = CDC::FromHandle(pDraw->nmcd.hdc);
+	if (pDC != NULL)
+		pDC->FillSolidRect(&rcRow, GetCustomSysColor(bSelected ? COLOR_HIGHLIGHT : COLOR_WINDOW));
+}
+
+void CArchivePreviewDlg::PaintReducedDarkArchiveEmptyArea(CDC *pDC)
+{
+	if (pDC == NULL)
+		return;
+
+	CRect rcClient;
+	m_ContentList.GetClientRect(&rcClient);
+	CRect rcFill(rcClient);
+	const int iItemCount = m_ContentList.GetItemCount();
+	if (iItemCount > 0) {
+		const int iTopItem = m_ContentList.GetTopIndex();
+		const int iLastVisibleItem = min(iItemCount - 1, iTopItem + m_ContentList.GetCountPerPage());
+		CRect rcLast;
+		if (m_ContentList.GetItemRect(iLastVisibleItem, &rcLast, LVIR_BOUNDS))
+			rcFill.top = rcLast.bottom;
+	}
+	else {
+		CHeaderCtrl *pHeader = m_ContentList.GetHeaderCtrl();
+		if (pHeader != NULL && ::IsWindow(pHeader->GetSafeHwnd())) {
+			CRect rcHeader;
+			pHeader->GetWindowRect(&rcHeader);
+			m_ContentList.ScreenToClient(&rcHeader);
+			rcFill.top = rcHeader.bottom;
+		}
+	}
+
+	if (rcFill.top < rcFill.bottom)
+		pDC->FillSolidRect(&rcFill, GetCustomSysColor(COLOR_WINDOW));
 }
 
 void CArchivePreviewDlg::OnDestroy()
@@ -273,10 +574,31 @@ void CArchivePreviewDlg::OnDestroy()
 	CResizablePage::OnDestroy();
 }
 
+void CArchivePreviewDlg::OnSysColorChange()
+{
+	CResizablePage::OnSysColorChange();
+	if (::IsWindow(m_ContentList.GetSafeHwnd())) {
+		UpdateArchiveListExtendedStyle();
+		m_ContentList.Invalidate(TRUE);
+	}
+}
+
+BOOL CArchivePreviewDlg::OnEraseBkgnd(CDC* pDC)
+{
+	if (pDC == NULL)
+		return CResizablePage::OnEraseBkgnd(pDC);
+
+	CRect rcClient;
+	GetClientRect(&rcClient);
+	pDC->FillSolidRect(&rcClient, GetCustomSysColor(IsDarkModeEnabled() ? COLOR_WINDOW : COLOR_3DFACE));
+	return TRUE;
+}
+
 BOOL CArchivePreviewDlg::OnSetActive()
 {
 	if (!CResizablePage::OnSetActive())
 		return FALSE;
+	UpdateArchiveListExtendedStyle();
 	AdjustSharedFilesDetailsHost(this);
 
 	if (m_bDataChanged) {
@@ -316,6 +638,32 @@ void CArchivePreviewDlg::OnLvnDeleteAllItemsArchiveEntries(LPNMHDR, LRESULT *pRe
 void CArchivePreviewDlg::OnNMCustomDrawArchiveEntries(LPNMHDR pNMHDR, LRESULT *pResult)
 {
 	LPNMLVCUSTOMDRAW pnmlvcd = (LPNMLVCUSTOMDRAW)pNMHDR;
+
+	if (IsReducedDarkArchivePage()) {
+		switch (pnmlvcd->nmcd.dwDrawStage) {
+		case CDDS_PREPAINT:
+			*pResult = CDRF_NOTIFYITEMDRAW | CDRF_NOTIFYPOSTPAINT;
+			return;
+		case CDDS_ITEMPREPAINT:
+			{
+				const bool bSelected = (m_ContentList.GetItemState(static_cast<int>(pnmlvcd->nmcd.dwItemSpec), LVIS_SELECTED) & LVIS_SELECTED) != 0;
+				PaintReducedDarkArchiveItemBackground(pnmlvcd);
+				pnmlvcd->clrTextBk = GetCustomSysColor(bSelected ? COLOR_HIGHLIGHT : COLOR_WINDOW);
+				pnmlvcd->clrText = GetCustomSysColor(bSelected ? COLOR_HIGHLIGHTTEXT : COLOR_WINDOWTEXT);
+				if (pnmlvcd->nmcd.lItemlParam == 1 && !bSelected)
+					pnmlvcd->clrText = RGB(128, 128, 128);
+			}
+			*pResult = CDRF_DODEFAULT;
+			return;
+		case CDDS_POSTPAINT:
+				{
+					CDC *pDC = CDC::FromHandle(pnmlvcd->nmcd.hdc);
+					PaintReducedDarkArchiveEmptyArea(pDC);
+				}
+			*pResult = CDRF_DODEFAULT;
+			return;
+		}
+	}
 
 	if (pnmlvcd->nmcd.dwDrawStage == CDDS_PREPAINT) {
 		*pResult = CDRF_NOTIFYITEMDRAW;
@@ -371,7 +719,7 @@ int CArchivePreviewDlg::ShowAceResults(int succ, archiveScannerThreadParams_s *t
 		? _T("ARCPREV_INSUFFDATA")
 		: tp->file->IsPartFile() ? _T("ARCPREV_LISTMAYBEINCOMPL") : 0;
 	CString temp;
-	temp.Format(_T("%s %s"), (LPCTSTR)GetResString(_T("ARCPARSED")), !IsEmpty(uid) ? (LPCTSTR)GetResString(uid) : EMPTY);
+	temp.Format(_T("%s %s"), (LPCTSTR)GetResString(_T("ARCPARSED")), !IsEmpty(uid) ? (LPCTSTR)GetResString(uid) : (LPCTSTR)EMPTY);
 	SetDlgItemText(IDC_INFO_STATUS, temp);
 
 	if (!tp->ai->ACEdir->IsEmpty()) {
@@ -530,7 +878,7 @@ int CArchivePreviewDlg::ShowISOResults(int succ, archiveScannerThreadParams_s *t
 		? _T("ARCPREV_INSUFFDATA")
 		: tp->file->IsPartFile() ? _T("ARCPREV_LISTMAYBEINCOMPL") : 0;
 	CString temp;
-	temp.Format(_T("%s %s"), (LPCTSTR)GetResString(_T("ARCPARSED")), !IsEmpty(uid) ? (LPCTSTR)GetResString(uid) : EMPTY);
+	temp.Format(_T("%s %s"), (LPCTSTR)GetResString(_T("ARCPARSED")), !IsEmpty(uid) ? (LPCTSTR)GetResString(uid) : (LPCTSTR)EMPTY);
 	SetDlgItemText(IDC_INFO_STATUS, temp);
 
 	m_ContentList.SetRedraw(FALSE);
@@ -659,7 +1007,7 @@ int CArchivePreviewDlg::ShowRarResults(int succ, archiveScannerThreadParams_s *t
 		LPCTSTR uid = tp->ai->RARdir->IsEmpty()
 			? _T("ARCPREV_INSUFFDATA")
 			: tp->file->IsPartFile() ? _T("ARCPREV_LISTMAYBEINCOMPL") : 0;
-		temp.Format(_T("%s %s"), (LPCTSTR)GetResString(_T("ARCPARSED")), !IsEmpty(uid) ? (LPCTSTR)GetResString(uid) : EMPTY);
+		temp.Format(_T("%s %s"), (LPCTSTR)GetResString(_T("ARCPARSED")), !IsEmpty(uid) ? (LPCTSTR)GetResString(uid) : (LPCTSTR)EMPTY);
 		SetDlgItemText(IDC_INFO_STATUS, temp);
 	}
 
@@ -935,7 +1283,7 @@ int CArchivePreviewDlg::ShowZipResults(int succ, archiveScannerThreadParams_s *t
 
 	// general info / archive attribs
 
-	SetDlgItemText(IDC_INFO_ATTR, (statusEncrypted ? (LPCTSTR)GetResString(_T("PASSWPROT")) : EMPTY));
+	SetDlgItemText(IDC_INFO_ATTR, (statusEncrypted ? (LPCTSTR)GetResString(_T("PASSWPROT")) : (LPCTSTR)EMPTY));
 	//... any other info?
 
 	delete tp->ai->centralDirectoryEntries;
@@ -1004,9 +1352,10 @@ void CArchivePreviewDlg::UpdateArchiveDisplay(bool doscan)
 		m_activeTParams = NULL; // thread may still run but is not our active one any more
 	}
 	m_progressbar.SetPos(0);
+	UpdateReducedDarkProgressStyle();
 
 	m_ContentList.DeleteAllItems();
-	m_ContentList.UpdateWindow();
+	m_ContentList.Invalidate(TRUE);
 
 	// set infos
 	SetDlgItemText(IDC_APV_FILEINFO, EMPTY);
@@ -1090,9 +1439,12 @@ void CArchivePreviewDlg::UpdateArchiveDisplay(bool doscan)
 	tp->progressHwnd = GetDlgItem(IDC_ARCHPROGRESS)->m_hWnd;
 	tp->curProgress = 0;
 	tp->m_bIsValid = true;
+	UpdateReducedDarkProgressStyle();
 
 	// start scanning thread
 	if (AfxBeginThread(RunArchiveScanner, (LPVOID)tp, THREAD_PRIORITY_LOWEST) == NULL) {
+		m_activeTParams = NULL;
+		UpdateReducedDarkProgressStyle();
 		FreeMemory(tp);
 		SetDlgItemText(IDC_INFO_STATUS, GetResString(_T("ERROR")));
 	}
@@ -1181,10 +1533,11 @@ LRESULT CArchivePreviewDlg::ShowScanResults(WPARAM wParam, LPARAM lParam)
 			case IMAGE_ISO:
 				ShowISOResults(ret, tp);
 			}
+			}
+			ASSERT(tp == m_activeTParams);
+			m_activeTParams = NULL;
+			UpdateReducedDarkProgressStyle();
 		}
-		ASSERT(tp == m_activeTParams);
-		m_activeTParams = NULL;
-	}
 
 	FreeMemory(tp);
 	return 1;

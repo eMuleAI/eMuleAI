@@ -1,4 +1,4 @@
-//This file is part of eMule AI
+﻿//This file is part of eMule AI
 //Copyright (C)2002-2026 Merkur ( devs@emule-project.net / https://www.emule-project.net )
 //Copyright (C)2026 eMule AI
 //
@@ -43,6 +43,7 @@ public:
 
 	virtual BOOL OnInitDialog();
 	int GetRequiredHeightCompensation();
+	void EnsureDarkModeTabControl();
 
 	void SetFiles(CTypedPtrList<CPtrList, CShareableFile*> &aFiles);
 	void Localize();
@@ -76,14 +77,19 @@ public:
 	virtual BOOL OnInitDialog();
 	void Localize();
 	void SetToolTipsDelay(DWORD dwDelay);
-	void Reload(bool bForceTreeReload = false, bool bUserForced = false);
+	void Reload(bool bForceTreeReload = false, bool bUserForced = false, LONG lDirWatchGeneration = 0);
 	void TryCompleteDeferredTreeInit();
 	uint32	GetFilterColumn() const				{ return m_nFilterColumn; }
 	void OnVolumesChanged()						{ m_ctlSharedDirTree.OnVolumesChanged(); }
 	void OnSingleFileShareStatusChanged()		{ m_ctlSharedDirTree.FileSystemTreeUpdateBoldState(NULL); }
 	void ShowSelectedFilesDetails(bool bForce = false);
+	void PostSelectedFilesDetailsAsync(bool bForce = false);
 	void ShowDetailsPanel(bool bShow);
 	void RequestDetailsPanelHeightAdjustment();
+	void PostShowFilesCountAsync();
+	void PostMetadataUpdatedAsync();
+	bool PostAutoReloadSharedFilesAsync(WPARAM wpRequest);
+	void PostDeferredAutoReloadSharedFilesIfIdle();
 	void AdjustDetailsPanelHeightForPageOverflow();
 
 	CSharedFilesCtrl sharedfilesctrl;
@@ -101,6 +107,15 @@ private:
 	bool			m_bDetailsVisible;
 	bool			m_bDetailsPanelHeightAdjustmentPending;
 	bool			m_bDeferredTreeInitPending;
+	bool			m_bSuppressTreeSelectionSync;
+	volatile LONG	m_lShowFilesCountPending;
+	volatile LONG	m_lMetadataUpdatedPending;
+	volatile LONG	m_lSelectedFilesDetailsPending;
+	volatile LONG	m_lSelectedFilesDetailsForce;
+	CCriticalSection m_autoReloadRequestLock;
+	DWORD		m_dwPendingAutoReloadFlags;
+	DWORD		m_dwDeferredAutoReloadFlags;
+	volatile LONG	m_lAutoReloadSharedFilesPending;
 
 protected:
 	CStringArray	m_astrFilterTemp;
@@ -111,9 +126,11 @@ protected:
 	CToolTipCtrlX m_ToolTip;
 
 	void LocalizeInternal(bool bDeferTreeInit);
+	void ApplySelectedTreeFilter(bool bRefreshList);
 	void SetAllIcons();
 	void DoResize(int iDelta);
 	void UpdateDetailsPanelLayout();
+	void RedrawDetailsPanelArea();
 	void EnsureFilterControlLayout();
 
 	virtual void DoDataExchange(CDataExchange *pDX);    // DDX/DDV support
@@ -140,6 +157,7 @@ protected:
 	afx_msg void OnBnClickedUpdateMetaData();
 	afx_msg LRESULT OnShowFilesCount(WPARAM wParam, LPARAM lParam);
 	afx_msg LRESULT OnMetadataUpdated(WPARAM wParam, LPARAM lParam);
+	afx_msg LRESULT OnSelectedFilesDetails(WPARAM wParam, LPARAM lParam);
 	afx_msg LRESULT OnAutoReloadSharedFiles(WPARAM wParam, LPARAM);
 	afx_msg LRESULT OnAdjustDetailsPanelHeight(WPARAM, LPARAM);
 };

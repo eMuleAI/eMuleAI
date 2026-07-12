@@ -1,0 +1,10 @@
+
+
+@c gnutls_hpke_role_t
+@table @code
+@item GNUTLS_@-HPKE_@-ROLE_@-SENDER
+HPKE sender role
+@item GNUTLS_@-HPKE_@-ROLE_@-RECEIVER
+HPKE receiver role
+Enumeration of HPKE roles.
+@end table

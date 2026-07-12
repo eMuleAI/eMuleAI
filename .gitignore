@@ -18,16 +18,13 @@
 /srchybrid/translations/translations_data.gen.h
 /srchybrid/translations/used_keys_reference.txt
 /srchybrid/enc_temp_folder
+/enc_temp_folder
 /logs
 /eMule CRT Debug Log.log
 /cryptopp/adhoc.cpp.copied
 /CxImage/UpgradeLog.htm
 /libpng/.vs
 /libpng/.vs
-/GeoLite2++/.vs
-/GeoLite2++/CMakeFiles/3.28.3-msvc11/CompilerIdC/Debug
-/GeoLite2++/CMakeFiles/3.28.3-msvc11/CompilerIdCXX/Debug
-/GeoLite2++/CMakeFiles/3.28.3-msvc11/VCTargetsPath/x64/Debug
 /libmaxminddb/.vs/maxminddb
 /libmaxminddb/CMakeFiles/3.28.3-msvc11/CompilerIdC/Debug
 /libmaxminddb/CMakeFiles/3.28.3-msvc11/VCTargetsPath/x64/Debug
@@ -67,3 +64,8 @@ srchybrid/translations/gemini_translator_resume.txt
 /srchybrid/translations/lang_registry.gen.h
 /.codex
 /srchybrid/translations/ai_translator.log
+/srchybrid/translations/ai_translator_resume.txt
+
+/enc_temp_folder/eedae7bdfad579a443059ece6197a1/translations.map
+/srchybrid/translations/translations.map.tmp
+/srchybrid/translations/translations.map.tmp

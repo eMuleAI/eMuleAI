@@ -136,8 +136,9 @@ protected:
 	bool TryNextProtocol();
 
 	enum { receives = 0, sends = 1, both = 2 };
-	// UTP layer is a layer without an underlying TCP socket there for it have to do some stuff on its own
+	// UTP and QUIC NAT-T layers do not use an underlying TCP socket.
 	virtual bool IsUtpLayer() const { return false; }
+	virtual bool IsQuicNatLayer() const { return false; }
 
 //private:
 protected:

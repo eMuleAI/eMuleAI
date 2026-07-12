@@ -131,11 +131,20 @@ protected:
 	bool	m_bIsDragging;
 	bool	downloadlistactive;
 	bool	m_bLayoutInited;
+	bool	m_bCatTabLayoutPending;
 	INT_PTR	m_iLastKnownQueueCount;
 	UINT	m_uCachedBannedCount;
 	DWORD	m_dwLastQueueCountBannedRefreshTick;
 	bool	m_bQueueCountDirty;
 	CString	m_strLastQueueCountText;
+	CCriticalSection m_transferMessagePostLock;
+	INT_PTR	m_iPendingQueueCount;
+	bool	m_bPendingQueueCountValue;
+	bool	m_bPendingQueueCountForce;
+	bool	m_bPendingCatTabTitleForce;
+	volatile LONG m_lQueueCountUpdatePending;
+	volatile LONG m_lCatTabTitleUpdatePending;
+	volatile LONG m_lCatTabInfoInvalidatePending;
 	CStringArray m_astrFilterTemp;
 	bool	m_bColumnDiff;
 	CString	m_strFullFilterExpr;
@@ -149,11 +158,15 @@ protected:
 	void	SetWnd2(EWnd2 uWnd2);
 	void	DoResize(int delta);
 	void	UpdateSplitterRange();
+	void	UpdateClientFilterCheckboxVisibility();
 	void	SetAllIcons();
 	void	SetWnd1Icons();
 	void	SetWnd2Icons();
 	void	UpdateTabToolTips()				{ UpdateTabToolTips(-1); }
 	void	UpdateTabToolTips(int tab);
+	void	PostQueueCountUpdateAsync(bool bHasQueueCount, INT_PTR iQueueCount, bool bForceImmediateUpdate);
+	void	PostCatTabTitlesUpdateAsync(bool bForce);
+	void	PostCatTabInfoInvalidateAsync();
 	CString	GetTabStatistic(int tab);
 	bool    m_bCatTabInfoDirty = true; // true if tab info needs to be updated
 	int     m_cachedActiveDwl = -1; // number of active (transferring & visible) downloads last computed
@@ -164,8 +177,8 @@ protected:
 	int		GetTabUnderMouse(const CPoint &point);
 	int		GetItemUnderMouse(CListCtrl &ctrl);
 	CString	GetCatTitle(int catid);
-	void	EditCatTabLabel(int index, CString newlabel);
-	void	EditCatTabLabel(int index);
+	bool	EditCatTabLabel(int index, CString newlabel);
+	bool	EditCatTabLabel(int index);
 	void	ShowList(uint32 dwListIDC);
 	void	UpdateQueueCountDisplay(bool bForceBannedCountRefresh = false);
 	bool	IsQueueCountDisplayVisible() const;
@@ -222,6 +235,7 @@ protected:
 	afx_msg void OnWnd1BtnDropDown(LPNMHDR, LRESULT*);
 	afx_msg void OnWnd2BtnDropDown(LPNMHDR, LRESULT*);
 	afx_msg void OnPaint();
+	afx_msg void OnSize(UINT nType, int cx, int cy);
 	afx_msg void OnSysCommand(UINT nID, LPARAM lParam);
 	afx_msg LRESULT OnChangeFilter(WPARAM wParam, LPARAM lParam);
 	afx_msg void OnBnClickedPreview();

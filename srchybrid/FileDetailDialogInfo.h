@@ -30,6 +30,7 @@ public:
 	virtual BOOL OnInitDialog();
 
 	void SetFiles(const CSimpleArray<CObject*> *paFiles)	{ m_paFiles = paFiles; m_bDataChanged = true; }
+	void SetSnapshotFileName(const CString& strFileName)	{ m_strSnapshotFileName = strFileName; }
 	void Localize();
 	bool m_bShowFileTypeWarning;
 
@@ -37,6 +38,7 @@ protected:
 	const CSimpleArray<CObject*> *m_paFiles;
 	UINT_PTR m_timer;
 	static LPCTSTR sm_pszNotAvail;
+	CString m_strSnapshotFileName;
 	bool m_bDataChanged;
 
 	void RefreshData();

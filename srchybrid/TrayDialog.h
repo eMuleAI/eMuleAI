@@ -15,6 +15,7 @@ public:
 	BOOL TraySetMenu(HMENU hMenu);
 	BOOL TraySetMenu(LPCTSTR lpszMenuName);
 	BOOL TrayUpdate();
+	bool TrayShowBalloon(LPCTSTR pszTitle, LPCTSTR pszText, DWORD dwInfoFlags);
 	bool TrayShow();
 	bool TrayHide();
 	void TrayReset();
@@ -32,6 +33,7 @@ public:
 	virtual void OnTrayRButtonUp(CPoint); //parameter used in the overriding method
 	virtual void OnTrayRButtonDblClk();
 	virtual void OnTrayMouseMove();
+	virtual void OnTrayBalloonUserClick();
 
 protected:
 	bool *m_pbMinimizeToTray;

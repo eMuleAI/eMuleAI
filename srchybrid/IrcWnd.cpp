@@ -275,8 +275,7 @@ void CIrcWnd::DoResize(int iDelta)
 	m_wndSplitterHorz.SetRange(rcWnd.left + SPLITTER_HORZ_RANGE_MIN + SPLITTER_HORZ_WIDTH / 2
 		, rcWnd.left + SPLITTER_HORZ_RANGE_MAX - SPLITTER_HORZ_WIDTH / 2);
 
-	Invalidate();
-	UpdateWindow();
+	Invalidate(FALSE);
 }
 
 LRESULT CIrcWnd::DefWindowProc(UINT uMessage, WPARAM wParam, LPARAM lParam)

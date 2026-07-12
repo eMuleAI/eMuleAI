@@ -34,6 +34,8 @@ protected:
 
 	void UpdateControls();
 	void ApplyNotifierSoundType();
+	void InitializeNotifierDisplayMode(bool bPreserveCurrentSelection = false);
+	void ApplyNotifierDisplayMode();
 
 	virtual void DoDataExchange(CDataExchange *pDX);
 	virtual BOOL OnInitDialog();

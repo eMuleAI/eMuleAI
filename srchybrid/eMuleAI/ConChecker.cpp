@@ -2,11 +2,11 @@
 //Copyright (C)2026 eMule AI
 
 #include "StdAfx.h"
+#include <afxinet.h>
 #include "emule.h"
 #include "emuleDlg.h"
 #include "conchecker.h"
 #include "Log.h"
-#include <wininet.h>
 #include "Preferences.h"
 
 #ifdef _DEBUG
@@ -19,66 +19,50 @@ const UINT UWM_CONCHECKER = ::RegisterWindowMessage(_T("UWM_CONCHECKER_{C44CF9E8
 
 namespace
 {
-void DrainPendingConCheckerMessages()
-{
-	if (theApp.emuledlg == NULL)
-		return;
+	const DWORD CONNECTION_CHECKER_TIMEOUT_MS = 1500;
+	const DWORD CONNECTION_CHECKER_INTERVAL_MS = 30000;
 
-	const HWND hWnd = theApp.emuledlg->GetSafeHwnd();
-	if (!::IsWindow(hWnd))
-		return;
-
-	MSG msg;
-	while (::PeekMessage(&msg, hWnd, UWM_CONCHECKER, UWM_CONCHECKER, PM_REMOVE)) {
+	void SetConnectionCheckerInternetTimeout(HINTERNET hInternet, DWORD dwOption)
+	{
+		DWORD dwTimeout = CONNECTION_CHECKER_TIMEOUT_MS;
+		::InternetSetOption(hInternet, dwOption, &dwTimeout, sizeof(dwTimeout));
 	}
-}
+
+	CString BuildConnectionCheckerUrl(LPCTSTR pszServer)
+	{
+		CString strUrl(pszServer != NULL ? pszServer : _T(""));
+		strUrl.Trim();
+		if (!strUrl.IsEmpty() && strUrl.Find(_T("://")) < 0)
+			strUrl.Insert(0, _T("http://"));
+		return strUrl;
+	}
 }
 
 CConChecker::CConChecker(void)
-	: m_pThread(NULL)
-	, m_hStopEvent(::CreateEvent(NULL, TRUE, FALSE, NULL))
-	, m_hNotifyWnd(NULL)
+	: m_lGeneration(0)
+	, m_lActive(0)
 {
 }
 
 CConChecker::~CConChecker(void)
 {
-	const bool bStopped = Stop();
-	if (bStopped && m_hStopEvent) {
-		::CloseHandle(m_hStopEvent);
-		m_hStopEvent = NULL;
-	}
-}
-
-bool CConChecker::CleanupStoppedThread(bool bLogStopped)
-{
-	if (m_pThread == NULL)
-		return true;
-
-	HANDLE hThread = m_pThread->m_hThread;
-	if (hThread != NULL && ::WaitForSingleObject(hThread, 0) == WAIT_TIMEOUT)
-		return false;
-
-	delete m_pThread;
-	m_pThread = NULL;
-	DrainPendingConCheckerMessages();
-	m_hNotifyWnd = NULL;
-	m_strConnectionCheckerServer.Empty();
-	if (bLogStopped)
-		AddLogLine(false, GetResString(_T("CONN_CHECK_STOPPED")));
-	return true;
+	Stop();
 }
 
 bool CConChecker::Start()
 {
-	if (!CleanupStoppedThread(false))
+	if (theApp.IsNetworkActivityBlockedByBind())
 		return false;
+
+	const LONG lGeneration = ::InterlockedIncrement(&m_lGeneration);
+	::InterlockedExchange(&m_lActive, 0);
+	{
+		CSingleLock lock(&m_serverLock, TRUE);
+		m_strConnectionCheckerServer.Empty();
+	}
 
 	theApp.SetConnectionState(CONSTATE_NULL);
 	AddLogLine(false, _T("***"));
-
-	if (m_hStopEvent == NULL)
-		return false;
 
 	if (!thePrefs.GetConnectionChecker()) {
 		AddLogLine(false, GetResString(_T("CONN_CHECK_PASSIVE")));
@@ -86,108 +70,132 @@ bool CConChecker::Start()
 		return false;
 	}
 
-	if (theApp.emuledlg == NULL) {
+	CString strConnectionCheckerServer = thePrefs.GetConnectionCheckerServer();
+	if (strConnectionCheckerServer.IsEmpty()) {
 		AddLogLine(false, GetResString(_T("CONN_CHECK_PASSIVE")));
 		AddLogLine(false, _T("***"));
 		return false;
 	}
 
-	const HWND hWnd = theApp.emuledlg->GetSafeHwnd();
-	if (!::IsWindow(hWnd)) {
+	{
+		CSingleLock lock(&m_serverLock, TRUE);
+		m_strConnectionCheckerServer = strConnectionCheckerServer;
+	}
+	::InterlockedExchange(&m_lActive, 1);
+	if (!QueueWorkerCheck(lGeneration, 1000)) {
+		::InterlockedExchange(&m_lActive, 0);
+		AddDebugLogLine(DLP_HIGH, _T("Connection Checker could not queue network utility worker job."));
 		AddLogLine(false, GetResString(_T("CONN_CHECK_PASSIVE")));
 		AddLogLine(false, _T("***"));
 		return false;
 	}
 
-	m_hNotifyWnd = hWnd;
-	m_strConnectionCheckerServer = thePrefs.GetConnectionCheckerServer();
-	if (m_strConnectionCheckerServer.IsEmpty()) {
-		AddLogLine(false, GetResString(_T("CONN_CHECK_PASSIVE")));
-		AddLogLine(false, _T("***"));
-		return false;
-	}
-
-	if (m_hStopEvent)
-		::ResetEvent(m_hStopEvent);
-
-	CWinThread* pThread = AfxBeginThread(ThreadProc, this, THREAD_PRIORITY_NORMAL, 0, CREATE_SUSPENDED);
-	if (pThread == NULL)
-		return false;
-
-	pThread->m_bAutoDelete = FALSE;
-	m_pThread = pThread;
 	AddLogLine(false, GetResString(_T("CONN_CHECK_ACTIVE")));
 	AddLogLine(false, _T("***"));
-	m_pThread->ResumeThread();
 	return true;
 }
 
 bool CConChecker::Stop()
 {
-	if (m_pThread == NULL)
-		return true;
-
-	if (m_hStopEvent)
-		::SetEvent(m_hStopEvent);
-
-	HANDLE hThread = m_pThread->m_hThread;
-	if (hThread != NULL) {
-		const DWORD waitRes = ::WaitForSingleObject(hThread, 6000);
-		if (waitRes == WAIT_TIMEOUT) {
-			AddDebugLogLine(DLP_HIGH, _T("Connection Checker thread stop timed out."));
-			return false;
-		}
-		if (waitRes != WAIT_OBJECT_0) {
-			AddDebugLogLine(DLP_HIGH, _T("Connection Checker thread stop failed. Error=%lu"), ::GetLastError());
-			return false;
-		}
+	const bool bWasActive = ::InterlockedExchange(&m_lActive, 0) != 0;
+	::InterlockedIncrement(&m_lGeneration);
+	{
+		CSingleLock lock(&m_serverLock, TRUE);
+		m_strConnectionCheckerServer.Empty();
 	}
-
-	return CleanupStoppedThread(true);
+	if (bWasActive && !theApp.IsClosing())
+		AddLogLine(false, GetResString(_T("CONN_CHECK_STOPPED")));
+	return true;
 }
 
-bool CConChecker::IsActive()
+bool CConChecker::IsActive() const
 {
-	if (m_pThread == NULL || m_pThread->m_hThread == NULL)
+	return ::InterlockedCompareExchange(const_cast<volatile LONG*>(&m_lActive), 0, 0) != 0;
+}
+
+bool CConChecker::IsWorkerGenerationActive(LONG lGeneration) const
+{
+	return lGeneration != 0
+		&& ::InterlockedCompareExchange(const_cast<volatile LONG*>(&m_lActive), 0, 0) != 0
+		&& ::InterlockedCompareExchange(const_cast<volatile LONG*>(&m_lGeneration), 0, 0) == lGeneration
+		&& !theApp.IsClosing()
+		&& !theApp.IsBackendLifecycleStopping();
+}
+
+bool CConChecker::QueueWorkerCheck(LONG lGeneration, DWORD dwDelayMs)
+{
+	if (!IsWorkerGenerationActive(lGeneration))
 		return false;
 
-	return ::WaitForSingleObject(m_pThread->m_hThread, 0) == WAIT_TIMEOUT;
+	CString strConnectionCheckerServer;
+	{
+		CSingleLock lock(&m_serverLock, TRUE);
+		strConnectionCheckerServer = m_strConnectionCheckerServer;
+	}
+	if (strConnectionCheckerServer.IsEmpty())
+		return false;
+
+	if (theApp.GetWorkerTopologyState(CemuleApp::WorkerTopologyNetworkUtility) == CemuleApp::WorkerTopologyStopped && !theApp.StartNetworkUtilityWorker())
+		return false;
+
+	CemuleApp::SWorkerTopologyItem item;
+	item.m_eRole = CemuleApp::WorkerTopologyNetworkUtility;
+	item.m_eType = CemuleApp::WorkerTopologyItemNetworkUtility;
+	item.m_dwCreatedTick = ::GetTickCount();
+	item.m_dwDueTick = item.m_dwCreatedTick + dwDelayMs;
+	item.m_lWorkerGeneration = lGeneration;
+	item.m_strPayload = strConnectionCheckerServer;
+	item.m_strStage = _T("connection-check");
+	item.m_strCoalesceKey.Format(_T("connection-check:%ld"), lGeneration);
+	return theApp.QueueNetworkUtilityWorkerItem(item);
 }
 
-UINT CConChecker::ThreadProc(LPVOID pProcParam)
+uint8 CConChecker::RunWorkerCheck(LONG lGeneration, LPCTSTR pszServer)
 {
-	CConChecker* pThis = reinterpret_cast<CConChecker*>(pProcParam);
-	if (pThis == NULL || pThis->m_hStopEvent == NULL)
-		return 0;
+	if (theApp.IsNetworkActivityBlockedByBind())
+		return CONSTATE_NULL;
 
-	const HANDLE hStopEvent = pThis->m_hStopEvent;
-	const HWND hNotifyWnd = pThis->m_hNotifyWnd;
-	const CString strConnectionCheckerServer = pThis->m_strConnectionCheckerServer;
-	if (!::IsWindow(hNotifyWnd) || strConnectionCheckerServer.IsEmpty())
-		return 0;
+	if (!IsWorkerGenerationActive(lGeneration))
+		return CONSTATE_NULL;
 
-#pragma warning(disable:4127) // Disable compiler warning for constant usage in the loop
-	for (;;) {
-		if (::WaitForSingleObject(hStopEvent, 1000) != WAIT_TIMEOUT)
-			break;
+	const CString strUrl = BuildConnectionCheckerUrl(pszServer);
+	if (strUrl.IsEmpty())
+		return CONSTATE_NULL;
 
-		if (theApp.IsClosing())
-			break;
+	HINTERNET hInternet = ::InternetOpen(_T("eMuleAI-ConnectionChecker"), INTERNET_OPEN_TYPE_PRECONFIG, NULL, NULL, 0);
+	if (hInternet == NULL)
+		return IsWorkerGenerationActive(lGeneration) ? CONSTATE_OFFLINE : CONSTATE_NULL;
 
-		const LPARAM lConnectionState = ::InternetCheckConnection(strConnectionCheckerServer, FLAG_ICC_FORCE_CONNECTION, 0)
-			? CONSTATE_ONLINE
-			: CONSTATE_OFFLINE;
+	SetConnectionCheckerInternetTimeout(hInternet, INTERNET_OPTION_CONNECT_TIMEOUT);
+	SetConnectionCheckerInternetTimeout(hInternet, INTERNET_OPTION_SEND_TIMEOUT);
+	SetConnectionCheckerInternetTimeout(hInternet, INTERNET_OPTION_RECEIVE_TIMEOUT);
 
-		if (::WaitForSingleObject(hStopEvent, 0) != WAIT_TIMEOUT)
-			break;
-		if (theApp.IsClosing())
-			break;
-		if (!::IsWindow(hNotifyWnd))
-			continue;
+	const DWORD dwOpenUrlFlags = INTERNET_FLAG_NO_UI | INTERNET_FLAG_NO_CACHE_WRITE | INTERNET_FLAG_RELOAD | INTERNET_FLAG_PRAGMA_NOCACHE;
+	HINTERNET hUrl = IsWorkerGenerationActive(lGeneration) ? ::InternetOpenUrl(hInternet, strUrl, NULL, 0, dwOpenUrlFlags, 0) : NULL;
+	const bool bOnline = hUrl != NULL;
+	if (hUrl != NULL)
+		::InternetCloseHandle(hUrl);
+	::InternetCloseHandle(hInternet);
 
-		::PostMessage(hNotifyWnd, UWM_CONCHECKER, static_cast<WPARAM>(2), lConnectionState);
+	if (!IsWorkerGenerationActive(lGeneration))
+		return CONSTATE_NULL;
+
+	return bOnline ? CONSTATE_ONLINE : CONSTATE_OFFLINE;
+}
+
+void CConChecker::ApplyWorkerResult(LONG lGeneration, uint8 uConnectionState)
+{
+	if (!IsWorkerGenerationActive(lGeneration))
+		return;
+	if (uConnectionState != CONSTATE_ONLINE && uConnectionState != CONSTATE_OFFLINE)
+		uConnectionState = CONSTATE_NULL;
+
+	if (theApp.emuledlg == NULL)
+		return;
+
+	const HWND hWnd = theApp.emuledlg->GetSafeHwnd();
+	if (hWnd != NULL && ::IsWindow(hWnd) && ::PostMessage(hWnd, UWM_CONCHECKER, static_cast<WPARAM>(lGeneration), static_cast<LPARAM>(uConnectionState))) {
+		if (!QueueWorkerCheck(lGeneration, CONNECTION_CHECKER_INTERVAL_MS))
+			AddDebugLogLine(DLP_LOW, _T("Connection Checker did not schedule the next network utility worker job."));
 	}
-#pragma warning(default:4127)
-
-	return 0;
 }

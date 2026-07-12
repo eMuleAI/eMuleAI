@@ -33,6 +33,12 @@ static char THIS_FILE[] = __FILE__;
 
 #define	PREF_INI_SECTION	_T("DirectDownloadDlg")
 
+namespace
+{
+	const UINT kDirectDownloadEditLimit = 128U * 1024U * 1024U;
+	const int kDirectDownloadNormalizeEditLimit = 64 * 1024;
+}
+
 IMPLEMENT_DYNAMIC(CDirectDownloadDlg, CDialog)
 
 BEGIN_MESSAGE_MAP(CDirectDownloadDlg, CResizableDialog)
@@ -71,12 +77,22 @@ void CDirectDownloadDlg::OnEnUpdateElink()
 
 void CDirectDownloadDlg::OnEnKillfocusElink()
 {
+	CWnd *pLinks = GetDlgItem(IDC_ELINK);
+	if (pLinks == NULL)
+		return;
+
+	const int iTextLen = pLinks->GetWindowTextLength();
+	if (iTextLen <= 0 || iTextLen > kDirectDownloadNormalizeEditLimit)
+		return;
+
 	CString strLinks;
-	GetDlgItemText(IDC_ELINK, strLinks);
+	pLinks->GetWindowText(strLinks);
 	if (!strLinks.IsEmpty()) {
-		strLinks.Replace(_T("\n"), _T("\r\n"));
-		strLinks.Replace(_T("\r\r"), _T("\r"));
-		SetDlgItemText(IDC_ELINK, strLinks);
+		CString strNormalized(strLinks);
+		strNormalized.Replace(_T("\n"), _T("\r\n"));
+		strNormalized.Replace(_T("\r\r"), _T("\r"));
+		if (strNormalized != strLinks)
+			pLinks->SetWindowText(strNormalized);
 	}
 }
 
@@ -84,31 +100,11 @@ void CDirectDownloadDlg::OnOK()
 {
 	CString strLinks;
 	GetDlgItemText(IDC_ELINK, strLinks);
+	strLinks.Trim();
 
-	for (int iPos = 0; iPos >= 0;) {
-		const CString &sToken(strLinks.Tokenize(_T(" \t\r\n"), iPos)); //tokenize by whitespace
-		if (sToken.IsEmpty())
-			break;
-		bool bSlash = (sToken[sToken.GetLength() - 1] == _T('/'));
-		CED2KLink *pLink = NULL;
-		try {
-			pLink = CED2KLink::CreateLinkFromUrl(bSlash ? sToken : sToken + _T('/'));
-			if (pLink) {
-				if (pLink->GetKind() != CED2KLink::kFile)
-					throwCStr(_T("bad link"));
-				theApp.downloadqueue->AddFileLinkToDownload(*pLink->GetFileLink(), thePrefs.GetCatCount() ? m_cattabs.GetCurSel() : 0);
-				delete pLink;
-				pLink = NULL;
-			}
-		} catch (const CString &error) {
-			delete pLink;
-			CString sBuffer;
-			sBuffer.Format(GetResString(_T("ERR_INVALIDLINK")), (LPCTSTR)error);
-			CString strError;
-			strError.Format(GetResString(_T("ERR_LINKERROR")), (LPCTSTR)sBuffer);
-			CDarkMode::MessageBox(strError);
-			return;
-		}
+	if (!strLinks.IsEmpty()) {
+		const int iCat = thePrefs.GetCatCount() ? m_cattabs.GetCurSel() : 0;
+		theApp.AddEd2kLinksToDownload(strLinks, iCat);
 	}
 
 	CResizableDialog::OnOK();
@@ -118,6 +114,7 @@ BOOL CDirectDownloadDlg::OnInitDialog()
 {
 	CResizableDialog::OnInitDialog();
 	InitWindowStyles(this);
+	SendDlgItemMessage(IDC_ELINK, EM_SETLIMITTEXT, kDirectDownloadEditLimit, 0);
 	SetIcon(m_icoWnd = theApp.LoadIcon(_T("PasteLink")), FALSE);
 
 	AddOrReplaceAnchor(this, IDC_DDOWN_FRM, TOP_LEFT, BOTTOM_RIGHT);
@@ -168,4 +165,5 @@ void CDirectDownloadDlg::UpdateCatTabs()
 	}
 
 	m_cattabs.SetCurSel(oldsel >= 0 && oldsel < m_cattabs.GetItemCount() ? oldsel : 0);
+	m_cattabs.RefreshDarkScrollButtons();
 }

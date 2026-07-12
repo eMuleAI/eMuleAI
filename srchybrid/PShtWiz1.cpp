@@ -30,7 +30,7 @@
 #include "emuledlg.h"
 #include "eMuleAI/DarkMode.h"
 #include "RichEditCtrlX.h"
-#include "eMuleAI/GeoLiteDownloadDlg.h"
+#include "Log.h"
 
 #ifdef _DEBUG
 #define new DEBUG_NEW
@@ -39,6 +39,57 @@ static char THIS_FILE[] = __FILE__;
 #endif
 
 #define	IDT_UPNP_TICKS	1
+
+
+static bool IsWizardListenRebindFailure(CListenSocket::ERebindResult eResult)
+{
+	return eResult == CListenSocket::RebindRequiresRestart || eResult == CListenSocket::RebindFailedKeptOldSocket;
+}
+
+static bool IsWizardClientUDPRebindFailure(CClientUDPSocket::ERebindResult eResult)
+{
+	return eResult == CClientUDPSocket::RebindRequiresRestart || eResult == CClientUDPSocket::RebindFailedKeptOldSocket;
+}
+
+static bool AreWizardRuntimePortsCurrent(uint16 nTcpPort, uint16 nUdpPort)
+{
+	return thePrefs.GetPort() == nTcpPort && thePrefs.GetUDPPort() == nUdpPort
+		&& theApp.listensocket->GetConnectedPort() == nTcpPort && theApp.clientudp->GetConnectedPort() == nUdpPort;
+}
+
+static bool ApplyWizardRuntimePorts(uint16 nTcpPort, uint16 nUdpPort, LPCTSTR pszContext)
+{
+	if (AreWizardRuntimePortsCurrent(nTcpPort, nUdpPort))
+		return true;
+
+	if (!theApp.IsPortchangeAllowed()) {
+		DebugLogError(_T("First Runtime Wizard could not apply %s runtime ports because runtime port changes are not allowed: tcp=%u, udp=%u, currentTcp=%u, currentUdp=%u"),
+			pszContext,
+			nTcpPort,
+			nUdpPort,
+			theApp.listensocket->GetConnectedPort(),
+			theApp.clientudp->GetConnectedPort());
+		return false;
+	}
+
+	thePrefs.port = nTcpPort;
+	thePrefs.udpport = nUdpPort;
+	const CListenSocket::ERebindResult eTcpRebind = theApp.listensocket->Rebind();
+	const CClientUDPSocket::ERebindResult eUdpRebind = theApp.clientudp->Rebind();
+	const bool bApplied = !IsWizardListenRebindFailure(eTcpRebind) && !IsWizardClientUDPRebindFailure(eUdpRebind) && AreWizardRuntimePortsCurrent(nTcpPort, nUdpPort);
+	if (!bApplied)
+		DebugLogError(_T("First Runtime Wizard failed to apply %s runtime ports: tcpResult=%d, udpResult=%d, requestedTcp=%u, requestedUdp=%u, prefTcp=%u, prefUdp=%u, actualTcp=%u, actualUdp=%u"),
+			pszContext,
+			static_cast<int>(eTcpRebind),
+			static_cast<int>(eUdpRebind),
+			nTcpPort,
+			nUdpPort,
+			thePrefs.GetPort(),
+			thePrefs.GetUDPPort(),
+			theApp.listensocket->GetConnectedPort(),
+			theApp.clientudp->GetConnectedPort());
+	return bApplied;
+}
 
 static void SetWizardCloseEnabled(CPropertySheetEx *pSheet, bool bEnable)
 {
@@ -280,8 +331,7 @@ BOOL CPPgWiz1ExtRes::OnInitDialog()
 
 void CPPgWiz1ExtRes::ApplyNoticeText()
 {
-	CString text;
-	text.Format(GetResString(_T("EMULE_AI_EXTRES_BODY")), kGeoLiteDownloadUrl);
+	CString text = GetResString(_T("EMULE_AI_EXTRES_BODY"));
 	m_wndNotice.SetWindowText(text);
 	UpdateNoticeLayout();
 	m_wndNotice.UpdateColors();
@@ -645,17 +695,14 @@ void CPPgWiz1Ports::OnStartConTest()
 	uint16 udp = GetUDPPort();
 
 	if (tcp != theApp.listensocket->GetConnectedPort() || udp != theApp.clientudp->GetConnectedPort()) {
-		if (!theApp.IsPortchangeAllowed()) {
+		const uint16 nOldTcpPort = thePrefs.GetPort();
+		const uint16 nOldUdpPort = thePrefs.GetUDPPort();
+
+		if (!ApplyWizardRuntimePorts(tcp, udp, _T("connection test"))) {
+			ApplyWizardRuntimePorts(nOldTcpPort, nOldUdpPort, _T("connection test rollback"));
 			LocMessageBox(_T("NOPORTCHANGEPOSSIBLE"), MB_OK, 0);
 			return;
 		}
-
-		// set new ports
-		thePrefs.port = tcp;
-		thePrefs.udpport = udp;
-
-		theApp.listensocket->Rebind();
-		theApp.clientudp->Rebind();
 	}
 
 	TriggerPortTest(tcp, udp);
@@ -1205,16 +1252,16 @@ BOOL FirstTimeWizard()
 	page4.m_pbUDPDisabled = &bUDPDisabled;
 	page7.m_pbUDPDisabled = &bUDPDisabled;
 
+	const uint16 nInitialWizardTcpPort = static_cast<uint16>(page4.m_uTCP);
+	const uint16 nInitialWizardUdpPort = static_cast<uint16>(page4.m_uUDP);
 	uint16 oldtcpport = thePrefs.GetPort();
 	uint16 oldudpport = thePrefs.GetUDPPort();
 
 	if (sheet.DoModal() == IDCANCEL) {
 
-		// restore port settings?
-		thePrefs.port = oldtcpport;
-		thePrefs.udpport = oldudpport;
-		theApp.listensocket->Rebind();
-		theApp.clientudp->Rebind();
+		// Restore runtime ports changed by the wizard port test.
+		if (!AreWizardRuntimePortsCurrent(oldtcpport, oldudpport))
+			ApplyWizardRuntimePorts(oldtcpport, oldudpport, _T("cancel rollback"));
 
 		return FALSE;
 	}
@@ -1238,20 +1285,29 @@ BOOL FirstTimeWizard()
 	thePrefs.SetNetworkED2K(page7.m_iED2K != 0);
 
 	// set ports
-	thePrefs.port = (uint16)page4.m_uTCP;
-	thePrefs.udpport = (uint16)page4.m_uUDP;
-	ASSERT(thePrefs.port != 0 && thePrefs.udpport != 0 + 10);
-	if (thePrefs.port == 0)
-		thePrefs.port = thePrefs.GetRandomTCPPort();
-	if (thePrefs.udpport == 0 + 10)
-		thePrefs.udpport = thePrefs.GetRandomUDPPort();
-	if ((thePrefs.port != theApp.listensocket->GetConnectedPort()) || (thePrefs.udpport != theApp.clientudp->GetConnectedPort()))
-		if (!theApp.IsPortchangeAllowed())
-			LocMessageBox(_T("NOPORTCHANGEPOSSIBLE"), MB_OK, 0);
-		else {
-			theApp.listensocket->Rebind();
-			theApp.clientudp->Rebind();
+	uint16 nNewTcpPort = (uint16)page4.m_uTCP;
+	uint16 nNewUdpPort = (uint16)page4.m_uUDP;
+	ASSERT(nNewTcpPort != 0 && nNewUdpPort != 0 + 10);
+	if (nNewTcpPort == 0)
+		nNewTcpPort = thePrefs.GetRandomTCPPort();
+	if (nNewUdpPort == 0 + 10)
+		nNewUdpPort = thePrefs.GetRandomUDPPort();
+	const bool bWizardPortsChanged = nNewTcpPort != nInitialWizardTcpPort || nNewUdpPort != nInitialWizardUdpPort;
+	const bool bRuntimePortsApplied = ApplyWizardRuntimePorts(nNewTcpPort, nNewUdpPort, _T("finish"));
+	if (bRuntimePortsApplied) {
+		if (bWizardPortsChanged) {
+			thePrefs.SetPortRandomizationOnStartupEnabled(false);
+			thePrefs.SetConfiguredPort(nNewTcpPort);
+			thePrefs.SetConfiguredUDPPort(nNewUdpPort);
+			thePrefs.port = nNewTcpPort;
+			thePrefs.udpport = nNewUdpPort;
 		}
+	}
+	else {
+		ApplyWizardRuntimePorts(oldtcpport, oldudpport, _T("finish rollback"));
+		LocMessageBox(_T("NOPORTCHANGEPOSSIBLE"), MB_OK, 0);
+	}
+
 
 	return TRUE;
 }

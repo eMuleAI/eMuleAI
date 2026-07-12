@@ -21,6 +21,7 @@
 #include "ThrottledSocket.h" // ZZ:UploadBandWithThrottler (UDP)
 
 class CUtpSocket;
+class CQuicNatSocket;
 
 class CAsyncProxySocketLayer;
 
@@ -54,6 +55,7 @@ public:
 	virtual bool HasQueues(bool bOnlyStandardPackets = false) const;
 	virtual bool IsEnoughFileDataQueued(uint32 nMinFilePayloadBytes) const;
 	virtual bool UseBigSendBuffer();
+	bool	UseBigSendBuffer(uint32 uBufferBytes);
 	INT_PTR	DbgGetStdQueueCount() const		{ return standardpacket_queue.GetCount(); }
 
 	virtual DWORD GetTimeOut() const		{ return m_uTimeOut; }
@@ -70,8 +72,13 @@ public:
 	CUtpSocket* InitUtpSupport();
 	CUtpSocket* GetUtpLayer() { return m_pUtpLayer; }
 	BOOL	HaveUtpLayer(bool bActive = false);
+	bool	HasFailedUtpTransport() const;
+	CQuicNatSocket* InitQuicNatSupport();
+	CQuicNatSocket* GetQuicNatLayer() { return m_pQuicNatLayer; }
+	BOOL	HaveQuicNatLayer(bool bActive = false);
+	BOOL	HaveNatTraversalLayer(bool bActive = false);
 	
-	// Override to bypass encryption check for uTP connections
+	// Override to bypass encryption check for NAT-T connections
 	virtual bool IsEncryptionLayerReady();
 
 	void InitProxySupport();
@@ -87,6 +94,7 @@ public:
 	uint64 GetSentBytesControlPacketSinceLastCallAndReset();
 	uint32 GetSentPayloadSinceLastCall(bool bReset);
 	void TruncateQueues();
+	void ResetTransportStateForReconnect();
 	bool DropQueuedControlPacket(uint8 opcode, uint8 protocol = 0x00);
 
 	virtual SocketSentBytes SendControlData(uint32 maxNumberOfBytesToSend, uint32 minFragSize)			{ return SendEM(maxNumberOfBytesToSend, minFragSize, true); }
@@ -111,6 +119,7 @@ protected:
 	uint8	byConnected;
 	bool	m_bProxyConnectFailed;
 	CUtpSocket* m_pUtpLayer;
+	CQuicNatSocket* m_pQuicNatLayer;
 
 private:
 	virtual SocketSentBytes SendEM(uint32 maxNumberOfBytesToSend, uint32 minFragSize, bool onlyAllowedToSendControlPacket);
@@ -162,6 +171,7 @@ private:
 	bool	m_bBusy;
 	bool	m_hasSent;
 	bool	m_bUseBigSendBuffers;
+	uint32	m_uRequestedSendBufferBytes;
 	bool	m_bUseOverlappedSend;
 	bool	m_bPendingSendOv;
 };
