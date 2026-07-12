@@ -1,1 +1,0 @@
-@item @var{int} @ref{gnutls_hpke_export} (gnutls_hpke_context_t @var{ctx}, const gnutls_datum_t * @var{exporter_context}, size_t @var{length}, gnutls_datum_t * @var{secret})

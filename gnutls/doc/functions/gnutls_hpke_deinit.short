@@ -1,1 +1,0 @@
-@item @var{int} @ref{gnutls_hpke_deinit} (gnutls_hpke_context_t @var{ctx})

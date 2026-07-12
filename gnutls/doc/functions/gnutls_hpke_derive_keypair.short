@@ -1,1 +1,0 @@
-@item @var{int} @ref{gnutls_hpke_derive_keypair} (gnutls_hpke_kem_t @var{kem}, const gnutls_datum_t * @var{ikm}, gnutls_privkey_t @var{privkey}, gnutls_pubkey_t @var{pubkey})

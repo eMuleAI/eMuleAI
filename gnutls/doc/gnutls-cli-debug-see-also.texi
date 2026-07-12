@@ -1,1 +1,0 @@
-gnutls-cli(1), gnutls-serv(1)
