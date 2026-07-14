@@ -8,7 +8,7 @@ A modern fork of the classic open-source eMule P2P file sharing client.
 
 ## Overview
 
-eMule AI modernizes the classic eMule experience with improvements focused on today's networks, hardware, and usability.
+eMule AI modernizes the eMule experience with NAT Traversal, QUIC/uTP and IPv6 support, stronger LowID and firewalled peer connectivity, smoother interface performance and a broad range of usability, protection and reliability improvements.
 
 For feature overviews, installation help, migration guidance, settings reference, NAT Traversal documentation, release notes, and troubleshooting, visit the official documentation hub:
 
