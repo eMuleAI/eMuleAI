@@ -1,0 +1,32 @@
+services:
+  emuleai:
+    image: emuleai/emuleai:latest
+    container_name: emuleai
+    platform: linux/amd64
+    restart: "no"
+    environment:
+      PUID: "1000"
+      PGID: "1000"
+      DISPLAY_MODE: "${DISPLAY_MODE:-xpra}"
+      DISPLAY_WIDTH: "${DISPLAY_WIDTH:-1280}"
+      DISPLAY_HEIGHT: "${DISPLAY_HEIGHT:-800}"
+      XPRA_CANVAS_WIDTH: "${XPRA_CANVAS_WIDTH:-7680}"
+      XPRA_CANVAS_HEIGHT: "${XPRA_CANVAS_HEIGHT:-4320}"
+      DISPLAY_DEPTH: "${DISPLAY_DEPTH:-24}"
+      NOVNC_PORT: "${NOVNC_PORT:-6080}"
+      XPRA_PORT: "${XPRA_PORT:-14500}"
+      XPRA_PASSWORD: "${XPRA_PASSWORD:-}"
+      EMULE_TCP_PORT: "${EMULE_TCP_PORT:-4662}"
+      EMULE_UDP_PORT: "${EMULE_UDP_PORT:-4672}"
+    ports:
+      - "127.0.0.1:${NOVNC_PORT:-6080}:${NOVNC_PORT:-6080}/tcp"
+      - "127.0.0.1:${XPRA_PORT:-14500}:${XPRA_PORT:-14500}/tcp"
+      - "${EMULE_TCP_PORT:-4662}:${EMULE_TCP_PORT:-4662}/tcp"
+      - "${EMULE_UDP_PORT:-4672}:${EMULE_UDP_PORT:-4672}/udp"
+    volumes:
+      - type: bind
+        source: "${EMULEAI_DATA_DIR:-./data/eMuleAI}"
+        target: /data
+        bind:
+          create_host_path: true
+    shm_size: "256m"

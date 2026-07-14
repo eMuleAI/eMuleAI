@@ -20,9 +20,26 @@ For the latest builds and release notes, visit the GitHub Releases page:
 
 https://github.com/eMuleAI/eMuleAI/releases
 
+For Docker deployments, use the official emuleai/emuleai (https://hub.docker.com/r/emuleai/emuleai) image on Docker Hub. Linux and macOS users can use Xpra desktop integration while headless Linux systems can use noVNC browser access. See the [Docker Guide](#docker-guide) below for installation, configuration, networking, update, and troubleshooting instructions.
+
 For installation and upgrade guidance, use the official documentation:
 
 https://emuleai.github.io
+
+## Docker Guide
+
+The official eMule AI Docker image runs the Windows x64 release under Wine in a Linux `amd64` container. It provides two display modes:
+
+- **Xpra**, the default mode, presents the eMule AI window as a separate desktop window on Linux or macOS. The interface is still rendered by the Windows application under Wine.
+- **noVNC** provides the complete virtual desktop in a browser. It is the fallback mode and is suitable for headless Linux systems.
+
+The official public image is available from Docker Hub:
+
+https://hub.docker.com/r/emuleai/emuleai
+
+Please see the Docker overview for more details:
+
+https://emuleai.github.io/index.html#overview-docker
 
 ## Migration Warning
 
@@ -42,7 +59,7 @@ https://emuleai.github.io
 
 ## Optional External Resources
 
-Some features require user-supplied external files such as server.met, nodes.dat, ipfilter.dat.
+Some features require user supplied external files such as server.met, nodes.dat, ipfilter.dat.
 
 If you already have these files, copy them to the eMule AI config directory and restart the application.
 
@@ -52,7 +69,7 @@ Please use only sources you trust and review their origin, terms, license condit
 
 ## Legal Notice
 
-eMule AI is a general-purpose peer-to-peer networking application intended for lawful use only, including authorized file distribution, archival purposes, research, and community sharing.
+eMule AI is a general purpose peer to peer networking application intended for lawful use only, including authorized file distribution, archival purposes, research, and community sharing.
 
 The project does not endorse, encourage, or promote copyright infringement or any other unlawful activity.
 

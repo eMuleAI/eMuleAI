@@ -300,17 +300,6 @@ public:
 	virtual void HtmlHelp(DWORD_PTR dwData, UINT nCmd = 0x000F);
 
 	bool IsInitializing() const;
-	enum EBulkOperationProgressSlot
-	{
-		BulkOperationProgressSearch = 0,
-		BulkOperationProgressDownload,
-		BulkOperationProgressSharedFiles,
-		BulkOperationProgressBackendDownload,
-		BulkOperationProgressCount
-	};
-	void SetBulkOperationProgressState(EBulkOperationProgressSlot eSlot, bool bActive, bool bCanCancel, bool bAdd, bool bDelete, bool bUpdate, UINT uDone, UINT uTotal, bool bListUpdateAfterCompletion = false, bool bHashing = false);
-	void ClearBulkOperationProgressState(EBulkOperationProgressSlot eSlot);
-	bool GetBulkOperationProgressState(EBulkOperationProgressSlot eSlot, bool& bCanCancel, bool& bAdd, bool& bDelete, bool& bUpdate, UINT& uDone, UINT& uTotal) const;
 	void CancelActiveBulkOperations();
 	void RefreshActiveBulkOperationOverlays();
 	void DeferUiLogFlush(DWORD dwDelayMs);
@@ -408,22 +397,6 @@ protected:
 	float			m_prevProgress;
 	HICON			m_ovlIcon;
 #endif
-
-	struct SBulkOperationProgressState
-	{
-		SBulkOperationProgressState();
-		bool bActive;
-		bool bCanCancel;
-		bool bHasAdd;
-		bool bHasDelete;
-		bool bHasUpdate;
-		bool bListUpdateAfterCompletion;
-		bool bHashing;
-		UINT uDone;
-		UINT uTotal;
-	};
-
-	SBulkOperationProgressState m_bulkOperationProgressStates[BulkOperationProgressCount];
 
 	bool bPrevKadState;
 	bool bPrevEd2kState;

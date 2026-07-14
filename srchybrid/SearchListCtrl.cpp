@@ -597,8 +597,6 @@ bool CSearchListCtrl::ResolveChunkedSearchRemoveItem(const SChunkedSearchRemoveI
 
 void CSearchListCtrl::ClearChunkedSearchRemoveItems(bool bReloadVisibleList)
 {
-	if (theApp.emuledlg != NULL)
-		theApp.emuledlg->ClearBulkOperationProgressState(CemuleDlg::BulkOperationProgressSearch);
 	if (::IsWindow(m_hWnd))
 		KillTimer(kTimerChunkedSearchRemove);
 	m_vecChunkedSearchRemoveItems.clear();
@@ -667,10 +665,8 @@ void CSearchListCtrl::StartChunkedRemoveSelectedSearchResults(CTypedPtrList<CPtr
 	m_uChunkedSearchRemoveFailed = 0;
 	m_dwChunkedSearchRemoveStartedTick = ::GetTickCount();
 	m_dwChunkedSearchRemoveLastProgressTick = m_dwChunkedSearchRemoveStartedTick;
-	if (theApp.emuledlg != NULL) {
-		theApp.emuledlg->SetBulkOperationProgressState(CemuleDlg::BulkOperationProgressSearch, true, true, false, true, false, 0, static_cast<UINT>(m_vecChunkedSearchRemoveItems.size()));
+	if (theApp.emuledlg != NULL)
 		theApp.emuledlg->RefreshActiveBulkOperationOverlays();
-	}
 
 	if (SetTimer(kTimerChunkedSearchRemove, 1, NULL) == 0) {
 		AddDebugLogLine(DLP_HIGH, false, _T("Chunked search result remove aborted because the continuation timer could not be created. total=%u\n"), static_cast<UINT>(m_vecChunkedSearchRemoveItems.size()));
@@ -716,11 +712,8 @@ void CSearchListCtrl::ProcessChunkedSearchRemoveItems()
 
 	if (m_iNextChunkedSearchRemoveItem >= static_cast<INT_PTR>(m_vecChunkedSearchRemoveItems.size()))
 		FinishChunkedSearchRemoveItems(false);
-	else if (theApp.emuledlg != NULL) {
-		const UINT uTotal = static_cast<UINT>(m_vecChunkedSearchRemoveItems.size());
-		theApp.emuledlg->SetBulkOperationProgressState(CemuleDlg::BulkOperationProgressSearch, true, true, false, true, false, min(static_cast<UINT>(m_iNextChunkedSearchRemoveItem), uTotal), uTotal);
+	else if (theApp.emuledlg != NULL)
 		theApp.emuledlg->RefreshActiveBulkOperationOverlays();
-	}
 }
 
 void CSearchListCtrl::FinishChunkedSearchRemoveItems(bool bAborted)
@@ -738,10 +731,8 @@ void CSearchListCtrl::FinishChunkedSearchRemoveItems(bool bAborted)
 	m_uChunkedSearchRemoveFailed = 0;
 	m_dwChunkedSearchRemoveStartedTick = 0;
 	m_dwChunkedSearchRemoveLastProgressTick = 0;
-	if (theApp.emuledlg != NULL) {
-		theApp.emuledlg->ClearBulkOperationProgressState(CemuleDlg::BulkOperationProgressSearch);
+	if (theApp.emuledlg != NULL)
 		theApp.emuledlg->RefreshActiveBulkOperationOverlays();
-	}
 	if (!theApp.IsClosing() && ::IsWindow(m_hWnd)) {
 		if (bAborted)
 			ReloadList(false, kSearchListViewState);
@@ -758,10 +749,8 @@ void CSearchListCtrl::CancelActiveChunkedSearchOperation()
 {
 	ClearChunkedSearchRemoveItems(true);
 	HideOperationOverlay();
-	if (theApp.emuledlg != NULL) {
-		theApp.emuledlg->ClearBulkOperationProgressState(CemuleDlg::BulkOperationProgressSearch);
+	if (theApp.emuledlg != NULL)
 		theApp.emuledlg->RefreshActiveBulkOperationOverlays();
-	}
 }
 
 

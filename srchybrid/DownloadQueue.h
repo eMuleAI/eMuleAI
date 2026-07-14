@@ -225,7 +225,7 @@ public:
 	void	RemoveDeferredSourceSave(CPartFile *pFile);
 	void	ProcessDeferredSourceSaves(bool bDrainAll = false);
 	void	UpdateBulkAddDiskFinalizationProgress(bool bForceNotify = false);
-	void	RequestBulkAddDiskFinalizationProgressUpdate();
+	void	RequestBulkAddDiskFinalizationProgressUpdate(bool bForceNotify = false);
 	bool	HasBulkAddDiskFinalizationProgressUpdate() const;
 	void	ProcessBulkAddDiskFinalizationProgressUpdate();
 	void	DrainDeferredPartFileDiskWorkForShutdown();
@@ -398,6 +398,7 @@ private:
 	DWORD	m_dwLastA4AFtime; // ZZ:DownloadManager
 	UINT	CountPendingDeferredPartFileDiskWork();
 	UINT	CountPendingBulkAddDiskFinalizationFiles();
+	bool	IsBulkAddDiskFinalizationActive() const;
 	UINT	FlushQueuedPartFileCreatesSynchronously();
 	UINT	FlushPendingPartFileCreatesSynchronously();
 	UINT	ProcessDeferredPartFileCreateResults(bool bDrainAll, DWORD dwSliceStart, UINT &uProcessed, UINT uMaxResults);
@@ -432,10 +433,13 @@ private:
 	bool	m_bBulkAddSuppressPerItemListUpdates;
 	bool	m_bBulkAddDeferDownloadValidatorAdds;
 	bool	m_bBulkAddOverviewExportDeferred;
-	bool	m_bBulkAddDiskFinalizationActive;
+	std::vector<SDownloadItemId> m_bulkAddedDownloadIds;
+	std::vector<SDownloadItemId> m_bulkAddDiskFinalizationIds;
+	volatile LONG	m_lBulkAddDiskFinalizationActive;
 	UINT	m_uBulkAddDiskFinalizationTotal;
 	DWORD	m_dwLastBulkAddDiskFinalizationNotifyTick;
 	volatile LONG	m_lBulkAddDiskFinalizationProgressUpdatePending;
+	volatile LONG	m_lBulkAddDiskFinalizationForceNotifyPending;
 	bool	m_bStartupLoadActive;
 	bool	m_bStartupLoadCompleted;
 	INT_PTR	m_iStartupLoadTempDir;

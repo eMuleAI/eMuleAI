@@ -38,6 +38,7 @@ struct FlushPartMetData
 
 	LONG lGeneration;
 	bool bDontOverrideBak;
+	bool bDeferredInitialPartMetSave;
 	CString strFullName;
 	CString strPartMetFileName;
 	CString strFileName;

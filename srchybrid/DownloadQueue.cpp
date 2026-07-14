@@ -839,10 +839,13 @@ CDownloadQueue::CDownloadQueue()
 	, m_bBulkAddSuppressPerItemListUpdates()
 	, m_bBulkAddDeferDownloadValidatorAdds()
 	, m_bBulkAddOverviewExportDeferred()
-	, m_bBulkAddDiskFinalizationActive()
+	, m_bulkAddedDownloadIds()
+	, m_bulkAddDiskFinalizationIds()
+	, m_lBulkAddDiskFinalizationActive(0)
 	, m_uBulkAddDiskFinalizationTotal()
 	, m_dwLastBulkAddDiskFinalizationNotifyTick()
 	, m_lBulkAddDiskFinalizationProgressUpdatePending(0)
+	, m_lBulkAddDiskFinalizationForceNotifyPending(0)
 	, m_bStartupLoadActive()
 	, m_bStartupLoadCompleted()
 
@@ -1789,10 +1792,13 @@ CDownloadQueue::~CDownloadQueue()
 	m_deferredSourceSaves.clear();
 	m_deferredSourceSaveSet.clear();
 	m_bDeferredSourceSavesIncludePaused = false;
-	m_bBulkAddDiskFinalizationActive = false;
+	m_bulkAddedDownloadIds.clear();
+	m_bulkAddDiskFinalizationIds.clear();
+	::InterlockedExchange(&m_lBulkAddDiskFinalizationActive, 0);
 	m_uBulkAddDiskFinalizationTotal = 0;
 	m_dwLastBulkAddDiskFinalizationNotifyTick = 0;
 	::InterlockedExchange(&m_lBulkAddDiskFinalizationProgressUpdatePending, 0);
+	::InterlockedExchange(&m_lBulkAddDiskFinalizationForceNotifyPending, 0);
 	m_mapFilesByHash.RemoveAll();
 	const UINT uShutdownFileTotal = static_cast<UINT>(min(static_cast<INT_PTR>(UINT_MAX), filelist.GetCount()));
 	const uint64 uShutdownProgressDoubleTotal = static_cast<uint64>(uShutdownFileTotal) * 2ULL;
@@ -2010,55 +2016,79 @@ UINT CDownloadQueue::CountPendingDeferredPartFileDiskWork()
 UINT CDownloadQueue::CountPendingBulkAddDiskFinalizationFiles()
 {
 	UINT uPending = 0;
-	for (POSITION pos = filelist.GetHeadPosition(); pos != NULL;) {
-		const CPartFile* pFile = filelist.GetNext(pos);
-		if (pFile == NULL)
+	for (std::vector<SDownloadItemId>::const_iterator it = m_bulkAddDiskFinalizationIds.begin(); it != m_bulkAddDiskFinalizationIds.end(); ++it) {
+		CPartFile* pFile = GetFileByID(it->m_abyFileHash);
+		if (pFile == NULL || (it->m_uRuntimeID != 0 && pFile->GetRuntimeID() != it->m_uRuntimeID))
 			continue;
 
-		if (pFile->HasPendingPartFileDiskCreate() || pFile->HasDeferredInitialPartMetSave() || pFile->m_bFlushPartMetInQueue)
+		if (pFile->HasPendingPartFileDiskCreate() || pFile->HasDeferredInitialPartMetSave() || pFile->HasDeferredInitialPartMetSaveWritePending())
 			++uPending;
 	}
 	return uPending;
 }
 
+bool CDownloadQueue::IsBulkAddDiskFinalizationActive() const
+{
+	return ::InterlockedCompareExchange(const_cast<volatile LONG*>(&m_lBulkAddDiskFinalizationActive), 0, 0) != 0;
+}
+
 void CDownloadQueue::StartBulkAddDiskFinalization(UINT uTotal)
 {
-	m_bBulkAddDiskFinalizationActive = uTotal >= BULK_OPERATION_MIN_ITEMS;
-	m_uBulkAddDiskFinalizationTotal = m_bBulkAddDiskFinalizationActive ? uTotal : 0;
+	const bool bContinueActiveFinalization = IsBulkAddDiskFinalizationActive();
+	if (bContinueActiveFinalization || uTotal >= BULK_OPERATION_MIN_ITEMS)
+		m_bulkAddDiskFinalizationIds.insert(m_bulkAddDiskFinalizationIds.end(), m_bulkAddedDownloadIds.begin(), m_bulkAddedDownloadIds.end());
+	m_bulkAddedDownloadIds.clear();
+
+	if (m_bulkAddDiskFinalizationIds.empty()) {
+		::InterlockedExchange(&m_lBulkAddDiskFinalizationActive, 0);
+		m_uBulkAddDiskFinalizationTotal = 0;
+		m_dwLastBulkAddDiskFinalizationNotifyTick = 0;
+		::InterlockedExchange(&m_lBulkAddDiskFinalizationProgressUpdatePending, 0);
+		::InterlockedExchange(&m_lBulkAddDiskFinalizationForceNotifyPending, 0);
+		return;
+	}
+
+	m_uBulkAddDiskFinalizationTotal = static_cast<UINT>(min(static_cast<size_t>(UINT_MAX), m_bulkAddDiskFinalizationIds.size()));
 	m_dwLastBulkAddDiskFinalizationNotifyTick = 0;
-	::InterlockedExchange(&m_lBulkAddDiskFinalizationProgressUpdatePending, m_bBulkAddDiskFinalizationActive ? 1 : 0);
-	if (m_bBulkAddDiskFinalizationActive)
-		theApp.SetActiveDownloadAddDiskProgress(0, m_uBulkAddDiskFinalizationTotal, true);
+	::InterlockedExchange(&m_lBulkAddDiskFinalizationForceNotifyPending, 0);
+	::InterlockedExchange(&m_lBulkAddDiskFinalizationActive, 1);
+	::InterlockedExchange(&m_lBulkAddDiskFinalizationProgressUpdatePending, 1);
+	theApp.SetActiveDownloadAddDiskProgress(0, m_uBulkAddDiskFinalizationTotal, true);
 }
 
 void CDownloadQueue::UpdateBulkAddDiskFinalizationProgress(bool bForceNotify)
 {
-	if (!m_bBulkAddDiskFinalizationActive)
-		return;
-	if (!theApp.IsBackendOwnerThread()) {
-		RequestBulkAddDiskFinalizationProgressUpdate();
+	if (!IsBulkAddDiskFinalizationActive()) {
+		::InterlockedExchange(&m_lBulkAddDiskFinalizationProgressUpdatePending, 0);
+		::InterlockedExchange(&m_lBulkAddDiskFinalizationForceNotifyPending, 0);
 		return;
 	}
-
-	const DWORD dwNow = ::GetTickCount();
-	if (!bForceNotify && m_dwLastBulkAddDiskFinalizationNotifyTick != 0 && static_cast<DWORD>(dwNow - m_dwLastBulkAddDiskFinalizationNotifyTick) < 1000) {
-		::InterlockedExchange(&m_lBulkAddDiskFinalizationProgressUpdatePending, 0);
+	if (!theApp.IsBackendOwnerThread()) {
+		RequestBulkAddDiskFinalizationProgressUpdate(bForceNotify);
 		return;
 	}
 
 	::InterlockedExchange(&m_lBulkAddDiskFinalizationProgressUpdatePending, 0);
+	if (::InterlockedExchange(&m_lBulkAddDiskFinalizationForceNotifyPending, 0) != 0)
+		bForceNotify = true;
+
+	const DWORD dwNow = ::GetTickCount();
+	if (!bForceNotify && m_dwLastBulkAddDiskFinalizationNotifyTick != 0 && static_cast<DWORD>(dwNow - m_dwLastBulkAddDiskFinalizationNotifyTick) < 1000)
+		return;
+
 	const UINT uTotal = m_uBulkAddDiskFinalizationTotal;
 	const UINT uPending = CountPendingBulkAddDiskFinalizationFiles();
 	if (uPending == 0) {
-		m_bBulkAddDiskFinalizationActive = false;
+		::InterlockedExchange(&m_lBulkAddDiskFinalizationActive, 0);
+		m_bulkAddDiskFinalizationIds.clear();
 		m_uBulkAddDiskFinalizationTotal = 0;
 		m_dwLastBulkAddDiskFinalizationNotifyTick = 0;
+		::InterlockedExchange(&m_lBulkAddDiskFinalizationForceNotifyPending, 0);
 		theApp.SetActiveDownloadAddDiskProgress(0, 0, false);
-		bForceNotify = true;
-	} else
+	} else {
+		m_dwLastBulkAddDiskFinalizationNotifyTick = dwNow;
 		theApp.SetActiveDownloadAddDiskProgress(uPending >= uTotal ? 0 : uTotal - uPending, uTotal, true);
-
-	m_dwLastBulkAddDiskFinalizationNotifyTick = dwNow;
+	}
 
 	if (theApp.emuledlg != NULL && theApp.IsUiThread())
 		theApp.emuledlg->RefreshActiveBulkOperationOverlays();
@@ -2066,10 +2096,12 @@ void CDownloadQueue::UpdateBulkAddDiskFinalizationProgress(bool bForceNotify)
 		theApp.QueueBulkOperationOverlayRefreshEvent(_T("bulk-add-disk-progress"));
 }
 
-void CDownloadQueue::RequestBulkAddDiskFinalizationProgressUpdate()
+void CDownloadQueue::RequestBulkAddDiskFinalizationProgressUpdate(bool bForceNotify)
 {
-	if (!m_bBulkAddDiskFinalizationActive || theApp.IsClosing())
+	if (!IsBulkAddDiskFinalizationActive() || theApp.IsClosing())
 		return;
+	if (bForceNotify)
+		::InterlockedExchange(&m_lBulkAddDiskFinalizationForceNotifyPending, 1);
 	::InterlockedExchange(&m_lBulkAddDiskFinalizationProgressUpdatePending, 1);
 	theApp.QueueBackendContinuationProcessing();
 }
@@ -2489,6 +2521,8 @@ void CDownloadQueue::BeginBulkAddDownloads(bool bSuppressPerItemListUpdates, boo
 {
 	if (!GuardDownloadModelMutation(_T("CDownloadQueue::BeginBulkAddDownloads")))
 		return;
+	if (m_uBulkAddDepth == 0)
+		m_bulkAddedDownloadIds.clear();
 	if (bSuppressPerItemListUpdates)
 		m_bBulkAddSuppressPerItemListUpdates = true;
 	if (bDeferDownloadValidatorAdds)
@@ -2519,6 +2553,7 @@ void CDownloadQueue::FinalizeBulkAddDownloads()
 	m_bBulkAddDeferDownloadValidatorAdds = false;
 
 	if (!m_bBulkAddPending) {
+		m_bulkAddedDownloadIds.clear();
 		if (HasDeferredDownloadValidatorAdds())
 			theApp.QueueBackendContinuationProcessing();
 		return;
@@ -2982,6 +3017,10 @@ void CDownloadQueue::AddDownload(CPartFile *newfile, bool paused)
 
 	CDownloadListCtrl *pDownloadList = GetDownloadListForDownloadQueueUi();
 	if (IsBulkAddingDownloads()) {
+		SDownloadItemId id;
+		id.SetFile(newfile);
+		if (id.IsValid())
+			m_bulkAddedDownloadIds.push_back(id);
 		m_bBulkAddPending = true;
 		++m_uBulkAddedFiles;
 		if (pDownloadList != NULL)
@@ -3878,10 +3917,13 @@ void CDownloadQueue::DeleteAll()
 	ClearDownloadSourceIndexes();
 	m_posDeferredPartFileCreateQueueFile = NULL;
 	m_bDeferredPartFileCreateQueuePending = false;
-	m_bBulkAddDiskFinalizationActive = false;
+	m_bulkAddedDownloadIds.clear();
+	m_bulkAddDiskFinalizationIds.clear();
+	::InterlockedExchange(&m_lBulkAddDiskFinalizationActive, 0);
 	m_uBulkAddDiskFinalizationTotal = 0;
 	m_dwLastBulkAddDiskFinalizationNotifyTick = 0;
 	::InterlockedExchange(&m_lBulkAddDiskFinalizationProgressUpdatePending, 0);
+	::InterlockedExchange(&m_lBulkAddDiskFinalizationForceNotifyPending, 0);
 	for (POSITION pos = filelist.GetHeadPosition(); pos != NULL;) {
 		CPartFile *cur_file = filelist.GetNext(pos);
 		cur_file->srclist.RemoveAll();

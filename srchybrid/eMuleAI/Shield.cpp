@@ -517,15 +517,16 @@ void CShield::CheckClient(CUpDownClient* client)
 	if (thePrefs.IsDetectCommunity() && IsHarderPunishment(client->m_uPunishment, PR_BADCOMMUNITY) && (IsSnakeOrGamer(client) || (client->m_bUnitedComm)))
 		SetPunishment(client, GetResString(_T("PUNISHMENT_REASON_BAD_COMMUNITY")), PR_BADCOMMUNITY);
 
+	const UINT uClientVersion = client->GetVersion();
 	if (thePrefs.IsDetectFakeEmule() && IsHarderPunishment(client->m_uPunishment, PR_FAKEMULEVERSION) &&
-		(((GetVersion() > 589) && ((client->GetSourceExchange1Version() > 0) || (client->GetExtendedRequestsVersion() > 0)) && (client->GetClientSoft() == SO_EDONKEY)) //Fake Donkeys
+		(((uClientVersion > 589) && ((client->GetSourceExchange1Version() > 0) || (client->GetExtendedRequestsVersion() > 0)) && (client->GetClientSoft() == SO_EDONKEY)) //Fake Donkeys
 			|| ((client->GetClientSoft() == SO_EDONKEYHYBRID) && ((client->GetSourceExchange1Version() > 0) || (client->GetExtendedRequestsVersion() > 0))) //Fake Hybrids
 			|| (client->m_bySupportSecIdent != 0 && (client->GetClientSoft() == SO_EDONKEYHYBRID || client->GetClientSoft() == SO_EDONKEY)) // this clients don't support sui
-			|| (GetVersion() > MAKE_CLIENT_VERSION(0, 30, 0) && client->GetMuleVersion() > 0 && client->GetMuleVersion() != 0x99 && client->GetClientSoft() == SO_EMULE) //Fake emuleVersion
-			|| (GetVersion() == MAKE_CLIENT_VERSION(0, 44, 3) && client->GetClientModVer().IsEmpty() && client->GetUnicodeSupport() == UTF8strNone && client->GetClientSoft() == SO_EMULE)
+			|| (uClientVersion > MAKE_CLIENT_VERSION(0, 30, 0) && client->GetMuleVersion() > 0 && client->GetMuleVersion() != 0x99 && client->GetClientSoft() == SO_EMULE) //Fake emuleVersion
+			|| (uClientVersion == MAKE_CLIENT_VERSION(0, 44, 3) && client->GetClientModVer().IsEmpty() && client->GetUnicodeSupport() == UTF8strNone && client->GetClientSoft() == SO_EMULE)
 			)) {
 		CString str;
-		str.Format(GetResString(_T("PUNISHMENT_REASON_FAKE_EMULE_VERSION")) + _T(": %i/%u.%u.%u.%u/0.%x"), (UINT)client->GetClientSoft(), (GetVersion() >> 17) & 0x7f, (GetVersion() >> 10) & 0x7f, (GetVersion() >> 7) & 0x07, GetVersion() & 0x7f, (UINT)client->GetMuleVersion());
+		str.Format(GetResString(_T("PUNISHMENT_REASON_FAKE_EMULE_VERSION")) + _T(": %i/%u.%u.%u.%u/0.%x"), (UINT)client->GetClientSoft(), (uClientVersion >> 17) & 0x7f, (uClientVersion >> 10) & 0x7f, (uClientVersion >> 7) & 0x07, uClientVersion & 0x7f, (UINT)client->GetMuleVersion());
 		SetPunishment(client, str, PR_FAKEMULEVERSION);
 	}
 

@@ -524,6 +524,7 @@ void CPartFile::Init()
 	m_bSaveSourcesInQueue = false;
 	m_bFlushPartMetInQueue = false;
 	m_bDeferredInitialPartMetSave = false;
+	m_lDeferredInitialPartMetSaveWritePending = 0;
 	m_bPartFileDiskCreatePending = false;
 	m_bPartFileDiskCreateQueued = false;
 	m_bSkipPartFileSaveOnDelete = false;
@@ -1835,7 +1836,7 @@ bool CPartFile::FlushDeferredInitialPartMetSave()
 		return false;
 
 	m_bDeferredInitialPartMetSave = false;
-	if (SavePartFile())
+	if (SavePartFile(false, false, true))
 		return true;
 
 	if (!theApp.IsClosing())
@@ -1843,13 +1844,13 @@ bool CPartFile::FlushDeferredInitialPartMetSave()
 	return false;
 }
 
-bool CPartFile::SavePartFile(bool bDontOverrideBak, bool bForceSynchronous)
+bool CPartFile::SavePartFile(bool bDontOverrideBak, bool bForceSynchronous, bool bDeferredInitialPartMetSave)
 {
 	if (status == PS_WAITINGFORHASH || status == PS_HASHING || status == PS_COMPLETE || status == PS_COMPLETING || m_bPartFileHashFailed)
 		return false;
 
 	if (!bForceSynchronous && !theApp.IsClosing()) // Except app is closing or a durable bulk add commit is required, use the write thread.
-		return SavePartFileThreaded(bDontOverrideBak);
+		return SavePartFileThreaded(bDontOverrideBak, bDeferredInitialPartMetSave);
 
 	if (!theApp.CanWritePartMetFiles(GetTmpPath()))
 		return false;
@@ -2184,7 +2185,7 @@ bool CPartFile::SavePartFile(bool bDontOverrideBak, bool bForceSynchronous)
 	return true;
 }
 
-bool CPartFile::SavePartFileThreaded(bool bDontOverrideBak)
+bool CPartFile::SavePartFileThreaded(bool bDontOverrideBak, bool bDeferredInitialPartMetSave)
 {
 	if (!theApp.GuardModelMutation(CemuleApp::ModelMutationPartFile, _T("CPartFile::SavePartFileThreaded")))
 		return false;
@@ -2345,6 +2346,7 @@ bool CPartFile::SavePartFileThreaded(bool bDontOverrideBak)
 	FlushPartMetData* pFlushData = new FlushPartMetData;
 	pFlushData->lGeneration = NextPartMetSaveGeneration();
 	pFlushData->bDontOverrideBak = bDontOverrideBak;
+	pFlushData->bDeferredInitialPartMetSave = bDeferredInitialPartMetSave;
 	pFlushData->strFullName = PartMetFileData->m_fullname;
 	pFlushData->strPartMetFileName = PartMetFileData->m_partmetfilename;
 	pFlushData->strFileName = PartMetFileData->m_strFileName;
@@ -2367,6 +2369,8 @@ bool CPartFile::SavePartFileThreaded(bool bDontOverrideBak)
 	if (pThread && pThread->IsRunning()) {
 		CSingleLock sFlushListLock(&pThread->m_lockFlushList, TRUE);
 		m_bFlushPartMetInQueue = true;
+		if (bDeferredInitialPartMetSave)
+			InterlockedExchange(&m_lDeferredInitialPartMetSaveWritePending, 1);
 		pThread->m_FlushList.AddTail(ToWrite{ this, NULL, pFlushData, NULL, NULL, NULL, NULL });
 		pFlushData = NULL;
 		bQueuedSnapshot = true;

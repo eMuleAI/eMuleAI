@@ -1,0 +1,6 @@
+*
+!Dockerfile
+!entrypoint.sh
+!configure-settings.py
+!app/
+!app/**

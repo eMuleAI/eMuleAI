@@ -633,9 +633,6 @@ void CDownloadListCtrl::UpdateBackendDownloadCommandOverlay(bool bRemove, UINT u
 	m_bBackendDownloadCommandOverlayActive = true;
 	m_uBackendDownloadCommandSequence = uSequence;
 	m_uBackendDownloadCommandCorrelationId = uCorrelationId;
-	if (theApp.emuledlg != NULL)
-		theApp.emuledlg->SetBulkOperationProgressState(CemuleDlg::BulkOperationProgressBackendDownload, true, true, false, bRemove, !bRemove, uDone, uTotal);
-
 	if (HasActiveChunkedDownloadOperation()) {
 		if (theApp.emuledlg != NULL)
 			theApp.emuledlg->RefreshActiveBulkOperationOverlays();
@@ -666,8 +663,6 @@ void CDownloadListCtrl::HideBackendDownloadCommandOverlay(uint64 uSequence, uint
 	m_bBackendDownloadCommandOverlayActive = false;
 	m_uBackendDownloadCommandSequence = 0;
 	m_uBackendDownloadCommandCorrelationId = 0;
-	if (theApp.emuledlg != NULL)
-		theApp.emuledlg->ClearBulkOperationProgressState(CemuleDlg::BulkOperationProgressBackendDownload);
 	if (m_bMirroredSearchDownloadOverlayActive && !HasActiveChunkedDownloadOperation())
 		RefreshMirroredSearchDownloadOverlay();
 	else if (!HasActiveChunkedDownloadOperation())
@@ -747,8 +742,6 @@ void CDownloadListCtrl::CancelActiveChunkedDownloadOperation()
 {
 	ClearChunkedRemoveDownloadItems();
 	ClearChunkedDownloadStateItems();
-	if (theApp.emuledlg != NULL)
-		theApp.emuledlg->ClearBulkOperationProgressState(CemuleDlg::BulkOperationProgressDownload);
 	if (m_bMirroredSearchDownloadOverlayActive)
 		RefreshMirroredSearchDownloadOverlay();
 	else
@@ -835,10 +828,8 @@ void CDownloadListCtrl::UpdateChunkedRemoveDownloadOverlay()
 {
 	if (m_uChunkedRemoveDownloadTotal < BULK_OPERATION_MIN_ITEMS || (m_chunkedRemoveDownloadItems.IsEmpty() && !m_bChunkedRemoveDownloadPending && !m_bChunkedRemoveDownloadListStateBatchActive && !m_bChunkedRemoveDownloadQueueBulkActive && !m_bChunkedRemoveDownloadWaitingForDiskCleanup && m_uChunkedRemoveDownloadPendingDiskDeletes == 0)) {
 		HideOperationOverlay();
-		if (theApp.emuledlg != NULL) {
-			theApp.emuledlg->ClearBulkOperationProgressState(CemuleDlg::BulkOperationProgressDownload);
+		if (theApp.emuledlg != NULL)
 			theApp.emuledlg->RefreshActiveBulkOperationOverlays();
-		}
 		return;
 	}
 
@@ -846,10 +837,8 @@ void CDownloadListCtrl::UpdateChunkedRemoveDownloadOverlay()
 	CString strDetail;
 	strDetail.Format(GetResString(_T("BULKOP_PROGRESS_DETAIL")), uDone, m_uChunkedRemoveDownloadTotal);
 	UpdateOperationOverlay(GetResString(_T("BULKOP_DELETE_DOWNLOADS_TITLE")), strDetail, uDone, m_uChunkedRemoveDownloadTotal, true);
-	if (theApp.emuledlg != NULL) {
-		theApp.emuledlg->SetBulkOperationProgressState(CemuleDlg::BulkOperationProgressDownload, true, true, false, true, false, uDone, m_uChunkedRemoveDownloadTotal);
+	if (theApp.emuledlg != NULL)
 		theApp.emuledlg->RefreshActiveBulkOperationOverlays();
-	}
 	ApplyChunkedRemoveDownloadVisibleItemCount(false);
 }
 
@@ -857,10 +846,8 @@ void CDownloadListCtrl::UpdateChunkedDownloadStateOverlay()
 {
 	if (m_uChunkedDownloadStateTotal < BULK_OPERATION_MIN_ITEMS || (m_chunkedDownloadStateItems.IsEmpty() && !m_bChunkedDownloadStatePending && !m_bChunkedDownloadStateListStateBatchActive)) {
 		HideOperationOverlay();
-		if (theApp.emuledlg != NULL) {
-			theApp.emuledlg->ClearBulkOperationProgressState(CemuleDlg::BulkOperationProgressDownload);
+		if (theApp.emuledlg != NULL)
 			theApp.emuledlg->RefreshActiveBulkOperationOverlays();
-		}
 		return;
 	}
 
@@ -869,10 +856,8 @@ void CDownloadListCtrl::UpdateChunkedDownloadStateOverlay()
 	CString strDetail;
 	strDetail.Format(GetResString(_T("BULKOP_PROGRESS_DETAIL")), uDone, m_uChunkedDownloadStateTotal);
 	UpdateOperationOverlay(GetResString(_T("BULKOP_UPDATE_DOWNLOADS_TITLE")), strDetail, uDone, m_uChunkedDownloadStateTotal, true);
-	if (theApp.emuledlg != NULL) {
-		theApp.emuledlg->SetBulkOperationProgressState(CemuleDlg::BulkOperationProgressDownload, true, true, false, false, true, uDone, m_uChunkedDownloadStateTotal);
+	if (theApp.emuledlg != NULL)
 		theApp.emuledlg->RefreshActiveBulkOperationOverlays();
-	}
 }
 
 void CDownloadListCtrl::OnTimer(UINT_PTR nIDEvent)
@@ -907,8 +892,6 @@ CDownloadListCtrl::SChunkedDownloadStateItem::SChunkedDownloadStateItem()
 
 void CDownloadListCtrl::ClearChunkedRemoveDownloadItems()
 {
-	if (theApp.emuledlg != NULL)
-		theApp.emuledlg->ClearBulkOperationProgressState(CemuleDlg::BulkOperationProgressDownload);
 	if (::IsWindow(m_hWnd))
 		KillTimer(TimerChunkedRemoveDownload);
 	m_bChunkedRemoveDownloadPending = false;
@@ -1289,8 +1272,6 @@ void CDownloadListCtrl::FinishChunkedRemoveDownloads()
 
 	AddDebugLogLine(DLP_LOW, false, _T("Chunked download remove completed. processed=%u stale=%u failed=%u elapsed=%u\n"), m_uChunkedRemoveDownloadProcessed, m_uChunkedRemoveDownloadStale, m_uChunkedRemoveDownloadFailed, static_cast<DWORD>(::GetTickCount() - m_dwChunkedRemoveDownloadStartedTick));
 	theApp.QueueDownloadListCommandEvent(CemuleApp::ApplicationEventDownloadRemoveCompleted, 0, m_uChunkedRemoveDownloadProcessed, m_uChunkedRemoveDownloadFailed, m_uChunkedRemoveDownloadStale, m_uChunkedRemoveDownloadTotal, m_uChunkedRemoveDownloadSequence, m_uChunkedRemoveDownloadCorrelationId, CemuleApp::BackendCommandSourceUi, CemuleApp::BackendCommandOrderingDownloadList, _T("download-list:chunked-remove"));
-	if (theApp.emuledlg != NULL)
-		theApp.emuledlg->ClearBulkOperationProgressState(CemuleDlg::BulkOperationProgressDownload);
 	m_uChunkedRemoveDownloadTotal = 0;
 	m_uChunkedRemoveDownloadPendingDiskDeletes = 0;
 	if (m_bMirroredSearchDownloadOverlayActive)
@@ -1374,8 +1355,6 @@ LRESULT CDownloadListCtrl::OnProcessChunkedRemoveDownloads(WPARAM, LPARAM)
 
 void CDownloadListCtrl::ClearChunkedDownloadStateItems()
 {
-	if (theApp.emuledlg != NULL)
-		theApp.emuledlg->ClearBulkOperationProgressState(CemuleDlg::BulkOperationProgressDownload);
 	if (::IsWindow(m_hWnd))
 		KillTimer(TimerChunkedDownloadState);
 	m_bChunkedDownloadStatePending = false;
@@ -1643,8 +1622,6 @@ void CDownloadListCtrl::FinishChunkedDownloadStateChange()
 	AddDebugLogLine(DLP_LOW, false, _T("Chunked download state change completed. action=%u value=%d processed=%u failed=%u stale=%u elapsed=%u\n"), static_cast<UINT>(m_eChunkedDownloadStateAction), m_iChunkedDownloadStateValue, m_uChunkedDownloadStateProcessed, m_uChunkedDownloadStateFailed, m_uChunkedDownloadStateStale, static_cast<DWORD>(::GetTickCount() - m_dwChunkedDownloadStateStartedTick));
 	theApp.QueueDownloadListCommandEvent(CemuleApp::ApplicationEventDownloadStateCompleted, static_cast<UINT>(m_eChunkedDownloadStateAction), m_uChunkedDownloadStateProcessed, m_uChunkedDownloadStateFailed, m_uChunkedDownloadStateStale, m_uChunkedDownloadStateTotal, m_uChunkedDownloadStateSequence, m_uChunkedDownloadStateCorrelationId);
 	m_uChunkedDownloadStateTotal = 0;
-	if (theApp.emuledlg != NULL)
-		theApp.emuledlg->ClearBulkOperationProgressState(CemuleDlg::BulkOperationProgressDownload);
 	if (m_bMirroredSearchDownloadOverlayActive)
 		RefreshMirroredSearchDownloadOverlay();
 	else

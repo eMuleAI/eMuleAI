@@ -17,10 +17,32 @@
 //Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 #pragma once
 
-#define MOD_NAME		_T("AI")
-#define MOD_VERSION		_T("AI v1.5")
-#define MOD_REPO_BASE_URL _T("https://github.com/eMuleAI/eMuleAI")
-#define MOD_PAGES_BASE_URL _T("https://eMuleAI.github.io")
+// Update only this definition for eMule AI releases: major, minor, patch, build, suffix.
+// Example prerelease suffix: APPLY(1,6,0,0,"-beta1").
+#define EMULEAI_VERSION(APPLY)		APPLY(1,5,1,0,"")
+#define EMULEAI_STRINGIZE_I(value)	#value
+#define EMULEAI_STRINGIZE(value)	EMULEAI_STRINGIZE_I(value)
+#define EMULEAI_MOD_VERSION_I(major, minor, patch, build, suffix)	_T("AI v") _T(EMULEAI_STRINGIZE(major)) _T(".") _T(EMULEAI_STRINGIZE(minor)) _T(".") _T(EMULEAI_STRINGIZE(patch)) _T(suffix)
+#define MOD_NAME					_T("AI")
+#define MOD_VERSION					EMULEAI_VERSION(EMULEAI_MOD_VERSION_I)
+#define MOD_REPO_BASE_URL			_T("https://github.com/eMuleAI/eMuleAI")
+#define MOD_PAGES_BASE_URL			_T("https://eMuleAI.github.io")
+
+// eMule core and protocol version. Keep independent from the eMule AI release version.
+#define VERSION_MJR		0
+#define VERSION_MIN		70
+#define VERSION_UPDATE	1
+#define VERSION_BUILD	5
+
+#ifndef EMULEAI_VERSION_RESOURCE_ONLY
+
+#if defined _M_X64
+#define VERSION_PLATFORM	_T(" x64")
+#elif defined _M_ARM64
+#define VERSION_PLATFORM	_T(" arm64")
+#else
+#define VERSION_PLATFORM	_T("")
+#endif
 
 #ifdef _DEBUG
 #define DEBUGLEAKHELPER
@@ -813,3 +835,5 @@ union UModMiscOptions
 #define SP_BLACKLISTED					0x09u
 
 static const CString EMPTY = _T("");
+
+#endif // EMULEAI_VERSION_RESOURCE_ONLY

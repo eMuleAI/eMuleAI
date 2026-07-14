@@ -136,6 +136,7 @@ namespace
 FlushPartMetData::FlushPartMetData()
 	: lGeneration()
 	, bDontOverrideBak()
+	, bDeferredInitialPartMetSave()
 	, uPartFileVersion()
 {
 	md4clr(abyMD4Hash);
@@ -1239,8 +1240,14 @@ void CPartFileWriteThread::CleanUp(const ToWrite& item, CPartFile* pFile) {
 	if (item.pFlushPartMetData) {
 		if (pFile) {
 			try {
-				if (!m_DeletedFilesList.Find(pFile)) // File is not deleted
+				if (!m_DeletedFilesList.Find(pFile)) { // File is not deleted
 					pFile->m_bFlushPartMetInQueue = false; // We should do this to make sure flushing not stuck.
+					if (item.pFlushPartMetData->bDeferredInitialPartMetSave) {
+						pFile->ClearDeferredInitialPartMetSaveWritePending();
+						if (theApp.downloadqueue != NULL)
+							theApp.downloadqueue->RequestBulkAddDiskFinalizationProgressUpdate(true);
+					}
+				}
 			} catch (CException* ex) {
 				ex->Delete();
 				ASSERT(0);

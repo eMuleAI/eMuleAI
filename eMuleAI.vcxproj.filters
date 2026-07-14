@@ -263,7 +263,6 @@
     <ClCompile Include="srchybrid\UPnPImplMiniLib.cpp" />
     <ClCompile Include="srchybrid\UPnPImplWinServ.cpp" />
     <ClCompile Include="srchybrid\UPnPImplWrapper.cpp" />
-    <ClCompile Include="srchybrid\Version.cpp" />
     <ClCompile Include="srchybrid\WebServer.cpp" />
     <ClCompile Include="srchybrid\WebSocket.cpp" />
     <ClCompile Include="srchybrid\Wizard.cpp" />
@@ -557,7 +556,6 @@
     <ClInclude Include="srchybrid\UPnPImplWinServ.h" />
     <ClInclude Include="srchybrid\UPnPImplWrapper.h" />
     <ClInclude Include="srchybrid\UserMsgs.h" />
-    <ClInclude Include="srchybrid\Version.h" />
     <ClInclude Include="srchybrid\VistaDefines.h" />
     <ClInclude Include="srchybrid\WebServer.h" />
     <ClInclude Include="srchybrid\WebServices.h" />

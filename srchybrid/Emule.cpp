@@ -116,6 +116,12 @@ void FreeEncryptedStreamSocketRandomPool();
 #define new DEBUG_NEW
 #endif
 
+const UINT CemuleApp::m_nVersionMjr = VERSION_MJR;
+const UINT CemuleApp::m_nVersionMin = VERSION_MIN;
+const UINT CemuleApp::m_nVersionUpd = VERSION_UPDATE;
+const UINT CemuleApp::m_nVersionBld = VERSION_BUILD;
+const TCHAR *CemuleApp::m_sPlatform = VERSION_PLATFORM;
+
 namespace
 {
 	static const LPCTSTR EMULE_AI_FIREWALL_APPLY_ARG = _T("emuleai-firewall-apply-listen-ports");

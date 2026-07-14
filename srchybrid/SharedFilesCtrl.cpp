@@ -1976,10 +1976,8 @@ void CSharedFilesCtrl::UpdateSharedFilesBulkOverlay()
 {
 	if (m_eSharedFilesBulkOperation == SharedFilesBulkOperationNone || m_uSharedFilesBulkTotal < BULK_OPERATION_MIN_ITEMS || (m_sharedFilesBulkItems.IsEmpty() && !m_bSharedFilesBulkCollectingSelection)) {
 		HideOperationOverlay();
-		if (theApp.emuledlg != NULL) {
-			theApp.emuledlg->ClearBulkOperationProgressState(CemuleDlg::BulkOperationProgressSharedFiles);
+		if (theApp.emuledlg != NULL)
 			theApp.emuledlg->RefreshActiveBulkOperationOverlays();
-		}
 		return;
 	}
 
@@ -1992,10 +1990,8 @@ void CSharedFilesCtrl::UpdateSharedFilesBulkOverlay()
 	UpdateOperationOverlay(GetResString(bDeleteLike ? _T("BULKOP_DELETE_DOWNLOADS_TITLE") : _T("BULKOP_UPDATE_DOWNLOADS_TITLE")), strDetail, uDone, m_uSharedFilesBulkTotal, true);
 	if (bDeleteLike)
 		ApplySharedFilesBulkRemoveVisibleItemCount(false);
-	if (theApp.emuledlg != NULL) {
-		theApp.emuledlg->SetBulkOperationProgressState(CemuleDlg::BulkOperationProgressSharedFiles, true, true, false, bDeleteLike, !bDeleteLike, uDone, m_uSharedFilesBulkTotal);
+	if (theApp.emuledlg != NULL)
 		theApp.emuledlg->RefreshActiveBulkOperationOverlays();
-	}
 }
 
 bool CSharedFilesCtrl::IsDeleteLikeBulkOperationActive() const
@@ -2052,10 +2048,9 @@ void CSharedFilesCtrl::UpdateSharedFilesHashingOverlay()
 		m_uSharedFilesHashingOverlayTotal = 0;
 		m_uSharedFilesHashingOverlayLastRemaining = 0;
 		if (bHadHashingOverlay) {
-			if (theApp.emuledlg != NULL) {
-				theApp.emuledlg->ClearBulkOperationProgressState(CemuleDlg::BulkOperationProgressSharedFiles);
+			if (theApp.emuledlg != NULL)
 				theApp.emuledlg->RefreshActiveBulkOperationOverlays();
-			} else if (!m_bBackendDownloadRemoveOverlayActive)
+			else if (!m_bBackendDownloadRemoveOverlayActive)
 				HideOperationOverlay();
 		}
 		return;
@@ -2077,10 +2072,8 @@ void CSharedFilesCtrl::UpdateSharedFilesHashingOverlay()
 	CString strDetail;
 	strDetail.Format(GetResString(_T("BULKOP_PROGRESS_FINAL_RELOAD_DETAIL")), uDone, uTotal);
 	UpdateOperationOverlay(GetResString(_T("BULKOP_HASH_SHAREDFILES_TITLE")), strDetail, uDone, uTotal, false);
-	if (theApp.emuledlg != NULL) {
-		theApp.emuledlg->SetBulkOperationProgressState(CemuleDlg::BulkOperationProgressSharedFiles, true, false, false, false, false, uDone, uTotal, true, true);
+	if (theApp.emuledlg != NULL)
 		theApp.emuledlg->RefreshActiveBulkOperationOverlays();
-	}
 }
 
 void CSharedFilesCtrl::OnOperationOverlayCancel()
@@ -2132,10 +2125,8 @@ void CSharedFilesCtrl::ClearSharedFilesBulkOperation()
 	if (bDeleteLike && (bHadRemovePending || bHadDetachedRows) && theApp.DownloadValidator != NULL && !theApp.IsClosing())
 		theApp.DownloadValidator->QueueReloadMap();
 	HideOperationOverlay();
-	if (theApp.emuledlg != NULL && !theApp.IsClosing()) {
-		theApp.emuledlg->ClearBulkOperationProgressState(CemuleDlg::BulkOperationProgressSharedFiles);
+	if (theApp.emuledlg != NULL && !theApp.IsClosing())
 		theApp.emuledlg->RefreshActiveBulkOperationOverlays();
-	}
 }
 
 
@@ -2207,10 +2198,8 @@ void CSharedFilesCtrl::FinishSharedFilesBulkOperation()
 	m_uSharedFilesBulkCorrelationId = 0;
 	m_dwSharedFilesBulkLastCompactTick = 0;
 	HideOperationOverlay();
-	if (theApp.emuledlg != NULL && !theApp.IsClosing()) {
-		theApp.emuledlg->ClearBulkOperationProgressState(CemuleDlg::BulkOperationProgressSharedFiles);
+	if (theApp.emuledlg != NULL && !theApp.IsClosing())
 		theApp.emuledlg->RefreshActiveBulkOperationOverlays();
-	}
 }
 
 void CSharedFilesCtrl::QueueSharedFilesBulkFailureEvent(const SSharedFilesBulkItem &item, LPCTSTR pszStage, DWORD dwError)

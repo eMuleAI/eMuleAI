@@ -9,6 +9,13 @@
 LANGUAGE LANG_ENGLISH, SUBLANG_ENGLISH_US
 #pragma code_page(65001)
 
+#define EMULEAI_VERSION_RESOURCE_ONLY
+#include "..\Opcodes.h"
+#undef EMULEAI_VERSION_RESOURCE_ONLY
+
+#define EMULEAI_VERSION_NUMBERS_I(major, minor, patch, build, suffix)	major,minor,patch,build
+#define EMULEAI_VERSION_RESOURCE_STRING_I(major, minor, patch, build, suffix)	EMULEAI_STRINGIZE(major) "." EMULEAI_STRINGIZE(minor) "." EMULEAI_STRINGIZE(patch) suffix
+
 /////////////////////////////////////////////////////////////////////////////
 // Fügen Sie hier manuell bearbeitete Ressourcen hinzu...
 
@@ -18,8 +25,8 @@ LANGUAGE LANG_ENGLISH, SUBLANG_ENGLISH_US
 //
 
 VS_VERSION_INFO VERSIONINFO
-        FILEVERSION         VERSION_MJR,VERSION_MIN,VERSION_UPDATE,VERSION_BUILD
-        PRODUCTVERSION      VERSION_MJR,VERSION_MIN,VERSION_UPDATE,VERSION_BUILD
+        FILEVERSION         EMULEAI_VERSION(EMULEAI_VERSION_NUMBERS_I)
+        PRODUCTVERSION      EMULEAI_VERSION(EMULEAI_VERSION_NUMBERS_I)
         FILEFLAGSMASK       VS_FFI_FILEFLAGSMASK
 #ifdef _DEBUG
         FILEFLAGS           VS_FF_DEBUG | VS_FF_PRIVATEBUILD | VS_FF_PRERELEASE
@@ -36,12 +43,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "https://github.com/eMuleAI/eMuleAI"
             VALUE "FileDescription", "eMule AI"
-            VALUE "FileVersion", SZ_VERSION_NAME " Unicode"
+            VALUE "FileVersion", EMULEAI_VERSION(EMULEAI_VERSION_RESOURCE_STRING_I)
             VALUE "InternalName", "eMuleAI.exe"
             VALUE "LegalCopyright", "Copyright © 2002-2026 Merkur. Copyright © 2026 eMule AI. See license.txt for details."
             VALUE "OriginalFilename", "eMuleAI.exe"
             VALUE "ProductName", "eMule AI"
-            VALUE "ProductVersion", SZ_VERSION_NAME " Unicode"
+            VALUE "ProductVersion", EMULEAI_VERSION(EMULEAI_VERSION_RESOURCE_STRING_I)
         END
     END
     BLOCK "VarFileInfo"

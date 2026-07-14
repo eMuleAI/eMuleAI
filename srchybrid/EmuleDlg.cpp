@@ -7243,75 +7243,6 @@ bool CemuleDlg::GetActiveBulkOperationCloseInfo(CString& strTitle, CString& strB
 	return true;
 }
 
-CemuleDlg::SBulkOperationProgressState::SBulkOperationProgressState()
-	: bActive(false)
-	, bCanCancel(false)
-	, bHasAdd(false)
-	, bHasDelete(false)
-	, bHasUpdate(false)
-	, bListUpdateAfterCompletion(false)
-	, bHashing(false)
-	, uDone(0)
-	, uTotal(0)
-{
-}
-
-void CemuleDlg::SetBulkOperationProgressState(EBulkOperationProgressSlot eSlot, bool bActive, bool bCanCancel, bool bAdd, bool bDelete, bool bUpdate, UINT uDone, UINT uTotal, bool bListUpdateAfterCompletion, bool bHashing)
-{
-	if (eSlot < 0 || eSlot >= BulkOperationProgressCount)
-		return;
-
-	SBulkOperationProgressState& state = m_bulkOperationProgressStates[eSlot];
-	if (!bActive || uTotal == 0 || (!bHashing && uTotal < BULK_OPERATION_MIN_ITEMS)) {
-		state = SBulkOperationProgressState();
-		return;
-	}
-
-	state.bActive = bActive;
-	state.bCanCancel = bCanCancel;
-	state.bHasAdd = bAdd;
-	state.bHasDelete = bDelete;
-	state.bHasUpdate = bUpdate;
-	state.bListUpdateAfterCompletion = bListUpdateAfterCompletion;
-	state.bHashing = bHashing;
-	state.uTotal = uTotal;
-	state.uDone = min(uDone, uTotal);
-}
-
-void CemuleDlg::ClearBulkOperationProgressState(EBulkOperationProgressSlot eSlot)
-{
-	if (eSlot < 0 || eSlot >= BulkOperationProgressCount)
-		return;
-
-	m_bulkOperationProgressStates[eSlot] = SBulkOperationProgressState();
-}
-
-bool CemuleDlg::GetBulkOperationProgressState(EBulkOperationProgressSlot eSlot, bool& bCanCancel, bool& bAdd, bool& bDelete, bool& bUpdate, UINT& uDone, UINT& uTotal) const
-{
-	bCanCancel = false;
-	bAdd = false;
-	bDelete = false;
-	bUpdate = false;
-	uDone = 0;
-	uTotal = 0;
-
-	if (eSlot < 0 || eSlot >= BulkOperationProgressCount)
-		return false;
-
-	const SBulkOperationProgressState& state = m_bulkOperationProgressStates[eSlot];
-	if (!state.bActive || state.uTotal == 0 || (!state.bHashing && state.uTotal < BULK_OPERATION_MIN_ITEMS))
-		return false;
-
-	bCanCancel = state.bCanCancel;
-	bAdd = state.bHasAdd;
-	bDelete = state.bHasDelete;
-	bUpdate = state.bHasUpdate;
-	uDone = state.uDone;
-	uTotal = state.uTotal;
-	return true;
-}
-
-
 void CemuleDlg::CancelActiveBulkOperations()
 {
 	if (searchwnd != NULL && searchwnd->m_pwndResults != NULL)
@@ -7330,8 +7261,17 @@ void CemuleDlg::CancelActiveBulkOperations()
 
 void CemuleDlg::StartDownloadOverlayCompletionDelay()
 {
-	if (::IsWindow(m_hWnd))
-		SetTimer(TIMER_DOWNLOAD_OVERLAY_COMPLETION_DELAY, DOWNLOAD_OVERLAY_COMPLETION_DELAY_MS, NULL);
+	if (!::IsWindow(m_hWnd))
+		return;
+	if (SetTimer(TIMER_DOWNLOAD_OVERLAY_COMPLETION_DELAY, DOWNLOAD_OVERLAY_COMPLETION_DELAY_MS, NULL) != 0)
+		return;
+
+	KillTimer(TIMER_DOWNLOAD_OVERLAY_COMPLETION_DELAY);
+	if (serverwnd != NULL)
+		serverwnd->FinishServerMetDownloadOverlayDelay();
+	CPPgSecurity::FinishIPFilterDownloadOverlayDelay();
+	CIPGeolocation::FinishIPGeolocationDownloadOverlayDelay();
+	RefreshActiveBulkOperationOverlays();
 }
 
 void CemuleDlg::SetActiveBulkOperationOverlaysSuppressed(bool bSuppress)

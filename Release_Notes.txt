@@ -3,6 +3,11 @@
 1) VERSION HISTORY
 ================================================================
 
+v1.5.1
+Added Docker support with the official emuleai/emuleai image on Docker Hub so Linux and macOS users can run eMule AI with Xpra desktop integration or access it through a browser with noVNC on headless Linux systems.
+Fixed an issue where the Saving Downloads overlay could remain stuck after adding eD2K links from the clipboard and prevent eMule AI from closing.
+Fixed an issue that could incorrectly punish eMule Qt clients as using a fake eMule AI version.
+
 v1.5
 Improved UI performace by moving several heavy disk, file, and list operations off the UI thread to reduce freezes during large updates.
 Improved startup performance by loading large file, search, client, and transfer data in parallel where possible.
@@ -185,145 +190,148 @@ Initial public release. See the New Features, Improvements and Bug Fixes section
 1. QUIC NAT-T Transport
 QUIC is now the primary NAT Traversal data protocol for compatible peers. Direct capability negotiation selects QUIC when available and automatically falls back to uTP for compatibility.
 
-2. Upload Settings
+2. Docker Support for Linux and macOS
+Use the official emuleai/emuleai image on Docker Hub to run eMule AI with Xpra desktop integration on Linux and macOS or noVNC browser access on headless Linux systems.
+
+3. Upload Settings
 A dedicated settings group controls high-bandwidth slot targets, elastic overflow, slow and inactive slot recycling, low-ratio queue assistance, session transfer and time limits, and adaptive download write buffering.
 
-3. Network Binding and IP Guard
+4. Network Binding and IP Guard
 Bind P2P sockets to an adapter or local address. IP Guard can block network activity until the binding and optional public IP allowlist are verified, including runtime changes.
 
-4. Startup, Exit, and Bulk Operation Overlays
+5. Startup, Exit, and Bulk Operation Overlays
 Progress overlays and list status boxes make parallel startup, safe shutdown, large reloads, and bulk add or delete operations visible without blocking the interface.
 
-5. Shared File Startup Cache
+6. Shared File Startup Cache
 sharedcache.dat accelerates large shared-folder scans, remembers verified path metadata, and reduces repeated duplicate checks while remaining disposable and automatically rebuildable.
 
-6. Search Limits and Last Request Column
+7. Search Limits and Last Request Column
 New eD2K and Kad result, request, and lifetime controls limit oversized searches. Files -> All Shared Files adds a sortable Last Request column.
 
-7. Native Firewall and Port Randomization
+8. Native Firewall and Port Randomization
 eMule AI can maintain Windows Firewall listen-port rules and select new listen ports from a configured range at startup.
 
-8. Notification Modes
+9. Notification Modes
 Notifications can use a tray balloon, Windows toast notification, or the custom eMule AI popup.
 
-9. Majority Filename Controls
+10. Majority Filename Controls
 Automatic rename decisions can be restricted to new downloads and require both a configurable agreement percentage and minimum vote count.
 
-10. Protection Panel
+11. Protection Panel
 A dedicated Options page that centralizes safety/anti-leecher controls with clear explanations, timed punishments, and friend exemptions. Choose actions (ban, score reduce, log only) per detection category to keep the swarm clean with minimal false positives.
 
-11. Dark Mode
+12. Dark Mode
 A full dark modern theme for windows, tabs, menus, list headers, and progress bars. It preserves readability, supports hover/pressed states, and can be toggled without restarting.
 
-12. Fast and Fluid Lists
+13. Fast and Fluid Lists
 Provides a smoother experience in heavy lists (Files, Downloads, Search, Clients) with lower memory usage and faster responsiveness, smooth scrolling and quick updates even with hundreds of thousands of rows.
 
-13. NAT Traversal & Extended Source Exchange
+14. NAT Traversal & Extended Source Exchange
 LowID <-> LowID now works through two distinct NAT-T paths. Kad Buddy path (classic): Kad rendezvous flow where uploader side needs a Kad buddy. eServer Buddy path (new in eMule AI): same-server relay between LowID peers using OP_ESERVER_BUDDY/RELAY packets. This eServer Buddy mechanism is a client-side eMule AI feature and does not require server NAT extension support (no dependency on Lugdunum NAT opcodes). If the target is not connected yet, the buddy can try classic OP_CALLBACKREQUEST and finish relay after target reconnect + ACK. External UDP port discovery, hole-punch retries, QUIC negotiation, and uTP fallback retries improve success under difficult NAT conditions. Extended Source Exchange further improves source discovery and transfer stability with richer peer metadata.
 
-14. IPv6 Support
+15. IPv6 Support
 End-to-end IPv6 handling for peers, friends, and sockets alongside IPv4; addresses display and copy correctly across dialogs and tooltips.
 
-15. Spam/Blacklist System
+16. Spam/Blacklist System
 A Spam Rating column (0-100), a customizable spam threshold, logging of rating results, and a Blacklist Panel with "recheck now" combine to surface quality results and hide junk.
 
-16. Client History
+17. Client History
 Lightweight history of clients you met (with retention control) to enable once-per-client automation like first-time shared-files queries.
 
-17. Threaded Shared-Files Reload
+18. Threaded Shared-Files Reload
 Refreshing shared files runs in a worker thread and updates the UI progressively, avoiding stalls while scanning disks.
 
-18. Shared Files Watcher
+19. Shared Files Watcher
 Background watcher keeps the Shared view in sync with filesystem changes without manual reloads.
 
-19. Automatically Share Subdirectories
+20. Automatically Share Subdirectories
 When enabled, subfolders under your shared roots are included automatically, both existing and newly created ones.
 
-20. Download Validator
+21. Download Validator
 Before adding a file, checks duplicates/near-duplicates across downloads/history/shared and can warn, reject, or auto-blacklist by your preference.
 
-21. Built-In Language Resources (116 Languages)
+22. Built-In Language Resources (116 Languages)
 Language support is embedded, so external language DLL files are not required. Supported language codes (116): en, af, am, ar, ast, az, be, bg, bn, bs, ca, ca-VAL, ceb, co, cs, cy, da, de, el, eo, es, es-AR, et, eu, fa, fi, fr, fy, ga, gd, gl, gu, ha, haw, he, hi, hmw, hr, ht, hu, hy, id, ig, is, it, iw, ja, jw, ka, kk, km, kn, ko, ku, ky, la, lb, lo, lt, lv, mg, mi, mk, ml, mn, mr, ms, mt, my, nb, ne, nl, nn, no, ny, or, pa, pl, ps, pt, pt-BR, ro, ru, rw, sd, si, sk, sl, sm, sn, so, sq, sr, st, su, sv, sw, ta, te, tg, th, tk, tl, tr, tt, ug, uk, ur, uz, vi, xh, yi, yo, zh-CN, zh-TW, zu.
 
-22. Connection Checker
+23. Connection Checker
 One-click background connectivity test with clear start/stop log lines; helps diagnose DNS/routing hiccups without interrupting transfers.
 
-23. Emulate Clients & Communities
+24. Emulate Clients & Communities
 Optional compatibility/emulation toggles for certain clients/communities to improve interoperability and prioritization.
 
-24. New Toolbar Buttons
+25. New Toolbar Buttons
 Quick actions for Save State, Reload Config (no restart), and threaded Backup. Numbered Preview buttons (1-10) launch your chosen preview apps directly; right-click can jump to the next previewable file.
 
-25. Read PeerGuardian Lists Automatically
+26. Read PeerGuardian Lists Automatically
 At startup, all *.p2p files in the config folder are merged into the active IP filter, just drop lists in and they apply.
 
-26. Kad Search Limit Option
+27. Kad Search Limit Option
 You can limit how many answers a Kad keyword search collects before auto-stopping.
 
-27. Search / Transfer Window Filters
+28. Search / Transfer Window Filters
 Fast, on-view filters to narrow lists to what you care about (for example, active/paused).
 
-28. Friend / User Hash / ID Type / Client Version Columns
+29. Friend / User Hash / ID Type / Client Version Columns
 New columns in client lists show Friend status, User Hash, ID Type (High/LowID), and Client Version for quick grouping and sorting.
 
-29. IP:Port Column
+30. IP:Port Column
 Shows each peer's current endpoint in a sortable column.
 
-30. See Own Credits
+31. See Own Credits
 Displays how your credit ratio appears to the remote side for clearer give-and-take diagnostics.
 
-31. Cancel Download from Context Menus
+32. Cancel Download from Context Menus
 Right-click in Search/Download/Shared lists to cancel downloads; an option lets you cancel without marking as "canceled" in history.
 
-32. Remote Client's Shared Files - Status Columns
+33. Remote Client's Shared Files - Status Columns
 New columns indicate query status, last queried time, and number of files received for a client's shared list.
 
-33. Client Note
+34. Client Note
 Attach a short note to any client; optionally show it in the tab title when viewing that client's files.
 
-34. Copy List Text with CTRL+C / CTRL+X
+35. Copy List Text with CTRL+C / CTRL+X
 Copy selected list rows as neat plain text for pasting into notes/spreadsheets.
 
-35. Clean Up Search Results
+36. Clean Up Search Results
 A command to quickly purge obsolete/blacklisted items from active search tabs.
 
-36. Disable "Find As You Type" Option
+37. Disable "Find As You Type" Option
 Turn off type-to-search in heavy lists to avoid accidental scans.
 
-37. Don't Mark As Canceled (Menu Action)
+38. Don't Mark As Canceled (Menu Action)
 Cancel a download without adding it to the "canceled" history.
 
-38. Friend Link Recognition
+39. Friend Link Recognition
 Understands ed2k "friend" links from clipboard to add friends quickly.
 
-39. Source Cache
+40. Source Cache
 Temporarily caches discovered sources so paused/resumed files can reuse them without re-querying.
 
-40. IP Geolocation (Country/City & Flags)
+41. IP Geolocation (Country/City & Flags)
 Shows country (and city when known) and a flag icon for peers/servers; can be disabled or limited to country only.
 
-41. Client Version in Tooltips
+42. Client Version in Tooltips
 Download-list tooltips include full client software/version lines.
 
-42. Webservices Enhancements
+43. Webservices Enhancements
 Wide-character support and a "filename_untouched" placeholder in webservices.dat; multi-selection webservice actions.
 
-43. SpeedMeter
+44. SpeedMeter
 Built-in live up/down graphs in the Connection page and main window for a lightweight visual of throughput.
 
-44. Auto Query Remote Client's Shared Files (First Connect)
+45. Auto Query Remote Client's Shared Files (First Connect)
 Optionally auto-query a client's shared files after first connection, paced by configurable per-period limits.
 
-45. Save Application State (Button)
+46. Save Application State (Button)
 One-click save of list layouts, column orders, and preferences for easy layout "bookmarks".
 
-46. Set Executable Directory as Default (First-Run Behavior)
+47. Set Executable Directory as Default (First-Run Behavior)
 If no choice exists yet, uses the app's folder as the base location for a portable-style setup.
 
-47. Migration Wizard
+48. Migration Wizard
 Adds a built-in Migration Wizard that can run automatically on first launch after language selection or be scheduled later from Tools > Migration Wizard. It helps restore supported legacy eMule configuration files into eMule AI with directory detection, copy results, and clear follow-up guidance.
 
-48. Don't Filter Private IPs Option
+49. Don't Filter Private IPs Option
 Allow local/private addresses even when an IP filter is active, useful on home/lab networks.
 
 ================================================================

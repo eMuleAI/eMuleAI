@@ -218,10 +218,12 @@ public:
 	EPartFileLoadResult	LoadPartFile(LPCTSTR in_directory, LPCTSTR in_filename, EPartFileFormat *pOutCheckFileFormat = NULL, bool bDeferHashing = false); //filename = *.part.met
 	EPartFileLoadResult	ImportShareazaTempfile(LPCTSTR in_directory, LPCTSTR in_filename, EPartFileFormat *pOutCheckFileFormat = NULL, bool bDeferHashing = false);
 
-	bool	SavePartFile(bool bDontOverrideBak = false, bool bForceSynchronous = false);
-	bool	SavePartFileThreaded(bool bDontOverrideBak = false);
+	bool	SavePartFile(bool bDontOverrideBak = false, bool bForceSynchronous = false, bool bDeferredInitialPartMetSave = false);
+	bool	SavePartFileThreaded(bool bDontOverrideBak = false, bool bDeferredInitialPartMetSave = false);
 	void	SetSkipPartFileSaveOnDelete(bool bSkip)	{ m_bSkipPartFileSaveOnDelete = bSkip; }
 	bool	HasDeferredInitialPartMetSave() const			{ return m_bDeferredInitialPartMetSave; }
+	bool	HasDeferredInitialPartMetSaveWritePending() const	{ return InterlockedCompareExchange(const_cast<volatile LONG*>(&m_lDeferredInitialPartMetSaveWritePending), 0, 0) != 0; }
+	void	ClearDeferredInitialPartMetSaveWritePending()	{ InterlockedExchange(&m_lDeferredInitialPartMetSaveWritePending, 0); }
 	bool	FlushDeferredInitialPartMetSave();
 	bool	HasPendingPartFileDiskCreate() const			{ return m_bPartFileDiskCreatePending; }
 	bool	HasUnqueuedPartFileDiskCreate() const		{ return m_bPartFileDiskCreatePending && !m_bPartFileDiskCreateQueued; }
@@ -474,6 +476,7 @@ public:
 	bool m_bSaveSourcesInQueue;
 	bool m_bFlushPartMetInQueue;
 	bool m_bDeferredInitialPartMetSave;
+	volatile LONG m_lDeferredInitialPartMetSaveWritePending;
 	bool m_bPartFileDiskCreatePending;
 	bool m_bPartFileDiskCreateQueued;
 	bool m_bSkipPartFileSaveOnDelete;

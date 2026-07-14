@@ -2834,7 +2834,6 @@ BEGIN
     "#define _AFX_NO_TRACKER_RESOURCES\r\n"
     "#define _AFX_NO_PROPERTY_RESOURCES\r\n"
     "\r\n"
-    "#include ""version.h""\r\n"
     "#include ""res\\emule.rc2""\r\n"
     "#include ""afxres.rc""\r\r\n"
     "\0"
@@ -3105,7 +3104,6 @@ CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST "res\\emule.manifest"
 #define _AFX_NO_TRACKER_RESOURCES
 #define _AFX_NO_PROPERTY_RESOURCES
 
-#include "version.h"
 #include "res\emule.rc2"
 #include "afxres.rc"
 
