@@ -20,6 +20,32 @@ static char THIS_FILE[]=__FILE__;
 #define WM_ITEM_HELP			(WM_USER + 0x102 + 1)
 static LPCTSTR kHelpKeyProp = _T("BlacklistHelpKey");
 
+namespace
+{
+	int GetMultilineCheckboxIdealHeight(CWnd* pCheckBox)
+	{
+		CString strText;
+		pCheckBox->GetWindowText(strText);
+
+		CRect rcCheckBox;
+		pCheckBox->GetClientRect(&rcCheckBox);
+		CClientDC dc(pCheckBox);
+		CFont* pOldFont = NULL;
+		if (pCheckBox->GetFont() != NULL)
+			pOldFont = dc.SelectObject(pCheckBox->GetFont());
+		TEXTMETRIC textMetric = {};
+		dc.GetTextMetrics(&textMetric);
+		const int iGlyphWidth = max(::GetSystemMetrics(SM_CXMENUCHECK), textMetric.tmHeight);
+		CRect rcText(0, 0, max(1, rcCheckBox.Width() - iGlyphWidth - 3), 0);
+		dc.DrawText(strText, &rcText, DT_CALCRECT | DT_LEFT | DT_WORDBREAK);
+		if (pOldFont != NULL)
+			dc.SelectObject(pOldFont);
+
+		const int iGlyphHeight = max(::GetSystemMetrics(SM_CYMENUCHECK), textMetric.tmHeight);
+		return max(rcText.Height(), iGlyphHeight) + max(2, textMetric.tmExternalLeading);
+	}
+}
+
 ///////////////////////////////////////////////////////////////////////////////
 // CPPgBlacklistPanel dialog
 
@@ -139,13 +165,14 @@ BOOL CPPgBlacklistPanel::OnInitDialog()
 	LoadSettings();
 	Localize();
 	UpdateBlacklistDefinitionsTextBoxColors();
-	UpdateLayout();
 
 	return TRUE;  // return TRUE unless you set the focus to the control. EXCEPTION: OCX Property Pages should return FALSE
 }
 
 void CPPgBlacklistPanel::UpdateLayout()
 {
+	UpdateOptionsLayout();
+
 	CWnd* pDefinitionsFrame = GetDlgItem(IDC_BLACKLIST_DEF_FRM);
 	CWnd* pDefinitionsText = GetDlgItem(IDC_BLACKLIST_DEFINITIONS_TEXTBOX);
 	CWnd* pInfo = GetDlgItem(IDC_BLACKLIST_PANEL_HELP_TEXTBOX);
@@ -182,6 +209,63 @@ void CPPgBlacklistPanel::UpdateLayout()
 		pDefinitionsText->MoveWindow(&rcText);
 }
 
+void CPPgBlacklistPanel::UpdateOptionsLayout()
+{
+	CWnd* pOptionsFrame = GetDlgItem(IDC_BLACKLIST_OPT_FRM);
+	CWnd* pAutomatic = GetDlgItem(IDC_BLACKLIST_ENABLE_AUTOMATIC_CHECKBOX);
+	CWnd* pManual = GetDlgItem(IDC_BLACKLIST_ENABLE_MANUAL_CHECKBOX);
+	CWnd* pLog = GetDlgItem(IDC_BLACKLIST_LOG_CHECKBOX);
+	CWnd* pAutoRemove = GetDlgItem(IDC_BLACKLIST_AUTOREMOVE_CHECKBOX);
+	CWnd* pDefinitionsFrame = GetDlgItem(IDC_BLACKLIST_DEF_FRM);
+	CWnd* pDefinitionsText = GetDlgItem(IDC_BLACKLIST_DEFINITIONS_TEXTBOX);
+	if (pOptionsFrame == NULL || pAutomatic == NULL || pManual == NULL || pLog == NULL || pAutoRemove == NULL || pDefinitionsFrame == NULL || pDefinitionsText == NULL)
+		return;
+
+	CRect rcOptionsFrame;
+	CRect rcAutomatic;
+	CRect rcManual;
+	CRect rcLog;
+	CRect rcAutoRemove;
+	CRect rcDefinitionsFrame;
+	CRect rcDefinitionsText;
+	pOptionsFrame->GetWindowRect(&rcOptionsFrame);
+	pAutomatic->GetWindowRect(&rcAutomatic);
+	pManual->GetWindowRect(&rcManual);
+	pLog->GetWindowRect(&rcLog);
+	pAutoRemove->GetWindowRect(&rcAutoRemove);
+	pDefinitionsFrame->GetWindowRect(&rcDefinitionsFrame);
+	pDefinitionsText->GetWindowRect(&rcDefinitionsText);
+	ScreenToClient(&rcOptionsFrame);
+	ScreenToClient(&rcAutomatic);
+	ScreenToClient(&rcManual);
+	ScreenToClient(&rcLog);
+	ScreenToClient(&rcAutoRemove);
+	ScreenToClient(&rcDefinitionsFrame);
+	ScreenToClient(&rcDefinitionsText);
+
+	const int iRowGap = max(1, ::GetSystemMetrics(SM_CYEDGE));
+	const int iFrameBottomMargin = max(4, ::GetSystemMetrics(SM_CYEDGE) * 2);
+	const int iFrameGap = max(1, ::GetSystemMetrics(SM_CYEDGE));
+	const int iFirstRowHeight = max(GetMultilineCheckboxIdealHeight(pAutomatic), GetMultilineCheckboxIdealHeight(pManual));
+	const int iSecondRowHeight = max(GetMultilineCheckboxIdealHeight(pLog), GetMultilineCheckboxIdealHeight(pAutoRemove));
+	const int iSecondRowTop = rcAutomatic.top + iFirstRowHeight + iRowGap;
+
+	pAutomatic->SetWindowPos(NULL, rcAutomatic.left, rcAutomatic.top, rcAutomatic.Width(), iFirstRowHeight, SWP_NOOWNERZORDER | SWP_NOZORDER | SWP_NOACTIVATE);
+	pManual->SetWindowPos(NULL, rcManual.left, rcAutomatic.top, rcManual.Width(), iFirstRowHeight, SWP_NOOWNERZORDER | SWP_NOZORDER | SWP_NOACTIVATE);
+	pLog->SetWindowPos(NULL, rcLog.left, iSecondRowTop, rcLog.Width(), iSecondRowHeight, SWP_NOOWNERZORDER | SWP_NOZORDER | SWP_NOACTIVATE);
+	pAutoRemove->SetWindowPos(NULL, rcAutoRemove.left, iSecondRowTop, rcAutoRemove.Width(), iSecondRowHeight, SWP_NOOWNERZORDER | SWP_NOZORDER | SWP_NOACTIVATE);
+
+	const int iOptionsFrameBottom = iSecondRowTop + iSecondRowHeight + iFrameBottomMargin;
+	rcOptionsFrame.bottom = iOptionsFrameBottom;
+	pOptionsFrame->MoveWindow(&rcOptionsFrame);
+
+	const int iDefinitionsTextTopOffset = rcDefinitionsText.top - rcDefinitionsFrame.top;
+	rcDefinitionsFrame.top = iOptionsFrameBottom + iFrameGap;
+	pDefinitionsFrame->MoveWindow(&rcDefinitionsFrame);
+	rcDefinitionsText.top = rcDefinitionsFrame.top + iDefinitionsTextTopOffset;
+	pDefinitionsText->MoveWindow(&rcDefinitionsText);
+}
+
 void CPPgBlacklistPanel::OnSize(UINT nType, int cx, int cy)
 {
 	CPropertyPage::OnSize(nType, cx, cy);
@@ -205,6 +289,7 @@ void CPPgBlacklistPanel::Localize(void)
 		SetDlgItemText(IDC_BLACKLIST_AUTOREMOVE_CHECKBOX, GetResString(_T("BLACKLIST_AUTOREMOVE")));
 		SetDlgItemText(IDC_BLACKLIST_LOG_CHECKBOX, GetResString(_T("BLACKLIST_LOG")));
 		SetDlgItemText(IDC_BLACKLIST_DEF_FRM, GetResString(_T("BLACKLIST_DEFINITIONS")));
+		UpdateLayout();
 	}
 }
 

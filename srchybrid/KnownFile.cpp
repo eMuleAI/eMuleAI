@@ -496,7 +496,7 @@ void CKnownFile::SetFileName(LPCTSTR pszFileName, bool bReplaceInvalidFileSystem
 		theApp.sharedfiles->AddKeywords(this);
 }
 
-bool CKnownFile::CreateFromFile(LPCTSTR in_directory, LPCTSTR in_filename, const SFileHashProgressContext* pProgressContext)
+bool CKnownFile::CreateFromFile(LPCTSTR in_directory, LPCTSTR in_filename, const SFileHashProgressContext* pProgressContext, bool bUpdateMetaData)
 {
 	SetPath(in_directory);
 	SetFileName(in_filename);
@@ -637,8 +637,8 @@ bool CKnownFile::CreateFromFile(LPCTSTR in_directory, LPCTSTR in_filename, const
 	if (theApp.IsClosing())
 		return false;
 
-	// Add file tags
-	UpdateMetaDataTags();
+	if (bUpdateMetaData)
+		UpdateMetaDataTags();
 
 	if (theApp.IsClosing())
 		return false;
@@ -1743,84 +1743,119 @@ void TruncateED2KMetaData(CString &rstrData)
 }
 
 
+bool CKnownFile::ExtractMetaData(const CShareableFile* pFile, SKnownFileMetaData& rMetaData)
+{
+	if (pFile == NULL)
+		return false;
+
+	rMetaData = SKnownFileMetaData();
+	CMediaInfoLIB theMediaInfoLib;
+	SMediaInfo mi;
+	mi.strFileName = pFile->GetFileName();
+	try {
+		if (!theMediaInfoLib.GetMediaInfo(pFile, &mi))
+			return false;
+
+		mi.InitFileLength();
+		rMetaData.uLengthSec = static_cast<uint32>(mi.fFileLengthSec);
+		CStringA strCodec;
+		if (mi.iVideoStreams) {
+			strCodec = mi.strVideoFormat;
+			if (mi.video.dwBitRate == _UI32_MAX && rMetaData.uLengthSec)
+				rMetaData.uBitrateKbps = static_cast<uint32>((((uint64)pFile->GetFileSize() / rMetaData.uLengthSec) * 8 + 500) / 1000);
+			else
+				rMetaData.uBitrateKbps = (mi.video.dwBitRate + 500) / 1000;
+		} else if (mi.iAudioStreams) {
+			strCodec = mi.strAudioFormat;
+			if (mi.audio.nAvgBytesPerSec == _UI32_MAX && rMetaData.uLengthSec)
+				rMetaData.uBitrateKbps = static_cast<uint32>((((uint64)pFile->GetFileSize() / rMetaData.uLengthSec) * 8 + 500) / 1000);
+			else
+				rMetaData.uBitrateKbps = (mi.audio.nAvgBytesPerSec * 8 + 500) / 1000;
+		}
+
+		rMetaData.strCodec = CString(strCodec);
+		rMetaData.strTitle = mi.strTitle;
+		rMetaData.strArtist = mi.strAuthor;
+		rMetaData.strAlbum = mi.strAlbum;
+		TruncateED2KMetaData(rMetaData.strTitle);
+		TruncateED2KMetaData(rMetaData.strArtist);
+		TruncateED2KMetaData(rMetaData.strAlbum);
+		return true;
+	} catch (CException* ex) {
+		if (theApp.IsRunning() && thePrefs.GetVerbose())
+			AddDebugLogLine(false, _T("Unhandled exception while extracting file meta data from \"%s\""), (LPCTSTR)EscPercent(pFile->GetFileName()));
+		ex->Delete();
+		ASSERT(0);
+	} catch (...) {
+		if (theApp.IsRunning() && thePrefs.GetVerbose())
+			AddDebugLogLine(false, _T("Unhandled exception while extracting file meta data from \"%s\""), (LPCTSTR)EscPercent(pFile->GetFileName()));
+		ASSERT(0);
+	}
+	return false;
+}
+
+void CKnownFile::ApplyMetaDataTags(const SKnownFileMetaData* pMetaData)
+{
+	try {
+		CSingleLock tagListLock(&m_mutTagList, TRUE);
+		RemoveMetaDataTags();
+		if (pMetaData == NULL)
+			return;
+
+		if (pMetaData->uLengthSec) {
+			AddTagUnique(new CTag(FT_MEDIA_LENGTH, pMetaData->uLengthSec));
+			m_uMetaDataVer = META_DATA_VER;
+		}
+
+		if (!pMetaData->strCodec.IsEmpty()) {
+			AddTagUnique(new CTag(FT_MEDIA_CODEC, pMetaData->strCodec));
+			m_uMetaDataVer = META_DATA_VER;
+		}
+
+		if (pMetaData->uBitrateKbps) {
+			AddTagUnique(new CTag(FT_MEDIA_BITRATE, pMetaData->uBitrateKbps));
+			m_uMetaDataVer = META_DATA_VER;
+		}
+
+		if (!pMetaData->strTitle.IsEmpty()) {
+			AddTagUnique(new CTag(FT_MEDIA_TITLE, pMetaData->strTitle));
+			m_uMetaDataVer = META_DATA_VER;
+		}
+
+		if (!pMetaData->strArtist.IsEmpty()) {
+			AddTagUnique(new CTag(FT_MEDIA_ARTIST, pMetaData->strArtist));
+			m_uMetaDataVer = META_DATA_VER;
+		}
+
+		if (!pMetaData->strAlbum.IsEmpty()) {
+			AddTagUnique(new CTag(FT_MEDIA_ALBUM, pMetaData->strAlbum));
+			m_uMetaDataVer = META_DATA_VER;
+		}
+	} catch (CException* ex) {
+		if (theApp.IsRunning() && thePrefs.GetVerbose())
+			AddDebugLogLine(false, _T("Unhandled exception while applying file meta data to \"%s\""), (LPCTSTR)EscPercent(GetFileName()));
+		ex->Delete();
+		ASSERT(0);
+	} catch (...) {
+		if (theApp.IsRunning() && thePrefs.GetVerbose())
+			AddDebugLogLine(false, _T("Unhandled exception while applying file meta data to \"%s\""), (LPCTSTR)EscPercent(GetFileName()));
+		ASSERT(0);
+	}
+}
+
 void CKnownFile::UpdateMetaDataTags()
 {
 	// 10-12-2023 [eMule AI]: After nearly 20 years, I decided to copy/paste bc's comment here since it is still valid :)
 	// ed2k and Kad are already full of totally wrong and/or improperly
 	// attached meta data. Take the chance to clean any available meta data tags
 	// and provide only tags which were determined by us.
-	RemoveMetaDataTags();
-
-	if (thePrefs.GetExtractMetaData() == 0)
+	if (thePrefs.GetExtractMetaData() == 0) {
+		ApplyMetaDataTags(NULL);
 		return;
-
-	CMediaInfoLIB theMediaInfoLib;
-	SMediaInfo mi;
-	mi.strFileName = GetFileName();
-	try {
-		if (theMediaInfoLib.GetMediaInfo(this, &mi)) {
-			mi.InitFileLength();
-			UINT uLengthSec = (UINT)mi.fFileLengthSec;
-			CStringA strCodec;
-			uint32 uBitrate;
-			if (mi.iVideoStreams) {
-				strCodec = mi.strVideoFormat;
-				if (mi.video.dwBitRate == _UI32_MAX && uLengthSec) //VBR files are set to _UI32_MAX, so use average bitrate instead
-					uBitrate = (((uint64)GetFileSize() / uLengthSec) * 8 + 500) / 1000; //500 for rounding to ceil
-				else
-					uBitrate = (mi.video.dwBitRate + 500) / 1000;
-			} else if (mi.iAudioStreams) {
-				strCodec = mi.strAudioFormat;
-				if (mi.audio.nAvgBytesPerSec == _UI32_MAX && uLengthSec) //VBR files are set to _UI32_MAX, so use average bitrate instead
-					uBitrate = (((uint64)GetFileSize()/uLengthSec) * 8 + 500) / 1000; //500 for rounding to ceil
-				else
-					uBitrate = (mi.audio.nAvgBytesPerSec * 8 + 500) / 1000;
-			} else
-				uBitrate = 0;
-
-			if (uLengthSec) {
-				AddTagUnique(new CTag(FT_MEDIA_LENGTH, (uint32)uLengthSec));
-				m_uMetaDataVer = META_DATA_VER;
-			}
-
-			if (!strCodec.IsEmpty()) {
-				AddTagUnique(new CTag(FT_MEDIA_CODEC, CString(strCodec)));
-				m_uMetaDataVer = META_DATA_VER;
-			}
-
-			if (uBitrate) {
-				AddTagUnique(new CTag(FT_MEDIA_BITRATE, (uint32)uBitrate));
-				m_uMetaDataVer = META_DATA_VER;
-			}
-
-			TruncateED2KMetaData(mi.strTitle);
-			if (!mi.strTitle.IsEmpty()) {
-				AddTagUnique(new CTag(FT_MEDIA_TITLE, mi.strTitle));
-				m_uMetaDataVer = META_DATA_VER;
-			}
-
-			TruncateED2KMetaData(mi.strAuthor);
-			if (!mi.strAuthor.IsEmpty()) {
-				AddTagUnique(new CTag(FT_MEDIA_ARTIST, mi.strAuthor));
-				m_uMetaDataVer = META_DATA_VER;
-			}
-
-			TruncateED2KMetaData(mi.strAlbum);
-			if (!mi.strAlbum.IsEmpty()) {
-				AddTagUnique(new CTag(FT_MEDIA_ALBUM, mi.strAlbum));
-				m_uMetaDataVer = META_DATA_VER;
-			}
-		}
-	} catch (CException* ex) {
-		if (thePrefs.GetVerbose())
-			AddDebugLogLine(false, _T("Unhandled exception while extracting file meta data from \"%s\""), (LPCTSTR)EscPercent(GetFileName()));
-		ex->Delete();
-		ASSERT(0);
-	} catch (...) {
-		if (thePrefs.GetVerbose())
-			AddDebugLogLine(false, _T("Unhandled exception while extracting file meta data from \"%s\""), (LPCTSTR)EscPercent(GetFileName()));
-		ASSERT(0);
 	}
+
+	SKnownFileMetaData metaData;
+	ApplyMetaDataTags(ExtractMetaData(this, metaData) ? &metaData : NULL);
 }
 
 void CKnownFile::SetPublishedED2K(bool val)

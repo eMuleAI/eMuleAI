@@ -70,6 +70,7 @@ public:
 	void	ReloadList(const bool bSortCurrentList, const EListStateField LsfFlag);
 	void	QueueDeferredReload(const bool bSortCurrentList, const EListStateField LsfFlag, UINT uDelayMs);
 	void	RebuildListedItemsMap();
+	void	CollectSearchDownloadItems(uint32 nSearchID, bool bOnlyUnknown, CTypedPtrList<CPtrList, CSearchFile*> &downloadItems) const;
 	virtual DWORD_PTR GetVirtualItemData(int iItem) const override { return (iItem < 0 || static_cast<size_t>(iItem) >= m_ListedItemsVector.size() ? 0 : static_cast<DWORD_PTR>(iItem + 1)); } // Owner-data row data is a stable visible index, not a backend pointer
 	int		GetVirtualItemCount() const override { return m_ListedItemsVector.size(); }
 	CObject* GetItemObject(int iIndex) const;

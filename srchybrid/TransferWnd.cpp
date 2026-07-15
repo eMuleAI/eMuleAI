@@ -66,9 +66,30 @@ static const UINT s_auClientFilterCheckboxes[] = {
 	IDC_CHECK_HIGHID,
 	IDC_CHECK_BADCLIENT
 };
-static const int CLIENT_FILTER_CHECKBOX_XOFFSET = -7;
+static const int CLIENT_FILTER_CONTROL_GAP = 4;
 static const int CLIENT_FILTER_TOOLBAR_GAP = 4;
 static const int DOWNLOAD_HEADER_CONTROL_GAP = 4;
+
+namespace
+{
+	int GetCheckboxIdealWidth(CWnd* pCheckBox)
+	{
+		CString strText;
+		pCheckBox->GetWindowText(strText);
+
+		CClientDC dc(pCheckBox);
+		CFont* pOldFont = NULL;
+		if (pCheckBox->GetFont() != NULL)
+			pOldFont = dc.SelectObject(pCheckBox->GetFont());
+		const CSize sizeText = dc.GetTextExtent(strText);
+		TEXTMETRIC textMetric = {};
+		dc.GetTextMetrics(&textMetric);
+		if (pOldFont != NULL)
+			dc.SelectObject(pOldFont);
+
+		return sizeText.cx + max(::GetSystemMetrics(SM_CXMENUCHECK), textMetric.tmHeight) + max(4, textMetric.tmAveCharWidth);
+	}
+}
 
 // CTransferWnd dialog
 
@@ -180,14 +201,7 @@ void CTransferWnd::OnInitialUpdate()
 	m_uWnd2 = (EWnd2)thePrefs.GetTransferWnd2();
 	ShowWnd2(m_uWnd2);
 
-	for (size_t i = 0; i < _countof(s_auClientFilterCheckboxes); ++i) {
-		CWnd* pCheckBox = GetDlgItem(s_auClientFilterCheckboxes[i]);
-		CRect rcCheckBox;
-		pCheckBox->GetWindowRect(&rcCheckBox);
-		ScreenToClient(&rcCheckBox);
-		rcCheckBox.OffsetRect(CLIENT_FILTER_CHECKBOX_XOFFSET, 0);
-		pCheckBox->MoveWindow(&rcCheckBox, FALSE);
-	}
+	UpdateFilterCheckboxLayout();
 
 	AddOrReplaceAnchor(this, IDC_DOWNLOADLIST, TOP_LEFT, ANCHOR(100, thePrefs.GetSplitterbarPosition()));
 	AddOrReplaceAnchor(this, IDC_UPLOADLIST, ANCHOR(0, thePrefs.GetSplitterbarPosition()), BOTTOM_RIGHT);
@@ -318,6 +332,53 @@ void CTransferWnd::UpdateClientFilterCheckboxVisibility()
 
 		if (((pCheckBox->GetStyle() & WS_VISIBLE) != 0) != bShow)
 			pCheckBox->ShowWindow(bShow ? SW_SHOW : SW_HIDE);
+	}
+}
+
+void CTransferWnd::UpdateFilterCheckboxLayout()
+{
+	CWnd* pPreview = GetDlgItem(IDC_CHECK_PREVIEW);
+	CWnd* pFileType = GetDlgItem(IDC_FILETYPE);
+	if (pPreview != NULL && pFileType != NULL) {
+		CRect rcPreview;
+		CRect rcFileType;
+		pPreview->GetWindowRect(&rcPreview);
+		pFileType->GetWindowRect(&rcFileType);
+		ScreenToClient(&rcPreview);
+		ScreenToClient(&rcFileType);
+
+		const int nPreviewWidth = GetCheckboxIdealWidth(pPreview);
+		const int nPreviewRight = rcFileType.left - DOWNLOAD_HEADER_CONTROL_GAP;
+		const int nPreviewLeft = nPreviewRight - nPreviewWidth;
+		if (rcPreview.left != nPreviewLeft || rcPreview.Width() != nPreviewWidth) {
+			pPreview->SetWindowPos(NULL, nPreviewLeft, rcPreview.top, nPreviewWidth, rcPreview.Height(), SWP_NOOWNERZORDER | SWP_NOZORDER | SWP_NOACTIVATE);
+			AddOrReplaceAnchor(this, IDC_CHECK_PREVIEW, TOP_RIGHT);
+		}
+	}
+
+	CWnd* pFilter = GetDlgItem(IDC_FILTER_CLIENT_LIST);
+	if (pFilter == NULL)
+		return;
+
+	CRect rcFilter;
+	pFilter->GetWindowRect(&rcFilter);
+	ScreenToClient(&rcFilter);
+	int nCheckBoxRight = rcFilter.left - CLIENT_FILTER_CONTROL_GAP;
+	for (size_t i = _countof(s_auClientFilterCheckboxes); i-- > 0;) {
+		CWnd* pCheckBox = GetDlgItem(s_auClientFilterCheckboxes[i]);
+		if (pCheckBox == NULL)
+			continue;
+
+		CRect rcCheckBox;
+		pCheckBox->GetWindowRect(&rcCheckBox);
+		ScreenToClient(&rcCheckBox);
+		const int nCheckBoxWidth = GetCheckboxIdealWidth(pCheckBox);
+		const int nCheckBoxLeft = nCheckBoxRight - nCheckBoxWidth;
+		if (rcCheckBox.left != nCheckBoxLeft || rcCheckBox.Width() != nCheckBoxWidth) {
+			pCheckBox->SetWindowPos(NULL, nCheckBoxLeft, rcCheckBox.top, nCheckBoxWidth, rcCheckBox.Height(), SWP_NOOWNERZORDER | SWP_NOZORDER | SWP_NOACTIVATE);
+			AddOrReplaceAnchor(this, s_auClientFilterCheckboxes[i], TOP_RIGHT);
+		}
+		nCheckBoxRight = nCheckBoxLeft - CLIENT_FILTER_CONTROL_GAP;
 	}
 }
 
@@ -473,6 +534,7 @@ void CTransferWnd::OnSize(UINT nType, int cx, int cy)
 		m_bCatTabLayoutPending = true;
 		return;
 	}
+	UpdateFilterCheckboxLayout();
 	UpdateClientFilterCheckboxVisibility();
 	VerifyCatTabSize();
 }
@@ -1104,6 +1166,7 @@ void CTransferWnd::Localize()
 	SetDlgItemText(IDC_CHECK_BADCLIENT, GetResString(_T("BADCLIENT")));
 
 	InitFileTypesCtrl(&m_FileTypeComboBox, thePrefs.m_strFileTypeSelected, true);
+	UpdateFilterCheckboxLayout();
 
 	m_ctlFilterDownloadList.ShowColumnText(true);
 	m_ctlFilterUploadList.ShowColumnText(true);
@@ -1115,6 +1178,8 @@ void CTransferWnd::Localize()
 		ShowSplitWindow();
 	else
 		ShowList(m_dwShowListIDC);
+	VerifyCatTabSize();
+	UpdateClientFilterCheckboxVisibility();
 }
 
 void CTransferWnd::LocalizeToolbars()

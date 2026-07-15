@@ -159,6 +159,7 @@ protected:
 	void	DoResize(int delta);
 	void	UpdateSplitterRange();
 	void	UpdateClientFilterCheckboxVisibility();
+	void	UpdateFilterCheckboxLayout();
 	void	SetAllIcons();
 	void	SetWnd1Icons();
 	void	SetWnd2Icons();

@@ -30,6 +30,22 @@ class CAICHHashAlgo;
 class CSafeMemFile;
 class CPartFile;
 
+struct SKnownFileMetaData
+{
+	SKnownFileMetaData()
+		: uLengthSec()
+		, uBitrateKbps()
+	{
+	}
+
+	uint32 uLengthSec;
+	uint32 uBitrateKbps;
+	CString strCodec;
+	CString strTitle;
+	CString strArtist;
+	CString strAlbum;
+};
+
 typedef CTypedPtrList<CPtrList, CUpDownClient*> CUpDownClientPtrList;
 
 struct SFileHashProgressContext
@@ -49,7 +65,7 @@ public:
 
 	virtual void SetFileName(LPCTSTR pszFileName, bool bReplaceInvalidFileSystemChars = false, bool bRemoveControlChars = false); // 'bReplaceInvalidFileSystemChars' is set to 'false' for backward compatibility!
 
-	bool	CreateFromFile(LPCTSTR directory, LPCTSTR filename, const SFileHashProgressContext* pProgressContext); // create date, hashset and tags from a file
+	bool	CreateFromFile(LPCTSTR directory, LPCTSTR filename, const SFileHashProgressContext* pProgressContext, bool bUpdateMetaData = true); // create date, hashset and tags from a file
 	bool	LoadFromFile(CFileDataIO &file, bool bLoadCachedAICHPartHashSet = true);	//load date, hashset and tags from a .met file
 	bool	WriteToFile(CFileDataIO &file);
 	bool	CreateAICHHashSetOnly();
@@ -118,6 +134,8 @@ public:
 	// file sharing
 	virtual Packet* CreateSrcInfoPacket(const CUpDownClient *forClient, uint8 byRequestedVersion, uint16 nRequestedOptions) const;
 	UINT	GetMetaDataVer() const						{ return m_uMetaDataVer; }
+	static bool ExtractMetaData(const CShareableFile* pFile, SKnownFileMetaData& rMetaData);
+	void	ApplyMetaDataTags(const SKnownFileMetaData* pMetaData);
 	void	UpdateMetaDataTags();
 	void	RemoveMetaDataTags(UINT uTagType = 0);
 	void	RemoveBrokenUnicodeMetaDataTags();

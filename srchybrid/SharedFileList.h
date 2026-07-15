@@ -31,6 +31,7 @@ class CServer;
 class CCollection;
 class CTag;
 struct ImportOperationContext;
+struct SharedFileMetaDataThreadContext;
 typedef CMap<CCKey, const CCKey&, CKnownFile*, CKnownFile*> CKnownFilesMap;
 typedef CMap<CSKey, const CSKey&, CKnownFile*, CKnownFile*> CReloadLookupFilesMap;
 class CSharedFileListSearchThread;
@@ -45,6 +46,11 @@ struct UnknownFile_Struct
 
 struct SharedFileHashResult_Struct
 {
+	SharedFileHashResult_Struct()
+		: pKnownFile(NULL)
+	{
+	}
+
 	CString strName;
 	CString strDirectory;
 	CString strPathKey;
@@ -87,6 +93,8 @@ public:
 	void	Process();
 	void	Publish();
 	void	RebuildMetaData();
+	bool	QueueMetaDataUpdateForFile(const CKnownFile* pFile);
+	UINT	GetMetaDataUpdateCount() const;
 	void	DeletePartFileInstances() const;
 	void	PublishNextTurn()						{ m_lastPublishED2KFlag = true; }
 	void	ClearED2KPublishInfo();
@@ -144,7 +152,7 @@ public:
 	void	CopyWebSharedFileSnapshots(std::vector<SWebSharedFileSnapshot>& snapshots, size_t uMaxSnapshots = 0) const;
 
 	bool	SafeAddKFile(CKnownFile *toadd, bool bOnlyAdd = false, bool bHashingAlreadyDetached = false);
-	void	RepublishFile(CKnownFile *pFile);
+	void	RepublishFile(CKnownFile *pFile, bool bForce = false);
 	void	SetOutputCtrl(CSharedFilesCtrl *in_ctrl);
 	bool	RemoveFile(CKnownFile *pFile, bool bDeleted = false, bool bWillReloadListLater = false);	// removes a specific shared file from the list
 	void	UpdateFile(CKnownFile *toupdate);
@@ -229,9 +237,25 @@ protected:
 	bool	CheckAndAddSingleFile(const CString &rstrFilePath); // add specific files without editing sharing preferences
 
 private:
-	static UINT AFX_CDECL RunProc(LPVOID pParam);
-	CWinThread* pRebuildMetaDataThread;
-	CList<CKnownFile*> m_MetaDataProcessList;
+	enum EMetaDataQueueResult
+	{
+		MetaDataQueueFailed,
+		MetaDataQueueUnchanged,
+		MetaDataQueueQueued
+	};
+
+	volatile LONG m_lRebuildMetaDataThreadActive;
+	static UINT AFX_CDECL RunMetaDataUpdateProc(LPVOID pParam);
+	bool StartMetaDataUpdateThread();
+	void ShutdownMetaDataUpdateThread();
+	EMetaDataQueueResult QueueMetaDataUpdate(const CKnownFile* pFile, bool bManualUpdate = false, bool bForceUpdate = false);
+	void QueueMetaDataReconciliation();
+	void ProcessDeferredMetaDataUpdates();
+	SharedFileMetaDataThreadContext* m_pMetaDataThreadContext;
+	POSITION m_posMetaDataReconciliation;
+	uint32 m_uMetaDataReconciliationPathRevision;
+	uint32 m_uSharedPathCacheRevision;
+	bool m_bMetaDataReconciliationStarted;
 
 	static SWebSharedFileSnapshot BuildWebSharedFileSnapshot(const CKnownFile *pFile);
 	void StoreWebSharedFileSnapshot(const CKnownFile *pFile);
@@ -307,6 +331,7 @@ private:
 	LONG	GetShareRuleGeneration() const { return ::InterlockedCompareExchange(const_cast<volatile LONG*>(&m_lShareRuleGeneration), 0, 0); }
 	void	CopyExplicitShareRules(CStringList& liSingleSharedFiles, CStringList& liSingleExcludedFiles, CStringList& liExcludedSharedDirs) const;
 	void	SetExplicitShareRulesLoaded(bool bLoaded);
+	static CString BuildSharedPathCacheKey(const CString& strFilePath);
 	void	UpdateSharedPathCache(CKnownFile* pFile, LPCTSTR pOldFilePath);
 	void	UpdateSharedPathCacheByPath(LPCTSTR pOldFilePath, LPCTSTR pNewFilePath);
 	void	MarkSharedFilesModelChanged();
@@ -335,7 +360,7 @@ private:
 	CTypedPtrList<CPtrList, UnknownFile_Struct*> waitingforhash_list;
 	CTypedPtrList<CPtrList, UnknownFile_Struct*> currentlyhashing_list;	// SLUGFILLER: SafeHash
 	CCriticalSection m_csDeferredHashResults;
-	CTypedPtrList<CPtrList, SharedFileHashResult_Struct*> m_deferredHashResults;
+	SharedFileHashResult_Struct* m_pDeferredHashResult;
 	CCriticalSection m_csDeferredPartFileHashResults;
 	CTypedPtrList<CPtrList, PartFileHash_Struct*> m_deferredPartFileHashResults;
 	CServerConnect	 *server;
@@ -373,13 +398,17 @@ class CAddFileThread : public CWinThread
 protected:
 	CAddFileThread();
 public:
+	virtual ~CAddFileThread();
 	virtual BOOL InitInstance();
 	virtual int	Run();
 	void	SetValues(CSharedFileList *pOwner, LPCTSTR directory, LPCTSTR filename, LPCTSTR strSharedDir, CPartFile *partfile = NULL, bool bRequireStableHashSource = false);
+	void	SetSharedHashResult(SharedFileHashResult_Struct* pResult);
 	void	SetImportOperationContext(ImportOperationContext* pContext);
 	bool	ImportParts();
 	uint16	SetPartToImport(LPCTSTR import);
 private:
+	int		RunInternal();
+	void	CompleteSharedHashResult(CKnownFile* pKnownFile);
 	CSharedFileList	*m_pOwner;
 	CPartFile	*m_partfile;
 	ImportOperationContext* m_pImportOperationContext;
@@ -392,6 +421,7 @@ private:
 	uchar		m_abyPartFileHash[16];
 	bool		m_bPartFileHashTokenValid;
 	bool		m_bRequireStableHashSource;
+	SharedFileHashResult_Struct* m_pSharedHashResult;
 	CArray<uint16, uint16>	m_PartsToImport;
 };
 

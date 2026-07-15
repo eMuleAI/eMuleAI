@@ -1235,6 +1235,7 @@
 #define IDC_VPN_GUARD_COUNTRY_LABEL    3087
 #define IDC_VPN_GUARD_COUNTRY          3088
 #define IDC_VPN_GUARD_BLOCK_UNKNOWN    3089
+#define IDC_CHECK_KNOWN                3090
 
 // Next default values for new objects
 // 
@@ -1242,7 +1243,7 @@
 #ifndef APSTUDIO_READONLY_SYMBOLS
 #define _APS_NEXT_RESOURCE_VALUE        1695
 #define _APS_NEXT_COMMAND_VALUE         32773
-#define _APS_NEXT_CONTROL_VALUE         3090
+#define _APS_NEXT_CONTROL_VALUE         3091
 #define _APS_NEXT_SYMED_VALUE           1610
 #endif
 #endif

@@ -19,7 +19,7 @@
 
 // Update only this definition for eMule AI releases: major, minor, patch, build, suffix.
 // Example prerelease suffix: APPLY(1,6,0,0,"-beta1").
-#define EMULEAI_VERSION(APPLY)		APPLY(1,5,1,0,"")
+#define EMULEAI_VERSION(APPLY)		APPLY(1,5,2,0,"")
 #define EMULEAI_STRINGIZE_I(value)	#value
 #define EMULEAI_STRINGIZE(value)	EMULEAI_STRINGIZE_I(value)
 #define EMULEAI_MOD_VERSION_I(major, minor, patch, build, suffix)	_T("AI v") _T(EMULEAI_STRINGIZE(major)) _T(".") _T(EMULEAI_STRINGIZE(minor)) _T(".") _T(EMULEAI_STRINGIZE(patch)) _T(suffix)

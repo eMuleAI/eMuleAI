@@ -1392,6 +1392,7 @@ public:
 	static uint8	m_uBadClientCheckState;
 
 	static uint8	m_uCompleteCheckState;
+	static uint8	m_uSearchKnownCheckState;
 
 	static int		m_iBootstrapSelection; 
 	static int		GetBootstrapSelection() { return m_iBootstrapSelection; }

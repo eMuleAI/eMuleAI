@@ -118,6 +118,7 @@ public:
 	bool	IsDownloadRemoveBatchActive() const		{ return m_uDownloadRemoveBatchDepth != 0; }
 	bool	GetActiveSharedFilesBulkOperationProgress(bool& bDeleteLike, UINT& uDone, UINT& uTotal) const;
 	bool	GetActiveSharedFilesHashingProgress(UINT& uDone, UINT& uTotal) const;
+	bool	GetActiveSharedFilesMetadataProgress(UINT& uDone, UINT& uTotal) const;
 	bool	IsFileSystemReloadActive() const;
 	static bool ProcessFileSystemReloadWorkerItem(const CemuleApp::SWorkerTopologyItem &item);
 
@@ -214,6 +215,8 @@ protected:
 	bool m_bSharedFilesBulkAddPending;
 	UINT m_uSharedFilesHashingOverlayTotal;
 	UINT m_uSharedFilesHashingOverlayLastRemaining;
+	UINT m_uSharedFilesMetadataOverlayTotal;
+	UINT m_uSharedFilesMetadataOverlayLastRemaining;
 	bool m_bSharedFilesRawSortInProgress;
 	UINT m_uSharedFilesListReloadDeferDepth;
 	bool m_bSharedFilesListReloadDeferred;
@@ -277,6 +280,7 @@ protected:
 	bool PostSharedFilesBulkOperationMessage();
 	void UpdateSharedFilesBulkOverlay();
 	void UpdateSharedFilesHashingOverlay();
+	void UpdateSharedFilesMetadataOverlay();
 	void ClearSharedFilesBulkOperation();
 	void FinishSharedFilesBulkOperation();
 	bool CompactNullSharedFilesItems(LPCTSTR pszReason);

@@ -121,6 +121,7 @@ public:
 
 	void	DownloadSelected();
 	void	DownloadSelected(bool bPaused, bool bBypassDownloadValidator = false);
+	void	DownloadAllSearchResults(int iTab, bool bOnlyUnknown);
 
 	bool	CanDeleteSearches() const			{ return (searchselect.GetItemCount() > 0); };
 	void	DeleteSearch(uint32 uSearchID);
@@ -273,6 +274,7 @@ protected:
 	afx_msg void OnSearchListMenuBtnDropDown(LPNMHDR, LRESULT*);
 	afx_msg void OnTabMovement(LPNMHDR, LRESULT*);
 	afx_msg void OnBnClickedComplete();
+	afx_msg void OnBnClickedKnown();
 	afx_msg void OnSize(UINT nType, int cx, int cy);
 	afx_msg LRESULT OnDeferredSearchListRefresh(WPARAM, LPARAM);
 	afx_msg LRESULT OnProcessChunkedSearchDownload(WPARAM, LPARAM);

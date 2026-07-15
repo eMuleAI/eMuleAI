@@ -2,6 +2,15 @@
 ================================================================
 1) VERSION HISTORY
 ================================================================
+v1.5.2
+Added Known filtering checkbox to Search results.
+Added bulk download options to the Search Results context menu.
+Improved metadata updates to show progress in the Files list while allowing eMule AI to close normally.
+Fixed an issue where the hashing progress overlay in the Files list could remain stuck after processing a shared file.
+Fixed an issue where the exit confirmation could be hidden behind the About screen.
+Fixed filter layouts so labels stay readable without overlapping nearby controls after changing languages.
+Fixed Blacklist Panel layout so translated option labels remain fully visible.
+Fixed IP Filter list rows disappearing in light mode.
 
 v1.5.1
 Added Docker support with the official emuleai/emuleai image on Docker Hub so Linux and macOS users can run eMule AI with Xpra desktop integration or access it through a browser with noVNC on headless Linux systems.

@@ -1232,6 +1232,7 @@ uint8	CPreferences::m_uHighIdCheckState;
 uint8	CPreferences::m_uBadClientCheckState;
 
 uint8	CPreferences::m_uCompleteCheckState;
+uint8	CPreferences::m_uSearchKnownCheckState;
 
 int		CPreferences::m_iBootstrapSelection;
 
@@ -3844,6 +3845,7 @@ bool CPreferences::SavePreferences()
 	ini.WriteInt(L"BadClientChecked", m_uBadClientCheckState);
 
 	ini.WriteInt(L"CompleteChecked", m_uCompleteCheckState);
+	ini.WriteInt(L"SearchKnownChecked", m_uSearchKnownCheckState);
 
 	ini.WriteInt(L"BootstrapSelection", m_iBootstrapSelection);
 
@@ -5028,6 +5030,7 @@ void CPreferences::LoadPreferences()
 	m_uBadClientCheckState = ini.GetInt(L"BadClientChecked", 0);
 
 	m_uCompleteCheckState = ini.GetInt(L"CompleteChecked", 0);
+	m_uSearchKnownCheckState = ini.GetInt(L"SearchKnownChecked", 0);
 
 	m_iBootstrapSelection = ini.GetInt(L"BootstrapSelection", B_URL);
 

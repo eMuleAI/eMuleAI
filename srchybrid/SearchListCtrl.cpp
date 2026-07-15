@@ -206,6 +206,70 @@ namespace
 		return item != NULL && item->GetListParent() != NULL ? item->GetListParent() : item;
 	}
 
+	bool IsSearchFileKnown(const CSearchFile *item)
+	{
+		if (item == NULL)
+			return false;
+
+		switch (item->GetKnownType()) {
+		case CSearchFile::Shared:
+		case CSearchFile::Downloading:
+		case CSearchFile::Downloaded:
+		case CSearchFile::Cancelled:
+			return true;
+		default:
+			return false;
+		}
+	}
+
+	bool IsSearchKnownColumnEmpty(const CSearchFile *item)
+	{
+		return item == NULL || (!IsSearchFileKnown(item)
+			&& !(thePrefs.GetBlacklistManual() && item->GetManualBlacklisted())
+			&& !(thePrefs.GetBlacklistAutomatic() && item->GetAutomaticBlacklisted())
+			&& !(thePrefs.IsSearchSpamFilterEnabled() && item->IsConsideredSpam(false)));
+	}
+
+	bool GroupSearchItemsByBottomCandidates(std::vector<CSearchFile*> &items)
+	{
+		if (!ShouldApplySearchBottomGrouping() || items.size() < 2)
+			return false;
+
+		std::vector<CSearchFile*> normalItems;
+		std::vector<CSearchFile*> knownItems;
+		std::vector<CSearchFile*> blockedItems;
+		normalItems.reserve(items.size());
+		knownItems.reserve(items.size());
+		blockedItems.reserve(items.size());
+
+		for (size_t i = 0; i < items.size(); ++i) {
+			CSearchFile *pFile = items[i];
+			if (pFile == NULL)
+				continue;
+			const CSearchFile *pSortFile = GetSearchFileSortGroupFile(pFile);
+			const int iRank = GetSearchFileBottomGroupRank(pSortFile);
+			if (iRank >= 2)
+				blockedItems.push_back(pFile);
+			else if (iRank == 1 && thePrefs.GetGroupKnownAtTheBottom())
+				knownItems.push_back(pFile);
+			else if (iRank == 1)
+				blockedItems.push_back(pFile);
+			else
+				normalItems.push_back(pFile);
+		}
+
+		const int iNonEmptyBucketCount = (normalItems.empty() ? 0 : 1) + (knownItems.empty() ? 0 : 1) + (blockedItems.empty() ? 0 : 1);
+		if (iNonEmptyBucketCount < 2)
+			return false;
+
+		items.clear();
+		items.reserve(normalItems.size() + knownItems.size() + blockedItems.size());
+		items.insert(items.end(), normalItems.begin(), normalItems.end());
+		items.insert(items.end(), knownItems.begin(), knownItems.end());
+		items.insert(items.end(), blockedItems.begin(), blockedItems.end());
+		return true;
+	}
+
 	void RebuildPreviewMenu(CMenuXP& menu, const CPartFile* file, bool bEnablePreview, bool bEnablePauseOnPreview, bool bPauseOnPreviewChecked, bool bEnablePreviewParts, bool bPreviewPartsChecked)
 	{
 		while (menu.GetMenuItemCount() > 0)
@@ -925,6 +989,62 @@ void CSearchListCtrl::BuildVisibleSearchItems(const CTypedPtrList<CPtrList, CSea
 	}
 }
 
+void CSearchListCtrl::CollectSearchDownloadItems(uint32 nSearchID, bool bOnlyUnknown, CTypedPtrList<CPtrList, CSearchFile*> &downloadItems) const
+{
+	downloadItems.RemoveAll();
+	if (nSearchID == 0 || searchlist == NULL)
+		return;
+
+	std::vector<CSearchFile*> items;
+	{
+		CSingleLock searchModelLock(searchlist->GetSearchModelLock(), TRUE);
+		const SearchList* list = searchlist->GetSearchListForID(nSearchID);
+		if (list == NULL)
+			return;
+
+		items.reserve(static_cast<size_t>(list->GetCount()));
+		for (POSITION pos = list->GetHeadPosition(); pos != NULL;) {
+			CSearchFile *pFile = list->GetNext(pos);
+			if (pFile == NULL || (pFile->GetListParent() != NULL && !pFile->GetListParent()->IsListExpanded()))
+				continue;
+			if (bOnlyUnknown) {
+				if (!IsSearchKnownColumnEmpty(pFile))
+					continue;
+			} else if (IsFilteredOut(pFile))
+				continue;
+			items.push_back(pFile);
+		}
+
+		if (items.size() > 1) {
+			CombinedSort(items.begin(), items.end(), [this](const CSearchFile* left, const CSearchFile* right) -> bool
+			{
+				return CompareSearchFilesRaw(left, right, m_pSortParam) < 0;
+			});
+			GroupSearchItemsByBottomCandidates(items);
+
+			CMapStringToPtr queuedHashes;
+			queuedHashes.InitHashTable(static_cast<UINT>(items.size() * 2 + 1));
+			std::vector<CSearchFile*> uniqueItems;
+			uniqueItems.reserve(items.size());
+			for (size_t i = 0; i < items.size(); ++i) {
+				CSearchFile *pFile = items[i];
+				if (pFile == NULL)
+					continue;
+				const CString strHash(md4str(pFile->GetFileHash()));
+				void *pDummy = NULL;
+				if (queuedHashes.Lookup(strHash, pDummy))
+					continue;
+				queuedHashes.SetAt(strHash, reinterpret_cast<void*>(1));
+				uniqueItems.push_back(pFile);
+			}
+			items.swap(uniqueItems);
+		}
+	}
+
+	for (size_t i = 0; i < items.size(); ++i)
+		downloadItems.AddTail(items[i]);
+}
+
 CString CSearchListCtrl::GetListedItemDisplayText(int iItem, int iSubItem) const
 {
 	const CSearchFile *pSearchFile = ResolveSearchFileByRowIndex(iItem);
@@ -1289,42 +1409,7 @@ void CSearchListCtrl::SortListedItemsRaw()
 
 bool CSearchListCtrl::GroupListedItemsByBottomCandidates()
 {
-	if (!ShouldApplySearchBottomGrouping() || m_ListedItemsVector.size() < 2 || searchlist == NULL)
-		return false;
-
-	std::vector<CSearchFile*> normalItems;
-	std::vector<CSearchFile*> knownItems;
-	std::vector<CSearchFile*> blockedItems;
-	normalItems.reserve(m_ListedItemsVector.size());
-	knownItems.reserve(m_ListedItemsVector.size());
-	blockedItems.reserve(m_ListedItemsVector.size());
-
-	for (size_t i = 0; i < m_ListedItemsVector.size(); ++i) {
-		CSearchFile *pFile = m_ListedItemsVector[i];
-		if (pFile == NULL)
-			continue;
-		const CSearchFile *pSortFile = GetSearchFileSortGroupFile(pFile);
-		const int iRank = GetSearchFileBottomGroupRank(pSortFile);
-		if (iRank >= 2)
-			blockedItems.push_back(pFile);
-		else if (iRank == 1 && thePrefs.GetGroupKnownAtTheBottom())
-			knownItems.push_back(pFile);
-		else if (iRank == 1)
-			blockedItems.push_back(pFile);
-		else
-			normalItems.push_back(pFile);
-	}
-
-	const int iNonEmptyBucketCount = (normalItems.empty() ? 0 : 1) + (knownItems.empty() ? 0 : 1) + (blockedItems.empty() ? 0 : 1);
-	if (iNonEmptyBucketCount < 2)
-		return false;
-
-	m_ListedItemsVector.clear();
-	m_ListedItemsVector.reserve(normalItems.size() + knownItems.size() + blockedItems.size());
-	m_ListedItemsVector.insert(m_ListedItemsVector.end(), normalItems.begin(), normalItems.end());
-	m_ListedItemsVector.insert(m_ListedItemsVector.end(), knownItems.begin(), knownItems.end());
-	m_ListedItemsVector.insert(m_ListedItemsVector.end(), blockedItems.begin(), blockedItems.end());
-	return true;
+	return searchlist != NULL && GroupSearchItemsByBottomCandidates(m_ListedItemsVector);
 }
 
 void CSearchListCtrl::OnLvnColumnClick(LPNMHDR pNMHDR, LRESULT *pResult)
@@ -2627,6 +2712,10 @@ const bool CSearchListCtrl::IsFilteredOut(const CSearchFile *pSearchFile) const
 
 	if ((thePrefs.m_uCompleteCheckState == BST_CHECKED && !pSearchFile->GetCompleteSourceCount()) ||
 		(thePrefs.m_uCompleteCheckState == BST_INDETERMINATE && pSearchFile->GetCompleteSourceCount()))
+		return true;
+
+	if ((thePrefs.m_uSearchKnownCheckState == BST_CHECKED && !IsSearchFileKnown(pSearchFile)) ||
+		(thePrefs.m_uSearchKnownCheckState == BST_INDETERMINATE && !IsSearchKnownColumnEmpty(pSearchFile)))
 		return true;
 
 	const CStringArray &rastrFilter = theApp.emuledlg->searchwnd->m_pwndResults->m_astrFilter;

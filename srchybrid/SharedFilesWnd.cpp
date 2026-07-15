@@ -52,7 +52,26 @@ namespace
 	const int kSharedFilesFilterMinGapFromButtons = 3;
 	const int kSharedFilesFilterRightMargin = 4;
 	const int kSharedFilesFilterMinWidth = 120;
+	const int kSharedFilesButtonGap = 3;
 	const WPARAM kAutoReloadDeferredDispatchRequest = 4;
+
+	int GetPushButtonIdealWidth(CWnd* pButton)
+	{
+		CString strText;
+		pButton->GetWindowText(strText);
+
+		CClientDC dc(pButton);
+		CFont* pOldFont = NULL;
+		if (pButton->GetFont() != NULL)
+			pOldFont = dc.SelectObject(pButton->GetFont());
+		const CSize sizeText = dc.GetTextExtent(strText);
+		TEXTMETRIC textMetric = {};
+		dc.GetTextMetrics(&textMetric);
+		if (pOldFont != NULL)
+			dc.SelectObject(pOldFont);
+
+		return sizeText.cx + max(16, textMetric.tmAveCharWidth * 3);
+	}
 
 	enum ESharedFilesAutoReloadFlags
 	{
@@ -319,6 +338,19 @@ void CSharedFilesWnd::EnsureFilterControlLayout()
 	CRect rcUpdateMetadataButton;
 	pUpdateMetadataButton->GetWindowRect(&rcUpdateMetadataButton);
 	ScreenToClient(&rcUpdateMetadataButton);
+
+	const int iButtonWidth = max(GetPushButtonIdealWidth(pReloadButton), GetPushButtonIdealWidth(pUpdateMetadataButton));
+	const int iReloadLeft = rcReloadButton.right - iButtonWidth;
+	const int iUpdateMetadataRight = iReloadLeft - kSharedFilesButtonGap;
+	const int iUpdateMetadataLeft = iUpdateMetadataRight - iButtonWidth;
+	if (rcReloadButton.left != iReloadLeft || rcReloadButton.Width() != iButtonWidth) {
+		pReloadButton->SetWindowPos(NULL, iReloadLeft, rcReloadButton.top, iButtonWidth, rcReloadButton.Height(), SWP_NOOWNERZORDER | SWP_NOZORDER | SWP_NOACTIVATE);
+		AddOrReplaceAnchor(this, IDC_RELOADSHAREDFILES, TOP_RIGHT);
+	}
+	if (rcUpdateMetadataButton.left != iUpdateMetadataLeft || rcUpdateMetadataButton.Width() != iButtonWidth) {
+		pUpdateMetadataButton->SetWindowPos(NULL, iUpdateMetadataLeft, rcUpdateMetadataButton.top, iButtonWidth, rcUpdateMetadataButton.Height(), SWP_NOOWNERZORDER | SWP_NOZORDER | SWP_NOACTIVATE);
+		AddOrReplaceAnchor(this, IDC_UPDATE_METADATA, TOP_RIGHT);
+	}
 
 	const int iMinLeft = max(rcReloadButton.right, rcUpdateMetadataButton.right) + kSharedFilesFilterMinGapFromButtons;
 	const int iMaxRight = rcClient.right - kSharedFilesFilterRightMargin;
@@ -646,6 +678,7 @@ void CSharedFilesWnd::LocalizeInternal(bool bDeferTreeInit)
 	sharedfilesctrl.SetDirectoryFilter(NULL, true);
 	SetDlgItemText(IDC_RELOADSHAREDFILES, GetResString(_T("SF_RELOAD")));
 	SetDlgItemText(IDC_UPDATE_METADATA, GetResString(_T("UPDATE_METADATA")));
+	EnsureFilterControlLayout();
 
 	if (m_ToolTip.GetSafeHwnd() == NULL) {
 		if (m_ToolTip.Create(this)) {

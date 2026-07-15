@@ -32,6 +32,7 @@ public:
 	explicit CSplashScreen(CWnd *pParent = NULL);   // standard constructor
 	virtual	~CSplashScreen();
 	void SetDisplayMode(DisplayMode eDisplayMode) { m_eDisplayMode = eDisplayMode; }
+	bool IsAboutMode() const { return m_eDisplayMode == DisplayModeAbout; }
 	bool IsSpecialThanksMode() const { return m_eDisplayMode == DisplayModeSpecialThanks; }
 	void AdvanceAnimationFrame();
 	void RepositionToParent(const CRect* pParentRect = NULL);

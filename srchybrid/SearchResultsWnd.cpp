@@ -63,9 +63,28 @@
 namespace
 {
 	const int kSearchResultsFilterDefaultLeft = -18;
-	const int kSearchResultsFilterMinGapFromComplete = 4;
+	const int kSearchResultsFilterControlGap = 4;
 	const int kSearchResultsFilterRightMargin = 4;
+	const int kSearchResultsToolbarControlGap = 4;
 	const UINT kLargeChunkedSearchDownloadSourceDeferCount = 1000;
+
+	int GetCheckboxIdealWidth(CWnd* pCheckBox)
+	{
+		CString strText;
+		pCheckBox->GetWindowText(strText);
+
+		CClientDC dc(pCheckBox);
+		CFont* pOldFont = NULL;
+		if (pCheckBox->GetFont() != NULL)
+			pOldFont = dc.SelectObject(pCheckBox->GetFont());
+		const CSize sizeText = dc.GetTextExtent(strText);
+		TEXTMETRIC textMetric = {};
+		dc.GetTextMetrics(&textMetric);
+		if (pOldFont != NULL)
+			dc.SelectObject(pOldFont);
+
+		return sizeText.cx + max(::GetSystemMetrics(SM_CXMENUCHECK), textMetric.tmHeight) + max(4, textMetric.tmAveCharWidth);
+	}
 
 	bool TryAddSearchPacketPayloadSizes(uint32 uLeftPayloadSize, ULONGLONG ullRightPayloadSize, uint32& ruCombinedPayloadSize)
 	{
@@ -446,6 +465,7 @@ BEGIN_MESSAGE_MAP(CSearchResultsWnd, CResizableFormView)
 	ON_NOTIFY(TBN_DROPDOWN, IDC_SEARCHLST_ICO, OnSearchListMenuBtnDropDown)
 	ON_NOTIFY(UM_TABMOVED, IDC_TAB1, OnTabMovement)
 	ON_BN_CLICKED(IDC_CHECK_COMPLETE, OnBnClickedComplete)
+	ON_BN_CLICKED(IDC_CHECK_KNOWN, OnBnClickedKnown)
 	ON_WM_SIZE()
 	ON_MESSAGE(WM_SEARCHRESULTSWND_DEFERRED_REFRESH, OnDeferredSearchListRefresh)
 	ON_MESSAGE(WM_SEARCHRESULTSWND_CHUNKED_DOWNLOAD, OnProcessChunkedSearchDownload)
@@ -862,17 +882,18 @@ void CSearchResultsWnd::OnInitialUpdate()
 	CRect rectControl;
 	m_ctlFilter.GetWindowRect(rectControl);
 	m_ctlFilter.MoveWindow(-18, 0, 437, 23);
-	GetDlgItem(IDC_CHECK_COMPLETE)->MoveWindow(-90, 0, 65, 23);
+	GetDlgItem(IDC_CHECK_KNOWN)->MoveWindow(-90, 0, 65, 23);
+	GetDlgItem(IDC_CHECK_COMPLETE)->MoveWindow(-162, 0, 65, 23);
 
 	searchselect.GetWindowRect(rectControl);
 	searchselect.MoveWindow(16, 24, 402, 26);
 	searchselect.InitToolTips();
 
 	ShowSearchSelector(false); //set anchors for IDC_SEARCHLIST
-	EnsureFilterControlLayout();
 
 	AddOrReplaceAnchor(this, m_btnSearchListMenu, TOP_LEFT);
 	AddOrReplaceAnchor(this, IDC_FILTER, TOP_RIGHT);
+	AddOrReplaceAnchor(this, IDC_CHECK_KNOWN, TOP_RIGHT);
 	AddOrReplaceAnchor(this, IDC_CHECK_COMPLETE, TOP_RIGHT);
 	AddOrReplaceAnchor(this, IDC_SDOWNLOAD, BOTTOM_LEFT);
 	AddOrReplaceAnchor(this, IDC_PROGRESS1, BOTTOM_LEFT, BOTTOM_RIGHT);
@@ -881,6 +902,7 @@ void CSearchResultsWnd::OnInitialUpdate()
 	AddOrReplaceAnchor(this, searchselect, TOP_LEFT, TOP_RIGHT);
 	AddOrReplaceAnchor(this, IDC_STATIC_DLTOof, BOTTOM_LEFT);
 	AddOrReplaceAnchor(this, m_cattabs, BOTTOM_LEFT, BOTTOM_RIGHT);
+	EnsureFilterControlLayout();
 
 	if (theApp.m_fontSymbol.m_hObject) {
 		GetDlgItem(IDC_STATIC_DLTOof)->SetFont(&theApp.m_fontSymbol);
@@ -888,6 +910,7 @@ void CSearchResultsWnd::OnInitialUpdate()
 	}
 
 	CheckDlgButton(IDC_CHECK_COMPLETE, thePrefs.m_uCompleteCheckState);
+	CheckDlgButton(IDC_CHECK_KNOWN, thePrefs.m_uSearchKnownCheckState);
 
 	InitWindowStyles(this); //Moved down
 }
@@ -898,7 +921,8 @@ void CSearchResultsWnd::EnsureFilterControlLayout()
 		return;
 
 	CWnd* pCompleteCheck = GetDlgItem(IDC_CHECK_COMPLETE);
-	if (pCompleteCheck == NULL)
+	CWnd* pKnownCheck = GetDlgItem(IDC_CHECK_KNOWN);
+	if (pCompleteCheck == NULL || pKnownCheck == NULL || !::IsWindow(m_btnSearchListMenu.GetSafeHwnd()))
 		return;
 
 	CRect rcClient;
@@ -911,18 +935,45 @@ void CSearchResultsWnd::EnsureFilterControlLayout()
 	CRect rcCompleteCheck;
 	pCompleteCheck->GetWindowRect(&rcCompleteCheck);
 	ScreenToClient(&rcCompleteCheck);
+	CRect rcKnownCheck;
+	pKnownCheck->GetWindowRect(&rcKnownCheck);
+	ScreenToClient(&rcKnownCheck);
+	CRect rcToolbar;
+	m_btnSearchListMenu.GetWindowRect(&rcToolbar);
+	ScreenToClient(&rcToolbar);
 
-	const int iMinLeft = rcCompleteCheck.right + kSearchResultsFilterMinGapFromComplete;
 	const int iMaxRight = rcClient.right - kSearchResultsFilterRightMargin;
-	const int iNewLeft = max(kSearchResultsFilterDefaultLeft, iMinLeft);
+	const int iNewLeft = max(kSearchResultsFilterDefaultLeft, rcFilter.left);
 	const int iNewWidth = iMaxRight - iNewLeft;
 	if (iNewWidth <= 0)
 		return;
 
-	if (rcFilter.left == iNewLeft && rcFilter.Width() == iNewWidth)
-		return;
+	const int iKnownRight = iNewLeft - kSearchResultsFilterControlGap;
+	const int iKnownWidth = GetCheckboxIdealWidth(pKnownCheck);
+	const int iKnownLeft = iKnownRight - iKnownWidth;
+	const int iCompleteRightWithKnown = iKnownLeft - kSearchResultsFilterControlGap;
+	const int iCompleteWidth = GetCheckboxIdealWidth(pCompleteCheck);
+	const int iCompleteLeftWithKnown = iCompleteRightWithKnown - iCompleteWidth;
+	const bool bSearchSelectorVisible = (searchselect.GetStyle() & WS_VISIBLE) != 0;
+	const bool bShowKnown = bSearchSelectorVisible && iCompleteLeftWithKnown >= rcToolbar.right + kSearchResultsToolbarControlGap;
+	const int iCompleteRight = bShowKnown ? iCompleteRightWithKnown : iKnownRight;
+	const int iCompleteLeft = iCompleteRight - iCompleteWidth;
+	const bool bShowComplete = bSearchSelectorVisible && iCompleteLeft >= rcToolbar.right + kSearchResultsToolbarControlGap;
 
-	m_ctlFilter.SetWindowPos(NULL, iNewLeft, rcFilter.top, iNewWidth, rcFilter.Height(), SWP_NOOWNERZORDER | SWP_NOZORDER | SWP_NOACTIVATE);
+	if (rcCompleteCheck.left != iCompleteLeft || rcCompleteCheck.Width() != iCompleteWidth) {
+		pCompleteCheck->SetWindowPos(NULL, iCompleteLeft, rcCompleteCheck.top, iCompleteWidth, rcCompleteCheck.Height(), SWP_NOOWNERZORDER | SWP_NOZORDER | SWP_NOACTIVATE);
+		AddOrReplaceAnchor(this, IDC_CHECK_COMPLETE, TOP_RIGHT);
+	}
+	if (rcKnownCheck.left != iKnownLeft || rcKnownCheck.Width() != iKnownWidth) {
+		pKnownCheck->SetWindowPos(NULL, iKnownLeft, rcKnownCheck.top, iKnownWidth, rcKnownCheck.Height(), SWP_NOOWNERZORDER | SWP_NOZORDER | SWP_NOACTIVATE);
+		AddOrReplaceAnchor(this, IDC_CHECK_KNOWN, TOP_RIGHT);
+	}
+	if (((pCompleteCheck->GetStyle() & WS_VISIBLE) != 0) != bShowComplete)
+		pCompleteCheck->ShowWindow(bShowComplete ? SW_SHOW : SW_HIDE);
+	if (((pKnownCheck->GetStyle() & WS_VISIBLE) != 0) != bShowKnown)
+		pKnownCheck->ShowWindow(bShowKnown ? SW_SHOW : SW_HIDE);
+	if (rcFilter.left != iNewLeft || rcFilter.Width() != iNewWidth)
+		m_ctlFilter.SetWindowPos(NULL, iNewLeft, rcFilter.top, iNewWidth, rcFilter.Height(), SWP_NOOWNERZORDER | SWP_NOZORDER | SWP_NOACTIVATE);
 }
 
 void CSearchResultsWnd::OnSize(UINT nType, int cx, int cy)
@@ -1432,6 +1483,20 @@ void CSearchResultsWnd::DownloadSelected(bool bPaused, bool bBypassDownloadValid
 	ExecuteSearchDownloadCommand(selectedList, bPaused, bBypassDownloadValidator);
 }
 
+void CSearchResultsWnd::DownloadAllSearchResults(int iTab, bool bOnlyUnknown)
+{
+	TCITEM item = {};
+	item.mask = TCIF_PARAM;
+	if (iTab < 0 || !searchselect.GetItem(iTab, &item) || item.lParam == NULL)
+		return;
+
+	const uint32 nSearchID = reinterpret_cast<SSearchParams*>(item.lParam)->dwSearchID;
+	CTypedPtrList<CPtrList, CSearchFile*> downloadItems;
+	searchlistctrl.CollectSearchDownloadItems(nSearchID, bOnlyUnknown, downloadItems);
+	if (!downloadItems.IsEmpty())
+		ExecuteSearchDownloadCommand(downloadItems, thePrefs.AddNewFilesPaused(), false);
+}
+
 void CSearchResultsWnd::ExecuteSearchDownloadCommand(CTypedPtrList<CPtrList, CSearchFile*> &selectedList, bool bPaused, bool bBypassDownloadValidator)
 {
 	ClearChunkedSearchDownloadItems();
@@ -1731,10 +1796,12 @@ void CSearchResultsWnd::Localize()
 	UpdateCatTabs();
 
 	SetDlgItemText(IDC_CHECK_COMPLETE, GetResString(_T("COMPLETE")));
+	SetDlgItemText(IDC_CHECK_KNOWN, GetResString(_T("KNOWN")));
 	SetDlgItemText(IDC_CLEARALL, GetResString(_T("REMOVEALLSEARCH")));
 	m_btnSearchListMenu.SetWindowText(GetResString(_T("SW_RESULT")));
 	SetDlgItemText(IDC_SDOWNLOAD, GetResString(_T("SW_DOWNLOAD")));
 	m_ctlOpenParamsWnd.SetWindowText(GetResString(_T("SEARCHPARAMS")) + _T("..."));
+	EnsureFilterControlLayout();
 }
 
 void CSearchResultsWnd::OnBnClickedClearAll()
@@ -2822,6 +2889,18 @@ void CSearchResultsWnd::OnBnClickedComplete()
 	}
 }
 
+void CSearchResultsWnd::OnBnClickedKnown()
+{
+	thePrefs.m_uSearchKnownCheckState = IsDlgButtonChecked(IDC_CHECK_KNOWN);
+	int iCurSel = searchselect.GetCurSel();
+	if (iCurSel >= 0) {
+		TCITEM item;
+		item.mask = TCIF_PARAM;
+		if (searchselect.GetItem(iCurSel, &item) && item.lParam != NULL)
+			ShowResults(reinterpret_cast<SSearchParams*>(item.lParam));
+	}
+}
+
 void CSearchResultsWnd::UpdateCatTabs()
 {
 	int oldsel = m_cattabs.GetCurSel();
@@ -2861,6 +2940,9 @@ void CSearchResultsWnd::ShowSearchSelector(bool visible)
 	GetDlgItem(IDC_CLEARALL)->ShowWindow(nCmdShow);
 	m_ctlFilter.ShowWindow(nCmdShow);
 	GetDlgItem(IDC_CHECK_COMPLETE)->ShowWindow(nCmdShow);
+	GetDlgItem(IDC_CHECK_KNOWN)->ShowWindow(SW_HIDE);
+	if (visible)
+		EnsureFilterControlLayout();
 	searchselect.UpdateTabToolTips();
 }
 
@@ -3301,6 +3383,16 @@ BOOL CSearchResultsSelector::OnCommand(WPARAM wParam, LPARAM lParam)
 			theApp.emuledlg->searchwnd->m_pwndResults->StartChunkedCleanUpSearchResults(iTab);
 		return TRUE;
 	}
+	case MP_DOWNLOAD_ALL_LISTED:
+	case MP_DOWNLOAD_ALL_UNKNOWN:
+	{
+		int iTab = GetTabUnderContextMenu();
+		if (iTab < 0)
+			iTab = GetCurSel();
+		if (iTab >= 0)
+			theApp.emuledlg->searchwnd->m_pwndResults->DownloadAllSearchResults(iTab, wParam == MP_DOWNLOAD_ALL_UNKNOWN);
+		return TRUE;
+	}
 	case MP_SHOWLIST:
 	case MP_MESSAGE:
 	case MP_ADDFRIEND:
@@ -3541,6 +3633,9 @@ void CSearchResultsSelector::OnContextMenu(CWnd*, CPoint point)
 	menu.AppendMenu(MF_STRING | (theApp.emuledlg->searchwnd->m_pwndResults->m_bMergeFromSearchIDHasBeenSet ? MF_ENABLED : MF_GRAYED), MP_MERGE_TO, GetResString(_T("MERGE_TO")), _T("MERGETO"));
 	menu.AppendMenu(MF_STRING | MF_SEPARATOR);
 	menu.AppendMenu(MF_STRING, MP_CLEAN_UP_CURRENT_TAB, GetResString(_T("CLEAN_UP_CURRENT_TAB")), _T("CLEAR"));
+	menu.AppendMenu(MF_STRING | MF_SEPARATOR);
+	menu.AppendMenu(MF_STRING, MP_DOWNLOAD_ALL_LISTED, GetResString(_T("DOWNLOAD_ALL_LISTED")), _T("RESUME"));
+	menu.AppendMenu(MF_STRING, MP_DOWNLOAD_ALL_UNKNOWN, GetResString(_T("DOWNLOAD_ALL_UNKNOWN")), _T("RESUME"));
 	menu.AppendMenu(MF_STRING | MF_SEPARATOR);
 	menu.AppendMenu(MF_STRING, MP_REMOVE, GetResString(_T("FD_CLOSE")), _T("CLOSETAB"));
 

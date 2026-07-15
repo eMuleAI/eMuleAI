@@ -1671,6 +1671,32 @@ CKnownFile* CKnownFileList::IsOnDuplicatesForSharedScan(const LPCTSTR filename, 
 	return FindKnownFileInSizeIndexLimited(m_dupFileSizeIndex, filename, in_date, in_size, uMaxLegacyFallbackCandidates);
 }
 
+bool CKnownFileList::IsDuplicatePathForSharedScan(LPCTSTR pszFileName, time_t tUtcFileDate, uint64 uFileSize, LPCTSTR pszPathKey)
+{
+	if (pszFileName == NULL || pszPathKey == NULL)
+		return false;
+
+	const size_t uMaxLegacyFallbackCandidates = 64;
+	CSingleLock sl(&m_csDuplicatesLock, TRUE);
+	auto identityRange = m_dupFileIdentityIndex.equal_range(BuildIdentityIndexKey(pszFileName, uFileSize));
+	for (auto it = identityRange.first; it != identityRange.second; ++it) {
+		if (!KnownFileMatches(it->second, pszFileName, tUtcFileDate, uFileSize))
+			continue;
+		if (CSharedFileList::BuildSharedPathCacheKey(it->second->GetFilePath()) == pszPathKey)
+			return true;
+	}
+
+	size_t uChecked = 0;
+	auto sizeRange = m_dupFileSizeIndex.equal_range(uFileSize);
+	for (auto it = sizeRange.first; it != sizeRange.second && uChecked < uMaxLegacyFallbackCandidates; ++it, ++uChecked) {
+		if (!KnownFileMatches(it->second, pszFileName, tUtcFileDate, uFileSize))
+			continue;
+		if (CSharedFileList::BuildSharedPathCacheKey(it->second->GetFilePath()) == pszPathKey)
+			return true;
+	}
+	return false;
+}
+
 CKnownFile* CKnownFileList::IsOnDuplicates(const LPCTSTR filename, time_t in_date, uint64 in_size)
 {
 	CSingleLock sl(&m_csDuplicatesLock, TRUE);

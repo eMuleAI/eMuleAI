@@ -730,8 +730,8 @@ void CListCtrlX::OnFindPrev()
 // This function is used to fix the full row selection in owner-data lists on Windows 11
 void CListCtrlX::OnNmCustomDraw(NMHDR* pNMHDR, LRESULT* pResult)
 {
-	// Apply fix only on Windows 11 owner-data lists without a small imagelist
-	if (thePrefs.GetWindowsVersion() < _WINVER_11_ || !(GetStyle() & LVS_OWNERDATA)	|| GetImageList(LVSIL_SMALL) != nullptr) {
+	// Apply the dark mode fix only on Windows 11 owner-data lists without a small imagelist.
+	if (!IsDarkModeEnabled() || thePrefs.GetWindowsVersion() < _WINVER_11_ || !(GetStyle() & LVS_OWNERDATA) || GetImageList(LVSIL_SMALL) != nullptr) {
 		*pResult = CDRF_DODEFAULT;
 		return;
 	}

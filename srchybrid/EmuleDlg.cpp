@@ -6831,6 +6831,7 @@ namespace
 			, bListUpdateAfterCompletion(false)
 			, bSavingDownloadsToDisk(false)
 			, bHashing(false)
+			, bMetadata(false)
 		{
 		}
 
@@ -6865,6 +6866,7 @@ namespace
 		bool bListUpdateAfterCompletion;
 		bool bSavingDownloadsToDisk;
 		bool bHashing;
+		bool bMetadata;
 	};
 
 	static CString GetResStringOrDefault(LPCTSTR pszKey, LPCTSTR pszDefault)
@@ -7055,6 +7057,11 @@ namespace
 		if (bIncludeSharedFilesHashing && pDlg->sharedfileswnd != NULL && pDlg->sharedfileswnd->sharedfilesctrl.GetActiveSharedFilesHashingProgress(uDone, uTotal))
 			AddActiveBulkOperation(summary, uDone, uTotal, false, false, false, false, true, true);
 
+		if (bIncludeSharedFilesHashing && pDlg->sharedfileswnd != NULL && pDlg->sharedfileswnd->sharedfilesctrl.GetActiveSharedFilesMetadataProgress(uDone, uTotal)) {
+			AddActiveBulkOperation(summary, uDone, uTotal, false, false, false, true);
+			summary.bMetadata = true;
+		}
+
 		if (bIncludeStartupLoad)
 			AddStartupLoadOperation(summary);
 		if (bIncludeSearchStartupLoad)
@@ -7169,7 +7176,7 @@ namespace
 				strDetail.Format(GetResString(_T("BULKOP_MULTI_OPERATIONS_DETAIL")), summary.uCount, summary.uDone, summary.uTotal);
 				return;
 			}
-			strTitle = GetResString(summary.bHashing ? _T("BULKOP_HASH_SHAREDFILES_TITLE") : _T("BULKOP_UPDATE_DOWNLOADS_TITLE"));
+			strTitle = GetResString(summary.bMetadata ? _T("BULKOP_UPDATE_METADATA_TITLE") : (summary.bHashing ? _T("BULKOP_HASH_SHAREDFILES_TITLE") : _T("BULKOP_UPDATE_DOWNLOADS_TITLE")));
 		}
 		FormatBulkOperationProgressDetail(strDetail, summary.uDone, summary.uTotal, summary.bListUpdateAfterCompletion, summary.bSavingDownloadsToDisk);
 	}
@@ -7608,6 +7615,8 @@ bool CemuleDlg::CanClose()
 
 	if (theApp.m_app_state == APP_STATE_RUNNING && thePrefs.IsConfirmExitEnabled()) {
 		theApp.m_app_state = APP_STATE_ASKCLOSE; //disable tray menu
+		if (m_pSplashWnd != NULL && m_pSplashWnd->IsAboutMode() && ::IsWindow(m_pSplashWnd->GetSafeHwnd()))
+			m_pSplashWnd->DestroyWindow();
 		RestoreWindow(); // make sure the window is in foreground for this prompt
 		ExitBox request(this);
 		request.DoModal();

@@ -102,6 +102,7 @@ public:
 	CKnownFile*	PromoteDuplicateForSharedFile(CKnownFile* pOldPrimary);
 	CKnownFile*	IsOnDuplicatesForSharedScan(const LPCTSTR filename, time_t in_date, uint64 in_size);
 	CKnownFile*	IsOnDuplicates(const LPCTSTR filename, time_t in_date, uint64 in_size);
+	bool	IsDuplicatePathForSharedScan(LPCTSTR pszFileName, time_t tUtcFileDate, uint64 uFileSize, LPCTSTR pszPathKey);
 	void PurgeDuplicateFile(CKnownFile* file);
 
 	typedef			 std::list<CKnownFile*> KnownFileList;

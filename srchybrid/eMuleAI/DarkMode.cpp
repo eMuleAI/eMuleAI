@@ -853,8 +853,22 @@ static LRESULT CALLBACK ButtonSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, 
 
 			wchar_t szText[256] = {};
 			GetWindowText(hWnd, szText, _countof(szText));
-			UINT dtFlags = (style & BS_MULTILINE) ? (DT_WORDBREAK | DT_VCENTER | DT_LEFT) : (DT_SINGLELINE | DT_VCENTER | DT_LEFT);
-			DrawText(hdc, szText, -1, &rcText, dtFlags);
+			if ((style & BS_MULTILINE) != 0) {
+				RECT rcMeasuredText = rcText;
+				DrawText(hdc, szText, -1, &rcMeasuredText, DT_CALCRECT | DT_LEFT | DT_WORDBREAK);
+				const int iTextHeight = rcMeasuredText.bottom - rcMeasuredText.top;
+				const int iAvailableHeight = rcText.bottom - rcText.top;
+				if (iTextHeight < iAvailableHeight) {
+					const LONG lVerticalAlignment = style & BS_VCENTER;
+					if (lVerticalAlignment == BS_BOTTOM)
+						rcText.top += iAvailableHeight - iTextHeight;
+					else if (lVerticalAlignment != BS_TOP)
+						rcText.top += (iAvailableHeight - iTextHeight) / 2;
+				}
+				DrawText(hdc, szText, -1, &rcText, DT_LEFT | DT_WORDBREAK);
+			}
+			else
+				DrawText(hdc, szText, -1, &rcText, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
 
 			SelectObject(hdc, oldFont);
 		}

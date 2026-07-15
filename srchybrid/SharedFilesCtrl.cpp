@@ -1115,6 +1115,8 @@ CSharedFilesCtrl::CSharedFilesCtrl()
 	, m_bSharedFilesBulkAddPending(false)
 	, m_uSharedFilesHashingOverlayTotal(0)
 	, m_uSharedFilesHashingOverlayLastRemaining(0)
+	, m_uSharedFilesMetadataOverlayTotal(0)
+	, m_uSharedFilesMetadataOverlayLastRemaining(0)
 	, m_bSharedFilesRawSortInProgress(false)
 	, m_uSharedFilesListReloadDeferDepth(0)
 	, m_bSharedFilesListReloadDeferred(false)
@@ -1974,6 +1976,11 @@ bool CSharedFilesCtrl::PostSharedFilesBulkOperationMessage()
 
 void CSharedFilesCtrl::UpdateSharedFilesBulkOverlay()
 {
+	if (m_eSharedFilesBulkOperation == SharedFilesBulkOperationUpdateMetadata) {
+		ShowFilesCount();
+		return;
+	}
+
 	if (m_eSharedFilesBulkOperation == SharedFilesBulkOperationNone || m_uSharedFilesBulkTotal < BULK_OPERATION_MIN_ITEMS || (m_sharedFilesBulkItems.IsEmpty() && !m_bSharedFilesBulkCollectingSelection)) {
 		HideOperationOverlay();
 		if (theApp.emuledlg != NULL)
@@ -2004,7 +2011,7 @@ bool CSharedFilesCtrl::GetActiveSharedFilesBulkOperationProgress(bool& bDeleteLi
 	bDeleteLike = false;
 	uDone = 0;
 	uTotal = 0;
-	if (m_eSharedFilesBulkOperation == SharedFilesBulkOperationNone || m_uSharedFilesBulkTotal < BULK_OPERATION_MIN_ITEMS)
+	if (m_eSharedFilesBulkOperation == SharedFilesBulkOperationNone || m_eSharedFilesBulkOperation == SharedFilesBulkOperationUpdateMetadata || m_uSharedFilesBulkTotal < BULK_OPERATION_MIN_ITEMS)
 		return false;
 
 	bDeleteLike = m_eSharedFilesBulkOperation == SharedFilesBulkOperationDelete || m_eSharedFilesBulkOperation == SharedFilesBulkOperationRemoveHistory || m_eSharedFilesBulkOperation == SharedFilesBulkOperationClearHistory;
@@ -2019,7 +2026,7 @@ bool CSharedFilesCtrl::GetActiveSharedFilesHashingProgress(UINT& uDone, UINT& uT
 {
 	uDone = 0;
 	uTotal = 0;
-	if (theApp.sharedfiles == NULL || !theApp.sharedfiles->IsStartupScanComplete() || m_eSharedFilesBulkOperation != SharedFilesBulkOperationNone)
+	if (theApp.sharedfiles == NULL || !theApp.sharedfiles->IsStartupScanComplete() || (m_eSharedFilesBulkOperation != SharedFilesBulkOperationNone && m_eSharedFilesBulkOperation != SharedFilesBulkOperationUpdateMetadata))
 		return false;
 
 	const UINT uRemaining = ClampSharedFilesHashingCount(theApp.sharedfiles->GetHashingCount());
@@ -2031,12 +2038,28 @@ bool CSharedFilesCtrl::GetActiveSharedFilesHashingProgress(UINT& uDone, UINT& uT
 	return true;
 }
 
+bool CSharedFilesCtrl::GetActiveSharedFilesMetadataProgress(UINT& uDone, UINT& uTotal) const
+{
+	uDone = 0;
+	uTotal = 0;
+	if (theApp.sharedfiles == NULL || !theApp.sharedfiles->IsStartupScanComplete())
+		return false;
+
+	const UINT uRemaining = theApp.sharedfiles->GetMetaDataUpdateCount();
+	if (uRemaining == 0 || m_uSharedFilesMetadataOverlayTotal < BULK_OPERATION_MIN_ITEMS)
+		return false;
+
+	uTotal = m_uSharedFilesMetadataOverlayTotal;
+	uDone = (uTotal >= uRemaining) ? (uTotal - uRemaining) : 0;
+	return true;
+}
+
 void CSharedFilesCtrl::UpdateSharedFilesHashingOverlay()
 {
 	if (theApp.sharedfiles == NULL || !::IsWindow(m_hWnd))
 		return;
 
-	if (!theApp.sharedfiles->IsStartupScanComplete() || m_eSharedFilesBulkOperation != SharedFilesBulkOperationNone) {
+	if (!theApp.sharedfiles->IsStartupScanComplete() || (m_eSharedFilesBulkOperation != SharedFilesBulkOperationNone && m_eSharedFilesBulkOperation != SharedFilesBulkOperationUpdateMetadata)) {
 		m_uSharedFilesHashingOverlayTotal = 0;
 		m_uSharedFilesHashingOverlayLastRemaining = 0;
 		return;
@@ -2072,6 +2095,51 @@ void CSharedFilesCtrl::UpdateSharedFilesHashingOverlay()
 	CString strDetail;
 	strDetail.Format(GetResString(_T("BULKOP_PROGRESS_FINAL_RELOAD_DETAIL")), uDone, uTotal);
 	UpdateOperationOverlay(GetResString(_T("BULKOP_HASH_SHAREDFILES_TITLE")), strDetail, uDone, uTotal, false);
+	if (theApp.emuledlg != NULL)
+		theApp.emuledlg->RefreshActiveBulkOperationOverlays();
+}
+
+void CSharedFilesCtrl::UpdateSharedFilesMetadataOverlay()
+{
+	if (theApp.sharedfiles == NULL || !::IsWindow(m_hWnd))
+		return;
+
+	if (!theApp.sharedfiles->IsStartupScanComplete()) {
+		m_uSharedFilesMetadataOverlayTotal = 0;
+		m_uSharedFilesMetadataOverlayLastRemaining = 0;
+		return;
+	}
+
+	const UINT uRemaining = theApp.sharedfiles->GetMetaDataUpdateCount();
+	if (uRemaining == 0) {
+		const bool bHadMetadataOverlay = m_uSharedFilesMetadataOverlayTotal != 0 || m_uSharedFilesMetadataOverlayLastRemaining != 0;
+		m_uSharedFilesMetadataOverlayTotal = 0;
+		m_uSharedFilesMetadataOverlayLastRemaining = 0;
+		if (bHadMetadataOverlay) {
+			if (theApp.emuledlg != NULL)
+				theApp.emuledlg->RefreshActiveBulkOperationOverlays();
+			else if (!m_bBackendDownloadRemoveOverlayActive && m_uSharedFilesHashingOverlayTotal == 0)
+				HideOperationOverlay();
+		}
+		return;
+	}
+
+	if (m_uSharedFilesMetadataOverlayTotal == 0)
+		m_uSharedFilesMetadataOverlayTotal = uRemaining;
+	else if (uRemaining > m_uSharedFilesMetadataOverlayLastRemaining) {
+		const UINT uAdded = uRemaining - m_uSharedFilesMetadataOverlayLastRemaining;
+		m_uSharedFilesMetadataOverlayTotal = (UINT_MAX - m_uSharedFilesMetadataOverlayTotal >= uAdded) ? (m_uSharedFilesMetadataOverlayTotal + uAdded) : UINT_MAX;
+	}
+	m_uSharedFilesMetadataOverlayLastRemaining = uRemaining;
+
+	UINT uDone = 0;
+	UINT uTotal = 0;
+	if (!GetActiveSharedFilesMetadataProgress(uDone, uTotal))
+		return;
+
+	CString strDetail;
+	strDetail.Format(GetResString(_T("BULKOP_PROGRESS_DETAIL")), uDone, uTotal);
+	UpdateOperationOverlay(GetResString(_T("BULKOP_UPDATE_METADATA_TITLE")), strDetail, uDone, uTotal, false);
 	if (theApp.emuledlg != NULL)
 		theApp.emuledlg->RefreshActiveBulkOperationOverlays();
 }
@@ -2124,7 +2192,8 @@ void CSharedFilesCtrl::ClearSharedFilesBulkOperation()
 	m_dwSharedFilesBulkLastCompactTick = 0;
 	if (bDeleteLike && (bHadRemovePending || bHadDetachedRows) && theApp.DownloadValidator != NULL && !theApp.IsClosing())
 		theApp.DownloadValidator->QueueReloadMap();
-	HideOperationOverlay();
+	if (eClearedOperation != SharedFilesBulkOperationUpdateMetadata)
+		HideOperationOverlay();
 	if (theApp.emuledlg != NULL && !theApp.IsClosing())
 		theApp.emuledlg->RefreshActiveBulkOperationOverlays();
 }
@@ -2197,7 +2266,8 @@ void CSharedFilesCtrl::FinishSharedFilesBulkOperation()
 	m_uSharedFilesBulkSequence = 0;
 	m_uSharedFilesBulkCorrelationId = 0;
 	m_dwSharedFilesBulkLastCompactTick = 0;
-	HideOperationOverlay();
+	if (eFinishedOperation != SharedFilesBulkOperationUpdateMetadata)
+		HideOperationOverlay();
 	if (theApp.emuledlg != NULL && !theApp.IsClosing())
 		theApp.emuledlg->RefreshActiveBulkOperationOverlays();
 }
@@ -2269,8 +2339,11 @@ bool CSharedFilesCtrl::ProcessSharedFilesBulkUpdateMetadata(CKnownFile *pFile, c
 		++m_uSharedFilesBulkStale;
 		return false;
 	}
-	pFile->UpdateMetaDataTags();
-	UpdateFile(pFile);
+	if (theApp.sharedfiles == NULL || !theApp.sharedfiles->QueueMetaDataUpdateForFile(pFile)) {
+		++m_uSharedFilesBulkFailed;
+		QueueSharedFilesBulkFailureEvent(item, _T("queue-metadata-update"), ERROR_NOT_READY);
+		return false;
+	}
 	++m_uSharedFilesBulkProcessed;
 	return true;
 }
@@ -3238,11 +3311,7 @@ void CSharedFilesCtrl::ShowFilesCount()
 	m_strCount.Format(_T(":%Iu"), static_cast<size_t>(m_ListedItemsVector.size()));
 
 	UpdateSharedFilesHashingOverlay();
-
-	if (theApp.sharedfiles->m_uMetadataUpdatingCount > 0) {
-		const CString strUpdatingLabel = GetResString(_T("UPDATING"));
-		m_strCount.AppendFormat(_T(", %s:%I64u"), (LPCTSTR)strUpdatingLabel, static_cast<ULONGLONG>(theApp.sharedfiles->m_uMetadataUpdatingCount));
-	}
+	UpdateSharedFilesMetadataOverlay();
 
 	if (m_eFilter == FilterType::History)
 		theApp.emuledlg->sharedfileswnd->SetDlgItemText(IDC_TRAFFIC_TEXT, GetResString(_T("FILE_HISTORY")) + m_strCount);
@@ -4629,8 +4698,8 @@ BOOL CSharedFilesCtrl::OnCommand(WPARAM wParam, LPARAM)
 					continue;
 				if (myfile->IsKindOf(RUNTIME_CLASS(CKnownFile))) {
 					CKnownFile* pfile = static_cast<CKnownFile*>(myfile);
-					pfile->UpdateMetaDataTags();
-					UpdateFile(pfile);
+					if (theApp.sharedfiles != NULL)
+						theApp.sharedfiles->QueueMetaDataUpdateForFile(pfile);
 				}
 			}
 		}
