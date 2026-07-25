@@ -132,6 +132,31 @@ BOOL CPPgStats::OnInitDialog()
 				  // EXCEPTION: OCX Property Pages should return FALSE
 }
 
+void CPPgStats::ResetToDefaults()
+{
+	static const DWORD aDefaultColors[15] =
+	{
+		RGB(0, 0, 64), RGB(192, 192, 255), RGB(128, 255, 128), RGB(0, 210, 0), RGB(0, 128, 0),
+		RGB(255, 128, 128), RGB(200, 0, 0), RGB(140, 0, 0), RGB(150, 150, 255), RGB(192, 0, 192),
+		RGB(255, 255, 128), RGB(50, 205, 50), RGB(255, 255, 255), RGB(255, 255, 255), RGB(255, 190, 190)
+	};
+
+	m_iGraphsUpdate = 3;
+	m_iGraphsAvgTime = 5;
+	m_iStatsUpdate = 5;
+	m_ctlGraphsUpdate.SetPos(m_iGraphsUpdate);
+	m_ctlStatsUpdate.SetPos(m_iGraphsAvgTime);
+	m_ctlGraphsAvgTime.SetPos(m_iStatsUpdate - 1);
+	CheckDlgButton(IDC_FILL_GRAPHS, BST_UNCHECKED);
+	SetDlgItemInt(IDC_CGRAPHSCALE, 100, FALSE);
+	m_cratio.SetCurSel(2);
+	for (int i = 0; i < min(m_iStatsColors, static_cast<int>(_countof(aDefaultColors))); ++i)
+		m_pdwStatsColors[i] = aDefaultColors[i];
+	OnCbnSelChangeColorSelector();
+	ShowInterval();
+	SetModified(TRUE);
+}
+
 BOOL CPPgStats::OnApply()
 {
 	//TODO: cache all parameters. stats should be redrawn (deleted) only if really needed
@@ -199,7 +224,7 @@ void CPPgStats::Localize()
 		SetDlgItemText(IDC_STREE, GetResString(_T("STREE")));
 		SetDlgItemText(IDC_STATIC_CGRAPHSCALE, GetResString(_T("PPGSTATS_YSCALE")));
 		SetDlgItemText(IDC_STATIC_CGRAPHRATIO, GetResString(_T("PPGSTATS_ACRATIO")));
-		SetWindowText(GetResString(_T("STATSSETUPINFO")));
+		SetWindowText(GetResString(_T("SF_STATISTICS")));
 		SetDlgItemText(IDC_PREFCOLORS, GetResString(_T("COLORS")));
 		SetDlgItemText(IDC_FILL_GRAPHS, GetResString(_T("FILLGRAPHS")));
 

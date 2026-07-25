@@ -283,6 +283,26 @@ void CPPgWebServer::LoadSettings()
 	SetModified(FALSE);	// FoRcHa
 }
 
+void CPPgWebServer::ResetToDefaults()
+{
+	CheckDlgButton(IDC_WSENABLED, BST_UNCHECKED);
+	CheckDlgButton(IDC_WS_GZIP, BST_CHECKED);
+	CheckDlgButton(IDC_WSUPNP, BST_UNCHECKED);
+	SetDlgItemInt(IDC_WSPORT, 4711, FALSE);
+	SetDlgItemText(IDC_TMPLPATH, thePrefs.GetMuleDirectory(EMULE_EXECUTABLEDIR) + _T("eMule.tmpl"));
+	SetDlgItemInt(IDC_WSTIMEOUT, 5, FALSE);
+	CheckDlgButton(IDC_WEB_HTTPS, BST_UNCHECKED);
+	SetDlgItemText(IDC_CERTPATH, _T(""));
+	SetDlgItemText(IDC_KEYPATH, _T(""));
+	SetDlgItemText(IDC_WSPASS, _T(""));
+	CheckDlgButton(IDC_WS_ALLOWHILEVFUNC, BST_UNCHECKED);
+	CheckDlgButton(IDC_WSENABLEDLOW, BST_UNCHECKED);
+	SetDlgItemText(IDC_WSPASSLOW, _T(""));
+	m_bNewCert = false;
+	OnEnChangeWSEnabled();
+	SetModified(TRUE);
+}
+
 void CPPgWebServer::OnDataChange()
 {
 	SetModified();
@@ -389,7 +409,7 @@ void CPPgWebServer::Localize()
 		SetDlgItemText(IDC_TEMPLATE, GetResString(_T("WS_RELOAD_TMPL")) + _T(':'));
 		SetDlgItemText(IDC_WSRELOADTMPL, GetResString(_T("SF_RELOAD")));
 
-		SetDlgItemText(IDC_STATIC_GENERAL, GetResString(_T("PW_GENERAL")));
+		SetDlgItemText(IDC_STATIC_GENERAL, GetResString(_T("CD_GENERAL")));
 
 		SetDlgItemText(IDC_WSTIMEOUTLABEL, GetResString(_T("WEB_SESSIONTIMEOUT")) + _T(':'));
 		SetDlgItemText(IDC_MINS, GetResString(_T("LONGMINS")).MakeLower());

@@ -83,6 +83,20 @@ void CPPgServer::LoadSettings()
 	CheckDlgButton(IDC_MANUALSERVERHIGHPRIO, thePrefs.m_bManualAddedServersHighPriority);
 }
 
+void CPPgServer::ResetToDefaults()
+{
+	SetDlgItemInt(IDC_SERVERRETRIES, 10, FALSE);
+	CheckDlgButton(IDC_AUTOSERVER, BST_UNCHECKED);
+	CheckDlgButton(IDC_UPDATESERVERCONNECT, BST_UNCHECKED);
+	CheckDlgButton(IDC_UPDATESERVERCLIENT, BST_UNCHECKED);
+	CheckDlgButton(IDC_SCORE, BST_CHECKED);
+	CheckDlgButton(IDC_SMARTIDCHECK, BST_CHECKED);
+	CheckDlgButton(IDC_SAFESERVERCONNECT, BST_UNCHECKED);
+	CheckDlgButton(IDC_AUTOCONNECTSTATICONLY, BST_UNCHECKED);
+	CheckDlgButton(IDC_MANUALSERVERHIGHPRIO, BST_UNCHECKED);
+	SetModified(TRUE);
+}
+
 BOOL CPPgServer::OnApply()
 {
 	UINT uCurDeadServerRetries = thePrefs.m_uDeadServerRetries;
@@ -112,7 +126,7 @@ BOOL CPPgServer::OnApply()
 void CPPgServer::Localize()
 {
 	if (m_hWnd) {
-		SetWindowText(GetResString(_T("PW_SERVER")));
+		SetWindowText(GetResString(_T("SERVER")));
 		SetDlgItemText(IDC_LBL_UPDATE_SERVERS, GetResString(_T("SV_UPDATE")));
 		SetDlgItemText(IDC_LBL_MISC, GetResString(_T("PW_MISC")));
 		SetDlgItemText(IDC_REMOVEDEAD, GetResString(_T("PW_RDEAD")));
@@ -132,7 +146,7 @@ void CPPgServer::Localize()
 void CPPgServer::OnBnClickedEditadr()
 {
 	CString sDat;
-	sDat.Format(_T("\"%saddresses.dat\""), (LPCTSTR)thePrefs.GetMuleDirectory(EMULE_CONFIGDIR));
+	sDat.Format(_T("\"%s%s\""), (LPCTSTR)thePrefs.GetMuleDirectory(EMULE_CONFIGDIR), ADDRESSES_DAT_FILENAME);
 	ShellOpen(thePrefs.GetTxtEditor(), sDat);
 }
 

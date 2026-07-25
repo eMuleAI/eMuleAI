@@ -118,6 +118,7 @@ public:
 
 	bool	CanSearchRelatedFiles() const;
 	void	SearchRelatedFiles(CPtrList &listFiles);
+	void	SearchRelatedFiles(const std::vector<CString>& hashes, const std::vector<CString>& names);
 
 	void	DownloadSelected();
 	void	DownloadSelected(bool bPaused, bool bBypassDownloadValidator = false);
@@ -136,6 +137,7 @@ public:
 	void	UpdateCatTabs();
 
 	SSearchParams* GetSearchResultsParams(uint32 uSearchID) const;
+	bool IsNetworkSearchActive(uint32 uSearchID) const;
 	void RefreshSearchTabActivityAnimation();
 	void EnsureActiveTabLoaded();
 
@@ -170,6 +172,7 @@ protected:
 	unsigned	m_servercount;
 	int			m_iSentMoreReq;
 	bool		m_bEd2kMoreResultsAvailable;
+	bool		m_bEd2kMoreRequestPending;
 	bool		m_b64BitSearchPacket;
 	bool		m_globsearch;
 	bool		m_cancelled;

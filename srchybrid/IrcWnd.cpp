@@ -112,8 +112,8 @@ void CIrcWnd::SetAllIcons()
 void CIrcWnd::Localize()
 {
 	SetDlgItemText(IDC_BN_IRCCONNECT, GetResString(m_bConnected ? _T("IRC_DISCONNECT") : _T("IRC_CONNECT")));
-	SetDlgItemText(IDC_CHATSEND, GetResString(_T("IRC_SEND")));
-	SetDlgItemText(IDC_CLOSECHAT, GetResString(_T("FD_CLOSE")));
+	SetDlgItemText(IDC_CHATSEND, GetResString(_T("CW_SEND")));
+	SetDlgItemText(IDC_CLOSECHAT, GetResString(_T("CW_CLOSE")));
 	m_wndChanList.Localize();
 	m_wndChanSel.Localize();
 	m_wndNicks.Localize();

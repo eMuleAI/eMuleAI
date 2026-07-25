@@ -55,69 +55,52 @@ namespace
 		pdc->SelectObject(pOldPen);
 	}
 
-	static int ResolveTabToolIndex(CTabCtrl* pTabCtrl, const TOOLINFO& ti)
-	{
-		if (pTabCtrl == NULL)
-			return -1;
-
-		const int iItemCount = pTabCtrl->GetItemCount();
-		if (iItemCount <= 0)
-			return -1;
-
-		const CRect rcTool(ti.rect);
-		for (int i = 0; i < iItemCount; ++i) {
-			CRect rcItem;
-			if (pTabCtrl->GetItemRect(i, &rcItem) && rcItem == rcTool)
-				return i;
-		}
-
-		if ((ti.uFlags & TTF_IDISHWND) == 0) {
-			if (static_cast<int>(ti.uId) >= 0 && static_cast<int>(ti.uId) < iItemCount)
-				return static_cast<int>(ti.uId);
-			if (static_cast<int>(ti.uId) > 0 && static_cast<int>(ti.uId - 1) < iItemCount)
-				return static_cast<int>(ti.uId - 1);
-		}
-
-		return -1;
-	}
-
 	static bool TryGetTooltipHeaderIcon(HWND hTooltipWnd, TooltipHeaderIcon& headerIcon)
 	{
 		memset(&headerIcon, 0, sizeof(headerIcon));
-		if (hTooltipWnd == NULL)
+		if (hTooltipWnd == NULL || !::IsWindow(hTooltipWnd))
 			return false;
 
-		TOOLINFO ti = {};
-		ti.cbSize = sizeof(ti);
-		if (!::SendMessage(hTooltipWnd, TTM_GETCURRENTTOOL, 0, reinterpret_cast<LPARAM>(&ti)) || ti.hwnd == NULL)
+		POINT ptScreen = {};
+		if (!::GetCursorPos(&ptScreen))
 			return false;
 
-		CTabCtrl* pTabCtrl = static_cast<CTabCtrl*>(CWnd::FromHandle(ti.hwnd));
-		if (pTabCtrl == NULL)
+		HWND hTabWnd = ::WindowFromPoint(ptScreen);
+		if (hTabWnd == NULL || hTabWnd == hTooltipWnd)
 			return false;
 
-		CImageList* pImageList = pTabCtrl->GetImageList();
-		if (pImageList == NULL || pImageList->GetSafeHandle() == NULL)
+		TCHAR szClassName[32] = {};
+		if (::GetClassName(hTabWnd, szClassName, _countof(szClassName)) == 0 || _tcsicmp(szClassName, WC_TABCONTROL) != 0)
 			return false;
 
-		const int iTabIndex = ResolveTabToolIndex(pTabCtrl, ti);
+		POINT ptClient = ptScreen;
+		if (!::ScreenToClient(hTabWnd, &ptClient))
+			return false;
+
+		TCHITTESTINFO hitTest = {};
+		hitTest.pt = ptClient;
+		const int iTabIndex = static_cast<int>(::SendMessage(hTabWnd, TCM_HITTEST, 0, reinterpret_cast<LPARAM>(&hitTest)));
 		if (iTabIndex < 0)
+			return false;
+
+		const HIMAGELIST hImageList = TabCtrl_GetImageList(hTabWnd);
+		if (hImageList == NULL)
 			return false;
 
 		TCITEM item = {};
 		item.mask = TCIF_IMAGE;
-		if (!pTabCtrl->GetItem(iTabIndex, &item) || item.iImage < 0)
+		if (!TabCtrl_GetItem(hTabWnd, iTabIndex, &item) || item.iImage < 0)
 			return false;
 
 		IMAGEINFO ii = {};
-		if (!pImageList->GetImageInfo(item.iImage, &ii))
+		if (!ImageList_GetImageInfo(hImageList, item.iImage, &ii))
 			return false;
 
-		headerIcon.pImageList = pImageList;
+		headerIcon.pImageList = CImageList::FromHandle(hImageList);
 		headerIcon.iImage = item.iImage;
 		headerIcon.size.cx = ii.rcImage.right - ii.rcImage.left;
 		headerIcon.size.cy = ii.rcImage.bottom - ii.rcImage.top;
-		return (headerIcon.size.cx > 0 && headerIcon.size.cy > 0);
+		return headerIcon.pImageList != NULL && headerIcon.size.cx > 0 && headerIcon.size.cy > 0;
 	}
 
 	static void DrawTooltipHeaderIcon(const TooltipHeaderIcon& headerIcon, CDC* pdc, const CRect& rcLine)
@@ -183,6 +166,7 @@ CToolTipCtrlX::CToolTipCtrlX()
 	, m_bHasDeferredTextUpdate(false)
 	, m_bDeferredTextUsesCallback(false)
 	, m_bShowFileIcon()
+	, m_bAutoTabHeaderIcon(false)
 	, m_bOwnsWindow(false)
 	, m_bProcessingDeferredMessage(false)
 	, m_uDeferredHideMessage(0)
@@ -324,13 +308,14 @@ void CToolTipCtrlX::ApplyDeferredTextUpdate()
 		return;
 
 	TOOLINFO ti = m_tiDeferredTextUpdate;
-	ti.lpszText = m_bDeferredTextUsesCallback ? LPSTR_TEXTCALLBACK : const_cast<LPTSTR>((LPCTSTR)m_strDeferredTextUpdate);
+	const bool bUsesCallback = m_bDeferredTextUsesCallback;
+	const CString strDeferredText(m_strDeferredTextUpdate);
+	ResetDeferredTextUpdate();
+	ti.lpszText = bUsesCallback ? LPSTR_TEXTCALLBACK : const_cast<LPTSTR>((LPCTSTR)strDeferredText);
 
 	m_bProcessingDeferredMessage = true;
 	__super::WindowProc(TTM_UPDATETIPTEXT, 0, reinterpret_cast<LPARAM>(&ti));
 	m_bProcessingDeferredMessage = false;
-
-	ResetDeferredTextUpdate();
 }
 
 void CToolTipCtrlX::ResetDeferredHide()
@@ -489,6 +474,12 @@ void CToolTipCtrlX::CustomPaint(LPNMTTCUSTOMDRAW pNMCD)
 	//
 	CString strText;
 	pwnd->GetWindowText(strText);
+	const bool bHasAutoFormatSuffix = !strText.IsEmpty() && strText.GetAt(strText.GetLength() - 1) == TOOLTIP_AUTOFORMAT_SUFFIX_CH;
+	if (bHasAutoFormatSuffix)
+		strText.Truncate(strText.GetLength() - 1);
+	strText.TrimRight();
+	if (bHasAutoFormatSuffix)
+		strText.AppendChar(TOOLTIP_AUTOFORMAT_SUFFIX_CH);
 
 	RECT rcWnd;
 	pwnd->GetWindowRect(&rcWnd);
@@ -523,7 +514,7 @@ void CToolTipCtrlX::CustomPaint(LPNMTTCUSTOMDRAW pNMCD)
 			bHasHeaderIcon = true;
 		}
 	}
-	if (!bHasHeaderIcon)
+	if (!bHasHeaderIcon && m_bAutoTabHeaderIcon)
 		bHasHeaderIcon = TryGetTooltipHeaderIcon(GetSafeHwnd(), headerIcon);
 	pdc->SetTextColor(palette.crValueText);
 
@@ -533,7 +524,7 @@ void CToolTipCtrlX::CustomPaint(LPNMTTCUSTOMDRAW pNMCD)
 	// auto-format is to be requested by appending the TOOLTIP_AUTOFORMAT_SUFFIX_CH
 	// character. Appending, because we can remove that character efficiently without
 	// re-allocating the entire string.
-	bool bAutoFormatText = (strText.Right(1)[0] == TOOLTIP_AUTOFORMAT_SUFFIX_CH);
+	bool bAutoFormatText = !strText.IsEmpty() && strText.GetAt(strText.GetLength() - 1) == TOOLTIP_AUTOFORMAT_SUFFIX_CH;
 	if (bAutoFormatText)
 		strText.Truncate(strText.GetLength() - 1); // truncate the TOOLTIP_AUTOFORMAT_SUFFIX_CH char
 	const int iCaptionBreak = bAutoFormatText ? strText.Find(_T("\n<br_head>\n")) : -1;

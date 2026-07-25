@@ -1,6 +1,7 @@
 #pragma once
 
 #include "SearchParamsWnd.h"
+#include <vector>
 class CSearchFile;
 class CClosableTabCtrl;
 
@@ -32,6 +33,7 @@ public:
 
 	bool CanSearchRelatedFiles() const;
 	void SearchRelatedFiles(CPtrList &listFiles);
+	void SearchRelatedFiles(const std::vector<CString>& hashes, const std::vector<CString>& names);
 
 	void DownloadSelected();
 	void DownloadSelected(bool bPaused, bool bBypassDownloadValidator = false);

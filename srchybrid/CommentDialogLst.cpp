@@ -53,7 +53,7 @@ CCommentDialogLst::CCommentDialogLst()
 	, m_timer()
 	, m_bDataChanged()
 {
-	m_strCaption = GetResString(_T("CMT_READALL"));
+	m_strCaption = GetResString(_T("COMMENT"));
 	m_psp.pszTitle = m_strCaption;
 	m_psp.dwFlags |= PSP_USETITLE;
 }
@@ -127,7 +127,7 @@ void CCommentDialogLst::Localize()
 {
 	if (!m_hWnd)
 		return;
-	SetTabTitle(_T("CMT_READALL"), this);
+	SetTabTitle(_T("COMMENT"), this);
 
 	SetDlgItemText(IDC_SEARCHKAD, GetResString(_T("SEARCHKAD")));
 	SetDlgItemText(IDC_EDITCOMMENTFILTER, GetResString(_T("EDITSPAMFILTER")));

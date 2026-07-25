@@ -159,7 +159,7 @@ void CFriendListCtrl::OnContextMenu(CWnd*, CPoint point)
 {
 	CMenuXP ClientMenu;
 	ClientMenu.CreatePopupMenu();
-	ClientMenu.AddMenuSidebar(GetResString(_T("FRIENDLIST")));
+	ClientMenu.AddMenuSidebar(GetResString(_T("CW_FRIENDS")));
 
 	CUpDownClient* client = NULL;
 
@@ -169,12 +169,12 @@ void CFriendListCtrl::OnContextMenu(CWnd*, CPoint point)
 		cur_friend = reinterpret_cast<CFriend*>(GetItemData(iSel));
 		if (cur_friend)
 			client = cur_friend->GetLinkedClient(true);
-		ClientMenu.AppendMenu(MF_STRING, MP_DETAIL, GetResString(_T("SHOWDETAILS")), _T("CLIENTDETAILS"));
+		ClientMenu.AppendMenu(MF_STRING, MP_DETAIL, GetResString(_T("DL_INFO")), _T("CLIENTDETAILS"));
 		ClientMenu.SetDefaultItem(MP_DETAIL);
 	}
 
-	ClientMenu.AppendMenu(MF_STRING, MP_ADDFRIEND, GetResString(_T("ADDAFRIEND")), _T("ADDFRIEND"));
-	ClientMenu.AppendMenu(MF_STRING | (cur_friend ? MF_ENABLED : MF_GRAYED), MP_REMOVEFRIEND, GetResString(_T("REMOVEFRIEND")), _T("DELETEFRIEND"));
+	ClientMenu.AppendMenu(MF_STRING, MP_ADDFRIEND, GetResStringWithEllipsis(_T("ADD")), _T("ADDFRIEND"));
+	ClientMenu.AppendMenu(MF_STRING | (cur_friend ? MF_ENABLED : MF_GRAYED), MP_REMOVEFRIEND, GetResString(_T("REMOVE")), _T("DELETEFRIEND"));
 	ClientMenu.AppendMenu(MF_STRING | (cur_friend ? MF_ENABLED : MF_GRAYED), MP_MESSAGE, GetResString(_T("SEND_MSG")), _T("SENDMESSAGE"));
 	ClientMenu.AppendMenu(MF_STRING | ((cur_friend && client && client->IsEd2kClient() && client->GetViewSharedFilesSupport()) ? MF_ENABLED : MF_GRAYED), MP_SHOWLIST, GetResString(_T("VIEWFILES")), _T("VIEWFILES"));
 

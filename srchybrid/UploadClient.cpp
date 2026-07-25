@@ -1043,7 +1043,7 @@ void CUpDownClient::AddRequestCount(const uchar *fileid)
 			if (curTick < cur_struct->lastasked + MIN_REQUESTTIME && !GetFriendSlot() && !bIsNatTraversalConnection) {
 				cur_struct->badrequests += static_cast<uint8>(GetDownloadState() != DS_DOWNLOADING);
 				if (cur_struct->badrequests == BADCLIENTBAN)
-					Ban();
+					Ban(GetResString(_T("PUNISHMENT_REASON_AGGRESSIVE_BEHAVIOUR")));
 			} else
 				cur_struct->badrequests -= static_cast<uint8>(cur_struct->badrequests > 0);
 
@@ -1097,7 +1097,7 @@ void  CUpDownClient::UnBan()
 
 const void CUpDownClient::Ban(const CString& strReason, const uint8 uBadClientCategory, const uint8 uPunishment, const time_t tBanStartTime)
 {
-	m_strPunishmentReason = strReason.IsEmpty() ? GetResString(_T("PUNISHMENT_REASON_AGGRESSIVE_BEHAVIOUR")) : strReason;
+	m_strPunishmentReason = strReason.IsEmpty() ? GetResString(_T("PUNISHMENT_REASON_NONE")) : strReason;
 
 	if (uPunishment == P_USERHASHBAN && isnulmd4(GetUserHash()))
 		return; //Null user hashes cannot be banned.

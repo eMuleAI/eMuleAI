@@ -18,6 +18,7 @@
 #include "stdafx.h"
 #include "emule.h"
 #include "ClientList.h"
+#include "Preferences.h"
 #include "Kademlia/Kademlia/kademlia.h"
 #include "Kademlia/Kademlia/prefs.h"
 #include "Kademlia/Kademlia/search.h"
@@ -195,8 +196,7 @@ namespace
 	}
 }
 
-#define CLIENT_HISTORY_MET_FILENAME	_T("clienthistory.met")
-#define CLIENT_HISTORY_MET_FILENAME_TMP	_T("clienthistory.met.tmp")
+#define CLIENT_HISTORY_MET_FILENAME_TMP	CLIENT_HISTORY_MET_FILENAME _T(".tmp")
 
 CClientList::CClientList()
 	: m_pServingBuddy()
@@ -829,7 +829,7 @@ bool CClientList::AttachToAlreadyKnown(CUpDownClient **client, CClientReqSocket 
 					// if found_client is connected and has the IS_IDENTIFIED, it's safe to say that the other one is a bad guy
 					if (thePrefs.GetLogBannedClients())
 						AddProtectionLogLine(false, _T("Clients: %s (%s), Ban reason: Userhash invalid"), (LPCTSTR)EscPercent(tocheck->GetUserName()), (LPCTSTR)ipstr(tocheck->GetConnectIP()));
-					tocheck->Ban();
+					tocheck->Ban(GetResString(_T("PUNISHMENT_REASON_BAD_USER_HASH")));
 				} else if (thePrefs.GetLogBannedClients()) {
 					//CLIENTCOL Warning: Found matching client, to a currently connected client: %s (%s) and %s (%s)
 					AddProtectionLogLine(false, (LPCTSTR)GetResString(_T("CLIENTCOL"))
@@ -2903,6 +2903,8 @@ void CClientList::ApplyArchivedClientToArchive(CUpDownClient* pLoadedClient, std
 				pExistingClient->m_ConnectIP = pLoadedClient->m_ConnectIP;
 			if (!pLoadedClient->m_UserIP.IsNull())
 				pExistingClient->m_UserIP = pLoadedClient->m_UserIP;
+			if (!pLoadedClient->m_UserIP.IsNull() || !pLoadedClient->m_ConnectIP.IsNull())
+				pExistingClient->m_structClientGeolocationData = pLoadedClient->m_structClientGeolocationData;
 			if (pLoadedClient->GetServerIP())
 				pExistingClient->SetServerIP(pLoadedClient->GetServerIP());
 			if (pLoadedClient->GetUserIDHybrid())

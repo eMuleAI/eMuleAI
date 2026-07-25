@@ -19,6 +19,7 @@
 #include <cstdio>
 #include "emule.h"
 #include "KademliaWnd.h"
+#include "Preferences.h"
 #include "KadContactListCtrl.h"
 #include "KadContactHistogramCtrl.h"
 #include "KadLookupGraph.h"
@@ -50,8 +51,8 @@ static char THIS_FILE[] = __FILE__;
 #endif
 
 
-#define	ONBOOTSTRAP_STRINGS_PROFILE	_T("AC_BootstrapIPs.dat")
-#define	ONBOOTSTRAP_URL_STRINGS_PROFILE	_T("AC_BootstrapURLs.dat")
+#define	ONBOOTSTRAP_STRINGS_PROFILE	AC_BOOTSTRAP_IPS_FILENAME
+#define	ONBOOTSTRAP_URL_STRINGS_PROFILE	AC_BOOTSTRAP_URLS_FILENAME
 
 #define	DFLT_TOOLBAR_BTN_WIDTH	24
 
@@ -255,7 +256,7 @@ namespace
 	CString GetNodesDatFilename()
 	{
 		CString strNodesDatFilename(thePrefs.GetMuleDirectory(EMULE_CONFIGDIR));
-		strNodesDatFilename.Append(_T("nodes.dat"));
+		strNodesDatFilename.Append(NODES_DAT_FILENAME);
 		return strNodesDatFilename;
 	}
 }
@@ -730,11 +731,11 @@ void CKademliaWnd::UpdateControlsState()
 {
 	LPCTSTR uid;
 	if (Kademlia::CKademlia::IsConnected())
-		uid = _T("MAIN_BTN_DISCONNECT");
+		uid = _T("IRC_DISCONNECT");
 	else if (Kademlia::CKademlia::IsRunning())
-		uid = _T("MAIN_BTN_CANCEL");
+		uid = _T("CANCEL");
 	else
-		uid = _T("MAIN_BTN_CONNECT");
+		uid = _T("IRC_CONNECT");
 	SetDlgItemText(IDC_KADCONNECT, GetResNoAmp(uid));
 	GetDlgItem(IDC_KADCONNECT)->EnableWindow(theApp.IsRunning());
 	GetDlgItem(IDC_FIREWALLCHECKBUTTON)->EnableWindow(Kademlia::CKademlia::IsConnected());

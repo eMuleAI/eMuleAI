@@ -1,4 +1,4 @@
-﻿//This file is part of eMule AI
+//This file is part of eMule AI
 //Copyright (C)2026 eMule AI
 
 #include "stdafx.h"
@@ -9,6 +9,7 @@
 #include "emuledlg.h"
 #include "UserMsgs.h"
 #include "OtherFunctions.h"
+#include "PreferencesDlg.h"
 #include "eMuleAI/Shield.h"
 #include <Log.h>
 #include "UpDownClient.h"
@@ -18,6 +19,50 @@
 #undef THIS_FILE
 static char THIS_FILE[]=__FILE__;
 #endif
+
+namespace
+{
+	CString FormatToolTipText(const CString& strText)
+	{
+		CString strNormalized(strText);
+		strNormalized.Replace(_T("\r\n"), _T("\n"));
+		strNormalized.Replace(_T('\r'), _T('\n'));
+
+		CString strResult;
+		int iPos = 0;
+		const int iWrapColumn = 88;
+		while (iPos >= 0) {
+			CString strRemaining(strNormalized.Tokenize(_T("\n"), iPos));
+			if (strRemaining.IsEmpty()) {
+				if (!strResult.IsEmpty())
+					strResult += _T("\r\n");
+				continue;
+			}
+
+			while (!strRemaining.IsEmpty()) {
+				if (strRemaining.GetLength() <= iWrapColumn) {
+					if (!strResult.IsEmpty())
+						strResult += _T("\r\n");
+					strResult += strRemaining;
+					break;
+				}
+
+				int iBreakPos = strRemaining.Left(iWrapColumn + 1).ReverseFind(_T(' '));
+				if (iBreakPos <= 0)
+					iBreakPos = iWrapColumn;
+				CString strWrappedLine(strRemaining.Left(iBreakPos));
+				strWrappedLine.TrimRight();
+				if (!strResult.IsEmpty())
+					strResult += _T("\r\n");
+				strResult += strWrappedLine;
+				strRemaining = strRemaining.Mid(iBreakPos);
+				strRemaining.TrimLeft();
+			}
+		}
+		strResult.TrimRight(_T("\r\n"));
+		return strResult;
+	}
+}
 
 ///////////////////////////////////////////////////////////////////////////////
 // CPPgProtectionPanel dialog
@@ -30,7 +75,6 @@ BEGIN_MESSAGE_MAP(CPPgProtectionPanel, CPropertyPage)
 	ON_MESSAGE(UM_TREEOPTSCTRL_NOTIFY, OnTreeOptsCtrlNotify)
 	ON_MESSAGE(WM_TREEITEM_HELP, DrawTreeItemHelp)
 	ON_BN_CLICKED(IDC_SHIELD_RELOAD, OnBnClickedShieldReload)
-	ON_WM_CTLCOLOR()
 	ON_WM_SIZE()
 END_MESSAGE_MAP()
 
@@ -779,6 +823,102 @@ void CPPgProtectionPanel::DoDataExchange(CDataExchange* pDX)
 	DDX_TreeEdit(pDX, IDC_PROTECTION_PANEL_OPTS, m_htiKadRequestFloodBanTreshold, m_iKadRequestFloodBanTreshold);
 	DDV_MinMaxInt(pDX, m_iKadRequestFloodBanTreshold, 1, 4);}
 
+void CPPgProtectionPanel::ResetToDefaults()
+{
+	m_ctrlTreeOptions.HandleChildControlLosingFocus();
+	m_iPunishmentCancelationScanPeriod = 5;
+	m_iClientBanTime = 48;
+	m_iClientScoreReducingTime = 48;
+	m_bDontPunishFriends = true;
+	m_bDontAllowFileHotSwapping = true;
+	m_bInformBadClients = false;
+	m_strInformBadClientsText.Empty();
+	m_bAntiUploadProtection = true;
+	m_iAntiUploadProtectionLimit = 1800;
+	m_bUploaderPunishmentPrevention = true;
+	m_iUploaderPunishmentPreventionLimit = 1000;
+	m_iUploaderPunishmentPreventionCase = 0;
+	m_bDetectModNames = true;
+	m_bDetectUserNames = true;
+	m_bDetectUserHashes = true;
+	m_iHardLeecherPunishment = 2;
+	m_iSoftLeecherPunishment = 7;
+	m_bBanBadKadNodes = true;
+	m_bBanWrongPackage = true;
+	m_bDetectAntiP2PBots = true;
+	m_iAntiP2PBotsPunishment = 1;
+	m_bDetectWrongTag = true;
+	m_iWrongTagPunishment = 9;
+	m_bDetectUnknownTag = true;
+	m_iUnknownTagPunishment = 9;
+	m_bDetectHashThief = true;
+	m_iHashThiefPunishment = 1;
+	m_bDetectModThief = true;
+	m_iModThiefPunishment = 6;
+	m_bDetectUserNameThief = true;
+	m_iUserNameThiefPunishment = 6;
+	m_bDetectModChanger = true;
+	m_iModChangerPunishment = 9;
+	m_iModChangerInterval = 60;
+	m_iModChangerThreshold = 4;
+	m_bDetectUserNameChanger = true;
+	m_iUserNameChangerPunishment = 9;
+	m_iUserNameChangerInterval = 180;
+	m_iUserNameChangerThreshold = 3;
+	m_bDetectTCPErrorFlooder = true;
+	m_iTCPErrorFlooderPunishment = 0;
+	m_iTCPErrorFlooderInterval = 60;
+	m_iTCPErrorFlooderThreshold = 7;
+	m_bDetectEmptyUserNameEmule = true;
+	m_iEmptyUserNameEmulePunishment = 9;
+	m_bDetectCommunity = true;
+	m_iCommunityPunishment = 5;
+	m_bDetectFakeEmule = true;
+	m_iFakeEmulePunishment = 3;
+	m_bDetectHexModName = true;
+	m_iHexModNamePunishment = 7;
+	m_bDetectGhostMod = true;
+	m_iGhostModPunishment = 9;
+	m_bDetectSpam = true;
+	m_iSpamPunishment = 3;
+	m_bDetectEmcrypt = true;
+	m_iEmcryptPunishment = 2;
+	m_bDetectXSExploiter = true;
+	m_iXSExploiterPunishment = 1;
+	m_bDetectFileFaker = true;
+	m_iFileFakerPunishment = 1;
+	m_bDetectUploadFaker = true;
+	m_iUploadFakerPunishment = 1;
+	m_bDetectUploadRequestAbuse = true;
+	m_bDetectUploadRequestAbuseNoRequestSlots = true;
+	m_bDetectUploadRequestAbuseQueueDrops = true;
+	m_bUploadRequestAbuseCounterGuard = true;
+	m_bUploadRequestAbuseHashRotationTracking = true;
+	m_bUploadRequestAbusePostHelloDisconnect = true;
+	m_iUploadRequestAbusePunishment = 1;
+	m_bDetectAgressive = true;
+	m_iAgressiveTime = 10;
+	m_iAgressiveCounter = 5;
+	m_bAgressiveLog = true;
+	m_iAgressivePunishment = 5;
+	m_bPunishNonSuiMlDonkey = true;
+	m_bPunishNonSuiEdonkey = true;
+	m_bPunishNonSuiEdonkeyHybrid = true;
+	m_bPunishNonSuiShareaza = true;
+	m_bPunishNonSuiLphant = true;
+	m_bPunishNonSuiAmule = true;
+	m_bPunishNonSuiEmule = true;
+	m_iNonSuiPunishment = 0;
+	m_bDetectCorruptedDataSender = true;
+	m_bDetectHashChanger = true;
+	m_bDetectFileScanner = true;
+	m_bDetectRankFlooder = true;
+	m_bDetectKadRequestFlooder = true;
+	m_iKadRequestFloodBanTreshold = 4;
+	UpdateData(FALSE);
+	SetModified(TRUE);
+}
+
 BOOL CPPgProtectionPanel::OnInitDialog()
 {
 	m_iPunishmentCancelationScanPeriod = thePrefs.GetPunishmentCancelationScanPeriod() / 60000; //Miliseconds to minutes
@@ -901,6 +1041,12 @@ BOOL CPPgProtectionPanel::OnInitDialog()
 
 	CPropertyPage::OnInitDialog();
 	InitWindowStyles(this);
+	if (m_tooltipTreeOptions.GetSafeHwnd() == NULL && m_tooltipTreeOptions.Create(this)) {
+		m_tooltipTreeOptions.AddTool(&m_ctrlTreeOptions, _T(""));
+		m_tooltipTreeOptions.SetMaxTipWidth(CPreferencesDlg::ScaleOptionsValue(420));
+		m_tooltipTreeOptions.SetAutoTabHeaderIcon(false);
+		m_tooltipTreeOptions.Activate(true);
+	}
 	Localize();
 	UpdateLayout();
 
@@ -910,27 +1056,17 @@ BOOL CPPgProtectionPanel::OnInitDialog()
 void CPPgProtectionPanel::UpdateLayout()
 {
 	CWnd* pTree = GetDlgItem(IDC_PROTECTION_PANEL_OPTS);
-	CWnd* pInfo = GetDlgItem(IDC_PROTECTION_PANEL_OPTS_INFO);
-	if (pTree == NULL || pInfo == NULL || !::IsWindow(pTree->GetSafeHwnd()) || !::IsWindow(pInfo->GetSafeHwnd()))
+	if (pTree == NULL || !::IsWindow(pTree->GetSafeHwnd()))
 		return;
 
 	CRect rcClient;
 	GetClientRect(&rcClient);
-
 	CRect rcTree;
 	pTree->GetWindowRect(&rcTree);
 	ScreenToClient(&rcTree);
-
-	CRect rcInfo;
-	pInfo->GetWindowRect(&rcInfo);
-	ScreenToClient(&rcInfo);
-
-	const int iBottomMargin = max(1, rcInfo.left);
-	const int iInfoTop = max(rcTree.top + 1, rcClient.bottom - iBottomMargin - rcInfo.Height());
-	rcInfo.OffsetRect(0, iInfoTop - rcInfo.top);
-	pInfo->MoveWindow(&rcInfo);
-
-	rcTree.bottom = rcInfo.top;
+	const int iMargin = max(1, rcTree.left);
+	rcTree.right = rcClient.right - iMargin;
+	rcTree.bottom = rcClient.bottom - iMargin;
 	if (rcTree.bottom > rcTree.top)
 		pTree->MoveWindow(&rcTree);
 }
@@ -1413,7 +1549,7 @@ void CPPgProtectionPanel::Localize(void)
 		LocalizeItemInfoText(m_htiDetectEmptyUserNameEmule,_T("DETECT_EMPTY_USERNAME_EMULE_INFO"));
 
 		LocalizeItemText(m_htiEmptyUserNameEmulePunishment, _T("PUNISHMENT"));
-		LocalizeItemInfoText(m_htiEmptyUserNameEmulePunishment,_T("IDS_GENERAL_PUNISHMENT_INFO"));
+		LocalizeItemInfoText(m_htiEmptyUserNameEmulePunishment,_T("GENERAL_PUNISHMENT_INFO"));
 
 		LocalizeItemText(m_htiDetectCommunity, _T("DETECT_COMMUNITY"));
 		LocalizeItemInfoText(m_htiDetectCommunity,_T("DETECT_COMMUNITY_INFO"));
@@ -1526,6 +1662,9 @@ void CPPgProtectionPanel::Localize(void)
 		LocalizeItemText(m_htiPunishNonSuiEmule, _T("PUNISH_NONSUI_EMULE"));
 		LocalizeItemInfoText(m_htiPunishNonSuiEmule,_T("PUNISH_NONSUI_EMULE_INFO"));
 
+		LocalizeItemText(m_htiTweakOfficialFeatures, _T("TWEAK_OFFICIAL_FEATURES"));
+		LocalizeItemInfoText(m_htiTweakOfficialFeatures, _T("OPTIONS_TIP_PROTECTION_OFFICIAL_FEATURES_GROUP"));
+
 		LocalizeItemText(m_htiDetectCorruptedDataSender, _T("DETECT_CORRUPTED_DATA_SENDER"));
 		LocalizeItemInfoText(m_htiDetectCorruptedDataSender,_T("DETECT_CORRUPTED_DATA_SENDER_INFO"));
 
@@ -1594,6 +1733,11 @@ void CPPgProtectionPanel::LocalizeCommonItems(void)
 
 void CPPgProtectionPanel::OnDestroy()
 {
+	if (m_tooltipTreeOptions.GetSafeHwnd() != NULL) {
+		m_tooltipTreeOptions.DelTool(&m_ctrlTreeOptions);
+		m_tooltipTreeOptions.CleanupWindow();
+	}
+	m_strTreeOptionsToolTip.Empty();
 	m_ctrlTreeOptions.DeleteAllItems();
 	m_ctrlTreeOptions.DestroyWindow();
 	m_bInitializedTreeOpts = false;
@@ -1752,13 +1896,8 @@ BOOL CPPgProtectionPanel::OnHelpInfo(HELPINFO* /*pHelpInfo*/)
 
 LRESULT CPPgProtectionPanel::DrawTreeItemHelp(WPARAM wParam, LPARAM lParam)
 {
-	if (!IsWindowVisible())
-		return 0;
-
-	if (wParam == IDC_PROTECTION_PANEL_OPTS) {
-		CString* sInfo = (CString*)lParam;
-		SetDlgItemText(IDC_PROTECTION_PANEL_OPTS_INFO, *sInfo);
-	}
+	UNREFERENCED_PARAMETER(wParam);
+	UNREFERENCED_PARAMETER(lParam);
 	return FALSE;
 }
 
@@ -1774,17 +1913,44 @@ void CPPgProtectionPanel::OnBnClickedShieldReload()
 		GetDlgItem(IDC_SHIELD_STATIC)->SetWindowText(GetResString(_T("SHIELD_NOT_LOADED")));
 }
 
-HBRUSH CPPgProtectionPanel::OnCtlColor(CDC* pDC, CWnd* pWnd, UINT nCtlColor)
+void CPPgProtectionPanel::UpdateTreeOptionsToolTip()
 {
-	switch (nCtlColor)
-	{
-	case CTLCOLOR_STATIC:
-		if (pWnd->GetSafeHwnd() == GetDlgItem(IDC_PROTECTION_PANEL_OPTS_INFO)->GetSafeHwnd()) {
-			pDC->SetTextColor(GetCustomSysColor(COLOR_WINDOWTEXT));	// Text font colour
-			pDC->SetBkColor(RGB(230, 230, 230)); // Text background colour
-			return CDarkMode::s_brHelpTextBackground;
+	if (m_tooltipTreeOptions.GetSafeHwnd() == NULL)
+		return;
+
+	CString strToolTip;
+	POINT ptScreen = {};
+	if (::GetCursorPos(&ptScreen)) {
+		CRect rcTree;
+		m_ctrlTreeOptions.GetWindowRect(&rcTree);
+		if (rcTree.PtInRect(ptScreen)) {
+			CPoint ptClient(ptScreen);
+			m_ctrlTreeOptions.ScreenToClient(&ptClient);
+			UINT uFlags = 0;
+			HTREEITEM hItem = m_ctrlTreeOptions.HitTest(ptClient, &uFlags);
+			if (hItem != NULL && (uFlags & TVHT_ONITEM)) {
+				CTreeOptionsItemData* pItemData = reinterpret_cast<CTreeOptionsItemData*>(m_ctrlTreeOptions.GetItemData(hItem));
+				if (pItemData != NULL && !pItemData->m_sInfo.IsEmpty())
+					strToolTip = FormatToolTipText(pItemData->m_sInfo);
+			}
 		}
-	default:
-		return CDialog::OnCtlColor(pDC, pWnd, nCtlColor);
 	}
+
+	if (strToolTip != m_strTreeOptionsToolTip) {
+		m_strTreeOptionsToolTip = strToolTip;
+		if (!m_strTreeOptionsToolTip.IsEmpty())
+			m_tooltipTreeOptions.UpdateTipText(m_strTreeOptionsToolTip, &m_ctrlTreeOptions);
+	}
+	m_tooltipTreeOptions.Activate(AreOptionsToolTipsEnabled(this) && !m_strTreeOptionsToolTip.IsEmpty());
+}
+
+BOOL CPPgProtectionPanel::PreTranslateMessage(MSG* pMsg)
+{
+	if (m_tooltipTreeOptions.GetSafeHwnd() != NULL) {
+		if (pMsg != NULL && (pMsg->message == WM_MOUSEMOVE || pMsg->message == WM_NCMOUSEMOVE || pMsg->message == WM_LBUTTONDOWN || pMsg->message == WM_RBUTTONDOWN || pMsg->message == WM_MOUSEWHEEL))
+			UpdateTreeOptionsToolTip();
+		if (AreOptionsToolTipsEnabled(this))
+			m_tooltipTreeOptions.RelayEvent(pMsg);
+	}
+	return CPropertyPage::PreTranslateMessage(pMsg);
 }

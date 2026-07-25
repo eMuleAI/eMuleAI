@@ -123,9 +123,9 @@ CIndexed::CIndexed()
 	m_mapLoad.InitHashTable(1031);
 	m_mapSources.InitHashTable(1031);
 	const CString &confdir(thePrefs.GetMuleDirectory(EMULE_CONFIGDIR));
-	m_sSourceFileName.Format(_T("%s") _T("src_index.dat"), (LPCTSTR)confdir);
-	m_sKeyFileName.Format(_T("%s") _T("key_index.dat"), (LPCTSTR)confdir);
-	m_sLoadFileName.Format(_T("%s") _T("load_index.dat"), (LPCTSTR)confdir);
+	m_sSourceFileName.Format(_T("%s") KAD_SRC_INDEX_FILENAME, (LPCTSTR)confdir);
+	m_sKeyFileName.Format(_T("%s") KAD_KEY_INDEX_FILENAME, (LPCTSTR)confdir);
+	m_sLoadFileName.Format(_T("%s") KAD_LOAD_INDEX_FILENAME, (LPCTSTR)confdir);
 	m_tNextClean = time(NULL) + MIN2S(30);
 	ReadFile();
 }
@@ -210,7 +210,7 @@ CIndexed::~CIndexed()
 				++uTotalLoad;
 				delete pLoad;
 			}
-			if (!QueueKadIndexSnapshot(fileLoad, m_sLoadFileName, _T("load_index.dat"), _T("kad-load-index"), &s_lKadLoadIndexSaveGeneration))
+			if (!QueueKadIndexSnapshot(fileLoad, m_sLoadFileName, KAD_LOAD_INDEX_FILENAME, _T("kad-load-index"), &s_lKadLoadIndexSaveGeneration))
 				DebugLogError(_T("Unable to store Kad file: %s"), (LPCTSTR)m_sLoadFileName);
 
 			CSafeMemFile fileSource;
@@ -241,7 +241,7 @@ CIndexed::~CIndexed()
 				}
 				delete pCurrSrcHash;
 			}
-			if (!QueueKadIndexSnapshot(fileSource, m_sSourceFileName, _T("src_index.dat"), _T("kad-source-index"), &s_lKadSourceIndexSaveGeneration))
+			if (!QueueKadIndexSnapshot(fileSource, m_sSourceFileName, KAD_SRC_INDEX_FILENAME, _T("kad-source-index"), &s_lKadSourceIndexSaveGeneration))
 				DebugLogError(_T("Unable to store Kad file: %s"), (LPCTSTR)m_sSourceFileName);
 
 			CSafeMemFile fileKey;
@@ -278,7 +278,7 @@ CIndexed::~CIndexed()
 				}
 				delete pCurrKeyHash;
 			}
-			if (!QueueKadIndexSnapshot(fileKey, m_sKeyFileName, _T("key_index.dat"), _T("kad-key-index"), &s_lKadKeyIndexSaveGeneration))
+			if (!QueueKadIndexSnapshot(fileKey, m_sKeyFileName, KAD_KEY_INDEX_FILENAME, _T("kad-key-index"), &s_lKadKeyIndexSaveGeneration))
 				DebugLogError(_T("Unable to store Kad file: %s"), (LPCTSTR)m_sKeyFileName);
 
 			AddDebugLogLine(false, _T("Queued %u source, %u keyword, and %u load entries"), uTotalSource, uTotalKey, uTotalLoad);

@@ -14,6 +14,7 @@ public:
 	CPPgStats();
 
 	void Localize();
+	void ResetToDefaults();
 
 protected:
 	int m_iStatsColors;

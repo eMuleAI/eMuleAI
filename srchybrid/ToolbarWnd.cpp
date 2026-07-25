@@ -146,7 +146,7 @@ void CToolbarWnd::FillToolbar()
 	atb1[4].idCommand = MP_CANCEL;
 	atb1[4].fsState = TBSTATE_WRAP;
 	atb1[4].fsStyle = BTNS_BUTTON | BTNS_AUTOSIZE;
-	atb1[4].iString = m_btnBar.AddString(GetResString(_T("MAIN_BTN_CANCEL")));
+	atb1[4].iString = m_btnBar.AddString(GetResStringWithAccel(_T("CANCEL"), _T('C')));
 	/////////////
 	atb1[5].iBitmap = -1;
 	atb1[5].idCommand = 0;
@@ -159,7 +159,7 @@ void CToolbarWnd::FillToolbar()
 		atb1[6].idCommand = MP_PREVIEW;
 		atb1[6].fsState = TBSTATE_WRAP;
 		atb1[6].fsStyle = BTNS_BUTTON | BTNS_AUTOSIZE;
-		atb1[6].iString = m_btnBar.AddString(GetResString(_T("DL_PREVIEW")));
+		atb1[6].iString = m_btnBar.AddString(GetResStringWithAccel(_T("PREVIEW_AVAILABLE"), _T('v')));
 	}
 
 	if (iPreviewAppCount >= 1) {
@@ -271,13 +271,13 @@ void CToolbarWnd::FillToolbar()
 	atb1[iPreviewAppCount + 11 - m_iDontShowPreviewButton].idCommand = MP_VIEWFILECOMMENTS;
 	atb1[iPreviewAppCount + 11 - m_iDontShowPreviewButton].fsState = TBSTATE_WRAP;
 	atb1[iPreviewAppCount + 11 - m_iDontShowPreviewButton].fsStyle = BTNS_BUTTON | BTNS_AUTOSIZE;
-	atb1[iPreviewAppCount + 11 - m_iDontShowPreviewButton].iString = m_btnBar.AddString(GetResString(_T("CMT_SHOWALL")));
+	atb1[iPreviewAppCount + 11 - m_iDontShowPreviewButton].iString = m_btnBar.AddString(GetResStringWithAccelAndEllipsis(_T("COMMENT"), _T('n')));
 
 	atb1[iPreviewAppCount + 12 - m_iDontShowPreviewButton].iBitmap = DownloadToolbarImageEd2kLink;
 	atb1[iPreviewAppCount + 12 - m_iDontShowPreviewButton].idCommand = MP_SHOWED2KLINK;
 	atb1[iPreviewAppCount + 12 - m_iDontShowPreviewButton].fsState = TBSTATE_WRAP;
 	atb1[iPreviewAppCount + 12 - m_iDontShowPreviewButton].fsStyle = BTNS_BUTTON | BTNS_AUTOSIZE;
-	atb1[iPreviewAppCount + 12 - m_iDontShowPreviewButton].iString = m_btnBar.AddString(GetResString(_T("DL_SHOWED2KLINK")));
+	atb1[iPreviewAppCount + 12 - m_iDontShowPreviewButton].iString = m_btnBar.AddString(GetResStringWithEllipsis(_T("SW_LINK")));
 
 	/////////////
 	atb1[iPreviewAppCount + 13 - m_iDontShowPreviewButton].iBitmap = -1;
@@ -368,7 +368,7 @@ void CToolbarWnd::UpdateImageLists()
 	iml.Add(CTempIconLoader(_T("STOP")));
 	iml.Add(CTempIconLoader(_T("RESUME")));
 	iml.Add(CTempIconLoader(_T("DELETE")));
-	iml.Add(CTempIconLoader(_T("OPENFILE")));
+	iml.Add(CTempIconLoader(_T("DL_OPEN")));
 	iml.Add(CTempIconLoader(_T("OPENFOLDER")));
 	iml.Add(CTempIconLoader(_T("PREVIEW")));
 	iml.Add(CTempIconLoader(_T("FILEINFO")));
@@ -391,7 +391,7 @@ void CToolbarWnd::UpdateImageLists()
 		VERIFY(AddIconGreyedToImageList(iml2, CTempIconLoader(_T("STOP"))) >= 0);
 		VERIFY(AddIconGreyedToImageList(iml2, CTempIconLoader(_T("RESUME"))) >= 0);
 		VERIFY(AddIconGreyedToImageList(iml2, CTempIconLoader(_T("DELETE"))) >= 0);
-		VERIFY(AddIconGreyedToImageList(iml2, CTempIconLoader(_T("OPENFILE"))) >= 0);
+		VERIFY(AddIconGreyedToImageList(iml2, CTempIconLoader(_T("DL_OPEN"))) >= 0);
 		VERIFY(AddIconGreyedToImageList(iml2, CTempIconLoader(_T("OPENFOLDER"))) >= 0);
 		VERIFY(AddIconGreyedToImageList(iml2, CTempIconLoader(_T("PREVIEW"))) >= 0);
 		VERIFY(AddIconGreyedToImageList(iml2, CTempIconLoader(_T("FILEINFO"))) >= 0);

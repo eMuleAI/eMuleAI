@@ -182,7 +182,7 @@ CString CastItoXBytes(double count, bool isK, bool isPerSec, uint32 decimal)
 	if (count <= 0.0) {
 		LPCTSTR uid;
 		if (isPerSec)
-			uid = thePrefs.GetForceSpeedsToKB() ? _T("KBYTESPERSEC") : _T("BYTESPERSEC");
+			uid = thePrefs.GetForceSpeedsToKB() ? _T("KBYTESSEC") : _T("BYTESPERSEC");
 		else
 			uid = _T("BYTES");
 		return _T("0 ") + GetResString(uid);
@@ -196,11 +196,11 @@ CString CastItoXBytes(double count, bool isK, bool isPerSec, uint32 decimal)
 	CString buffer;
 	if (isPerSec) {
 		if (thePrefs.GetForceSpeedsToKB())
-			buffer.Format(_T("%.*f %s"), decimal, count / 1024.0, (LPCTSTR)GetResString(_T("KBYTESPERSEC")));
+			buffer.Format(_T("%.*f %s"), decimal, count / 1024.0, (LPCTSTR)GetResString(_T("KBYTESSEC")));
 		else if (count < 1024.0)
 			buffer.Format(_T("%.0f %s"), count, (LPCTSTR)GetResString(_T("BYTESPERSEC")));
 		else if (count < 1024000.0)
-			buffer.Format(_T("%.*f %s"), decimal, count / 1024.0, (LPCTSTR)GetResString(_T("KBYTESPERSEC")));
+			buffer.Format(_T("%.*f %s"), decimal, count / 1024.0, (LPCTSTR)GetResString(_T("KBYTESSEC")));
 		else if (count < 1048576000.0)
 			buffer.Format(_T("%.*f %s"), decimal, count / 1048576.0, (LPCTSTR)GetResString(_T("MBYTESPERSEC")));
 		else if (count < 1073741824000.0)
@@ -1107,33 +1107,39 @@ int CWebServices::GetAllMenuEntries(CMenuXP *pMenu, DWORD dwFlags)
 
 bool CWebServices::RunURL(const CAbstractFile *file, UINT uMenuID)
 {
+	return RunURL(file != NULL ? file->GetFileHash() : NULL, file != NULL ? static_cast<uint64>(file->GetFileSize()) : 0, file != NULL ? file->GetFileName() : NULL, uMenuID);
+}
+
+bool CWebServices::RunURL(const uchar* pFileHash, uint64 uFileSize, LPCTSTR pszFileName, UINT uMenuID)
+{
 	for (INT_PTR i = 0; i < m_aServices.GetCount(); ++i) {
 		const SEd2kLinkService &rSvc(m_aServices[i]);
 		if (rSvc.uMenuID == uMenuID) {
 			CString strUrlTemplate(rSvc.strUrl);
-			if (file != NULL) {
+			if (pFileHash != NULL && pszFileName != NULL) {
 				// Convert hash to hexadecimal text and add it to the URL
-				strUrlTemplate.Replace(_T("#hashid"), md4str(file->GetFileHash()));
+				strUrlTemplate.Replace(_T("#hashid"), md4str(pFileHash));
 
 				// Add file size to the URL
 				CString temp;
-				temp.Format(_T("%I64u"), (uint64)file->GetFileSize());
+				temp.Format(_T("%I64u"), uFileSize);
 				strUrlTemplate.Replace(_T("#filesize"), temp);
 
+				CString strFileName(pszFileName);
 				// add complete untouched filename to the url
-				strUrlTemplate.Replace(_T("#filename_untouched"), file->GetFileName());
+				strUrlTemplate.Replace(_T("#filename_untouched"), strFileName);
 
 				// add complete filename to the url
-				strUrlTemplate.Replace(_T("#filename"), EncodeURLWC(file->GetFileName()));
+				strUrlTemplate.Replace(_T("#filename"), EncodeURLWC(strFileName));
 
 				// add basename to the url
-				CString strBaseName(file->GetFileName());
+				CString strBaseName(strFileName);
 				::PathRemoveExtension(strBaseName.GetBuffer(strBaseName.GetLength()));
 				strBaseName.ReleaseBuffer();
 				strUrlTemplate.Replace(_T("#name"), EncodeURLWC(strBaseName));
 
 				// add cleaned up complete filename to the url
-				strUrlTemplate.Replace(_T("#cleanfilename"), EncodeURLWC(CleanupFilename(file->GetFileName())));
+				strUrlTemplate.Replace(_T("#cleanfilename"), EncodeURLWC(CleanupFilename(strFileName)));
 
 				// add cleaned up basename to the url
 				strUrlTemplate.Replace(_T("#cleanname"), EncodeURLWC(CleanupFilename(strBaseName, false)));
@@ -1745,9 +1751,9 @@ CString GetFileTypeDisplayStrFromED2KFileType(LPCTSTR pszED2KFileType)
 	ASSERT(pszED2KFileType != NULL);
 	if (pszED2KFileType != NULL) {
 		if (_tcscmp(pszED2KFileType, _T(ED2KFTSTR_AUDIO)) == 0)
-			uid = _T("SEARCH_AUDIO");
+			uid = _T("AUDIO");
 		else if (_tcscmp(pszED2KFileType, _T(ED2KFTSTR_VIDEO)) == 0)
-			uid = _T("SEARCH_VIDEO");
+			uid = _T("VIDEO");
 		else if (_tcscmp(pszED2KFileType, _T(ED2KFTSTR_IMAGE)) == 0)
 			uid = _T("SEARCH_PICS");
 		else if (_tcscmp(pszED2KFileType, _T(ED2KFTSTR_DOCUMENT)) == 0)
@@ -1759,7 +1765,7 @@ CString GetFileTypeDisplayStrFromED2KFileType(LPCTSTR pszED2KFileType)
 		else if (_tcscmp(pszED2KFileType, _T(ED2KFTSTR_CDIMAGE)) == 0)
 			uid = _T("SEARCH_CDIMG");
 		else if (_tcscmp(pszED2KFileType, _T(ED2KFTSTR_EMULECOLLECTION)) == 0)
-			uid = _T("SEARCH_EMULECOLLECTION");
+			uid = _T("META_COLLECTION");
 	}
 	return !IsEmpty(uid) ? GetResString(uid) : CString();
 }
@@ -2731,7 +2737,7 @@ ULONGLONG GetDiskFileSize(LPCTSTR pszFilePath)
 
 bool HasNodesDatContacts()
 {
-	const CString strNodesDatPath = thePrefs.GetMuleDirectory(EMULE_CONFIGDIR) + _T("nodes.dat");
+	const CString strNodesDatPath = thePrefs.GetMuleDirectory(EMULE_CONFIGDIR) + NODES_DAT_FILENAME;
 	if (!PathFileExistsLongPath(strNodesDatPath))
 		return false;
 
@@ -4622,13 +4628,13 @@ void InitFileTypesCtrl(CComboBoxEx2* combo, CString strSelected, bool bAddOther)
 	std::list<SFileTypeCbEntry> lstFileTypeCbEntries;
 	lstFileTypeCbEntries.emplace_back(GetResString(_T("SEARCH_ANY")), _T(ED2KFTSTR_ANY), 0);
 	lstFileTypeCbEntries.emplace_back(GetResString(_T("SEARCH_ARC")), _T(ED2KFTSTR_ARCHIVE), 1);
-	lstFileTypeCbEntries.emplace_back(GetResString(_T("SEARCH_AUDIO")), _T(ED2KFTSTR_AUDIO), 2);
+	lstFileTypeCbEntries.emplace_back(GetResString(_T("AUDIO")), _T(ED2KFTSTR_AUDIO), 2);
 	lstFileTypeCbEntries.emplace_back(GetResString(_T("SEARCH_CDIMG")), _T(ED2KFTSTR_CDIMAGE), 3);
 	lstFileTypeCbEntries.emplace_back(GetResString(_T("SEARCH_PICS")), _T(ED2KFTSTR_IMAGE), 4);
 	lstFileTypeCbEntries.emplace_back(GetResString(_T("SEARCH_PRG")), _T(ED2KFTSTR_PROGRAM), 5);
-	lstFileTypeCbEntries.emplace_back(GetResString(_T("SEARCH_VIDEO")), _T(ED2KFTSTR_VIDEO), 6);
+	lstFileTypeCbEntries.emplace_back(GetResString(_T("VIDEO")), _T(ED2KFTSTR_VIDEO), 6);
 	lstFileTypeCbEntries.emplace_back(GetResString(_T("SEARCH_DOC")), _T(ED2KFTSTR_DOCUMENT), 7);
-	lstFileTypeCbEntries.emplace_back(GetResString(_T("SEARCH_EMULECOLLECTION")), _T(ED2KFTSTR_EMULECOLLECTION), 8);
+	lstFileTypeCbEntries.emplace_back(GetResString(_T("META_COLLECTION")), _T(ED2KFTSTR_EMULECOLLECTION), 8);
 	if (bAddOther) // ED2KFT_OTHER should not be used for searching. It can be only used to filter files on GUI 
 		lstFileTypeCbEntries.emplace_back(GetResString(_T("STATS_PRTOTHER")), _T(ED2KFTSTR_OTHER), 9);
 

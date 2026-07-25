@@ -1846,7 +1846,7 @@ CString CSearch::GetTypeName(uint32 uType)
 		uid = _T("NOTES");
 		break;
 	default:
-		uid = _T("KAD_UNKNOWN");
+		uid = _T("UNKNOWN");
 	}
 	return GetResString(uid);
 }

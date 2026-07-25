@@ -458,7 +458,7 @@ void CPartFileConvert::Localize()
 	m_convertgui->SetDlgItemText(IDC_ADDITEM, GetResString(_T("IMP_ADDBTN")));
 	m_convertgui->SetDlgItemText(IDC_RETRY, GetResString(_T("IMP_RETRYBTN")));
 	m_convertgui->SetDlgItemText(IDC_CONVREMOVE, GetResString(_T("IMP_REMOVEBTN")));
-	m_convertgui->SetDlgItemText(IDC_HIDECONVDLG, GetResString(_T("FD_CLOSE")));
+	m_convertgui->SetDlgItemText(IDC_HIDECONVDLG, GetResString(_T("CW_CLOSE")));
 	m_convertgui->SetWindowText(GetResString(_T("IMPORTSPLPF")));
 }
 
@@ -657,7 +657,7 @@ void CPartFileConvertDlg::OnAddFolder()
 void CPartFileConvertDlg::UpdateJobInfo(ConvertJob *job)
 {
 	if (job == NULL) {
-		SetDlgItemText(IDC_CURJOB, GetResString(_T("FSTAT_WAITING")));
+		SetDlgItemText(IDC_CURJOB, GetResStringWithEllipsis(_T("WAITING")));
 		SetDlgItemText(IDC_CONV_PROZENT, EMPTY);
 		pb_current.SetPos(0);
 		SetDlgItemText(IDC_CONV_PB_LABEL, EMPTY);

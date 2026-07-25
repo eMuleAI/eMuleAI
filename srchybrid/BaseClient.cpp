@@ -1324,7 +1324,7 @@ bool CUpDownClient::ProcessHelloTypePacket(CSafeMemFile &data)
 		if (thePrefs.IsDetectHashChanger() && !theApp.clientlist->ComparePriorUserhash(m_UserIP, m_nUserPort, pFoundCredits)) {
 			if (thePrefs.GetLogBannedClients())
 				AddProtectionLogLine(false, _T("Clients: %s (%s), Ban reason: Userhash changed (Found in TrackedClientsList)"), (LPCTSTR)EscPercent(GetUserName()), (LPCTSTR)ipstr(GetConnectIP()));
-			Ban();
+			Ban(GetResString(_T("PUNISHMENT_REASON_BAD_USER_HASH")));
 		}
 	} else if (credits != pFoundCredits) {
 		// userhash change OK, however two hours "waittime" before it can be used
@@ -1332,7 +1332,7 @@ bool CUpDownClient::ProcessHelloTypePacket(CSafeMemFile &data)
 		if (thePrefs.IsDetectHashChanger()) {
 			if (thePrefs.GetLogBannedClients())
 				AddProtectionLogLine(false, _T("Clients: %s (%s), Ban reason: Userhash changed"), (LPCTSTR)EscPercent(GetUserName()), (LPCTSTR)ipstr(GetConnectIP()));
-				Ban();
+				Ban(GetResString(_T("PUNISHMENT_REASON_BAD_USER_HASH")));
 		}
 	}
 
@@ -4657,7 +4657,7 @@ void CUpDownClient::RequestSharedFileList()
 		TryToConnect(true);
 	} else
 	{
-		LogWarning(LOG_STATUSBAR, GetResString(_T("SHAREDFILES_REQUEST_IN_PROGRESS")), (GetUserName() == NULL || GetUserName()[0] == '\0') ? CString(_T('(') + md4str(GetUserHash()) + _T(')')) : CString(GetUserName()), GetUserIDHybrid());
+		LogWarning(LOG_STATUSBAR, GetResString(_T("SHAREDFILES_REQUEST")), (GetUserName() == NULL || GetUserName()[0] == '\0') ? CString(_T('(') + md4str(GetUserHash()) + _T(')')) : CString(GetUserName()), GetUserIDHybrid());
 	}
 }
 
@@ -6309,6 +6309,10 @@ void CUpDownClient::SendSharedDirectories()
 
 const CString CUpDownClient::GetGeolocationData(const bool bForceCountryCity) const {
 	return theApp.ipgeolocation->GetGeolocationData(m_structClientGeolocationData, bForceCountryCity);
+}
+
+const CString CUpDownClient::GetGeolocationCity() const {
+	return m_structClientGeolocationData.City;
 }
 
 int CUpDownClient::GetCountryFlagIndex() const {

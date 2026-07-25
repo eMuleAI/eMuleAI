@@ -17,6 +17,8 @@ class CPPgDebug : public CPropertyPage
 
 public:
 	CPPgDebug();
+	void Localize();
+	void ResetToDefaults();
 
 protected:
 	HTREEITEM m_htiServer;
@@ -36,6 +38,7 @@ protected:
 	bool m_bInitializedTreeOpts;
 
 	void ClearAllMembers();
+	void LocalizeItemInfoText(HTREEITEM item, LPCTSTR strid);
 
 	virtual BOOL OnInitDialog();
 	virtual BOOL OnApply();

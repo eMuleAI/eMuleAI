@@ -116,6 +116,15 @@ void CPPgDirectories::OnBnClickedSeltempdir()
 		SetDlgItemText(IDC_TEMPFILES, buffer);
 }
 
+void CPPgDirectories::ResetToDefaults()
+{
+	SetDlgItemText(IDC_INCFILES, CPreferences::GetDefaultDirectory(EMULE_INCOMINGDIR, false));
+	SetDlgItemText(IDC_TEMPFILES, CPreferences::GetDefaultDirectory(EMULE_TEMPDIR, false));
+	CStringList sharedDirs;
+	m_ShareSelector.SetSharedDirectories(sharedDirs);
+	SetModified(TRUE);
+}
+
 BOOL CPPgDirectories::OnApply()
 {
 	CString strIncomingDir;

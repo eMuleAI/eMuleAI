@@ -15,6 +15,7 @@ public:
 	CPPgProxy();
 
 	void Localize();
+	void ResetToDefaults();
 
 protected:
 	ProxySettings proxy;

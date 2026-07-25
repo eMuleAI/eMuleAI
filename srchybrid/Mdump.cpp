@@ -18,6 +18,8 @@
 #include "stdafx.h"
 #include <dbghelp.h>
 #include "mdump.h"
+#include "Opcodes.h"
+#include "OtherFunctions.h"
 
 #ifdef _DEBUG
 #define new DEBUG_NEW
@@ -34,6 +36,7 @@ typedef BOOL (WINAPI *MINIDUMPWRITEDUMP)(HANDLE hProcess, DWORD dwPid, HANDLE hF
 CMiniDumper theCrashDumper;
 TCHAR CMiniDumper::m_szAppName[MAX_PATH] = {};
 TCHAR CMiniDumper::m_szDumpDir[MAX_PATH] = {};
+TCHAR CMiniDumper::m_szDumpSavedFormat[MAX_PATH + 1024] = {};
 
 void CMiniDumper::Enable(LPCTSTR pszAppName, bool bShowErrors, LPCTSTR pszDumpDir)
 {
@@ -47,6 +50,7 @@ void CMiniDumper::Enable(LPCTSTR pszAppName, bool bShowErrors, LPCTSTR pszDumpDi
 	_tcsncpy(m_szDumpDir, pszDumpDir, _countof(m_szDumpDir));
 	m_szDumpDir[_countof(m_szDumpDir) - 2] = _T('\0');
 	::PathAddBackslash(m_szDumpDir);
+	UpdateLocalizedStrings();
 
 	MINIDUMPWRITEDUMP pfnMiniDumpWriteDump;
 	HMODULE hDbgHelpDll = GetDebugHelperDll((FARPROC*)&pfnMiniDumpWriteDump, bShowErrors);
@@ -55,6 +59,13 @@ void CMiniDumper::Enable(LPCTSTR pszAppName, bool bShowErrors, LPCTSTR pszDumpDi
 			SetUnhandledExceptionFilter(TopLevelFilter);
 		FreeLibrary(hDbgHelpDll);
 	}
+}
+
+void CMiniDumper::UpdateLocalizedStrings()
+{
+	const CString strDumpSavedFormat = GetResString(_T("CRASH_DUMP_SAVED"));
+	_tcsncpy(m_szDumpSavedFormat, strDumpSavedFormat, _countof(m_szDumpSavedFormat));
+	m_szDumpSavedFormat[_countof(m_szDumpSavedFormat) - 1] = _T('\0');
 }
 
 #define DBGHELP_HINT _T("The required DBGHELP.DLL may be obtained from \"Microsoft Download Center\" as a part of \"User Mode Process Dumper\".\r\n\r\n") \
@@ -120,12 +131,7 @@ LONG WINAPI CMiniDumper::TopLevelFilter(struct _EXCEPTION_POINTERS *pExceptionIn
 					_MINIDUMP_EXCEPTION_INFORMATION ExInfo = { GetCurrentThreadId(), pExceptionInfo, FALSE };
 					BOOL bOK = (*pfnMiniDumpWriteDump)(GetCurrentProcess(), GetCurrentProcessId(), hFile, MiniDumpNormal, &ExInfo, NULL, NULL);
 					if (bOK) {
-						// Do *NOT* localize this string (in fact, do not use MFC to load it)!
-						_sntprintf(szResult, _countof(szResult)
-							, _T("Saved dump file to \"%s\".\r\n\r\n")
-							  _T("Please attach this file to a detailed bug report at forum.emule-project.net\r\n\r\n")
-							  _T("Thank you for helping to improve eMule!")
-							, szDumpPath);
+						_sntprintf(szResult, _countof(szResult), m_szDumpSavedFormat, szDumpPath, MOD_ISSUES_URL);
 						szResult[_countof(szResult) - 1] = _T('\0');
 #ifdef _DEBUG
 						lRetValue = EXCEPTION_EXECUTE_HANDLER;

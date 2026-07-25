@@ -87,15 +87,15 @@ BOOL CAddFriend::OnInitDialog()
 
 void CAddFriend::Localize()
 {
-	SetWindowText(GetResString(m_pShowFriend ? _T("DETAILS") : _T("ADDAFRIEND")));
+	SetWindowText(GetResString(m_pShowFriend ? _T("DETAILS") : _T("ADD")));
 	SetDlgItemText(IDC_INFO1, GetResString(_T("PAF_REQINFO")));
 	SetDlgItemText(IDC_INFO2, GetResString(_T("PAF_MOREINFO")));
 
 	SetDlgItemText(IDC_ADD, GetResString(_T("ADD")));
-	SetDlgItemText(IDCANCEL, GetResString(m_pShowFriend ? _T("FD_CLOSE") : _T("CANCEL")));
+	SetDlgItemText(IDCANCEL, GetResString(m_pShowFriend ? _T("CW_CLOSE") : _T("CANCEL")));
 
-	SetDlgItemText(IDC_STATIC31, GetResString(_T("CD_UNAME")));
-	SetDlgItemText(IDC_STATIC32, GetResString(_T("CD_UHASH")));
+	SetDlgItemText(IDC_STATIC31, GetResStringWithColon(_T("SW_NAME")));
+	SetDlgItemText(IDC_STATIC32, GetResStringWithColon(_T("CD_UHASH2")));
 	SetDlgItemText(IDC_STATIC34, (m_pShowFriend ? GetResString(_T("USERID")) + _T(':') : GetResString(_T("CD_UIP"))));
 	SetDlgItemText(IDC_STATIC35, GetResString(_T("PORT")) + _T(':'));
 	SetDlgItemText(IDC_LAST_SEEN_LABEL, GetResString(_T("LASTSEEN")) + _T(':'));

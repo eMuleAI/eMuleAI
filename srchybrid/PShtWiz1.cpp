@@ -1213,14 +1213,14 @@ BOOL FirstTimeWizard()
 	page2.m_psp.dwFlags |= PSP_HIDEHEADER;
 	sheet.AddPage(&page2);
 
-	CPPgWiz1General page3(IDD_WIZ1_GENERAL, sWiz1, GetResString(_T("PW_GENERAL")), GetResString(_T("QL_USERNAME")));
+	CPPgWiz1General page3(IDD_WIZ1_GENERAL, sWiz1, GetResString(_T("CD_GENERAL")), GetResString(_T("QL_USERNAME")));
 	sheet.AddPage(&page3);
 
 	CPPgWiz1Ports page4(IDD_WIZ1_PORTS, sWiz1, GetResString(_T("PORTSCON")), GetResString(_T("CONNECTION")));
 	sheet.AddPage(&page4);
 
 
-	CString sPage4(GetResString(_T("PW_CON_DOWNLBL")));
+	CString sPage4(GetResString(_T("DOWNLOAD")));
 	sPage4.AppendFormat(_T(" / %s"), (LPCTSTR)GetResString(_T("PW_CON_UPLBL")));
 	CPPgWiz1UlPrio page5(IDD_WIZ1_ULDL_PRIO, sWiz1, sPage4, GetResString(_T("PRIORITY")));
 	sheet.AddPage(&page5);
@@ -1228,7 +1228,7 @@ BOOL FirstTimeWizard()
 	CPPgWiz1Upload page6(IDD_WIZ1_UPLOAD, sWiz1, GetResString(_T("SECURITY")), GetResString(_T("OBFUSCATION")));
 	sheet.AddPage(&page6);
 
-	CPPgWiz1Server page7(IDD_WIZ1_SERVER, sWiz1, GetResString(_T("PW_SERVER")), GetResString(_T("NETWORK")));
+	CPPgWiz1Server page7(IDD_WIZ1_SERVER, sWiz1, GetResString(_T("SERVER")), GetResString(_T("NETWORK")));
 	sheet.AddPage(&page7);
 
 	CPPgWiz1End page8(IDD_WIZ1_END, sWiz1);

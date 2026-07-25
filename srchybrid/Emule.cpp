@@ -33,6 +33,7 @@ static _CrtMemState g_msAfterInit;
 #include "mdump.h"
 #include "Scheduler.h"
 #include "SearchList.h"
+#include "eMuleAI/DownloadValidator.h"
 #include "kademlia/kademlia/Error.h"
 #include "kademlia/kademlia/Kademlia.h"
 #include "kademlia/kademlia/SearchManager.h"
@@ -772,6 +773,7 @@ namespace
 	{
 		{ CemuleApp::WorkerTopologyBackendCommand, _T("backend-command"), 0, false, false, false, true, false },
 		{ CemuleApp::WorkerTopologyNetworkParseCpu, _T("network-parse-cpu"), 64, true, true, true, true, true },
+		{ CemuleApp::WorkerTopologyDownloadValidatorCpu, _T("download-validator-cpu"), 16, true, true, false, true, true },
 		{ CemuleApp::WorkerTopologyNetworkUtility, _T("network-utility"), 32, true, false, true, false, true },
 		{ CemuleApp::WorkerTopologyPartFileDiskIo, _T("part-file-disk-io"), 0, false, false, false, true, false },
 		{ CemuleApp::WorkerTopologyUploadDiskIo, _T("upload-disk-io"), 0, false, false, false, true, false },
@@ -798,6 +800,8 @@ namespace
 		switch (eRole) {
 		case CemuleApp::WorkerTopologyNetworkParseCpu:
 			return "NetworkParseCpuWorker";
+		case CemuleApp::WorkerTopologyDownloadValidatorCpu:
+			return "DownloadValidatorCpuWorker";
 		case CemuleApp::WorkerTopologyNetworkUtility:
 			return "NetworkUtilityWorker";
 		case CemuleApp::WorkerTopologyPersistence:
@@ -840,7 +844,7 @@ namespace
 {
 	bool IsServerMetAsyncDiskWriteFailure(const CemuleApp::SApplicationEvent &event)
 	{
-		return event.m_strAsyncResult.CompareNoCase(_T("failed")) == 0 && event.m_strAsyncName.CompareNoCase(_T("server.met")) == 0;
+		return event.m_strAsyncResult.CompareNoCase(_T("failed")) == 0 && event.m_strAsyncName.CompareNoCase(SERVER_MET_FILENAME) == 0;
 	}
 
 	CString BuildAsyncDiskWriteFailureDetail(const CemuleApp::SApplicationEvent &event)
@@ -2590,9 +2594,8 @@ void CemuleApp::ShowHelp(UINT uTopic, UINT uCmd)
 
 bool CemuleApp::ShowWebHelp(UINT uTopic)
 {
-	CString strHelpURL;
-	strHelpURL.Format(_T("https://onlinehelp.emule-project.net/help.php?language=%u&topic=%u"), thePrefs.GetLanguageID(), uTopic);
-	BrowserOpen(strHelpURL, thePrefs.GetMuleDirectory(EMULE_EXECUTABLEDIR));
+	UNREFERENCED_PARAMETER(uTopic);
+	BrowserOpen(MOD_PAGES_BASE_URL, thePrefs.GetMuleDirectory(EMULE_EXECUTABLEDIR));
 	return true;
 }
 
@@ -6493,6 +6496,7 @@ void CemuleApp::QueueSearchActivityChangedEvent(uint32 nSearchID)
 	event.m_lSearchGeneration = nSearchID != 0 && searchlist != NULL ? searchlist->GetSearchAnswerParseGeneration(nSearchID) : 0;
 	event.m_strMessage = _T("search-activity-changed");
 	QueueApplicationEvent(event);
+	QueueBulkOperationOverlayRefreshEvent(_T("search-activity-changed"));
 }
 
 bool CemuleApp::QueueSearchIngestProcessing()
@@ -7222,25 +7226,8 @@ bool CemuleApp::BeginStartupCriticalLoads()
 		bQueued = BeginStartupSharedCacheLoad() && bQueued;
 	if (thePrefs.IsStoringSearchesEnabled()) {
 		const SStartupMetadataLoadState storedSearchesState = GetStartupMetadataLoadState(StartupMetadataStoredSearches);
-		if (searchlist != NULL && !storedSearchesState.IsTerminal() && !searchlist->IsStartupLoadActive() && !searchlist->IsStartupLoadCompleted()) {
-			const bool bStoredSearchDependenciesReady = IsStartupMetadataDomainReady(StartupMetadataDownloads) && KnownFilesReady() && IsStartupMetadataDomainReady(StartupMetadataSharedRules);
-			if (bStoredSearchDependenciesReady)
-				searchlist->BeginStartupLoad();
-			else {
-				const SStartupMetadataLoadState downloadsState = GetStartupMetadataLoadState(StartupMetadataDownloads);
-				const SStartupMetadataLoadState knownFilesState = GetStartupMetadataLoadState(StartupMetadataKnownFiles);
-				const SStartupMetadataLoadState sharedRulesState = GetStartupMetadataLoadState(StartupMetadataSharedRules);
-				if ((downloadsState.IsTerminal() && !downloadsState.IsReady()) || (knownFilesState.IsTerminal() && !knownFilesState.IsReady()) || (sharedRulesState.IsTerminal() && !sharedRulesState.IsReady())) {
-					uint64 uToken = 0;
-					const LONG lGeneration = BeginStartupMetadataLoad(StartupMetadataStoredSearches, &uToken, _T("stored-searches-dependency-unavailable"));
-					CompleteStartupMetadataLoad(StartupMetadataStoredSearches, lGeneration, uToken, false, ERROR_NOT_READY, _T("stored-searches-dependency-unavailable"));
-					searchlist->CancelStartupLoad();
-					bQueued = false;
-				}
-				else
-					bQueued = false;
-			}
-		}
+		if (searchlist != NULL && !storedSearchesState.IsTerminal() && !searchlist->IsStartupLoadActive() && !searchlist->IsStartupLoadCompleted())
+			searchlist->BeginStartupLoad();
 		else if (searchlist == NULL && !storedSearchesState.IsTerminal()) {
 			uint64 uToken = 0;
 			const LONG lGeneration = BeginStartupMetadataLoad(StartupMetadataStoredSearches, &uToken, _T("stored-searches-unavailable"));
@@ -7934,6 +7921,33 @@ void CemuleApp::CancelNetworkParseCpuWorker()
 bool CemuleApp::QueueNetworkParseCpuWorkerItem(const SWorkerTopologyItem &item)
 {
 	return QueueWorkerTopologyItem(WorkerTopologyNetworkParseCpu, item);
+}
+
+bool CemuleApp::StartDownloadValidatorCpuWorker()
+{
+	return StartWorkerTopologyRole(WorkerTopologyDownloadValidatorCpu, _T("download-validator-cpu-api"));
+}
+
+bool CemuleApp::QueueDownloadValidatorCpuWorkerItem(const SWorkerTopologyItem &item)
+{
+	return QueueWorkerTopologyItem(WorkerTopologyDownloadValidatorCpu, item);
+}
+
+bool CemuleApp::QueueDownloadValidatorCpuWork()
+{
+	if (IsClosing())
+		return false;
+	if (GetWorkerTopologyState(WorkerTopologyDownloadValidatorCpu) == WorkerTopologyStopped && !StartDownloadValidatorCpuWorker())
+		return false;
+
+	SWorkerTopologyItem item;
+	item.m_eRole = WorkerTopologyDownloadValidatorCpu;
+	item.m_eType = WorkerTopologyItemDownloadValidatorCpu;
+	item.m_strStage = _T("download-validator");
+	item.m_strCoalesceKey = _T("download-validator");
+	item.m_dwCreatedTick = ::GetTickCount();
+	item.m_dwDueTick = item.m_dwCreatedTick;
+	return QueueDownloadValidatorCpuWorkerItem(item);
 }
 
 bool CemuleApp::QueueCollectionImportWorkerJob(HWND hNotifyWnd, const CString &strPath)
@@ -8641,6 +8655,9 @@ void CemuleApp::ProcessWorkerTopologyItem(const SWorkerTopologyItem &item)
 			case WorkerTopologyNetworkParseCpu:
 				ProcessNetworkParseCpuWorkerItem(item);
 				break;
+			case WorkerTopologyDownloadValidatorCpu:
+				ProcessDownloadValidatorCpuWorkerItem(item);
+				break;
 			case WorkerTopologyNetworkUtility:
 				ProcessNetworkUtilityWorkerItem(item);
 				break;
@@ -8710,6 +8727,21 @@ bool CemuleApp::ProcessNetworkParseCpuWorkerItem(const SWorkerTopologyItem &item
 
 	AddDebugLogLine(DLP_LOW, false, _T("Network parse CPU worker item dropped. stage=%s type=%u\n"), (LPCTSTR)item.m_strStage, static_cast<UINT>(item.m_eType));
 	return false;
+}
+
+bool CemuleApp::ProcessDownloadValidatorCpuWorkerItem(const SWorkerTopologyItem &item)
+{
+	if (item.m_eType != WorkerTopologyItemDownloadValidatorCpu || item.m_strStage != _T("download-validator"))
+		return false;
+
+	bool bHasMore = false;
+	if (searchlist != NULL)
+		bHasMore = searchlist->ProcessDownloadValidatorWorkerJobs();
+	if (DownloadValidator != NULL)
+		bHasMore = DownloadValidator->ProcessBackgroundWorkSlice() || bHasMore;
+	if (bHasMore)
+		QueueDownloadValidatorCpuWork();
+	return true;
 }
 
 bool CemuleApp::ProcessCollectionImportWorkerItem(const SWorkerTopologyItem &item)
@@ -13341,6 +13373,16 @@ void CemuleApp::DispatchUiNotificationApplicationEvent(const SApplicationEvent &
 	}
 
 	if (event.m_eType == ApplicationEventSearchResultsChanged) {
+		if (event.m_uSearchID == 0 && event.m_strMessage == _T("download-validator-refresh")) {
+			if (emuledlg != NULL && emuledlg->searchwnd != NULL && emuledlg->searchwnd->m_pwndResults != NULL)
+				emuledlg->searchwnd->m_pwndResults->searchlistctrl.QueuePossibleKnownRefresh(50);
+			return;
+		}
+		if (event.m_uSearchID == 0 && event.m_strMessage == _T("download-validator-soft-refresh")) {
+			if (emuledlg != NULL && emuledlg->searchwnd != NULL && emuledlg->searchwnd->m_pwndResults != NULL)
+				emuledlg->searchwnd->m_pwndResults->searchlistctrl.QueuePossibleKnownSoftRefresh();
+			return;
+		}
 		if (searchlist != NULL) {
 			const LONG lCurrentGeneration = searchlist->GetSearchAnswerParseGeneration(event.m_uSearchID);
 			if (event.m_lSearchGeneration != 0 && lCurrentGeneration != 0 && event.m_lSearchGeneration != lCurrentGeneration) {
@@ -13457,8 +13499,12 @@ void CemuleApp::DispatchUiNotificationApplicationEvent(const SApplicationEvent &
 	}
 
 	if (event.m_eType == ApplicationEventBulkOperationOverlayRefresh) {
-		if (emuledlg != NULL)
+		if (emuledlg != NULL) {
+			if (emuledlg->searchwnd != NULL && emuledlg->searchwnd->m_pwndResults != NULL
+				&& ::IsWindow(emuledlg->searchwnd->m_pwndResults->GetSafeHwnd()))
+				emuledlg->searchwnd->m_pwndResults->RefreshSearchTabActivityAnimation();
 			emuledlg->RefreshActiveBulkOperationOverlays();
+		}
 		return;
 	}
 
@@ -14254,7 +14300,7 @@ void CemuleApp::BackupMain()
 	bool error = false;
 
 	try {
-		LPCTSTR extensionsToBack[] = { _T("*.ini"), _T("*.dat"), _T("*.met"), _T("*.conf"), _T("*.bak"), _T("downloads.txt"), _T("download_inspector.txt") };
+		LPCTSTR extensionsToBack[] = { _T("*.ini"), _T("*.dat"), _T("*.met"), _T("*.conf"), _T("*.bak"), DOWNLOADS_TXT_FILENAME, DOWNLOAD_INSPECTOR_FILENAME };
 		WIN32_FIND_DATA findData;
 		HANDLE hSearch;
 		CString configDir = CString(thePrefs.GetMuleDirectory(EMULE_CONFIGDIR));

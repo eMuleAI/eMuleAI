@@ -71,6 +71,19 @@ void CPPgMessages::LoadSettings()
 	OnSpamFilterChange();
 }
 
+void CPPgMessages::ResetToDefaults()
+{
+	CheckDlgButton(IDC_MSGONLYFRIENDS, BST_UNCHECKED);
+	CheckDlgButton(IDC_ADVSPAMFILTER, BST_CHECKED);
+	CheckDlgButton(IDC_INDICATERATINGS, BST_CHECKED);
+	CheckDlgButton(IDC_MSHOWSMILEYS, BST_CHECKED);
+	CheckDlgButton(IDC_USECAPTCHAS, BST_CHECKED);
+	SetDlgItemText(IDC_FILTER, _T("Your client has an infinite queue|Your client is connecting too fast|fastest download speed|ZamBoR|DI-Emule|Join the L33cher|eMule FX|FXeMule|Ketamine|robot from RIAA|stolen client hashes"));
+	SetDlgItemText(IDC_COMMENTFILTER, _T("http://|https://|ftp://|www.|ftp."));
+	OnSpamFilterChange();
+	SetModified(TRUE);
+}
+
 BOOL CPPgMessages::OnInitDialog()
 {
 	CPropertyPage::OnInitDialog();

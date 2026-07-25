@@ -274,7 +274,7 @@ CPreviewApps::CPreviewApps()
 
 CString CPreviewApps::GetDefaultAppsFile()
 {
-	return thePrefs.GetMuleDirectory(EMULE_CONFIGDIR) + _T("PreviewApps.dat");
+	return thePrefs.GetMuleDirectory(EMULE_CONFIGDIR) + PREVIEW_APPS_FILENAME;
 }
 
 void CPreviewApps::RemoveAllApps()
@@ -386,82 +386,122 @@ int CPreviewApps::GetAllMenuEntries(CMenuXP &rMenu, const CPartFile *file, LPCTS
 	return iAddedEntries;
 }
 
+int CPreviewApps::GetAllMenuEntriesForFilePath(CMenuXP &rMenu, LPCTSTR pszFilePath, LPCTSTR pszExcludeCommand)
+{
+	UpdateApps(true);
+	int count = min((int)m_aApps.GetCount(), MP_PREVIEW_APP_MAX - MP_PREVIEW_APP_MIN + 1);
+	const bool bEnabled = pszFilePath != NULL && *pszFilePath != _T('\0');
+	CString strExcludedCommand = NormalizePreviewCommandPath(pszExcludeCommand);
+	int iAddedEntries = 0;
+	for (int i = 0; i < count; ++i) {
+		if (!strExcludedCommand.IsEmpty() && NormalizePreviewCommandPath(m_aApps[i].strCommand) == strExcludedCommand)
+			continue;
+
+		rMenu.AppendODMenu(MF_STRING | (bEnabled ? MF_ENABLED : MF_GRAYED), MP_PREVIEW_APP_MIN + i, new CMenuXPText(MP_PREVIEW_APP_MIN + i, NormalizePreviewDisplayName(m_aApps[i].strTitle), GetPreviewCommandIcon(m_aApps[i].strCommand)));
+		++iAddedEntries;
+	}
+	return iAddedEntries;
+}
+
+namespace
+{
+	void ExecutePreviewFilePath(LPCTSTR pszFilePath, LPCTSTR pszFileTitle, LPCTSTR pszCommand, LPCTSTR pszCommandArgs, CPartFile* pPartFile)
+	{
+		if (pszFilePath == NULL || *pszFilePath == _T('\0') || !CheckFileOpen(pszFilePath, pszFileTitle))
+			return;
+
+		// get directory of video player application
+		CString strCommandDir(pszCommand);
+		int iPos = strCommandDir.ReverseFind(_T('\\'));
+		strCommandDir.Truncate(iPos + 1); //may be empty
+
+		CString strArgs(pszCommandArgs);
+		if (!strArgs.IsEmpty())
+			strArgs += _T(' ');
+
+		CString strQuotedFilePath(pszFilePath);
+		// if the path contains spaces, quote the entire path
+		if (strQuotedFilePath.Find(_T(' ')) >= 0)
+			strArgs.AppendFormat(_T("\"%s\""), (LPCTSTR)strQuotedFilePath);
+		else
+			strArgs += strQuotedFilePath;
+
+		if (pPartFile != NULL)
+			pPartFile->FlushBuffer(true);
+
+		CString strCommand(pszCommand);
+		ExpandEnvironmentStrings(strCommand);
+		ExpandEnvironmentStrings(strArgs);
+		ExpandEnvironmentStrings(strCommandDir);
+
+		LPCTSTR pszVerb;
+
+		// Backward compatibility with old 'preview' command (when no preview application is specified):
+		if (strCommand.IsEmpty()) {
+			strCommand = strArgs;
+			strArgs.Empty();
+			strCommandDir.Empty();
+			pszVerb = NULL;
+		} else
+			pszVerb = _T("open");
+
+		TRACE2(_T("Starting preview application:\n"));
+		TRACE2(_T("  Command =%s\n"), (LPCTSTR)strCommand);
+		TRACE2(_T("  Args    =%s\n"), (LPCTSTR)strArgs);
+		TRACE2(_T("  Dir     =%s\n"), (LPCTSTR)strCommandDir);
+		DWORD dwError = (DWORD)ShellExecute(NULL, pszVerb, strCommand, strArgs.IsEmpty() ? NULL : (LPCTSTR)strArgs, strCommandDir.IsEmpty() ? NULL : (LPCTSTR)strCommandDir, SW_SHOWNORMAL);
+		if (dwError <= 32) {
+			//
+			// Unfortunately, Windows may already have shown an error dialog which tells
+			// the user about the failed 'ShellExecute' call. *BUT* that error dialog is not
+			// shown in each case!
+			//
+			// Examples:
+			//	 -	Specifying an executable which does not exist (e.g. APP.EXE)
+			//		-> (Error 2) -> No error is shown.
+			//
+			//   -	Executing a document (verb "open") which has an unregistered extension
+			//		-> (Error 31) -> Error is shown.
+			//
+			// I'm not sure whether this behaviour (showing an error dialog in cases of some
+			// specific errors) is handled the same way in all Windows version -> therefore I
+			// decide to always show an application specific error dialog!
+			//
+			CString strMsg;
+			strMsg.Format(_T("Failed to execute: %s %s"), (LPCTSTR)strCommand, (LPCTSTR)strArgs);
+
+			LPCTSTR strSysErrMsg = GetShellExecuteErrMsg(dwError);
+			if (*strSysErrMsg)
+				strMsg.AppendFormat(_T("\r\n\r\n%s"), strSysErrMsg);
+
+			CDarkMode::MessageBox(strMsg, MB_ICONSTOP);
+		}
+	}
+}
+
 void CPreviewApps::RunApp(CPartFile *file, UINT uMenuID) const
 {
 	const SPreviewApp &svc(m_aApps[uMenuID - MP_PREVIEW_APP_MIN]);
 	ExecutePartFile(file, svc.strCommand, svc.strCommandArgs);
 }
 
+void CPreviewApps::RunAppForFilePath(LPCTSTR pszFilePath, UINT uMenuID) const
+{
+	const SPreviewApp &svc(m_aApps[uMenuID - MP_PREVIEW_APP_MIN]);
+	LPCTSTR pszFileTitle = pszFilePath != NULL ? ::PathFindFileName(pszFilePath) : NULL;
+	ExecutePreviewFilePath(pszFilePath, pszFileTitle, svc.strCommand, svc.strCommandArgs, NULL);
+}
+
+void CPreviewApps::RunCommandForFilePath(LPCTSTR pszFilePath, LPCTSTR pszCommand, LPCTSTR pszCommandArgs) const
+{
+	LPCTSTR pszFileTitle = pszFilePath != NULL ? ::PathFindFileName(pszFilePath) : NULL;
+	ExecutePreviewFilePath(pszFilePath, pszFileTitle, pszCommand, pszCommandArgs, NULL);
+}
+
 void ExecutePartFile(CPartFile *file, LPCTSTR pszCommand, LPCTSTR pszCommandArgs)
 {
-	if (!CheckFileOpen(file->GetFilePath(), file->GetFileName()))
-		return;
-
-	// get directory of video player application
-	CString strCommandDir(pszCommand);
-	int iPos = strCommandDir.ReverseFind(_T('\\'));
-	strCommandDir.Truncate(iPos + 1); //may be empty
-
-	CString strArgs(pszCommandArgs);
-	if (!strArgs.IsEmpty())
-		strArgs += _T(' ');
-
-	const CString &strQuotedPartFilePath(file->GetFilePath());
-	// if the path contains spaces, quote the entire path
-	if (strQuotedPartFilePath.Find(_T(' ')) >= 0)
-		strArgs.AppendFormat(_T("\"%s\""), (LPCTSTR)strQuotedPartFilePath);
-	else
-		strArgs += strQuotedPartFilePath;
-
-	file->FlushBuffer(true);
-
-	CString strCommand(pszCommand);
-	ExpandEnvironmentStrings(strCommand);
-	ExpandEnvironmentStrings(strArgs);
-	ExpandEnvironmentStrings(strCommandDir);
-
-	LPCTSTR pszVerb;
-
-	// Backward compatibility with old 'preview' command (when no preview application is specified):
-	if (strCommand.IsEmpty()) {
-		strCommand = strArgs;
-		strArgs.Empty();
-		strCommandDir.Empty();
-		pszVerb = NULL;
-	} else
-		pszVerb = _T("open");
-
-	TRACE2(_T("Starting preview application:\n"));
-	TRACE2(_T("  Command =%s\n"), (LPCTSTR)strCommand);
-	TRACE2(_T("  Args    =%s\n"), (LPCTSTR)strArgs);
-	TRACE2(_T("  Dir     =%s\n"), (LPCTSTR)strCommandDir);
-	DWORD dwError = (DWORD)ShellExecute(NULL, pszVerb, strCommand, strArgs.IsEmpty() ? NULL : (LPCTSTR)strArgs, strCommandDir.IsEmpty() ? NULL : (LPCTSTR)strCommandDir, SW_SHOWNORMAL);
-	if (dwError <= 32) {
-		//
-		// Unfortunately, Windows may already have shown an error dialog which tells
-		// the user about the failed 'ShellExecute' call. *BUT* that error dialog is not
-		// shown in each case!
-		//
-		// Examples:
-		//	 -	Specifying an executable which does not exist (e.g. APP.EXE)
-		//		-> (Error 2) -> No error is shown.
-		//
-		//   -	Executing a document (verb "open") which has an unregistered extension
-		//		-> (Error 31) -> Error is shown.
-		//
-		// I'm not sure whether this behaviour (showing an error dialog in cases of some
-		// specific errors) is handled the same way in all Windows version -> therefore I
-		// decide to always show an application specific error dialog!
-		//
-		CString strMsg;
-		strMsg.Format(_T("Failed to execute: %s %s"), (LPCTSTR)strCommand, (LPCTSTR)strArgs);
-
-		LPCTSTR strSysErrMsg = GetShellExecuteErrMsg(dwError);
-		if (*strSysErrMsg)
-			strMsg.AppendFormat(_T("\r\n\r\n%s"), strSysErrMsg);
-
-		CDarkMode::MessageBox(strMsg, MB_ICONSTOP);
-	}
+	if (file != NULL)
+		ExecutePreviewFilePath(file->GetFilePath(), file->GetFileName(), pszCommand, pszCommandArgs, file);
 }
 
 int CPreviewApps::GetPreviewApp(const CPartFile *file)

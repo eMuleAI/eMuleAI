@@ -50,6 +50,7 @@ namespace
 		CString strHash;
 		CString strSoft;
 		CString strGeo;
+		CString strCity;
 		CString strIP;
 		CString strObfuscation;
 		CString strID;
@@ -72,6 +73,59 @@ namespace
 		CString strKad;
 		CString strPorts;
 	};
+
+	static CString GetClientDetailLabelText(LPCTSTR pszResourceID)
+	{
+		CString strText(GetResString(pszResourceID));
+		strText.TrimRight();
+		while (!strText.IsEmpty()) {
+			const int iLast = strText.GetLength() - 1;
+			const TCHAR cLast = strText[iLast];
+			const bool bTrailingDash = cLast == _T('-') && iLast > 0 && _istspace(strText[iLast - 1]);
+			if (cLast != _T(':') && cLast != 0x055D && cLast != 0x1361 && cLast != 0x1366 && cLast != 0x17D6 && cLast != 0xFF1A && !bTrailingDash)
+				break;
+			strText.Delete(iLast);
+			strText.TrimRight();
+		}
+		return strText;
+	}
+
+	static int ClientDetailDluX(CWnd* pWnd, int iDlu)
+	{
+		CRect rc(0, 0, iDlu, 0);
+		::MapDialogRect(pWnd->GetSafeHwnd(), &rc);
+		return rc.Width();
+	}
+
+	static int MeasureClientDetailText(CDC& dc, const CString& strText)
+	{
+		if (strText.IsEmpty())
+			return 0;
+
+		CRect rcText(0, 0, 0, 0);
+		dc.DrawText(strText, &rcText, DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX);
+		return rcText.Width();
+	}
+
+	static int MeasureClientDetailControlText(CWnd* pWnd, CDC& dc, UINT nID)
+	{
+		CString strText;
+		pWnd->GetDlgItemText(nID, strText);
+		return MeasureClientDetailText(dc, strText);
+	}
+
+	static void MoveClientDetailControl(CWnd* pWnd, UINT nID, int iLeft, int iWidth)
+	{
+		CWnd* pControl = pWnd->GetDlgItem(nID);
+		ASSERT(pControl != NULL);
+		if (pControl == NULL)
+			return;
+
+		CRect rcControl;
+		pControl->GetWindowRect(&rcControl);
+		pWnd->ScreenToClient(&rcControl);
+		pControl->SetWindowPos(NULL, iLeft, rcControl.top, max(1, iWidth), rcControl.Height(), SWP_NOZORDER | SWP_NOACTIVATE);
+	}
 
 	static CString FormatClientPorts(uint16 nTCPPort, uint16 nUDPPort)
 	{
@@ -103,7 +157,9 @@ namespace
 		snapshot.strHash = pClient->HasValidHash() ? md4str(pClient->GetUserHash()) : CString(_T("?"));
 		snapshot.strSoft = pClient->DbgGetFullClientSoftVer();
 		bool bLongCountryName = true;
-		snapshot.strGeo = theApp.ipgeolocation != NULL && theApp.ipgeolocation->IsIPGeolocationActive() ? pClient->GetGeolocationData(bLongCountryName) : CString(_T("?"));
+		const bool bGeolocationActive = theApp.ipgeolocation != NULL && theApp.ipgeolocation->IsIPGeolocationActive();
+		snapshot.strGeo = bGeolocationActive ? pClient->GetGeolocationData(bLongCountryName) : CString(_T("?"));
+		snapshot.strCity = bGeolocationActive ? pClient->GetGeolocationCity() : CString(_T("?"));
 		snapshot.strIP = ipstr(!pClient->GetIP().IsNull() ? pClient->GetIP() : pClient->GetConnectIP());
 
 		LPCTSTR pszObfuscation = NULL;
@@ -176,7 +232,7 @@ namespace
 			if (!pClient->GetFriendSlot())
 				snapshot.strScore.Format(_T("%u"), pClient->GetScore(false, pClient->IsDownloading(), false));
 			else
-				snapshot.strScore = GetResString(_T("FRIENDDETAIL"));
+				snapshot.strScore = GetResStringWithParens(_T("FRIEND_SLOT"));
 		} else
 			snapshot.strScore = _T("-");
 
@@ -302,6 +358,7 @@ static void ClearClientDetailView(CClientDetailPage* pPage)
 	SetClientDetailText(pPage, IDC_DHASH, _T("?"));
 	SetClientDetailText(pPage, IDC_DSOFT, _T("?"));
 	SetClientDetailText(pPage, IDC_GEOLOCATION_TXT, _T("?"));
+	SetClientDetailText(pPage, IDC_CITY, _T("?"));
 	SetClientDetailText(pPage, IDC_CLIENT_IP, _T("?"));
 	SetClientDetailText(pPage, IDC_CLIENT_PORT, _T("?"));
 	SetClientDetailText(pPage, IDC_OBFUSCATION_STAT, _T("?"));
@@ -340,6 +397,7 @@ static void ApplyClientDetailSnapshot(CClientDetailPage* pPage, const SClientDet
 	SetClientDetailText(pPage, IDC_DHASH, snapshot.strHash);
 	SetClientDetailText(pPage, IDC_DSOFT, snapshot.strSoft);
 	SetClientDetailText(pPage, IDC_GEOLOCATION_TXT, snapshot.strGeo);
+	SetClientDetailText(pPage, IDC_CITY, snapshot.strCity);
 	SetClientDetailText(pPage, IDC_CLIENT_IP, snapshot.strIP);
 	SetClientDetailText(pPage, IDC_CLIENT_PORT, snapshot.strPorts);
 	SetClientDetailText(pPage, IDC_OBFUSCATION_STAT, snapshot.strObfuscation);
@@ -421,12 +479,21 @@ IMPLEMENT_DYNAMIC(CClientDetailPage, CResizablePage)
 
 BEGIN_MESSAGE_MAP(CClientDetailPage, CResizablePage)
 	ON_MESSAGE(UM_DATA_CHANGED, OnDataChanged)
+	ON_WM_SIZE()
 END_MESSAGE_MAP()
 
 CClientDetailPage::CClientDetailPage()
 	: CResizablePage(CClientDetailPage::IDD)
 	, m_paClients()
 	, m_bDataChanged()
+	, countryflag()
+	, m_iLeftLabelWidth()
+	, m_iRightLabelWidth()
+	, m_iLeftMinimumValueWidth()
+	, m_iRightMinimumValueWidth()
+	, m_iColonWidth()
+	, m_iMinimumClientWidth()
+	, m_bLayoutReady()
 {
 	m_strCaption = GetResString(_T("CD_TITLE"));
 	m_psp.pszTitle = m_strCaption;
@@ -438,26 +505,184 @@ void CClientDetailPage::DoDataExchange(CDataExchange *pDX)
 	CResizablePage::DoDataExchange(pDX);
 }
 
+void CClientDetailPage::UpdateLayoutMetrics()
+{
+	if (!m_hWnd)
+		return;
+
+	static const UINT s_auLeftLabelIDs[] =
+	{
+		IDC_STATIC31, IDC_STATIC32, IDC_STATIC_SOFTWARE, IDC_STATIC35, IDC_STATIC133x, IDC_STATIC_GEOLOCATION, IDC_STATIC_CLIENT_IP,
+		IDC_STATIC41, IDC_STATIC48, IDC_STATIC42, IDC_STATIC43, IDC_STATIC44, IDC_STATIC51, IDC_STATIC52, IDC_STATIC53
+	};
+	static const UINT s_auRightLabelIDs[] =
+	{
+		IDC_CLIENTDETAIL_KAD, IDC_STATIC38, IDC_STATIC_OBF_LABEL, IDC_STATIC_CITY, IDC_STATIC_CLIENT_PORT,
+		IDC_STATIC45, IDC_STATIC46, IDC_STATIC47, IDC_STATIC_PUNISHMENT, IDC_STATIC_BAD_CLIENT_TYPE
+	};
+	static const LPCTSTR s_apszLeftFixedValueKeys[] =
+	{
+		_T("IDENTNOSUPPORT"), _T("IDENTFAILED"), _T("IDENTOK")
+	};
+	static const LPCTSTR s_apszRightFixedValueKeys[] =
+	{
+		_T("IDHIGH"), _T("IDLOW"), _T("CONNECTED"), _T("DISCONNECTED"), _T("IDENTNOSUPPORT"), _T("ENABLED"), _T("SUPPORTED")
+	};
+
+	CClientDC dc(this);
+	CFont* pFont = GetDlgItem(IDC_STATIC31)->GetFont();
+	CFont* pOldFont = pFont != NULL ? dc.SelectObject(pFont) : NULL;
+
+	m_iLeftLabelWidth = 0;
+	for (size_t i = 0; i < _countof(s_auLeftLabelIDs); ++i)
+		m_iLeftLabelWidth = max(m_iLeftLabelWidth, MeasureClientDetailControlText(this, dc, s_auLeftLabelIDs[i]));
+
+	m_iRightLabelWidth = 0;
+	for (size_t i = 0; i < _countof(s_auRightLabelIDs); ++i)
+		m_iRightLabelWidth = max(m_iRightLabelWidth, MeasureClientDetailControlText(this, dc, s_auRightLabelIDs[i]));
+
+	const int iHashMinimumWidth = MeasureClientDetailText(dc, _T("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"));
+	m_iLeftMinimumValueWidth = 0;
+	for (size_t i = 0; i < _countof(s_apszLeftFixedValueKeys); ++i)
+		m_iLeftMinimumValueWidth = max(m_iLeftMinimumValueWidth, MeasureClientDetailText(dc, GetResString(s_apszLeftFixedValueKeys[i])));
+	m_iLeftMinimumValueWidth = max(m_iLeftMinimumValueWidth, MeasureClientDetailText(dc, _T("100.0 [100.0]")));
+
+	m_iRightMinimumValueWidth = MeasureClientDetailText(dc, FormatClientPorts(65535, 65535));
+	for (size_t i = 0; i < _countof(s_apszRightFixedValueKeys); ++i)
+		m_iRightMinimumValueWidth = max(m_iRightMinimumValueWidth, MeasureClientDetailText(dc, GetResString(s_apszRightFixedValueKeys[i])));
+
+	CString strDebugObfuscation(GetResString(_T("ENABLED")));
+	strDebugObfuscation += _T("(In Use)");
+	m_iRightMinimumValueWidth = max(m_iRightMinimumValueWidth, MeasureClientDetailText(dc, strDebugObfuscation));
+
+	m_iColonWidth = max(ClientDetailDluX(this, 4), MeasureClientDetailText(dc, _T(":")) + ClientDetailDluX(this, 1));
+	const int iTextPadding = ClientDetailDluX(this, 3);
+	m_iLeftLabelWidth += iTextPadding;
+	m_iRightLabelWidth += iTextPadding;
+	m_iLeftMinimumValueWidth = max(m_iLeftMinimumValueWidth + iTextPadding, ClientDetailDluX(this, 76));
+	m_iRightMinimumValueWidth = max(m_iRightMinimumValueWidth + iTextPadding, ClientDetailDluX(this, 76));
+
+	const int iOuterMargin = ClientDetailDluX(this, 10);
+	const int iLabelColonGap = ClientDetailDluX(this, 2);
+	const int iColonValueGap = ClientDetailDluX(this, 4);
+	const int iBlockGap = ClientDetailDluX(this, 10);
+	const int iHashAvailableWidth = m_iLeftMinimumValueWidth + m_iRightLabelWidth + iLabelColonGap + m_iColonWidth + iColonValueGap;
+	if (iHashAvailableWidth < iHashMinimumWidth + iTextPadding)
+		m_iLeftMinimumValueWidth += iHashMinimumWidth + iTextPadding - iHashAvailableWidth;
+	m_iMinimumClientWidth = iOuterMargin + m_iLeftLabelWidth + iLabelColonGap + m_iColonWidth + iColonValueGap + m_iLeftMinimumValueWidth
+		+ iBlockGap + m_iRightLabelWidth + iLabelColonGap + m_iColonWidth + iColonValueGap + m_iRightMinimumValueWidth + iOuterMargin;
+
+	if (pOldFont != NULL)
+		dc.SelectObject(pOldFont);
+}
+
+void CClientDetailPage::LayoutControls(int iClientWidth)
+{
+	if (!m_bLayoutReady || iClientWidth <= 0)
+		return;
+
+	static const UINT s_auGroupBoxIDs[] = { IDC_STATIC30, IDC_STATIC40, IDC_STATIC50 };
+	static const UINT s_auLeftLabelIDs[] =
+	{
+		IDC_STATIC31, IDC_STATIC32, IDC_STATIC_SOFTWARE, IDC_STATIC35, IDC_STATIC133x, IDC_STATIC_GEOLOCATION, IDC_STATIC_CLIENT_IP,
+		IDC_STATIC41, IDC_STATIC48, IDC_STATIC42, IDC_STATIC43, IDC_STATIC44, IDC_STATIC51, IDC_STATIC52, IDC_STATIC53
+	};
+	static const UINT s_auLeftColonIDs[] =
+	{
+		IDC_CLIENTDETAIL_COLON_NAME, IDC_CLIENTDETAIL_COLON_HASH, IDC_CLIENTDETAIL_COLON_SOFTWARE, IDC_CLIENTDETAIL_COLON_SERVER_IP,
+		IDC_CLIENTDETAIL_COLON_IDENTIFICATION, IDC_CLIENTDETAIL_COLON_COUNTRY, IDC_CLIENTDETAIL_COLON_IP_ADDRESS,
+		IDC_CLIENTDETAIL_COLON_CURRENTLY_DOWNLOADING, IDC_CLIENTDETAIL_COLON_REQUESTED_UPLOAD, IDC_CLIENTDETAIL_COLON_DOWNLOADED_SESSION,
+		IDC_CLIENTDETAIL_COLON_DOWNLOAD_RATE, IDC_CLIENTDETAIL_COLON_DOWNLOADED_TOTAL, IDC_CLIENTDETAIL_COLON_DLUP_MODIFIER,
+		IDC_CLIENTDETAIL_COLON_RATING, IDC_CLIENTDETAIL_COLON_UPLOAD_QUEUE_SCORE
+	};
+	static const UINT s_auRightLabelIDs[] =
+	{
+		IDC_CLIENTDETAIL_KAD, IDC_STATIC38, IDC_STATIC_OBF_LABEL, IDC_STATIC_CITY, IDC_STATIC_CLIENT_PORT,
+		IDC_STATIC45, IDC_STATIC46, IDC_STATIC47, IDC_STATIC_PUNISHMENT, IDC_STATIC_BAD_CLIENT_TYPE
+	};
+	static const UINT s_auRightColonIDs[] =
+	{
+		IDC_CLIENTDETAIL_COLON_KAD, IDC_CLIENTDETAIL_COLON_SERVER_NAME, IDC_CLIENTDETAIL_COLON_OBFUSCATION, IDC_CLIENTDETAIL_COLON_CITY,
+		IDC_CLIENTDETAIL_COLON_PORT, IDC_CLIENTDETAIL_COLON_UPLOADED_SESSION, IDC_CLIENTDETAIL_COLON_UPLOAD_RATE,
+		IDC_CLIENTDETAIL_COLON_UPLOADED_TOTAL, IDC_CLIENTDETAIL_COLON_PUNISHMENT, IDC_CLIENTDETAIL_COLON_REASON
+	};
+	static const UINT s_auLeftValueIDs[] =
+	{
+		IDC_DSOFT, IDC_DSIP, IDC_CDIDENT, IDC_CLIENT_IP, IDC_DDOWN, IDC_DAVDR, IDC_DDOWNTOTAL, IDC_DRATIO, IDC_DRATING
+	};
+	static const UINT s_auRightValueIDs[] =
+	{
+		IDC_DID, IDC_CLIENTDETAIL_KADCON, IDC_DSNAME, IDC_OBFUSCATION_STAT, IDC_CITY, IDC_CLIENT_PORT,
+		IDC_DDUP, IDC_DAVUR, IDC_DUPTOTAL, IDC_PUNISHMENT, IDC_LEECHER
+	};
+	static const UINT s_auFullWidthValueIDs[] = { IDC_DNAME, IDC_DDOWNLOADING, IDC_UPLOADING, IDC_DSCORE };
+
+	const int iGroupMargin = ClientDetailDluX(this, 4);
+	const int iOuterMargin = ClientDetailDluX(this, 10);
+	const int iLabelColonGap = ClientDetailDluX(this, 2);
+	const int iColonValueGap = ClientDetailDluX(this, 4);
+	const int iBlockGap = ClientDetailDluX(this, 10);
+	const int iAvailableExtra = max(0, iClientWidth - m_iMinimumClientWidth);
+	const int iLeftValueWidth = m_iLeftMinimumValueWidth + iAvailableExtra / 2;
+	const int iRightValueWidth = m_iRightMinimumValueWidth + iAvailableExtra - iAvailableExtra / 2;
+
+	const int iLeftLabelX = iOuterMargin;
+	const int iLeftColonX = iLeftLabelX + m_iLeftLabelWidth + iLabelColonGap;
+	const int iLeftValueX = iLeftColonX + m_iColonWidth + iColonValueGap;
+	const int iRightLabelX = iLeftValueX + iLeftValueWidth + iBlockGap;
+	const int iRightColonX = iRightLabelX + m_iRightLabelWidth + iLabelColonGap;
+	const int iRightValueX = iRightColonX + m_iColonWidth + iColonValueGap;
+
+	for (size_t i = 0; i < _countof(s_auGroupBoxIDs); ++i)
+		MoveClientDetailControl(this, s_auGroupBoxIDs[i], iGroupMargin, max(1, iClientWidth - 2 * iGroupMargin));
+	for (size_t i = 0; i < _countof(s_auLeftLabelIDs); ++i)
+		MoveClientDetailControl(this, s_auLeftLabelIDs[i], iLeftLabelX, m_iLeftLabelWidth);
+	for (size_t i = 0; i < _countof(s_auLeftColonIDs); ++i)
+		MoveClientDetailControl(this, s_auLeftColonIDs[i], iLeftColonX, m_iColonWidth);
+	for (size_t i = 0; i < _countof(s_auRightLabelIDs); ++i)
+		MoveClientDetailControl(this, s_auRightLabelIDs[i], iRightLabelX, m_iRightLabelWidth);
+	for (size_t i = 0; i < _countof(s_auRightColonIDs); ++i)
+		MoveClientDetailControl(this, s_auRightColonIDs[i], iRightColonX, m_iColonWidth);
+	for (size_t i = 0; i < _countof(s_auLeftValueIDs); ++i)
+		MoveClientDetailControl(this, s_auLeftValueIDs[i], iLeftValueX, iLeftValueWidth);
+	for (size_t i = 0; i < _countof(s_auRightValueIDs); ++i)
+		MoveClientDetailControl(this, s_auRightValueIDs[i], iRightValueX, iRightValueWidth);
+	for (size_t i = 0; i < _countof(s_auFullWidthValueIDs); ++i)
+		MoveClientDetailControl(this, s_auFullWidthValueIDs[i], iLeftValueX, max(1, iClientWidth - iOuterMargin - iLeftValueX));
+	MoveClientDetailControl(this, IDC_DHASH, iLeftValueX, max(1, iRightValueX - iBlockGap - iLeftValueX));
+
+	const int iFlagWidth = ClientDetailDluX(this, 16);
+	const int iFlagGap = ClientDetailDluX(this, 2);
+	CWnd* pFlag = GetDlgItem(IDC_COUNTRY_FLAG_ICON);
+	const bool bFlagVisible = pFlag != NULL && (pFlag->GetStyle() & WS_VISIBLE) != 0;
+	MoveClientDetailControl(this, IDC_COUNTRY_FLAG_ICON, iLeftValueX, iFlagWidth);
+	MoveClientDetailControl(this, IDC_GEOLOCATION_TXT, bFlagVisible ? iLeftValueX + iFlagWidth + iFlagGap : iLeftValueX,
+		max(1, iLeftValueWidth - (bFlagVisible ? iFlagWidth + iFlagGap : 0)));
+}
+
+void CClientDetailPage::UpdateLayout()
+{
+	if (!m_hWnd)
+		return;
+
+	CRect rcClient;
+	GetClientRect(&rcClient);
+	LayoutControls(rcClient.Width());
+}
+
+void CClientDetailPage::OnSize(UINT nType, int cx, int cy)
+{
+	CResizablePage::OnSize(nType, cx, cy);
+	LayoutControls(cx);
+}
+
 BOOL CClientDetailPage::OnInitDialog()
 {
 	CResizablePage::OnInitDialog();
 	InitWindowStyles(this);
-
-	AddOrReplaceAnchor(this, IDC_STATIC30, TOP_LEFT, TOP_RIGHT);
-	AddOrReplaceAnchor(this, IDC_STATIC40, TOP_LEFT, TOP_RIGHT);
-	AddOrReplaceAnchor(this, IDC_STATIC50, TOP_LEFT, TOP_RIGHT);
-	AddOrReplaceAnchor(this, IDC_DNAME, TOP_LEFT, TOP_RIGHT);
-	AddOrReplaceAnchor(this, IDC_DSNAME, TOP_LEFT, TOP_RIGHT);
-	AddOrReplaceAnchor(this, IDC_DSOFT, TOP_LEFT, TOP_RIGHT);
-	AddOrReplaceAnchor(this, IDC_GEOLOCATION_TXT, TOP_LEFT, TOP_RIGHT);
-	AddOrReplaceAnchor(this, IDC_DDOWNLOADING, TOP_LEFT, TOP_RIGHT);
-	AddOrReplaceAnchor(this, IDC_UPLOADING, TOP_LEFT, TOP_RIGHT);
-	AddOrReplaceAnchor(this, IDC_OBFUSCATION_STAT, TOP_LEFT, TOP_RIGHT);
-	AddOrReplaceAnchor(this, IDC_CLIENT_IP, TOP_LEFT, TOP_RIGHT);
-	AddOrReplaceAnchor(this, IDC_CLIENT_PORT, TOP_LEFT, TOP_RIGHT);
-
-	AddAllOtherAnchors();
 	Localize();
+	m_bLayoutReady = true;
+	UpdateLayout();
 	return TRUE;
 }
 
@@ -485,20 +710,18 @@ BOOL CClientDetailPage::OnSetActive()
 		SetDlgItemText(IDC_DSOFT, client->DbgGetFullClientSoftVer());
 
 		bool longCountryName = true;
-		if (theApp.ipgeolocation->IsIPGeolocationActive())
-			GetDlgItem(IDC_GEOLOCATION_TXT)->SetWindowText(client->GetGeolocationData(longCountryName));
-		if (theApp.ipgeolocation->ShowCountryFlag()) {
+		const bool bGeolocationActive = theApp.ipgeolocation != NULL && theApp.ipgeolocation->IsIPGeolocationActive();
+		SetDlgItemText(IDC_GEOLOCATION_TXT, bGeolocationActive ? client->GetGeolocationData(longCountryName) : CString(_T("?")));
+		SetDlgItemText(IDC_CITY, bGeolocationActive ? client->GetGeolocationCity() : CString(_T("?")));
+		if (bGeolocationActive && theApp.ipgeolocation->ShowCountryFlag()) {
 			countryflag = theApp.ipgeolocation->GetFlagImageList()->ExtractIcon(client->GetCountryFlagIndex());
 			((CStatic*)GetDlgItem(IDC_COUNTRY_FLAG_ICON))->SetIcon(countryflag);
 			((CStatic*)GetDlgItem(IDC_COUNTRY_FLAG_ICON))->ShowWindow(SW_SHOW);
-			RECT rect1;
-			RECT rect2;
-			((CStatic*)GetDlgItem(IDC_COUNTRY_FLAG_ICON))->GetWindowRect(&rect1);
-			GetDlgItem(IDC_GEOLOCATION_TXT)->GetWindowRect(&rect2);
-			ScreenToClient(&rect1);
-			ScreenToClient(&rect2);
-			GetDlgItem(IDC_GEOLOCATION_TXT)->MoveWindow(CRect(rect1.right + 2, rect2.top, rect2.right, rect2.bottom), TRUE);
+		} else {
+			((CStatic*)GetDlgItem(IDC_COUNTRY_FLAG_ICON))->SetIcon(NULL);
+			((CStatic*)GetDlgItem(IDC_COUNTRY_FLAG_ICON))->ShowWindow(SW_HIDE);
 		}
+		UpdateLayout();
 
 		LPCTSTR uid;
 		if (!client->SupportsCryptLayer())
@@ -581,7 +804,7 @@ BOOL CClientDetailPage::OnSetActive()
 			if (!client->GetFriendSlot())
 				SetDlgItemInt(IDC_DSCORE, client->GetScore(false, client->IsDownloading(), false));
 			else
-				SetDlgItemText(IDC_DSCORE, GetResString(_T("FRIENDDETAIL")));
+				SetDlgItemText(IDC_DSCORE, GetResStringWithParens(_T("FRIEND_SLOT")));
 		} else
 			SetDlgItemText(IDC_DSCORE, _T("-"));
 
@@ -605,35 +828,39 @@ void CClientDetailPage::Localize()
 	SetTabTitle(_T("CD_TITLE"), this);
 
 	SetDlgItemText(IDC_STATIC30, GetResString(_T("CD_GENERAL")));
-	SetDlgItemText(IDC_STATIC31, GetResString(_T("CD_UNAME")));
-	SetDlgItemText(IDC_STATIC32, GetResString(_T("CD_UHASH")));
-	SetDlgItemText(IDC_STATIC_SOFTWARE, GetResString(_T("CD_CSOFT")) + _T(':'));
-	SetDlgItemText(IDC_STATIC35, GetResString(_T("CD_SIP")));
-	SetDlgItemText(IDC_STATIC38, GetResString(_T("CD_SNAME")));
-	SetDlgItemText(IDC_STATIC_OBF_LABEL, GetResString(_T("OBFUSCATION")) + _T(':'));
+	SetDlgItemText(IDC_STATIC31, GetClientDetailLabelText(_T("SW_NAME")));
+	SetDlgItemText(IDC_STATIC32, GetClientDetailLabelText(_T("CD_UHASH2")));
+	SetDlgItemText(IDC_STATIC_SOFTWARE, GetClientDetailLabelText(_T("CD_CSOFT")));
+	SetDlgItemText(IDC_STATIC35, GetClientDetailLabelText(_T("META_SERVERIP")));
+	SetDlgItemText(IDC_STATIC38, GetClientDetailLabelText(_T("SL_SERVERNAME")));
+	SetDlgItemText(IDC_STATIC_OBF_LABEL, GetClientDetailLabelText(_T("OBFUSCATION")));
 
 	SetDlgItemText(IDC_STATIC40, GetResString(_T("CD_TRANS")));
-	SetDlgItemText(IDC_STATIC41, GetResString(_T("CD_CDOWN")));
-	SetDlgItemText(IDC_STATIC42, GetResString(_T("CD_DOWN")));
-	SetDlgItemText(IDC_STATIC43, GetResString(_T("CD_ADOWN")));
-	SetDlgItemText(IDC_STATIC44, GetResString(_T("CD_TDOWN")));
-	SetDlgItemText(IDC_STATIC45, GetResString(_T("CD_UP")));
-	SetDlgItemText(IDC_STATIC46, GetResString(_T("CD_AUP")));
-	SetDlgItemText(IDC_STATIC47, GetResString(_T("CD_TUP")));
-	SetDlgItemText(IDC_STATIC48, GetResString(_T("CD_UPLOADREQ")));
+	SetDlgItemText(IDC_STATIC41, GetClientDetailLabelText(_T("CD_CDOWN")));
+	SetDlgItemText(IDC_STATIC42, GetClientDetailLabelText(_T("CD_DOWN")));
+	SetDlgItemText(IDC_STATIC43, GetClientDetailLabelText(_T("CD_ADOWN")));
+	SetDlgItemText(IDC_STATIC44, GetClientDetailLabelText(_T("INFLST_USER_TOTALDOWNLOAD")));
+	SetDlgItemText(IDC_STATIC45, GetClientDetailLabelText(_T("CD_UP")));
+	SetDlgItemText(IDC_STATIC46, GetClientDetailLabelText(_T("CD_AUP")));
+	SetDlgItemText(IDC_STATIC47, GetClientDetailLabelText(_T("INFLST_USER_TOTALUPLOAD")));
+	SetDlgItemText(IDC_STATIC48, GetClientDetailLabelText(_T("CD_UPLOADREQ")));
 
 	SetDlgItemText(IDC_STATIC50, GetResString(_T("CD_SCORES")));
-	SetDlgItemText(IDC_STATIC51, GetResString(_T("CD_MOD")));
-	SetDlgItemText(IDC_STATIC52, GetResString(_T("CD_RATING")));
-	SetDlgItemText(IDC_STATIC53, GetResString(_T("CD_USCORE")));
-	SetDlgItemText(IDC_STATIC133x, GetResString(_T("CD_IDENT")));
-	SetDlgItemText(IDC_CLIENTDETAIL_KAD, GetResString(_T("KADEMLIA")) + _T(':'));
-	SetDlgItemText(IDC_STATIC_GEOLOCATION, GetResString(_T("GEOLOCATION")) + _T(':'));
-	SetDlgItemText(IDC_STATIC_BAD_CLIENT_TYPE, GetResString(_T("REASON")));
-	SetDlgItemText(IDC_STATIC_PUNISHMENT, GetResString(_T("PUNISHMENT")) + _T(':'));
-	SetDlgItemText(IDC_STATIC_SOFTWARE, GetResString(_T("CD_CSOFT")) + _T(':'));
-	SetDlgItemText(IDC_STATIC_CLIENT_IP, GetResString(_T("CD_UIP")));
-	SetDlgItemText(IDC_STATIC_CLIENT_PORT, GetResString(_T("PORT")) + _T(':'));
+	SetDlgItemText(IDC_STATIC51, GetClientDetailLabelText(_T("CD_MOD")));
+	SetDlgItemText(IDC_STATIC52, GetClientDetailLabelText(_T("CD_RATING")));
+	SetDlgItemText(IDC_STATIC53, GetClientDetailLabelText(_T("CD_USCORE")));
+	SetDlgItemText(IDC_STATIC133x, GetClientDetailLabelText(_T("CD_IDENT")));
+	SetDlgItemText(IDC_CLIENTDETAIL_KAD, GetClientDetailLabelText(_T("KADEMLIA")));
+	SetDlgItemText(IDC_STATIC_GEOLOCATION, GetClientDetailLabelText(_T("GEOLOCATION")));
+	SetDlgItemText(IDC_STATIC_CITY, GetClientDetailLabelText(_T("CD_CITY")));
+	SetDlgItemText(IDC_STATIC_BAD_CLIENT_TYPE, GetClientDetailLabelText(_T("REASON")));
+	SetDlgItemText(IDC_STATIC_PUNISHMENT, GetClientDetailLabelText(_T("PUNISHMENT")));
+	SetDlgItemText(IDC_STATIC_CLIENT_IP, GetClientDetailLabelText(_T("CD_UIP")));
+	SetDlgItemText(IDC_STATIC_CLIENT_PORT, GetClientDetailLabelText(_T("PORT")));
+
+	UpdateLayoutMetrics();
+	if (m_bLayoutReady)
+		UpdateLayout();
 }
 
 
@@ -644,16 +871,19 @@ IMPLEMENT_DYNAMIC(CClientDetailDialog, CListViewWalkerPropertySheet)
 
 BEGIN_MESSAGE_MAP(CClientDetailDialog, CListViewWalkerPropertySheet)
 	ON_WM_DESTROY()
+	ON_WM_GETMINMAXINFO()
 END_MESSAGE_MAP()
 
 void CClientDetailDialog::Localize()
 {
 	m_wndClient.Localize();
 	SetTabTitle(_T("CD_TITLE"), &m_wndClient, this);
+	UpdateMinimumWidth();
 }
 
 CClientDetailDialog::CClientDetailDialog(CUpDownClient *pClient, CListCtrlItemWalk *pListCtrl)
 	: CListViewWalkerPropertySheet(pListCtrl)
+	, m_iMinimumWidth()
 {
 	if (pListCtrl != NULL)
 		AddRuntimeToken(pClient);
@@ -664,6 +894,7 @@ CClientDetailDialog::CClientDetailDialog(CUpDownClient *pClient, CListCtrlItemWa
 
 CClientDetailDialog::CClientDetailDialog(const CSimpleArray<CUpDownClient*> *paClients, CListCtrlItemWalk *pListCtrl)
 	: CListViewWalkerPropertySheet(pListCtrl)
+	, m_iMinimumWidth()
 {
 	for (int i = 0; i < paClients->GetSize(); ++i) {
 		CUpDownClient* pClient = (*paClients)[i];
@@ -729,16 +960,44 @@ void CClientDetailDialog::OnDestroy()
 	DestroyOwnedRuntimeTokens();
 }
 
+void CClientDetailDialog::OnGetMinMaxInfo(MINMAXINFO* lpMMI)
+{
+	CListViewWalkerPropertySheet::OnGetMinMaxInfo(lpMMI);
+	if (m_iMinimumWidth > 0 && lpMMI->ptMinTrackSize.x < m_iMinimumWidth)
+		lpMMI->ptMinTrackSize.x = m_iMinimumWidth;
+}
+
+void CClientDetailDialog::UpdateMinimumWidth()
+{
+	if (!m_hWnd || !m_wndClient.GetSafeHwnd())
+		return;
+
+	CRect rcWindow;
+	CRect rcPage;
+	GetWindowRect(&rcWindow);
+	m_wndClient.GetClientRect(&rcPage);
+	m_iMinimumWidth = rcWindow.Width() - rcPage.Width() + m_wndClient.GetMinimumClientWidth();
+
+	if (rcWindow.Width() < m_iMinimumWidth)
+		SetWindowPos(NULL, 0, 0, m_iMinimumWidth, rcWindow.Height(), SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+	m_wndClient.UpdateLayout();
+}
+
 BOOL CClientDetailDialog::OnInitDialog()
 {
 	EnableStackedTabs(FALSE);
 	BOOL bResult = CListViewWalkerPropertySheet::OnInitDialog();
 	HighColorTab::UpdateImageList(*this);
 	InitWindowStyles(this);
-	EnableSaveRestore(_T("ClientDetailDialog")); // call this after(!) OnInitDialog
+
+	UpdateMinimumWidth();
+	EnableSaveRestore(_T("ClientDetailDialogV3")); // call this after(!) OnInitDialog
+	UpdateMinimumWidth();
+
 	SetWindowText(GetResString(_T("CD_TITLE")));
 
 	m_tabDark.m_bClosable = false;
+	m_tabDark.m_bAllowTabReordering = false;
 
 	if (IsDarkModeEnabled()) {
 		HWND hTab = PropSheet_GetTabControl(m_hWnd);

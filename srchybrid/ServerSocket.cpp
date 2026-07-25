@@ -199,14 +199,14 @@ bool CServerSocket::ProcessPacket(const BYTE *packet, uint32 size, uint8 opcode)
 					} else if (_tcsncmp(message, _T("ERROR"), 5) == 0) {
 						LogError(LOG_STATUSBAR, _T("%s %s (%s:%u) - %s")
 							, (LPCTSTR)GetResString(_T("ERROR"))
-							, pServer ? (LPCTSTR)pServer->GetListName() : (LPCTSTR)GetResString(_T("PW_SERVER"))
+							, pServer ? (LPCTSTR)pServer->GetListName() : (LPCTSTR)GetResString(_T("SERVER"))
 							, cur_server ? (LPCTSTR)cur_server->GetAddress() : (LPCTSTR)EMPTY
 							, cur_server ? cur_server->GetPort() : 0, (LPCTSTR)message.Mid(5).Trim(_T(" :")));
 						bOutputMessage = false;
 					} else if (_tcsncmp(message, _T("WARNING"), 7) == 0) {
 						LogWarning(LOG_STATUSBAR, _T("%s %s (%s:%u) - %s")
 							, (LPCTSTR)GetResString(_T("WARNING"))
-							, pServer ? (LPCTSTR)pServer->GetListName() : (LPCTSTR)GetResString(_T("PW_SERVER"))
+							, pServer ? (LPCTSTR)pServer->GetListName() : (LPCTSTR)GetResString(_T("SERVER"))
 							, cur_server ? (LPCTSTR)cur_server->GetAddress() : (LPCTSTR)EMPTY
 							, cur_server ? cur_server->GetPort() : 0, (LPCTSTR)message.Mid(7).Trim(_T(" :")));
 						bOutputMessage = false;

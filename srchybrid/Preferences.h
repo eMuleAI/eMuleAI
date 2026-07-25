@@ -29,7 +29,44 @@ enum ENatTraversalProtocolMode
 	NAT_TRAVERSAL_PROTOCOL_UTP_ONLY = 1
 };
 
+// Configuration file names.
+#define DOWNLOADS_TXT_FILENAME _T("downloads.txt")
+#define DOWNLOAD_INSPECTOR_FILENAME _T("download_inspector.txt")
+#define AC_BOOTSTRAP_IPS_FILENAME _T("AC_BootstrapIPs.dat")
+#define AC_BOOTSTRAP_URLS_FILENAME _T("AC_BootstrapURLs.dat")
+#define AC_IPFILTER_UPDATE_URLS_FILENAME _T("AC_IPFilterUpdateURLs.dat")
+#define AC_SEARCH_STRINGS_FILENAME _T("AC_SearchStrings.dat")
+#define AC_SERVER_MET_URLS_FILENAME _T("AC_ServerMetURLs.dat")
+#define AC_VF_REGEXP_FILENAME _T("AC_VF_RegExpr.dat")
+#define ADDRESSES_DAT_FILENAME _T("addresses.dat")
 #define BLACKLISTFILE _T("blacklist.conf")
+#define DOWNLOADVALIDATORFILE _T("downloadvalidator.conf")
+#define CANCELLED_MET_FILENAME _T("cancelled.met")
+#define CATEGORY_INI_FILENAME _T("Category.ini")
+#define CLIENT_HISTORY_MET_FILENAME _T("clienthistory.met")
+#define CLIENTS_MET_FILENAME _T("clients.met")
+#define CRYPTKEY_DAT_FILENAME _T("cryptkey.dat")
+#define EMFRIENDS_MET_FILENAME _T("emfriends.met")
+#define IPGEOLOCATION_DB_FILENAMEA "dbip-city-lite.mmdb"
+#define IPGEOLOCATION_DB_FILENAME _T(IPGEOLOCATION_DB_FILENAMEA)
+#define KAD_KEY_INDEX_FILENAME _T("key_index.dat")
+#define KNOWN_MET_FILENAME _T("known.met")
+#define KAD_LOAD_INDEX_FILENAME _T("load_index.dat")
+#define NODES_DAT_FILENAME _T("nodes.dat")
+#define NOTIFIER_INI_FILENAME _T("Notifier.ini")
+#define PREFERENCES_DAT_FILENAME _T("preferences.dat")
+#define KAD_PREFERENCES_DAT_FILENAME _T("preferencesKad.dat")
+#define PREVIEW_APPS_FILENAME _T("PreviewApps.dat")
+#define SPAMFILTER_FILENAME _T("SearchSpam.met")
+#define SERVER_MET_FILENAME _T("server.met")
+#define SHAREDDIRS _T("shareddir.dat")
+#define SHARED_FILES_FILENAME _T("sharedfiles.dat")
+#define SHARED_CACHE_FILENAME _T("sharedcache.dat")
+#define SHARED_SUBDIR_FILENAME _T("sharedsubdir.ini")
+#define KAD_SRC_INDEX_FILENAME _T("src_index.dat")
+#define STATIC_SERVERS_FILENAME _T("staticservers.dat")
+#define STATISTICS_INI_FILENAME _T("statistics.ini")
+#define STOREDSEARCHES_FILENAME _T("StoredSearches.met")
 
 extern LPCTSTR const strDefaultToolbar;
 
@@ -54,6 +91,16 @@ enum ENotifierDisplayMode
 	ntfdmCustomPopup,
 	ntfdmToastNotification,
 	ntfdmTrayBalloon
+};
+
+enum EOptionsWindowScalePercent
+{
+	OPTIONS_WINDOW_SCALE_DISABLED = 100,
+	OPTIONS_WINDOW_SCALE_10_PERCENT = 110,
+	OPTIONS_WINDOW_SCALE_20_PERCENT = 120,
+	OPTIONS_WINDOW_SCALE_30_PERCENT = 130,
+	OPTIONS_WINDOW_SCALE_40_PERCENT = 140,
+	OPTIONS_WINDOW_SCALE_50_PERCENT = 150
 };
 
 enum TLSmode : byte
@@ -574,7 +621,6 @@ public:
 	static bool		filterserverbyip;
 	static bool		m_bDontFilterPrivateIPs;
 	static bool		m_bFirstStart;
-	static bool		m_bBetaNaggingDone;
 	static bool		m_bCreditSystem;
 
 	static bool		log2disk;
@@ -617,6 +663,8 @@ public:
 	static bool		m_bAllocFull;
 	static bool		m_bShowSharedFilesDetails;
 	static bool		m_bShowWin7TaskbarGoodies;
+	static bool		m_bShowOptionsToolTips;
+	static int		m_iOptionsWindowScalePercent;
 	static bool		m_bShowUpDownIconInTaskbar;
 	static bool		m_bForceSpeedsToKB;
 	static bool		m_bAutoShowLookups;
@@ -954,6 +1002,7 @@ public:
 	static bool		m_bDownloadValidatorIgnoreTags;
 	static bool		m_bDownloadValidatorDontIgnoreNumericTags;
 	static bool		m_bDownloadValidatorIgnoreNonAlphaNumeric;
+	static bool		m_bDownloadValidatorCleanMojibake;
 	static int		m_iDownloadValidatorMinimumComparisonLength;
 	static bool		m_bDownloadValidatorSkipIncompleteFileConfirmation;
 	static bool		m_bDownloadValidatorMarkAsBlacklisted;
@@ -964,6 +1013,18 @@ public:
 	static int		m_iDownloadValidatorDateTimeYearEnd;
 	static bool		m_bDownloadValidatorDateTimeCheckSeconds;
 	static bool		m_bDownloadValidatorDateTimeIncludeFollowingNumericValues;
+	static bool		m_bDownloadValidatorRegexMatching;
+	static bool		m_bDownloadValidatorFuzzyMatching;
+	static uint32	m_uDownloadValidatorFuzzySimilarityThreshold;
+	static uint32	m_uDownloadValidatorFuzzyMinimumSharedTokens;
+	static uint32	m_uDownloadValidatorFuzzyMinimumTokenCoveragePercent;
+	static uint32	m_uDownloadValidatorFuzzyMinimumLengthSimilarityPercent;
+	static uint32	m_uDownloadValidatorFuzzyMinimumEditSimilarityPercent;
+	static uint32	m_uDownloadValidatorFuzzyStructuralMinimumGroupLetters;
+	static uint32	m_uDownloadValidatorFuzzyStructuralMinimumIDDigits;
+	static uint32	m_uDownloadValidatorFuzzyDisplayThresholdPercent;
+	static bool		m_bDownloadValidatorMediaLengthMatching;
+	static uint32	m_uDownloadValidatorMediaLengthToleranceSec;
 	static int		GetDownloadValidator() { return m_iDownloadValidator; }
 	static void		SetDownloadValidator(int in) { m_iDownloadValidator = in; }
 	static int		GetDownloadValidatorAcceptPercentage() { return m_iDownloadValidatorAcceptPercentage; }
@@ -984,6 +1045,8 @@ public:
 	static void		SetDownloadValidatorDontIgnoreNumericTags(bool in) { m_bDownloadValidatorDontIgnoreNumericTags = in; }
 	static bool		GetDownloadValidatorIgnoreNonAlphaNumeric() { return m_bDownloadValidatorIgnoreNonAlphaNumeric; }
 	static void		SetDownloadValidatorIgnoreNonAlphaNumeric(bool in) { m_bDownloadValidatorIgnoreNonAlphaNumeric = in; }
+	static bool		GetDownloadValidatorCleanMojibake() { return m_bDownloadValidatorCleanMojibake; }
+	static void		SetDownloadValidatorCleanMojibake(bool in) { m_bDownloadValidatorCleanMojibake = in; }
 	static int		GetDownloadValidatorMinimumComparisonLength() { return m_iDownloadValidatorMinimumComparisonLength; }
 	static void		SetDownloadValidatorMinimumComparisonLength(int in) { m_iDownloadValidatorMinimumComparisonLength = in; }
 	static bool		GetDownloadValidatorSkipIncompleteFileConfirmation() { return m_bDownloadValidatorSkipIncompleteFileConfirmation; }
@@ -1004,6 +1067,30 @@ public:
 	static void		SetDownloadValidatorDateTimeCheckSeconds(bool in) { m_bDownloadValidatorDateTimeCheckSeconds = in; }
 	static bool		GetDownloadValidatorDateTimeIncludeFollowingNumericValues() { return m_bDownloadValidatorDateTimeIncludeFollowingNumericValues; }
 	static void		SetDownloadValidatorDateTimeIncludeFollowingNumericValues(bool in) { m_bDownloadValidatorDateTimeIncludeFollowingNumericValues = in; }
+	static bool		GetDownloadValidatorRegexMatching() { return m_bDownloadValidatorRegexMatching; }
+	static void		SetDownloadValidatorRegexMatching(bool in) { m_bDownloadValidatorRegexMatching = in; }
+	static bool		GetDownloadValidatorFuzzyMatching() { return m_bDownloadValidatorFuzzyMatching; }
+	static void		SetDownloadValidatorFuzzyMatching(bool in) { m_bDownloadValidatorFuzzyMatching = in; }
+	static uint32	GetDownloadValidatorFuzzySimilarityThreshold() { return m_uDownloadValidatorFuzzySimilarityThreshold; }
+	static void		SetDownloadValidatorFuzzySimilarityThreshold(uint32 in) { m_uDownloadValidatorFuzzySimilarityThreshold = in; }
+	static uint32	GetDownloadValidatorFuzzyMinimumSharedTokens() { return m_uDownloadValidatorFuzzyMinimumSharedTokens; }
+	static void		SetDownloadValidatorFuzzyMinimumSharedTokens(uint32 in) { m_uDownloadValidatorFuzzyMinimumSharedTokens = in; }
+	static uint32	GetDownloadValidatorFuzzyMinimumTokenCoveragePercent() { return m_uDownloadValidatorFuzzyMinimumTokenCoveragePercent; }
+	static void		SetDownloadValidatorFuzzyMinimumTokenCoveragePercent(uint32 in) { m_uDownloadValidatorFuzzyMinimumTokenCoveragePercent = in; }
+	static uint32	GetDownloadValidatorFuzzyMinimumLengthSimilarityPercent() { return m_uDownloadValidatorFuzzyMinimumLengthSimilarityPercent; }
+	static void		SetDownloadValidatorFuzzyMinimumLengthSimilarityPercent(uint32 in) { m_uDownloadValidatorFuzzyMinimumLengthSimilarityPercent = in; }
+	static uint32	GetDownloadValidatorFuzzyMinimumEditSimilarityPercent() { return m_uDownloadValidatorFuzzyMinimumEditSimilarityPercent; }
+	static void		SetDownloadValidatorFuzzyMinimumEditSimilarityPercent(uint32 in) { m_uDownloadValidatorFuzzyMinimumEditSimilarityPercent = in; }
+	static uint32	GetDownloadValidatorFuzzyStructuralMinimumGroupLetters() { return m_uDownloadValidatorFuzzyStructuralMinimumGroupLetters; }
+	static void		SetDownloadValidatorFuzzyStructuralMinimumGroupLetters(uint32 in) { m_uDownloadValidatorFuzzyStructuralMinimumGroupLetters = in; }
+	static uint32	GetDownloadValidatorFuzzyStructuralMinimumIDDigits() { return m_uDownloadValidatorFuzzyStructuralMinimumIDDigits; }
+	static void		SetDownloadValidatorFuzzyStructuralMinimumIDDigits(uint32 in) { m_uDownloadValidatorFuzzyStructuralMinimumIDDigits = in; }
+	static uint32	GetDownloadValidatorFuzzyDisplayThresholdPercent() { return m_uDownloadValidatorFuzzyDisplayThresholdPercent; }
+	static void		SetDownloadValidatorFuzzyDisplayThresholdPercent(uint32 in) { m_uDownloadValidatorFuzzyDisplayThresholdPercent = in; }
+	static bool		GetDownloadValidatorMediaLengthMatching() { return m_bDownloadValidatorMediaLengthMatching; }
+	static void		SetDownloadValidatorMediaLengthMatching(bool in) { m_bDownloadValidatorMediaLengthMatching = in; }
+	static uint32	GetDownloadValidatorMediaLengthToleranceSec() { return m_uDownloadValidatorMediaLengthToleranceSec; }
+	static void		SetDownloadValidatorMediaLengthToleranceSec(uint32 in) { m_uDownloadValidatorMediaLengthToleranceSec = in; }
 
 	static int		m_iDownloadInspector;
 	static bool		m_bDownloadInspectorFake;
@@ -1601,6 +1688,9 @@ public:
 	static void		SetBlacklistLog(bool in) { m_bBlacklistLog = in; }
 	static void		LoadBlacklistFile();
 	static void		SaveBlacklistFile();
+	static bool		ValidateBlacklistDefinitions(const CString& strDefinitions, UINT& uErrorLine, UINT& uRuleCount);
+	static bool		LoadBlacklistDefinitionsText(CString& strDefinitions, UINT& uErrorLine, UINT& uRuleCount);
+	static bool		ApplyBlacklistDefinitions(const CString& strDefinitions, UINT& uErrorLine, UINT& uRuleCount);
 	static void		CopyBlacklistList(CStringList& out);
 	static void		ReplaceBlacklistList(const CStringList& in);
 	static void		InvalidateCompiledBlacklistRules();
@@ -1878,6 +1968,10 @@ public:
 	static bool		IsDoubleClickEnabled() { return transferDoubleclick; }
 	static EViewSharedFilesAccess CanSeeShares() { return m_iSeeShares; }
 	static UINT		GetToolTipDelay() { return m_iToolDelayTime; }
+	static bool		GetShowOptionsToolTips() { return m_bShowOptionsToolTips; }
+	static void		SetShowOptionsToolTips(bool bShow) { m_bShowOptionsToolTips = bShow; }
+	static int		GetOptionsWindowScalePercent();
+	static void		SetOptionsWindowScalePercent(int iPercent);
 	static bool		IsBringToFront() { return bringtoforeground; }
 
 	static UINT		GetSplitterbarPosition() { return splitterbarPosition; }
@@ -2226,7 +2320,6 @@ public:
 	static CString	GetVersionCheckURL();
 	static CString	GetVersionCheckRawURL();
 	static void		SetWebMirrorAlertLevel(uint8 newValue) { m_nWebMirrorAlertLevel = newValue; }
-	static bool		IsDefaultNick(const CString& strCheck);
 	static UINT		GetWebMirrorAlertLevel();
 	static bool		UseSimpleTimeRemainingComputation() { return m_bUseOldTimeRemaining; }
 
@@ -2324,11 +2417,6 @@ public:
 	static uint16	GetRandomTCPPort();
 	static uint16	GetRandomUDPPort();
 
-	// Beta related
-#ifdef _BETA
-	static bool		ShouldBetaNag() { return !m_bBetaNaggingDone; }
-	static void		SetDidBetaNagging() { m_bBetaNaggingDone = true; }
-#endif
 protected:
 	static CString	m_strFileCommentsFilePath;
 	static Preferences_Ext_Struct* prefsExt;

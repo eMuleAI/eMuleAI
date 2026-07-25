@@ -29,6 +29,7 @@
 #include "HelpIDs.h"
 #include "opcodes.h"
 #include "SharedFilesWnd.h"
+#include "PreferencesDlg.h"
 
 #ifdef _DEBUG
 #define new DEBUG_NEW
@@ -58,7 +59,10 @@ BEGIN_MESSAGE_MAP(CPPgDisplay, CPropertyPage)
 	ON_BN_CLICKED(IDC_SHOWTRANSTOOLBAR, OnSettingsChange)
 	ON_BN_CLICKED(IDC_STORESEARCHES, OnSettingsChange)
 	ON_BN_CLICKED(IDC_WIN7TASKBARGOODIES, OnSettingsChange)
+	ON_BN_CLICKED(IDC_SHOW_OPTIONS_TOOLTIPS, OnBnClickedShowOptionsToolTips)
+	ON_CBN_SELCHANGE(IDC_OPTIONS_WINDOW_SCALE, OnSettingsChange)
 	ON_BN_CLICKED(IDC_RESETHIST, OnBtnClickedResetHist)
+	ON_WM_SIZE()
 	ON_WM_HELPINFO()
 END_MESSAGE_MAP()
 
@@ -72,6 +76,114 @@ void CPPgDisplay::DoDataExchange(CDataExchange *pDX)
 {
 	CPropertyPage::DoDataExchange(pDX);
 	DDX_Control(pDX, IDC_PREVIEW, m_3DPreview);
+	DDX_Control(pDX, IDC_OPTIONS_WINDOW_SCALE, m_ctlOptionsWindowScale);
+}
+
+void CPPgDisplay::SelectOptionsWindowScalePercent(int iPercent)
+{
+	for (int i = 0; i < m_ctlOptionsWindowScale.GetCount(); ++i)
+		if (static_cast<int>(m_ctlOptionsWindowScale.GetItemData(i)) == iPercent) {
+			m_ctlOptionsWindowScale.SetCurSel(i);
+			return;
+		}
+	m_ctlOptionsWindowScale.SetCurSel(0);
+}
+
+void CPPgDisplay::LayoutOptionsWindowScaleControls()
+{
+	CWnd* pLabel = GetDlgItem(IDC_OPTIONS_WINDOW_SCALE_LABEL);
+	CWnd* pTooltipLabel = GetDlgItem(IDC_TOOLTIPDELAY_LBL);
+	CWnd* pTooltipEdit = GetDlgItem(IDC_TOOLTIPDELAY);
+	if (pLabel == NULL || pTooltipLabel == NULL || pTooltipEdit == NULL || !::IsWindow(m_ctlOptionsWindowScale.GetSafeHwnd()))
+		return;
+
+	CRect rectClient;
+	CRect rectLabel;
+	CRect rectCombo;
+	CRect rectTooltipLabel;
+	CRect rectTooltipEdit;
+	GetClientRect(&rectClient);
+	pLabel->GetWindowRect(&rectLabel);
+	m_ctlOptionsWindowScale.GetWindowRect(&rectCombo);
+	pTooltipLabel->GetWindowRect(&rectTooltipLabel);
+	pTooltipEdit->GetWindowRect(&rectTooltipEdit);
+	ScreenToClient(&rectLabel);
+	ScreenToClient(&rectCombo);
+	ScreenToClient(&rectTooltipLabel);
+	ScreenToClient(&rectTooltipEdit);
+
+	CClientDC dc(this);
+	CFont* pFont = pLabel->GetFont();
+	CFont* pOldFont = pFont != NULL ? dc.SelectObject(pFont) : NULL;
+	CString strLabel;
+	pLabel->GetWindowText(strLabel);
+	const int iLabelWidth = dc.GetTextExtent(strLabel).cx + 2;
+	int iComboTextWidth = 0;
+	for (int i = 0; i < m_ctlOptionsWindowScale.GetCount(); ++i) {
+		CString strItem;
+		m_ctlOptionsWindowScale.GetLBText(i, strItem);
+		iComboTextWidth = max(iComboTextWidth, dc.GetTextExtent(strItem).cx);
+	}
+	if (pOldFont != NULL)
+		dc.SelectObject(pOldFont);
+
+	const int iGap = max(1, rectTooltipEdit.left - rectTooltipLabel.right);
+	const int iComboPadding = ::GetSystemMetrics(SM_CXVSCROLL) + 2 * ::GetSystemMetrics(SM_CXEDGE) + 4;
+	int iComboWidth = max(rectCombo.Width(), iComboTextWidth + iComboPadding);
+	const int iAvailableWidth = max(0, rectClient.right - rectLabel.left - 2);
+	int iAdjustedLabelWidth = iLabelWidth;
+	if (iAdjustedLabelWidth + iGap + iComboWidth > iAvailableWidth)
+		iAdjustedLabelWidth = max(0, iAvailableWidth - iGap - iComboWidth);
+
+	const int iComboLeft = rectLabel.left + iAdjustedLabelWidth + iGap;
+	const CRect rectNewLabel(rectLabel.left, rectLabel.top, rectLabel.left + iAdjustedLabelWidth, rectLabel.bottom);
+	const CRect rectNewCombo(iComboLeft, rectCombo.top, iComboLeft + iComboWidth, rectCombo.bottom);
+	const bool bLayoutChanged = !::EqualRect(&rectLabel, &rectNewLabel) || !::EqualRect(&rectCombo, &rectNewCombo);
+	if (bLayoutChanged) {
+		pLabel->SetWindowPos(NULL, rectNewLabel.left, rectNewLabel.top, rectNewLabel.Width(), rectNewLabel.Height(), SWP_NOACTIVATE | SWP_NOZORDER);
+		m_ctlOptionsWindowScale.SetWindowPos(NULL, rectNewCombo.left, rectNewCombo.top, rectNewCombo.Width(), rectNewCombo.Height(), SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOCOPYBITS);
+
+		CRect rectOldControls;
+		rectOldControls.UnionRect(&rectLabel, &rectCombo);
+		CRect rectNewControls;
+		rectNewControls.UnionRect(&rectNewLabel, &rectNewCombo);
+		CRect rectDirty;
+		rectDirty.UnionRect(&rectOldControls, &rectNewControls);
+		RedrawWindow(&rectDirty, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+	}
+	m_ctlOptionsWindowScale.SetDroppedWidth(max(iComboWidth, iComboTextWidth + iComboPadding));
+}
+
+void CPPgDisplay::FillOptionsWindowScaleCombo()
+{
+	int iSelectedPercent = thePrefs.GetOptionsWindowScalePercent();
+	const int iCurrentSelection = m_ctlOptionsWindowScale.GetCurSel();
+	if (iCurrentSelection != CB_ERR) {
+		const DWORD_PTR dwSelectedData = m_ctlOptionsWindowScale.GetItemData(iCurrentSelection);
+		if (dwSelectedData != static_cast<DWORD_PTR>(CB_ERR))
+			iSelectedPercent = static_cast<int>(dwSelectedData);
+	}
+
+	m_ctlOptionsWindowScale.ResetContent();
+	int iItem = m_ctlOptionsWindowScale.AddString(GetResString(_T("DISABLED")));
+	if (iItem >= 0)
+		m_ctlOptionsWindowScale.SetItemData(iItem, OPTIONS_WINDOW_SCALE_DISABLED);
+	iItem = m_ctlOptionsWindowScale.AddString(_T("10"));
+	if (iItem >= 0)
+		m_ctlOptionsWindowScale.SetItemData(iItem, OPTIONS_WINDOW_SCALE_10_PERCENT);
+	iItem = m_ctlOptionsWindowScale.AddString(_T("20"));
+	if (iItem >= 0)
+		m_ctlOptionsWindowScale.SetItemData(iItem, OPTIONS_WINDOW_SCALE_20_PERCENT);
+	iItem = m_ctlOptionsWindowScale.AddString(_T("30"));
+	if (iItem >= 0)
+		m_ctlOptionsWindowScale.SetItemData(iItem, OPTIONS_WINDOW_SCALE_30_PERCENT);
+	iItem = m_ctlOptionsWindowScale.AddString(_T("40"));
+	if (iItem >= 0)
+		m_ctlOptionsWindowScale.SetItemData(iItem, OPTIONS_WINDOW_SCALE_40_PERCENT);
+	iItem = m_ctlOptionsWindowScale.AddString(_T("50"));
+	if (iItem >= 0)
+		m_ctlOptionsWindowScale.SetItemData(iItem, OPTIONS_WINDOW_SCALE_50_PERCENT);
+	SelectOptionsWindowScalePercent(iSelectedPercent);
 }
 
 void CPPgDisplay::LoadSettings()
@@ -88,6 +200,9 @@ void CPPgDisplay::LoadSettings()
 	CheckDlgButton(IDC_CLEARCOMPL, static_cast<UINT>(thePrefs.GetRemoveFinishedDownloads()));
 	CheckDlgButton(IDC_SHOWTRANSTOOLBAR, static_cast<UINT>(thePrefs.IsTransToolbarEnabled()));
 	CheckDlgButton(IDC_DISABLEHIST, static_cast<UINT>(thePrefs.GetUseAutocompletion()));
+	CPreferencesDlg* pPreferencesDlg = DYNAMIC_DOWNCAST(CPreferencesDlg, GetParent());
+	CheckDlgButton(IDC_SHOW_OPTIONS_TOOLTIPS, static_cast<UINT>(pPreferencesDlg != NULL ? pPreferencesDlg->GetOptionsToolTipsEnabled() : thePrefs.GetShowOptionsToolTips()));
+	SelectOptionsWindowScalePercent(thePrefs.GetOptionsWindowScalePercent());
 
 #ifdef HAVE_WIN7_SDK_H
 	if (thePrefs.GetWindowsVersion() >= _WINVER_7_)
@@ -97,6 +212,31 @@ void CPPgDisplay::LoadSettings()
 		GetDlgItem(IDC_WIN7TASKBARGOODIES)->EnableWindow(FALSE);
 
 	SetDlgItemInt(IDC_TOOLTIPDELAY, thePrefs.m_iToolDelayTime, FALSE);
+}
+
+void CPPgDisplay::ResetToDefaults()
+{
+	CheckDlgButton(IDC_MINTRAY, CPreferences::IsDwmCompositionEnabled() ? BST_CHECKED : BST_UNCHECKED);
+	CheckDlgButton(IDC_DBLCLICK, BST_CHECKED);
+	CheckDlgButton(IDC_DBLCLICKFILENAMEPREVIEW, BST_UNCHECKED);
+	CheckDlgButton(IDC_SHOWRATEONTITLE, BST_CHECKED);
+	CheckDlgButton(IDC_DISABLEKNOWNLIST, BST_UNCHECKED);
+	CheckDlgButton(IDC_DISABLEQUEUELIST, BST_UNCHECKED);
+	CheckDlgButton(IDC_STORESEARCHES, BST_CHECKED);
+	CheckDlgButton(IDC_SHOWCATINFO, BST_CHECKED);
+	CheckDlgButton(IDC_SHOWDWLPERCENT, BST_CHECKED);
+	CheckDlgButton(IDC_CLEARCOMPL, BST_UNCHECKED);
+	CheckDlgButton(IDC_SHOWTRANSTOOLBAR, BST_CHECKED);
+	CheckDlgButton(IDC_DISABLEHIST, BST_CHECKED);
+	CheckDlgButton(IDC_SHOW_OPTIONS_TOOLTIPS, BST_CHECKED);
+	SelectOptionsWindowScalePercent(OPTIONS_WINDOW_SCALE_DISABLED);
+#ifdef HAVE_WIN7_SDK_H
+	CheckDlgButton(IDC_WIN7TASKBARGOODIES, BST_CHECKED);
+#endif
+	SetDlgItemInt(IDC_TOOLTIPDELAY, 1, FALSE);
+	static_cast<CSliderCtrl*>(GetDlgItem(IDC_3DDEPTH))->SetPos(5);
+	DrawPreview();
+	SetModified(TRUE);
 }
 
 BOOL CPPgDisplay::OnInitDialog()
@@ -133,6 +273,22 @@ BOOL CPPgDisplay::OnApply()
 	thePrefs.m_bRemoveFinishedDownloads = IsDlgButtonChecked(IDC_CLEARCOMPL) != 0;
 	thePrefs.m_bUseAutocompl = IsDlgButtonChecked(IDC_DISABLEHIST) != 0;
 	thePrefs.m_bStoreSearches = IsDlgButtonChecked(IDC_STORESEARCHES) != 0;
+	const bool bShowOptionsToolTips = IsDlgButtonChecked(IDC_SHOW_OPTIONS_TOOLTIPS) != 0;
+	thePrefs.SetShowOptionsToolTips(bShowOptionsToolTips);
+	CPreferencesDlg* pPreferencesDlg = DYNAMIC_DOWNCAST(CPreferencesDlg, GetParent());
+	if (pPreferencesDlg != NULL)
+		pPreferencesDlg->SetOptionsToolTipsEnabled(bShowOptionsToolTips);
+	const int iOldOptionsWindowScalePercent = thePrefs.GetOptionsWindowScalePercent();
+	int iOptionsWindowScalePercent = OPTIONS_WINDOW_SCALE_DISABLED;
+	const int iScaleSelection = m_ctlOptionsWindowScale.GetCurSel();
+	if (iScaleSelection != CB_ERR) {
+		const DWORD_PTR dwScaleData = m_ctlOptionsWindowScale.GetItemData(iScaleSelection);
+		if (dwScaleData != static_cast<DWORD_PTR>(CB_ERR))
+			iOptionsWindowScalePercent = static_cast<int>(dwScaleData);
+	}
+	thePrefs.SetOptionsWindowScalePercent(iOptionsWindowScalePercent);
+	if (iOldOptionsWindowScalePercent != thePrefs.GetOptionsWindowScalePercent() && pPreferencesDlg != NULL)
+		pPreferencesDlg->RequestOptionsWindowScaleRefresh();
 
 #ifdef HAVE_WIN7_SDK_H
 	thePrefs.m_bShowWin7TaskbarGoodies = IsDlgButtonChecked(IDC_WIN7TASKBARGOODIES) != 0;
@@ -207,19 +363,32 @@ void CPPgDisplay::Localize()
 		SetDlgItemText(IDC_DISABLEQUEUELIST, GetResString(_T("DISABLEQUEUELIST")));
 		SetDlgItemText(IDC_STATIC_CPUMEM, GetResString(_T("STATIC_CPUMEM")));
 		SetDlgItemText(IDC_SHOWCATINFO, GetResString(_T("SHOWCATINFO")));
-		SetDlgItemText(IDC_HYPERTEXT_FONT_HINT, GetResString(_T("HYPERTEXT_FONT_HINT")));
 		SetDlgItemText(IDC_SELECT_HYPERTEXT_FONT, GetResString(_T("SELECT_FONT")) + _T("..."));
 		SetDlgItemText(IDC_SHOWDWLPERCENT, GetResString(_T("SHOWDWLPERCENTAGE")));
 		SetDlgItemText(IDC_CLEARCOMPL, GetResString(_T("AUTOREMOVEFD")));
 		SetDlgItemText(IDC_STORESEARCHES, GetResString(_T("STORESEARCHES")));
 
-		SetDlgItemText(IDC_RESETLABEL, GetResString(_T("RESETLABEL")));
 		SetDlgItemText(IDC_RESETHIST, GetResString(_T("PW_RESET")));
-		SetDlgItemText(IDC_DISABLEHIST, GetResString(_T("ENABLED")));
+		SetDlgItemText(IDC_DISABLEHIST, GetResString(_T("ENABLE_AUTOCOMPLETION_HISTORY")));
 
 		SetDlgItemText(IDC_SHOWTRANSTOOLBAR, GetResString(_T("PW_SHOWTRANSTOOLBAR")));
 		SetDlgItemText(IDC_WIN7TASKBARGOODIES, GetResString(_T("SHOWWIN7TASKBARGOODIES")));
+		SetDlgItemText(IDC_SHOW_OPTIONS_TOOLTIPS, GetResString(_T("OPTIONS_SHOW_TOOLTIPS")));
+		SetDlgItemText(IDC_OPTIONS_WINDOW_SCALE_LABEL, GetResString(_T("OPTIONS_WINDOW_SIZE")));
+		FillOptionsWindowScaleCombo();
+		LayoutOptionsWindowScaleControls();
 	}
+}
+
+void CPPgDisplay::OnBnClickedShowOptionsToolTips()
+{
+	SetModified();
+}
+
+void CPPgDisplay::OnSize(UINT nType, int cx, int cy)
+{
+	CPropertyPage::OnSize(nType, cx, cy);
+	LayoutOptionsWindowScaleControls();
 }
 
 void CPPgDisplay::OnHScroll(UINT nSBCode, UINT nPos, CScrollBar *pScrollBar)

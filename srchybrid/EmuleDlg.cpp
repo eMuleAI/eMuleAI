@@ -58,6 +58,7 @@
 #include "eMuleAI\MigrationWizardDlg.h"
 #include "ServerConnect.h"
 #include "KnownFileList.h"
+#include "SHAHashSet.h"
 #include "ServerList.h"
 #include "Opcodes.h"
 #include "SharedFileList.h"
@@ -67,6 +68,7 @@
 #include "EnBitmap.h"
 #include "Exceptions.h"
 #include "SearchList.h"
+#include "eMuleAI/DownloadValidator.h"
 #include "HTRichEditCtrl.h"
 #include "FrameGrabThread.h"
 #include "kademlia/kademlia/kademlia.h"
@@ -455,6 +457,7 @@ namespace
 	const size_t kStartupKnownFilesParseRecordsPerSlice = 4096;
 	const size_t kStartupKnownFilesAttachRecordsPerSlice = 512;
 	const DWORD kStartupApplyProgressTraceIntervalMs = 1000;
+	const UINT kStartupApplyBlockedPollIntervalMs = 50;
 	const size_t kStartupKnownFilesCancelledRecordsPerSlice = 4096;
 	const size_t kStartupClientHistoryApplyRecordsPerSlice = 64;
 	const size_t kStartupClientHistoryCompletionRecordsPerSlice = 256;
@@ -897,9 +900,7 @@ namespace
 	const LPCTSTR IP_GUARD_OVERLAY_VERIFYING_KEY = _T("IP_GUARD_OVERLAY_VERIFYING");
 	const LPCTSTR IP_GUARD_OVERLAY_PUBLIC_IP_FMT_KEY = _T("IP_GUARD_OVERLAY_PUBLIC_IP_FMT");
 	const LPCTSTR EMULE_AI_CHATGPT_HELP_BASE_URL = _T("https://chatgpt.com/?");
-	const LPCTSTR EMULE_AI_GEMINI_HELP_BASE_URL = _T("https://gemini.google.com/guided-learning?");
 	const LPCTSTR EMULE_AI_CHATGPT_PROMPT_PARAM = _T("prompt");
-	const LPCTSTR EMULE_AI_GEMINI_PROMPT_PARAM = _T("query");
 
 #ifndef DWMWA_CAPTION_BUTTON_BOUNDS
 	#define DWMWA_CAPTION_BUTTON_BOUNDS 5
@@ -2513,6 +2514,8 @@ void CemuleDlg::StopTimer()
 	KillMainTimer();
 	CheckScheduledTasks();
 	StartMainTimer();
+	if (theApp.DownloadValidator != NULL)
+		theApp.DownloadValidator->StartDeferredBackgroundWork();
 
 	if (!theApp.IsNetworkActivityBlockedByBind() && thePrefs.GetConnectionChecker() && theApp.ConChecker != NULL && !theApp.ConChecker->IsActive())
 		theApp.ConChecker->Start();
@@ -3015,7 +3018,7 @@ void CemuleDlg::ShowConnectionState()
 	tbbi.dwMask = TBIF_IMAGE | TBIF_TEXT;
 
 	if (theApp.IsConnected()) {
-		CString strPane(GetResString(_T("MAIN_BTN_DISCONNECT")));
+		CString strPane(GetResStringWithAccel(_T("IRC_DISCONNECT"), _T('c')));
 		tbbi.iImage = 1;
 		tbbi.pszText = const_cast<LPTSTR>((LPCTSTR)strPane);
 		toolbar->SetButtonInfo(TBBTN_CONNECT, &tbbi);
@@ -3025,7 +3028,7 @@ void CemuleDlg::ShowConnectionState()
 	}
 	else {
 		if (theApp.serverconnect->IsConnecting() || Kademlia::CKademlia::IsRunning()) {
-			CString strPane(GetResString(_T("MAIN_BTN_CANCEL")));
+			CString strPane(GetResStringWithAccel(_T("CANCEL"), _T('C')));
 			tbbi.iImage = 2;
 			tbbi.pszText = const_cast<LPTSTR>((LPCTSTR)strPane);
 			toolbar->SetButtonInfo(TBBTN_CONNECT, &tbbi);
@@ -3033,7 +3036,7 @@ void CemuleDlg::ShowConnectionState()
 			theApp.emuledlg->m_SysMenuOptions.ModifyMenuW(MP_CONNECT, MF_STRING, MP_DISCONNECT, strPane);
 		}
 		else {
-			CString strPane(GetResString(_T("MAIN_BTN_CONNECT")));
+			CString strPane(GetResStringWithAccel(_T("IRC_CONNECT"), _T('C')));
 			tbbi.iImage = 0;
 			tbbi.pszText = const_cast<LPTSTR>((LPCTSTR)strPane);
 			toolbar->SetButtonInfo(TBBTN_CONNECT, &tbbi);
@@ -3456,7 +3459,23 @@ void CemuleDlg::ScheduleStartupApplyPump()
 	if (theApp.IsClosing() || !HasPendingStartupApplyWork() || !::IsWindow(m_hWnd) || m_bStartupApplyPumpTimerActive || m_bStartupApplyPumpPostPending)
 		return;
 
-	if (SetTimer(TIMER_STARTUP_APPLY_PUMP, STARTUP_APPLY_PUMP_INTERVAL_MS, NULL) != 0) {
+	UINT uIntervalMs = STARTUP_APPLY_PUMP_INTERVAL_MS;
+	if (m_pPendingStartupStoredSearchesLoadResult != NULL
+		&& m_pPendingStartupDownloadsLoadResult == NULL
+		&& m_pPendingStartupKnownFilesLoadResult == NULL
+		&& m_pPendingStartupClientHistoryLoadResult == NULL) {
+		const CemuleApp::SStartupMetadataLoadState downloadsState = theApp.GetStartupMetadataLoadState(CemuleApp::StartupMetadataDownloads);
+		const CemuleApp::SStartupMetadataLoadState knownFilesState = theApp.GetStartupMetadataLoadState(CemuleApp::StartupMetadataKnownFiles);
+		const CemuleApp::SStartupMetadataLoadState sharedRulesState = theApp.GetStartupMetadataLoadState(CemuleApp::StartupMetadataSharedRules);
+		const bool bDependenciesReady = downloadsState.IsReady() && knownFilesState.IsReady() && sharedRulesState.IsReady();
+		const bool bDependencyFailed = (downloadsState.IsTerminal() && !downloadsState.IsReady())
+			|| (knownFilesState.IsTerminal() && !knownFilesState.IsReady())
+			|| (sharedRulesState.IsTerminal() && !sharedRulesState.IsReady());
+		if (!bDependenciesReady && !bDependencyFailed)
+			uIntervalMs = kStartupApplyBlockedPollIntervalMs;
+	}
+
+	if (SetTimer(TIMER_STARTUP_APPLY_PUMP, uIntervalMs, NULL) != 0) {
 		m_bStartupApplyPumpTimerActive = true;
 		return;
 	}
@@ -3551,6 +3570,24 @@ bool CemuleDlg::ProcessStartupStoredSearchesApplySlice()
 	CSearchList::SStartupStoredSearchesLoadResult *pResult = static_cast<CSearchList::SStartupStoredSearchesLoadResult*>(m_pPendingStartupStoredSearchesLoadResult);
 	if (pResult == NULL)
 		return false;
+
+	const CemuleApp::SStartupMetadataLoadState downloadsState = theApp.GetStartupMetadataLoadState(CemuleApp::StartupMetadataDownloads);
+	const CemuleApp::SStartupMetadataLoadState knownFilesState = theApp.GetStartupMetadataLoadState(CemuleApp::StartupMetadataKnownFiles);
+	const CemuleApp::SStartupMetadataLoadState sharedRulesState = theApp.GetStartupMetadataLoadState(CemuleApp::StartupMetadataSharedRules);
+	const bool bDependencyFailed = (downloadsState.IsTerminal() && !downloadsState.IsReady())
+		|| (knownFilesState.IsTerminal() && !knownFilesState.IsReady())
+		|| (sharedRulesState.IsTerminal() && !sharedRulesState.IsReady());
+	if (bDependencyFailed) {
+		theApp.CompleteStartupMetadataLoad(CemuleApp::StartupMetadataStoredSearches, pResult->lGeneration, pResult->uCancellationToken, false, ERROR_NOT_READY, _T("stored-searches-dependency-unavailable"));
+		if (theApp.searchlist != NULL)
+			theApp.searchlist->CancelStartupLoad();
+		m_pPendingStartupStoredSearchesLoadResult = NULL;
+		CSearchList::DeleteStartupStoredSearchesLoadResult(pResult);
+		PostStartupOverlayRefresh();
+		return false;
+	}
+	if (!downloadsState.IsReady() || !knownFilesState.IsReady() || !sharedRulesState.IsReady())
+		return true;
 
 	const DWORD dwApplyStartTick = ::GetTickCount();
 	if (theApp.IsClosing() || theApp.IsStartupMetadataLoadCancelled(CemuleApp::StartupMetadataStoredSearches, pResult->lGeneration, pResult->uCancellationToken)) {
@@ -3790,8 +3827,17 @@ bool CemuleDlg::ProcessStartupApplyPump()
 				break;
 			case StartupApplyPumpDomainStoredSearches:
 				if (m_pPendingStartupStoredSearchesLoadResult != NULL) {
-					ProcessStartupStoredSearchesApplySlice();
-					bProcessed = true;
+					const CemuleApp::SStartupMetadataLoadState downloadsState = theApp.GetStartupMetadataLoadState(CemuleApp::StartupMetadataDownloads);
+					const CemuleApp::SStartupMetadataLoadState knownFilesState = theApp.GetStartupMetadataLoadState(CemuleApp::StartupMetadataKnownFiles);
+					const CemuleApp::SStartupMetadataLoadState sharedRulesState = theApp.GetStartupMetadataLoadState(CemuleApp::StartupMetadataSharedRules);
+					const bool bDependenciesReady = downloadsState.IsReady() && knownFilesState.IsReady() && sharedRulesState.IsReady();
+					const bool bDependencyFailed = (downloadsState.IsTerminal() && !downloadsState.IsReady())
+						|| (knownFilesState.IsTerminal() && !knownFilesState.IsReady())
+						|| (sharedRulesState.IsTerminal() && !sharedRulesState.IsReady());
+					if (bDependenciesReady || bDependencyFailed) {
+						ProcessStartupStoredSearchesApplySlice();
+						bProcessed = true;
+					}
 				}
 				break;
 			}
@@ -4451,6 +4497,28 @@ LRESULT CemuleDlg::OnConsoleThreadEvent(WPARAM wParam, LPARAM lParam)
 }
 
 
+namespace
+{
+	const int OverlayBaseWindowWidth = 500;
+	const int OverlayPanelPadding = 24;
+	const int OverlayTaskTitleInset = 16;
+	const int OverlayTaskTitleToProgressGap = 12;
+	const int OverlayBaseTaskTitleWidth = 192;
+	const int OverlayTaskProgressWidth = 232;
+	const int OverlayMinimumTaskProgressWidth = 80;
+	const int OverlayTextPadding = 4;
+	const int OverlayWorkAreaMargin = 16;
+	const int OverlayShutdownCaptionReservedWidth = 58;
+	const int OverlayStartupCaptionReservedWidth = 84;
+
+	int MeasureOverlaySingleLineTextWidth(CDC& dc, const CString& strText)
+	{
+		CRect rcText(0, 0, 0, 0);
+		dc.DrawText(strText, &rcText, DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX);
+		return rcText.Width();
+	}
+}
+
 class CShutdownProgressDlg : public CWnd
 {
 public:
@@ -4460,6 +4528,7 @@ public:
 		, m_uAnimationPhase(0)
 		, m_uHoverButton(0)
 		, m_bTrackingMouse(false)
+		, m_iTaskTitleWidth(OverlayBaseTaskTitleWidth)
 	{
 		for (UINT i = 0; i < CemuleDlg::ShutdownProgressStageCount; ++i) {
 			m_uDone[i] = 0;
@@ -4476,9 +4545,10 @@ public:
 
 		m_pOwner = pOwner;
 		CString strClass(AfxRegisterWndClass(CS_DBLCLKS, ::LoadCursor(NULL, IDC_ARROW), NULL, NULL));
-		const CRect rcDialog = GetInitialDialogWindowRect();
-		if (!CreateEx(WS_EX_APPWINDOW, strClass, NULL, WS_POPUP, rcDialog, NULL, 0))
+		const CRect rcInitialDialog = GetInitialDialogWindowRect();
+		if (!CreateEx(WS_EX_APPWINDOW, strClass, NULL, WS_POPUP, rcInitialDialog, NULL, 0))
 			return false;
+		const CRect rcDialog = GetContentSizedDialogWindowRect(rcInitialDialog);
 
 		HICON hIcon = reinterpret_cast<HICON>(m_pOwner->SendMessage(WM_GETICON, ICON_BIG, 0));
 		if (hIcon != NULL)
@@ -4637,7 +4707,7 @@ protected:
 
 	CRect GetInitialDialogWindowRect() const
 	{
-		const int iWidth = 500;
+		const int iWidth = OverlayBaseWindowWidth;
 		const int iHeight = 220;
 		CRect rcAnchor;
 		if (m_pOwner != NULL && ::IsWindow(m_pOwner->GetSafeHwnd()))
@@ -4655,6 +4725,40 @@ protected:
 		else
 			::SystemParametersInfo(SPI_GETWORKAREA, 0, &rcWork, 0);
 
+		return CRect(rcWork.left + (rcWork.Width() - iWidth) / 2, rcWork.top + (rcWork.Height() - iHeight) / 2, rcWork.left + (rcWork.Width() + iWidth) / 2, rcWork.top + (rcWork.Height() + iHeight) / 2);
+	}
+
+	CRect GetContentSizedDialogWindowRect(const CRect& rcInitial)
+	{
+		CClientDC dc(this);
+		CFont* pFont = GetFont();
+		CFont* pOldFont = pFont != NULL ? dc.SelectObject(pFont) : NULL;
+		int iMaxTaskTextWidth = 0;
+		for (UINT i = 0; i < CemuleDlg::ShutdownProgressStageCount; ++i)
+			iMaxTaskTextWidth = max(iMaxTaskTextWidth, MeasureOverlaySingleLineTextWidth(dc, GetDlgResString(GetStageTitleKey(i), GetStageDefaultTitle(i))));
+		const int iTitleTextWidth = MeasureOverlaySingleLineTextWidth(dc, GetDlgResString(_T("EXIT_LOAD_TITLE"), _T("Exiting eMule AI")));
+		if (pOldFont != NULL)
+			dc.SelectObject(pOldFont);
+
+		m_iTaskTitleWidth = max(OverlayBaseTaskTitleWidth, iMaxTaskTextWidth + OverlayTextPadding);
+		int iDesiredWidth = OverlayPanelPadding * 2 + OverlayTaskTitleInset + m_iTaskTitleWidth + OverlayTaskTitleToProgressGap + OverlayTaskProgressWidth;
+		iDesiredWidth = max(iDesiredWidth, OverlayPanelPadding + iTitleTextWidth + OverlayShutdownCaptionReservedWidth + OverlayTextPadding);
+
+		HMONITOR hMonitor = ::MonitorFromRect(rcInitial, MONITOR_DEFAULTTONEAREST);
+		MONITORINFO mi;
+		ZeroMemory(&mi, sizeof(mi));
+		mi.cbSize = sizeof(mi);
+		CRect rcWork;
+		if (hMonitor != NULL && ::GetMonitorInfo(hMonitor, &mi))
+			rcWork = mi.rcWork;
+		else
+			::SystemParametersInfo(SPI_GETWORKAREA, 0, &rcWork, 0);
+
+		const int iMaxWidth = max(1, rcWork.Width() - OverlayWorkAreaMargin * 2);
+		const int iWidth = min(max(OverlayBaseWindowWidth, iDesiredWidth), iMaxWidth);
+		const int iFixedRowWidth = OverlayPanelPadding * 2 + OverlayTaskTitleInset + OverlayTaskTitleToProgressGap + OverlayTaskProgressWidth;
+		m_iTaskTitleWidth = min(m_iTaskTitleWidth, max(32, iWidth - iFixedRowWidth));
+		const int iHeight = rcInitial.Height();
 		return CRect(rcWork.left + (rcWork.Width() - iWidth) / 2, rcWork.top + (rcWork.Height() - iHeight) / 2, rcWork.left + (rcWork.Width() + iWidth) / 2, rcWork.top + (rcWork.Height() + iHeight) / 2);
 	}
 
@@ -4801,9 +4905,9 @@ protected:
 		pDC->SelectObject(pOldBrush);
 		pDC->SelectObject(pOldPen);
 
-		const int iTitleLeft = rcRow.left + 16;
-		const int iProgressLeft = rcRow.left + 220;
-		CRect rcTitle(iTitleLeft, rcRow.top, iProgressLeft - 12, rcRow.bottom);
+		const int iTitleLeft = rcRow.left + OverlayTaskTitleInset;
+		const int iProgressLeft = min(iTitleLeft + m_iTaskTitleWidth + OverlayTaskTitleToProgressGap, rcRow.right - OverlayMinimumTaskProgressWidth);
+		CRect rcTitle(iTitleLeft, rcRow.top, max(iTitleLeft, iProgressLeft - OverlayTaskTitleToProgressGap), rcRow.bottom);
 		pDC->SetTextColor(crText);
 		pDC->DrawText(GetDlgResString(GetStageTitleKey(uStage), GetStageDefaultTitle(uStage)), rcTitle, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
 
@@ -4928,6 +5032,7 @@ private:
 	UINT m_uAnimationPhase;
 	UINT m_uHoverButton;
 	bool m_bTrackingMouse;
+	int m_iTaskTitleWidth;
 	CRect m_rcMinimize;
 };
 
@@ -4959,6 +5064,7 @@ public:
 		, m_dwLastHeartbeatTraceTick(0)
 		, m_bTrackingMouse(false)
 		, m_bCancelExitPending(false)
+		, m_iTaskTitleWidth(OverlayBaseTaskTitleWidth)
 	{
 	}
 
@@ -4971,9 +5077,10 @@ public:
 		RefreshProgress(true);
 
 		CString strClass(AfxRegisterWndClass(CS_DBLCLKS, ::LoadCursor(NULL, IDC_ARROW), NULL, NULL));
-		const CRect rcDialog = GetInitialDialogWindowRect();
-		if (!CreateEx(WS_EX_APPWINDOW, strClass, NULL, WS_POPUP, rcDialog, NULL, 0))
+		const CRect rcInitialDialog = GetInitialDialogWindowRect();
+		if (!CreateEx(WS_EX_APPWINDOW, strClass, NULL, WS_POPUP, rcInitialDialog, NULL, 0))
 			return false;
+		const CRect rcDialog = GetContentSizedDialogWindowRect(rcInitialDialog);
 		HICON hIcon = reinterpret_cast<HICON>(m_pOwner->SendMessage(WM_GETICON, ICON_BIG, 0));
 		if (hIcon != NULL)
 			SetIcon(hIcon, TRUE);
@@ -5489,7 +5596,7 @@ protected:
 			else
 				SetTaskPhaseProgress(0, 6000, uTempDirIndex, max(1U, uTempDirCount), uDone, uTotal);
 			const UINT uDownloadWeight = max(160U, AddStartupTaskWeights(uTempDirCount * 50U, uLoaded * 12U));
-			AddTask(StartupLoadTaskMetricDownloads, GetDlgResString(_T("STARTUP_LOAD_TASK_DOWNLOADS"), _T("Loading downloads")), eState, uDone, uTotal, uDownloadWeight);
+			AddTask(StartupLoadTaskMetricDownloads, GetDlgResString(_T("LOAD_DOWNLOADS"), _T("Loading downloads")), eState, uDone, uTotal, uDownloadWeight);
 		}
 
 		if (thePrefs.IsStoringSearchesEnabled() && theApp.searchlist != NULL) {
@@ -5515,9 +5622,9 @@ protected:
 			AddTask(StartupLoadTaskMetricStoredSearches, GetDlgResString(_T("STARTUP_LOAD_TASK_SEARCHES"), _T("Loading stored searches")), eState, uDone, uTotal, uSearchWeight);
 		}
 
-		AddMetadataTask(CemuleApp::StartupMetadataKnownFiles, _T("STARTUP_LOAD_TASK_KNOWNFILES"), _T("Loading known files"));
+		AddMetadataTask(CemuleApp::StartupMetadataKnownFiles, _T("BULKOP_LOAD_KNOWNFILES_TITLE"), _T("Loading known files"));
 		if (thePrefs.GetClientHistory())
-			AddMetadataTask(CemuleApp::StartupMetadataClientHistory, _T("STARTUP_LOAD_TASK_CLIENTHISTORY"), _T("Loading client history"));
+			AddMetadataTask(CemuleApp::StartupMetadataClientHistory, _T("LOAD_CLIENTHISTORY"), _T("Loading client history"));
 		AddMetadataTask(CemuleApp::StartupMetadataSharedRules, _T("STARTUP_LOAD_TASK_SHAREDCACHE"), _T("Loading shared cache"));
 
 	}
@@ -5654,7 +5761,7 @@ protected:
 
 	CRect GetInitialDialogWindowRect() const
 	{
-		const int iWidth = 500;
+		const int iWidth = OverlayBaseWindowWidth;
 		const int iTaskCount = static_cast<int>(m_tasks.size());
 		const int iHeight = max(196, 120 + iTaskCount * 24);
 		CRect rcAnchor;
@@ -5673,6 +5780,54 @@ protected:
 		else
 			::SystemParametersInfo(SPI_GETWORKAREA, 0, &rcWork, 0);
 
+		return CRect(rcWork.left + (rcWork.Width() - iWidth) / 2, rcWork.top + (rcWork.Height() - iHeight) / 2, rcWork.left + (rcWork.Width() + iWidth) / 2, rcWork.top + (rcWork.Height() + iHeight) / 2);
+	}
+
+	CRect GetContentSizedDialogWindowRect(const CRect& rcInitial)
+	{
+		CClientDC dc(this);
+		CFont* pFont = GetFont();
+		CFont* pOldFont = pFont != NULL ? dc.SelectObject(pFont) : NULL;
+		static const LPCTSTR s_apszTaskKeys[] = {
+			_T("LOAD_DOWNLOADS"),
+			_T("STARTUP_LOAD_TASK_SEARCHES"),
+			_T("BULKOP_LOAD_KNOWNFILES_TITLE"),
+			_T("LOAD_CLIENTHISTORY"),
+			_T("STARTUP_LOAD_TASK_SHAREDCACHE")
+		};
+		static const LPCTSTR s_apszTaskDefaults[] = {
+			_T("Loading downloads"),
+			_T("Loading stored searches"),
+			_T("Loading known files"),
+			_T("Loading client history"),
+			_T("Loading shared cache")
+		};
+		int iMaxTaskTextWidth = 0;
+		for (size_t i = 0; i < _countof(s_apszTaskKeys); ++i)
+			iMaxTaskTextWidth = max(iMaxTaskTextWidth, MeasureOverlaySingleLineTextWidth(dc, GetDlgResString(s_apszTaskKeys[i], s_apszTaskDefaults[i])));
+		const int iTitleTextWidth = MeasureOverlaySingleLineTextWidth(dc, GetDlgResString(_T("STARTUP_LOAD_TITLE"), _T("Starting eMule AI")));
+		if (pOldFont != NULL)
+			dc.SelectObject(pOldFont);
+
+		m_iTaskTitleWidth = max(OverlayBaseTaskTitleWidth, iMaxTaskTextWidth + OverlayTextPadding);
+		int iDesiredWidth = OverlayPanelPadding * 2 + OverlayTaskTitleInset + m_iTaskTitleWidth + OverlayTaskTitleToProgressGap + OverlayTaskProgressWidth;
+		iDesiredWidth = max(iDesiredWidth, OverlayPanelPadding + iTitleTextWidth + OverlayStartupCaptionReservedWidth + OverlayTextPadding);
+
+		HMONITOR hMonitor = ::MonitorFromRect(rcInitial, MONITOR_DEFAULTTONEAREST);
+		MONITORINFO mi;
+		ZeroMemory(&mi, sizeof(mi));
+		mi.cbSize = sizeof(mi);
+		CRect rcWork;
+		if (hMonitor != NULL && ::GetMonitorInfo(hMonitor, &mi))
+			rcWork = mi.rcWork;
+		else
+			::SystemParametersInfo(SPI_GETWORKAREA, 0, &rcWork, 0);
+
+		const int iMaxWidth = max(1, rcWork.Width() - OverlayWorkAreaMargin * 2);
+		const int iWidth = min(max(OverlayBaseWindowWidth, iDesiredWidth), iMaxWidth);
+		const int iFixedRowWidth = OverlayPanelPadding * 2 + OverlayTaskTitleInset + OverlayTaskTitleToProgressGap + OverlayTaskProgressWidth;
+		m_iTaskTitleWidth = min(m_iTaskTitleWidth, max(32, iWidth - iFixedRowWidth));
+		const int iHeight = rcInitial.Height();
 		return CRect(rcWork.left + (rcWork.Width() - iWidth) / 2, rcWork.top + (rcWork.Height() - iHeight) / 2, rcWork.left + (rcWork.Width() + iWidth) / 2, rcWork.top + (rcWork.Height() + iHeight) / 2);
 	}
 
@@ -5930,19 +6085,11 @@ protected:
 		pDC->SelectObject(pOldBrush);
 		pDC->SelectObject(pOldPen);
 
-		const int iTitleLeft = rcRow.left + 16;
-		const int iTitleToProgressGap = 12;
-		const int iMinTitleWidth = 132;
-		const int iMinProgressWidth = 210;
-		const int iPreferredProgressLeft = rcRow.left + 220;
+		const int iTitleLeft = rcRow.left + OverlayTaskTitleInset;
 		const int iProgressRight = rcRow.right;
-		int iProgressLeft = min(iPreferredProgressLeft, iProgressRight - iMinProgressWidth);
-		if (iProgressLeft < iTitleLeft + iMinTitleWidth + iTitleToProgressGap)
-			iProgressLeft = iTitleLeft + iMinTitleWidth + iTitleToProgressGap;
-		if (iProgressLeft > iProgressRight - 80)
-			iProgressLeft = max(iTitleLeft + iTitleToProgressGap, iProgressRight - 80);
+		const int iProgressLeft = min(iTitleLeft + m_iTaskTitleWidth + OverlayTaskTitleToProgressGap, iProgressRight - OverlayMinimumTaskProgressWidth);
 
-		CRect rcTitle(iTitleLeft, rcRow.top, max(iTitleLeft + iMinTitleWidth, iProgressLeft - iTitleToProgressGap), rcRow.bottom);
+		CRect rcTitle(iTitleLeft, rcRow.top, max(iTitleLeft, iProgressLeft - OverlayTaskTitleToProgressGap), rcRow.bottom);
 		CRect rcMiniProgress(iProgressLeft, rcRow.top + 4, iProgressRight, rcRow.top + 20);
 
 		pDC->SetTextColor(crText);
@@ -6014,6 +6161,7 @@ private:
 	DWORD m_dwLastHeartbeatTraceTick;
 	bool m_bTrackingMouse;
 	bool m_bCancelExitPending;
+	int m_iTaskTitleWidth;
 	SStartupLoadTaskTimeModel m_taskTimeModels[StartupLoadTaskMetricCount];
 	SStartupLoadTaskVisualState m_taskVisualStates[StartupLoadTaskMetricCount];
 	CRect m_rcMinimize;
@@ -7109,7 +7257,7 @@ namespace
 		}
 
 		if (summary.bHasStartupLoad) {
-			strTitle = GetResString(_T("BULKOP_LOAD_DOWNLOADS_TITLE"));
+			strTitle = GetResString(_T("LOAD_DOWNLOADS"));
 			strDetail.Format(GetResString(_T("BULKOP_LOAD_DOWNLOADS_DETAIL")), summary.uStartupLoaded, summary.uStartupTempDirIndex, summary.uStartupTempDirCount);
 			uDone = 0;
 			uTotal = 0;
@@ -7117,7 +7265,7 @@ namespace
 			return;
 		}
 		if (summary.bHasSearchStartupLoad) {
-			strTitle = GetResString(_T("BULKOP_LOAD_SEARCHES_TITLE"));
+			strTitle = GetResString(_T("LOAD_SEARCHES"));
 			strDetail.Format(GetResString(_T("BULKOP_LOAD_SEARCHES_DETAIL")), summary.uSearchStartupLoadedSearches, summary.uSearchStartupTotalSearches, summary.uSearchStartupLoadedFiles);
 			uDone = 0;
 			uTotal = 0;
@@ -7135,7 +7283,7 @@ namespace
 		}
 
 		if (summary.bHasClientHistoryLoad) {
-			strTitle = GetResStringOrDefault(_T("BULKOP_LOAD_CLIENTHISTORY_TITLE"), _T("Loading client history"));
+			strTitle = GetResStringOrDefault(_T("LOAD_CLIENTHISTORY"), _T("Loading client history"));
 			strDetail = GetResStringOrDefault(_T("BULKOP_LOAD_CLIENTHISTORY_DETAIL"), _T("Preparing the Client List view"));
 			uDone = 0;
 			uTotal = 0;
@@ -7144,7 +7292,7 @@ namespace
 		}
 
 		if (summary.bHasSharedFilesLoad) {
-			strTitle = GetResStringOrDefault(_T("BULKOP_LOAD_SHAREDFILES_TITLE"), _T("Loading shared files"));
+			strTitle = GetResStringOrDefault(_T("LOAD_SHAREDFILES"), _T("Loading shared files"));
 			strDetail = GetResStringOrDefault(_T("BULKOP_LOAD_SHAREDFILES_DETAIL"), _T("Scanning shared folders"));
 			if (theApp.sharedfiles != NULL) {
 				CString strSharedDetail;
@@ -7159,7 +7307,7 @@ namespace
 			return;
 		}
 		if (summary.bSavingDownloadsToDisk && summary.bHasAdd) {
-			strTitle = GetResStringOrDefault(_T("BULKOP_SAVE_DOWNLOADS_TITLE"), _T("Saving downloads"));
+			strTitle = GetResStringOrDefault(_T("EXIT_LOAD_TASK_DOWNLOADS"), _T("Saving downloads"));
 			FormatBulkOperationProgressDetail(strDetail, summary.uDone, summary.uTotal, summary.bListUpdateAfterCompletion, true);
 			bCanCancel = false;
 			return;
@@ -7243,7 +7391,7 @@ bool CemuleDlg::GetActiveBulkOperationCloseInfo(CString& strTitle, CString& strB
 	} else {
 		strBody.Format(GetResString(_T("BULKOP_EXIT_UPDATE_BODY")), summary.uTotal, summary.uDone, summary.uTotal >= summary.uDone ? summary.uTotal - summary.uDone : 0);
 		if (summary.bCanCancel)
-			strCancelAndExit = GetResString(_T("BULKOP_EXIT_CANCEL_UPDATE_AND_EXIT"));
+			strCancelAndExit = GetResString(_T("BULKOP_EXIT_CANCEL_ADD_AND_EXIT"));
 	}
 	if (pbCanCancel != NULL)
 		*pbCanCancel = summary.bCanCancel;
@@ -7459,6 +7607,24 @@ void CemuleDlg::RefreshActiveBulkOperationOverlays()
 		bHasTargetOverlay = true;
 		bTargetOverlayWasShown = true;
 	} else if (pTargetList != NULL) {
+		bool bDownloadValidatorOverlay = false;
+		if (pTargetList == pSearchList && theApp.DownloadValidator != NULL) {
+			const uint32 uActiveSearchID = searchwnd != NULL && searchwnd->m_pwndResults != NULL ? searchwnd->m_pwndResults->searchlistctrl.m_nResultsID : 0;
+			const bool bNetworkSearchActive = searchwnd != NULL && searchwnd->m_pwndResults != NULL && searchwnd->m_pwndResults->IsNetworkSearchActive(uActiveSearchID);
+			bool bDownloadValidatorSearchOverlay = false;
+			if (!bNetworkSearchActive && theApp.searchlist != NULL)
+				bDownloadValidatorSearchOverlay = theApp.searchlist->GetDownloadValidatorSearchProgress(uActiveSearchID, uDone, uTotal);
+			bool bDownloadValidatorIndexOverlay = false;
+			if (!bNetworkSearchActive && !bDownloadValidatorSearchOverlay)
+				bDownloadValidatorIndexOverlay = theApp.DownloadValidator->GetBackgroundProgress(uDone, uTotal);
+			bDownloadValidatorOverlay = bDownloadValidatorSearchOverlay || bDownloadValidatorIndexOverlay;
+			if (bDownloadValidatorOverlay) {
+				strTitle = GetResString(bDownloadValidatorIndexOverlay ? _T("DOWNLOAD_VALIDATOR_INDEX_PREPARATION") : _T("DOWNLOAD_VALIDATOR_SEARCH_RESULTS_CHECK"));
+				strDetail.Format(GetResString(_T("BULKOP_PROGRESS_DETAIL")), uDone, uTotal);
+				bCanCancel = false;
+				bHasTargetOverlay = true;
+			}
+		}
 		const bool bIncludeDownloadStartupLoad = pTargetList == pDownloadList || pTargetList == pSharedFilesList;
 		const bool bIncludeSearchStartupLoad = pTargetList == pSearchList;
 		const bool bIncludeSharedFilesStartupLoad = false;
@@ -7466,7 +7632,8 @@ void CemuleDlg::RefreshActiveBulkOperationOverlays()
 		const bool bIncludeClientHistoryLoad = pTargetList == pClientList;
 		const bool bIncludeDownloadAddOperation = pTargetList == pDownloadList || pTargetList == pSharedFilesList;
 		const bool bIncludeSharedFilesBulkOperation = pTargetList == pSharedFilesList;
-		bHasTargetOverlay = BuildActiveBulkOperationOverlayForList(this, bIncludeDownloadStartupLoad, bIncludeSearchStartupLoad, bIncludeSharedFilesStartupLoad, bIncludeKnownFilesStartupLoad, bIncludeClientHistoryLoad, bTargetIsIPFilterList, bIncludeDownloadAddOperation, bIncludeSharedFilesBulkOperation, strTitle, strDetail, uDone, uTotal, bCanCancel);
+		if (!bDownloadValidatorOverlay)
+			bHasTargetOverlay = BuildActiveBulkOperationOverlayForList(this, bIncludeDownloadStartupLoad, bIncludeSearchStartupLoad, bIncludeSharedFilesStartupLoad, bIncludeKnownFilesStartupLoad, bIncludeClientHistoryLoad, bTargetIsIPFilterList, bIncludeDownloadAddOperation, bIncludeSharedFilesBulkOperation, strTitle, strDetail, uDone, uTotal, bCanCancel);
 	}
 	if (bHasTargetOverlay && !bTargetOverlayWasShown)
 		ShowActiveBulkOperationOverlayOnList(pTargetList, strTitle, strDetail, uDone, uTotal, bCanCancel);
@@ -7477,7 +7644,7 @@ void CemuleDlg::RefreshActiveBulkOperationOverlays()
 		pSearchList->HideOperationOverlay();
 	if (pDownloadList != NULL && pDownloadList != pTargetList && !bGeoAwareDownloadActive) {
 		if (bBackendAddOperationActive) {
-			strTitle = bBackendAddSavingToDisk ? GetResStringOrDefault(_T("BULKOP_SAVE_DOWNLOADS_TITLE"), _T("Saving downloads")) : GetResString(_T("BULKOP_ADD_DOWNLOADS_TITLE"));
+			strTitle = bBackendAddSavingToDisk ? GetResStringOrDefault(_T("EXIT_LOAD_TASK_DOWNLOADS"), _T("Saving downloads")) : GetResString(_T("BULKOP_ADD_DOWNLOADS_TITLE"));
 			FormatBulkOperationProgressDetail(strDetail, uBackendOperationDone, uBackendOperationTotal, true, bBackendAddSavingToDisk);
 			ShowActiveBulkOperationOverlayOnList(pDownloadList, strTitle, strDetail, uBackendOperationDone, uBackendOperationTotal, !bBackendAddSavingToDisk);
 		} else
@@ -7489,7 +7656,7 @@ void CemuleDlg::RefreshActiveBulkOperationOverlays()
 			strDetail.Format(GetResString(_T("BULKOP_PROGRESS_DETAIL")), uSharedFilesBulkDone, uSharedFilesBulkTotal);
 			ShowActiveBulkOperationOverlayOnList(pSharedFilesList, strTitle, strDetail, uSharedFilesBulkDone, uSharedFilesBulkTotal, true);
 		} else if (bBackendAddOperationActive) {
-			strTitle = bBackendAddSavingToDisk ? GetResStringOrDefault(_T("BULKOP_SAVE_DOWNLOADS_TITLE"), _T("Saving downloads")) : GetResString(_T("BULKOP_ADD_DOWNLOADS_TITLE"));
+			strTitle = bBackendAddSavingToDisk ? GetResStringOrDefault(_T("EXIT_LOAD_TASK_DOWNLOADS"), _T("Saving downloads")) : GetResString(_T("BULKOP_ADD_DOWNLOADS_TITLE"));
 			FormatBulkOperationProgressDetail(strDetail, uBackendOperationDone, uBackendOperationTotal, true, bBackendAddSavingToDisk);
 			ShowActiveBulkOperationOverlayOnList(pSharedFilesList, strTitle, strDetail, uBackendOperationDone, uBackendOperationTotal, !bBackendAddSavingToDisk);
 		} else
@@ -7996,7 +8163,7 @@ void CemuleDlg::OnTrayRButtonUp(CPoint pt)
 
 void CemuleDlg::AddSpeedSelectorMenus(CMenu* addToMenu)
 {
-	const CString& kbyps(GetResString(_T("KBYTESPERSEC")));
+	const CString& kbyps(GetResString(_T("KBYTESSEC")));
 	// Create UploadPopup Menu
 	ASSERT(m_menuUploadCtrl.m_hMenu == NULL);
 	CString text;
@@ -8015,7 +8182,7 @@ void CemuleDlg::AddSpeedSelectorMenus(CMenu* addToMenu)
 		m_menuUploadCtrl.AppendMenu(MF_SEPARATOR);
 
 		if (GetRecMaxUpload() > 0) {
-			text.Format(GetResString(_T("PW_MINREC")) + GetResString(_T("KBYTESPERSEC")), GetRecMaxUpload());
+			text.Format(GetResString(_T("PW_MINREC")) + GetResString(_T("KBYTESSEC")), GetRecMaxUpload());
 			m_menuUploadCtrl.AppendMenu(MF_STRING, MP_QS_UP10, text);
 		}
 
@@ -8043,7 +8210,7 @@ void CemuleDlg::AddSpeedSelectorMenus(CMenu* addToMenu)
 	}
 
 	addToMenu->AppendMenu(MF_SEPARATOR);
-	addToMenu->AppendMenu(MF_STRING | MF_GRAYED, MP_CONNECT, GetResString(_T("MAIN_BTN_CONNECT")));
+	addToMenu->AppendMenu(MF_STRING | MF_GRAYED, MP_CONNECT, GetResStringWithAccel(_T("IRC_CONNECT"), _T('C')));
 }
 
 
@@ -8506,10 +8673,10 @@ CString CemuleDlg::FormatIpGuardPublicIpMessage(bool bRuntime, const SIpGuardPub
 	CString strMessage;
 	if (result.bSucceeded) {
 		const CString strPublicAddress(CA2T(result.strPublicAddress));
-		strMessage.Format(GetResString(bRuntime ? _T("IP_GUARD_RUNTIME_PUBLIC_IP_MISMATCH_FMT") : _T("IP_GUARD_STARTUP_PUBLIC_IP_MISMATCH_FMT")), (LPCTSTR)strPublicAddress, (LPCTSTR)result.strProviderUrl, (LPCTSTR)strRanges);
+		strMessage.Format(GetResString(bRuntime ? _T("IP_GUARD_RUNTIME_PUBLIC_IP_MISMATCH_FMT") : _T("IP_GUARD_RUNTIME_PUBLIC_IP_MISMATCH_FMT")), (LPCTSTR)strPublicAddress, (LPCTSTR)result.strProviderUrl, (LPCTSTR)strRanges);
 	}
 	else
-		strMessage.Format(GetResString(bRuntime ? _T("IP_GUARD_RUNTIME_PROBE_FAILED_FMT") : _T("IP_GUARD_STARTUP_PROBE_FAILED_FMT")), (LPCTSTR)strRanges);
+		strMessage.Format(GetResString(bRuntime ? _T("IP_GUARD_RUNTIME_PROBE_FAILED_FMT") : _T("IP_GUARD_RUNTIME_PROBE_FAILED_FMT")), (LPCTSTR)strRanges);
 	return strMessage;
 }
 
@@ -9452,7 +9619,7 @@ void CemuleDlg::Localize()
 			// create new 'speed control' menus
 			if (m_SysMenuOptions.CreateMenu()) {
 				AddSpeedSelectorMenus(&m_SysMenuOptions);
-				pSysMenu->AppendMenu(MF_STRING | MF_POPUP, (UINT_PTR)m_SysMenuOptions.m_hMenu, GetResString(_T("EM_PREFS")));
+				pSysMenu->AppendMenu(MF_STRING | MF_POPUP, (UINT_PTR)m_SysMenuOptions.m_hMenu, GetResStringWithAccel(_T("OPTIONS"), _T('O')));
 			}
 		}
 
@@ -9654,6 +9821,8 @@ BOOL CemuleDlg::OnCommand(WPARAM wParam, LPARAM lParam)
 	case TBBTN_RELOADCONF:
 	case MP_HM_RELOADCONF:
 		thePrefs.LoadBlacklistFile(); // Loads blacklist.conf
+		if (theApp.DownloadValidator != NULL && theApp.DownloadValidator->ReloadRegexRules() && thePrefs.GetDownloadValidatorRegexMatching())
+			theApp.DownloadValidator->QueueReloadRegexMap();
 		theApp.shield->LoadShieldFile(); // Loads shield.conf
 		break;
 	case TBBTN_BACKUP:
@@ -9703,10 +9872,10 @@ BOOL CemuleDlg::OnCommand(WPARAM wParam, LPARAM lParam)
 		BrowserOpen(MOD_REPO_BASE_URL, thePrefs.GetMuleDirectory(EMULE_EXECUTABLEDIR));
 		break;
 	case MP_EMULE_AI_REPORT_ISSUE:
-		BrowserOpen(CString(MOD_REPO_BASE_URL) + _T("/issues"), thePrefs.GetMuleDirectory(EMULE_EXECUTABLEDIR));
+		BrowserOpen(CString(MOD_ISSUES_URL), thePrefs.GetMuleDirectory(EMULE_EXECUTABLEDIR));
 		break;
 	case MP_EMULE_AI_DISCUSSIONS:
-		BrowserOpen(CString(MOD_REPO_BASE_URL) + _T("/discussions"), thePrefs.GetMuleDirectory(EMULE_EXECUTABLEDIR));
+		BrowserOpen(CString(MOD_DISCUSSIONS_URL), thePrefs.GetMuleDirectory(EMULE_EXECUTABLEDIR));
 		break;
 	case MP_EMULE_AI_HOMEPAGE_DOCUMENTATION:
 		BrowserOpen(MOD_PAGES_BASE_URL, thePrefs.GetMuleDirectory(EMULE_EXECUTABLEDIR));
@@ -9716,9 +9885,6 @@ BOOL CemuleDlg::OnCommand(WPARAM wParam, LPARAM lParam)
 		break;
 	case MP_EMULE_AI_ASK_CHATGPT_HELP:
 		BrowserOpen(BuildEmuleAiAssistantUrl(EMULE_AI_CHATGPT_HELP_BASE_URL, EMULE_AI_CHATGPT_PROMPT_PARAM, _T("EMULE_AI_PROMPT_FOR_HELP")), thePrefs.GetMuleDirectory(EMULE_EXECUTABLEDIR));
-		break;
-	case MP_EMULE_AI_ASK_GEMINI_HELP:
-		BrowserOpen(BuildEmuleAiAssistantUrl(EMULE_AI_GEMINI_HELP_BASE_URL, EMULE_AI_GEMINI_PROMPT_PARAM, _T("EMULE_AI_PROMPT_FOR_HELP")), thePrefs.GetMuleDirectory(EMULE_EXECUTABLEDIR));
 		break;
 	case MP_WEBSVC_EDIT:
 		theWebServices.Edit();
@@ -9814,21 +9980,21 @@ void CemuleDlg::ShowToolPopup(bool toolsonly)
 
 	if (!toolsonly) {
 		if (theApp.serverconnect->IsConnected())
-			menu.AppendMenu(MF_STRING, MP_HM_CON, GetResString(_T("MAIN_BTN_DISCONNECT")), _T("DISCONNECT"));
+			menu.AppendMenu(MF_STRING, MP_HM_CON, GetResStringWithAccel(_T("IRC_DISCONNECT"), _T('c')), _T("DISCONNECT"));
 		else if (theApp.serverconnect->IsConnecting())
-			menu.AppendMenu(MF_STRING, MP_HM_CON, GetResString(_T("MAIN_BTN_CANCEL")), _T("STOPCONNECTING"));
+			menu.AppendMenu(MF_STRING, MP_HM_CON, GetResStringWithAccel(_T("CANCEL"), _T('C')), _T("STOPCONNECTING"));
 		else
-			menu.AppendMenu(MF_STRING, MP_HM_CON, GetResString(_T("MAIN_BTN_CONNECT")), _T("CONNECT"));
+			menu.AppendMenu(MF_STRING, MP_HM_CON, GetResStringWithAccel(_T("IRC_CONNECT"), _T('C')), _T("CONNECT"));
 
-		menu.AppendMenu(MF_STRING, MP_HM_KAD, GetResString(_T("EM_KADEMLIA")), _T("KADEMLIA"));
-		menu.AppendMenu(MF_STRING, MP_HM_SRVR, GetResString(_T("EM_SERVER")), _T("SERVER"));
+		menu.AppendMenu(MF_STRING, MP_HM_KAD, GetResStringWithAccel(_T("KADEMLIA"), _T('K')), _T("KADEMLIA"));
+		menu.AppendMenu(MF_STRING, MP_HM_SRVR, GetResStringWithAccel(_T("FSTAT_SERVERS"), _T('v')), _T("SERVER"));
 		menu.AppendMenu(MF_STRING, MP_HM_TRANSFER, GetResString(_T("EM_TRANS")), _T("TRANSFER"));
-		menu.AppendMenu(MF_STRING, MP_HM_SEARCH, GetResString(_T("EM_SEARCH")), _T("SEARCH"));
-		menu.AppendMenu(MF_STRING, MP_HM_FILES, GetResString(_T("EM_FILES2")), _T("Files"));
-		menu.AppendMenu(MF_STRING, MP_HM_MSGS, GetResString(_T("EM_MESSAGES")), _T("MESSAGES"));
+		menu.AppendMenu(MF_STRING, MP_HM_SEARCH, GetResStringWithAccel(_T("SW_SEARCHBOX"), _T('S')), _T("SEARCH"));
+		menu.AppendMenu(MF_STRING, MP_HM_FILES, GetResStringWithAccel(_T("FILES"), _T('F')), _T("Files"));
+		menu.AppendMenu(MF_STRING, MP_HM_MSGS, GetResStringWithAccel(_T("CW_MESSAGES"), _T('M')), _T("MESSAGES"));
 		menu.AppendMenu(MF_STRING, MP_HM_IRC, GetResString(_T("IRC")), _T("IRC"));
-		menu.AppendMenu(MF_STRING, MP_HM_STATS, GetResString(_T("EM_STATISTIC")), _T("STATISTICS"));
-		menu.AppendMenu(MF_STRING, MP_HM_PREFS, GetResString(_T("EM_PREFS")), _T("PREFERENCES"));
+		menu.AppendMenu(MF_STRING, MP_HM_STATS, GetResStringWithAccel(_T("SF_STATISTICS"), _T('a')), _T("STATISTICS"));
+		menu.AppendMenu(MF_STRING, MP_HM_PREFS, GetResStringWithAccel(_T("OPTIONS"), _T('O')), _T("PREFERENCES"));
 		menu.AppendMenu(MF_STRING, MP_HM_SAVESTATE, GetResString(_T("SAVE_APP_STATE")), _T("SAVE"));
 		menu.AppendMenu(MF_STRING, MP_HM_RELOADCONF, GetResString(_T("RELOAD_CONF")), _T("RELOAD CONF"));
 		menu.AppendMenu(MF_STRING, MP_HM_BACKUP, GetResString(_T("BACKUP")), _T("BACKUP"));
@@ -9863,11 +10029,10 @@ void CemuleDlg::ShowEmuleAIPopup()
 	const LPCTSTR pszGithubIcon = IsDarkModeEnabled() ? _T("GITHUB_LIGHT") : _T("GITHUB");
 	const LPCTSTR pszReportIssueIcon = _T("REPORTISSUE");
 	const LPCTSTR pszChatGptIcon = IsDarkModeEnabled() ? _T("CHATGPT_LIGHT") : _T("CHATGPT");
-	const LPCTSTR pszGeminiIcon = _T("GEMINI");
 
 	CMenuXP menu;
 	menu.CreatePopupMenu();
-	menu.AddMenuSidebar(GetResString(_T("EMULE_AI_LABEL")));
+	menu.AddMenuSidebar(GetResString(_T("PW_MOD")));
 
 	// eMule AI main navigation
 	menu.AppendMenu(MF_STRING, MP_EMULE_AI_HOMEPAGE_DOCUMENTATION, GetResString(_T("EMULE_AI_MENU_HOMEPAGE_DOCUMENTATION")), _T("EMULEAI"));
@@ -9879,7 +10044,6 @@ void CemuleDlg::ShowEmuleAIPopup()
 	menu.AppendMenu(MF_SEPARATOR);
 
 	menu.AppendMenu(MF_STRING, MP_EMULE_AI_ASK_CHATGPT_HELP, GetResString(_T("EMULE_AI_MENU_ASK_CHATGPT_HELP")), pszChatGptIcon);
-	menu.AppendMenu(MF_STRING, MP_EMULE_AI_ASK_GEMINI_HELP, GetResString(_T("EMULE_AI_MENU_ASK_GEMINI_HELP")), pszGeminiIcon);
 	menu.AppendMenu(MF_SEPARATOR);
 
 	menu.AppendMenu(MF_STRING, MP_HM_LINK1, GetResString(_T("HM_LINKHP")), _T("MULE_VISTA_ICON"));
@@ -9989,10 +10153,7 @@ void InitWindowStyles(CWnd* pWnd, bool bForTheApp)
 LRESULT CemuleDlg::OnDarkModeSwitch(WPARAM /*wParam*/, LPARAM /*lParam*/)
 {
 	CWaitCursor curWait;
-
-	// Close the preferences dialog if it is open
-	if (preferenceswnd && ::IsWindow(preferenceswnd->GetSafeHwnd()) && preferenceswnd->m_bApplyButtonClicked)
-		preferenceswnd->DestroyWindow(); // Close preferences dialog if apply button was clicked
+	const bool bReopenPreferences = preferenceswnd != NULL && ::IsWindow(preferenceswnd->GetSafeHwnd()) && preferenceswnd->m_bApplyButtonClicked;
 
 	ApplyTheme(AfxGetMainWnd()->GetSafeHwnd()); // Switch color scheme for the entire application
 	if (sharedfileswnd != NULL && ::IsWindow(sharedfileswnd->GetSafeHwnd()))
@@ -10000,8 +10161,8 @@ LRESULT CemuleDlg::OnDarkModeSwitch(WPARAM /*wParam*/, LPARAM /*lParam*/)
 	if (m_pMiniMule != NULL && !m_pMiniMule->IsInInitDialog() && ::IsWindow(m_pMiniMule->GetSafeHwnd()))
 		ApplyThemeToWindow(m_pMiniMule->GetSafeHwnd(), true, false);
 
-	if (preferenceswnd->m_bApplyButtonClicked)
-		ShowPreferences(IDD_PPG_MOD); // Reopen the preferences dialog with IDD_PPG_MOD page selected if apply button was clicked
+	if (bReopenPreferences)
+		preferenceswnd->RequestModalReopen(IDD_PPG_MOD);
 
 	return 0;
 }
@@ -10734,13 +10895,6 @@ void CemuleDlg::DestroySplash()
 		else
 			delete pSplashWnd;
 	}
-#ifdef _BETA
-	// only do it once to not be annoying given that the beta phases are expected to last longer these days
-	if (!thePrefs.IsFirstStart() && thePrefs.ShouldBetaNag()) {
-		thePrefs.SetDidBetaNagging();
-		LocMessageBox(_T("BETANAG"), MB_ICONINFORMATION | MB_OK, 0);
-	}
-#endif
 }
 
 BOOL CemuleApp::IsIdleMessage(MSG* pMsg)
@@ -11026,7 +11180,7 @@ void CemuleDlg::HtmlHelp(DWORD_PTR dwData, UINT nCmd)
 		CString msg;
 		msg.Format(_T("%s\n\n%s\n\n%s"), pApp->m_pszHelpFilePath, (LPCTSTR)strHelpError, (LPCTSTR)GetResString(_T("ERR_NOHELP")));
 		if (CDarkMode::MessageBox(msg, MB_YESNO | MB_ICONERROR) == IDYES)
-			BrowserOpen(thePrefs.GetHomepageBaseURL() + _T("/home/perl/help.cgi"), thePrefs.GetMuleDirectory(EMULE_EXECUTABLEDIR));
+			BrowserOpen(MOD_PAGES_BASE_URL, thePrefs.GetMuleDirectory(EMULE_EXECUTABLEDIR));
 	}
 }
 
@@ -11130,9 +11284,16 @@ INT_PTR CemuleDlg::ShowPreferences(UINT uStartPageID)
 		preferenceswnd->BringWindowToTop();
 		return -1;
 	}
-	if (uStartPageID != UINT_MAX)
-		preferenceswnd->SetStartPage(uStartPageID);
-	return preferenceswnd->DoModal();
+
+	INT_PTR iResult = -1;
+	UINT uPageId = uStartPageID;
+	do {
+		if (uPageId != UINT_MAX)
+			preferenceswnd->SetStartPage(uPageId);
+		iResult = preferenceswnd->DoModal();
+		uPageId = UINT_MAX;
+	} while (preferenceswnd->ConsumeModalReopenRequest(uPageId));
+	return iResult;
 }
 
 
@@ -11308,7 +11469,7 @@ LRESULT CemuleDlg::OnWebGUIInteraction(WPARAM wParam, LPARAM lParam)
 				AddLogLine(true, GetResString(_T("WEB_REBOOT")) + _T(' ') + GetResString(_T("FAILED")));
 			}
 		} else
-			AddLogLine(true, GetResString(_T("WEB_REBOOT")) + _T(' ') + GetResString(_T("ACCESSDENIED")));
+			AddLogLine(true, GetResString(_T("WEB_REBOOT")) + _T(' ') + GetResStringWithExclamation(_T("SFS_ACCESS_DENIED")));
 		break;
 	case WEBGUIIA_UPD_CATTABS:
 		theApp.emuledlg->transferwnd->UpdateCatTabTitles();
@@ -11618,13 +11779,13 @@ void CemuleDlg::UpdateThumbBarButtons(bool initialAddToDlg)
 		switch (i) {
 		case TBB_CONNECT:
 			m_thbButtons[i].hIcon = theApp.LoadIcon(_T("CONNECT"), 16, 16);
-			uid = _T("MAIN_BTN_CONNECT");
+			uid = _T("IRC_CONNECT");
 			if (theApp.IsConnected())
 				m_thbButtons[i].dwFlags |= THBF_DISABLED;
 			break;
 		case TBB_DISCONNECT:
 			m_thbButtons[i].hIcon = theApp.LoadIcon(_T("DISCONNECT"), 16, 16);
-			uid = _T("MAIN_BTN_DISCONNECT");
+			uid = _T("IRC_DISCONNECT");
 			if (!theApp.IsConnected())
 				m_thbButtons[i].dwFlags |= THBF_DISABLED;
 			break;
@@ -11638,7 +11799,7 @@ void CemuleDlg::UpdateThumbBarButtons(bool initialAddToDlg)
 			break;
 		case TBB_PREFERENCES:
 			m_thbButtons[i].hIcon = theApp.LoadIcon(_T("PREFERENCES"), 16, 16);
-			uid = _T("EM_PREFS");
+			uid = _T("OPTIONS");
 			break;
 		default:
 			uid = EMPTY;

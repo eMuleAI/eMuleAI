@@ -424,7 +424,7 @@ namespace
 			return CString();
 
 		if (pParams->bClientSharedFiles)
-			return GetResString(_T("SHAREDFILES"));
+			return GetResString(_T("SF_FILES"));
 
 		switch (pParams->eType) {
 		case SearchTypeEd2kServer:
@@ -483,6 +483,7 @@ CSearchResultsWnd::CSearchResultsWnd(CWnd* /*pParent*/)
 	, m_servercount()
 	, m_iSentMoreReq()
 	, m_bEd2kMoreResultsAvailable(false)
+	, m_bEd2kMoreRequestPending(false)
 	, m_b64BitSearchPacket()
 	, m_globsearch()
 	, m_cancelled()
@@ -1013,6 +1014,8 @@ BOOL CSearchResultsWnd::PreTranslateMessage(MSG *pMsg)
 				}
 			}
 		}
+		if (pMsg->wParam == VK_RETURN && searchlistctrl.IsPassiveRowIndex(searchlistctrl.GetNextItem(-1, LVIS_FOCUSED)))
+			return TRUE;
 		if (pMsg->wParam == VK_RETURN && thePrefs.IsDisableFindAsYouType()) {
 			CEditDelayed::SFilterParam* wParam = new CEditDelayed::SFilterParam;
 			wParam->bForceApply = true; // We need to force OnChangeFilter to filter+reload listbox
@@ -1027,6 +1030,8 @@ BOOL CSearchResultsWnd::PreTranslateMessage(MSG *pMsg)
 		int it = searchlistctrl.HitTest(point);
 		if (it == -1)
 			return FALSE;
+		if (searchlistctrl.IsPassiveRowIndex(it))
+			return TRUE;
 
 		searchlistctrl.SetItemState(-1, 0, LVIS_SELECTED);
 		searchlistctrl.SetItemState(it, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
@@ -1365,6 +1370,7 @@ void CSearchResultsWnd::CancelEd2kSearch()
 	m_b64BitSearchPacket = false;
 	m_globsearch = false;
 	m_bEd2kMoreResultsAvailable = false;
+	m_bEd2kMoreRequestPending = false;
 
 	// delete local server timeout timer
 	if (m_uTimerLocalServer) {
@@ -1417,6 +1423,7 @@ void CSearchResultsWnd::SearchCancelled(uint32 uSearchID)
 
 void CSearchResultsWnd::LocalEd2kSearchEnd(UINT count, bool bMoreResultsAvailable)
 {
+	m_bEd2kMoreRequestPending = false;
 	// local server has answered, kill the timeout timer
 	if (m_uTimerLocalServer) {
 		VERIFY(KillTimer(m_uTimerLocalServer));
@@ -1454,9 +1461,11 @@ void CSearchResultsWnd::OnBnClickedDownloadSelected()
 	DownloadSelected();
 }
 
-void CSearchResultsWnd::OnDblClkSearchList(LPNMHDR, LRESULT *pResult)
+void CSearchResultsWnd::OnDblClkSearchList(LPNMHDR pNMHDR, LRESULT *pResult)
 {
-	OnBnClickedDownloadSelected();
+	const LPNMITEMACTIVATE pNMIA = reinterpret_cast<LPNMITEMACTIVATE>(pNMHDR);
+	if (pNMIA == NULL || !searchlistctrl.IsPassiveRowIndex(pNMIA->iItem))
+		OnBnClickedDownloadSelected();
 	*pResult = 0;
 }
 
@@ -1471,11 +1480,7 @@ void CSearchResultsWnd::DownloadSelected(bool bPaused, bool bBypassDownloadValid
 {
 	// Save selected list first. Because it'll be reordered each time when thePrefs.GetGroupKnownAtTheBottom() is active which changes indexes dynamically.
 	CTypedPtrList<CPtrList, CSearchFile*> selectedList;
-	for (POSITION pos = searchlistctrl.GetFirstSelectedItemPosition(); pos != NULL;) {
-		int index = searchlistctrl.GetNextSelectedItem(pos);
-		if (index >= 0)
-			selectedList.AddTail(reinterpret_cast<CSearchFile*>(searchlistctrl.m_ListedItemsVector[index]));
-	}
+	searchlistctrl.CollectSelectedSearchFiles(selectedList);
 
 	if (selectedList.IsEmpty())
 		return;
@@ -1691,6 +1696,7 @@ void CSearchResultsWnd::StopSearchTabActivityTimer()
 	if (!::IsWindow(searchselect.GetSafeHwnd()))
 		return;
 
+	bool bIconChanged = false;
 	for (int iTab = 0; iTab < searchselect.GetItemCount(); ++iTab) {
 		TCITEM ti = {};
 		ti.mask = TCIF_PARAM | TCIF_IMAGE;
@@ -1699,8 +1705,29 @@ void CSearchResultsWnd::StopSearchTabActivityTimer()
 			if (ti.iImage != iTargetImage) {
 				ti.iImage = iTargetImage;
 				searchselect.SetItem(iTab, &ti);
+				bIconChanged = true;
 			}
 		}
+	}
+	if (bIconChanged)
+		searchselect.Invalidate(FALSE);
+}
+
+bool CSearchResultsWnd::IsNetworkSearchActive(uint32 uSearchID) const
+{
+	const SSearchParams *pParams = GetSearchResultsParams(uSearchID);
+	if (pParams == NULL || pParams->bClientSharedFiles)
+		return false;
+
+	switch (pParams->eType) {
+	case SearchTypeEd2kServer:
+		return pParams->dwSearchID == m_nEd2kSearchID && (IsLocalEd2kSearchRunning() || m_bEd2kMoreRequestPending);
+	case SearchTypeEd2kGlobal:
+		return pParams->dwSearchID == m_nEd2kSearchID && (IsLocalEd2kSearchRunning() || IsGlobalEd2kSearchRunning() || m_bEd2kMoreRequestPending);
+	case SearchTypeKademlia:
+		return Kademlia::CSearchManager::IsSearching(pParams->dwSearchID);
+	default:
+		return false;
 	}
 }
 
@@ -1716,23 +1743,13 @@ bool CSearchResultsWnd::IsSearchTabActivityActive(const SSearchParams *pParams) 
 			return true;
 		if (theApp.searchlist->HasPendingSearchProcessing(pParams->dwSearchID))
 			return true;
+		if (searchlistctrl.HasPendingPossibleKnownProcessing(pParams->dwSearchID))
+			return true;
 		if (searchlistctrl.m_nResultsID == pParams->dwSearchID && searchlistctrl.m_ListedItemsVector.empty() && theApp.searchlist->GetParentItemCount(pParams->dwSearchID) > 0)
 			return true;
 	}
 
-	if (pParams->bClientSharedFiles)
-		return false;
-
-	switch (pParams->eType) {
-	case SearchTypeEd2kServer:
-		return pParams->dwSearchID == m_nEd2kSearchID && IsLocalEd2kSearchRunning();
-	case SearchTypeEd2kGlobal:
-		return pParams->dwSearchID == m_nEd2kSearchID && (IsLocalEd2kSearchRunning() || IsGlobalEd2kSearchRunning());
-	case SearchTypeKademlia:
-		return Kademlia::CSearchManager::IsSearching(pParams->dwSearchID);
-	default:
-		return false;
-	}
+	return IsNetworkSearchActive(pParams->dwSearchID);
 }
 
 bool CSearchResultsWnd::IsSearchCleanupActiveForSearch(uint32 nSearchID) const
@@ -1766,6 +1783,7 @@ bool CSearchResultsWnd::UpdateSearchTabActivityAnimation()
 		return false;
 
 	bool bHasActiveTab = false;
+	bool bIconChanged = false;
 	for (int iTab = 0; iTab < searchselect.GetItemCount(); ++iTab) {
 		TCITEM ti = {};
 		ti.mask = TCIF_PARAM | TCIF_IMAGE;
@@ -1783,8 +1801,11 @@ bool CSearchResultsWnd::UpdateSearchTabActivityAnimation()
 		if (ti.iImage != iTargetImage) {
 			ti.iImage = iTargetImage;
 			searchselect.SetItem(iTab, &ti);
+			bIconChanged = true;
 		}
 	}
+	if (bIconChanged)
+		searchselect.Invalidate(FALSE);
 
 	return bHasActiveTab;
 }
@@ -1799,7 +1820,7 @@ void CSearchResultsWnd::Localize()
 	SetDlgItemText(IDC_CHECK_KNOWN, GetResString(_T("KNOWN")));
 	SetDlgItemText(IDC_CLEARALL, GetResString(_T("REMOVEALLSEARCH")));
 	m_btnSearchListMenu.SetWindowText(GetResString(_T("SW_RESULT")));
-	SetDlgItemText(IDC_SDOWNLOAD, GetResString(_T("SW_DOWNLOAD")));
+	SetDlgItemText(IDC_SDOWNLOAD, GetResString(_T("DOWNLOAD")));
 	m_ctlOpenParamsWnd.SetWindowText(GetResString(_T("SEARCHPARAMS")) + _T("..."));
 	EnsureFilterControlLayout();
 }
@@ -2448,6 +2469,7 @@ bool CSearchResultsWnd::DoNewEd2kSearch(SSearchParams *pParams)
 	const CWnd *pWndFocus = GetFocus();
 	m_pwndParams->m_ctlMore.EnableWindow(FALSE);
 	m_bEd2kMoreResultsAvailable = false;
+	m_bEd2kMoreRequestPending = false;
 	if (pWndFocus && pWndFocus->m_hWnd == m_pwndParams->m_ctlMore.m_hWnd)
 		m_pwndParams->m_ctlCancel.SetFocus();
 	m_iSentMoreReq = 0;
@@ -2496,6 +2518,7 @@ bool CSearchResultsWnd::SearchMore()
 		return false;
 	}
 
+	m_bEd2kMoreRequestPending = true;
 	SetActiveSearchResultsIcon(m_nEd2kSearchID);
 	m_cancelled = false;
 	EnsureSearchTabActivityTimer();
@@ -2643,12 +2666,12 @@ void CSearchResultsWnd::DeleteSearch(uint32 uSearchID)
 
 	if (uSearchID == theApp.emuledlg->searchwnd->m_pwndResults->searchlistctrl.m_nResultsID) {
 		// This is current tab, so we need to clear the results list
-		theApp.emuledlg->searchwnd->m_pwndResults->searchlistctrl.m_ListedItemsVector.clear();
-		theApp.emuledlg->searchwnd->m_pwndResults->searchlistctrl.m_ListedItemsMap.RemoveAll();
+		theApp.emuledlg->searchwnd->m_pwndResults->searchlistctrl.ClearListedItems(false);
 		theApp.emuledlg->searchwnd->m_pwndResults->searchlistctrl.SetItemCountEx(static_cast<int>(0), LVSICF_NOINVALIDATEALL);
 	}
 
 	// delete search results
+	searchlistctrl.RemoveCachedSearchRows(uSearchID);
 	if (uSearchID == m_nEd2kSearchID) {
 		if (!m_cancelled)
 			CancelEd2kSearch();
@@ -2712,8 +2735,7 @@ void CSearchResultsWnd::DeleteAllSearches()
 
 void CSearchResultsWnd::NoTabItems()
 {
-	searchlistctrl.m_ListedItemsVector.clear();
-	searchlistctrl.m_ListedItemsMap.RemoveAll();
+	searchlistctrl.ClearListedItems(true);
 	searchlistctrl.SetItemCountEx(static_cast<int>(0), LVSICF_NOINVALIDATEALL);
 
 	theApp.searchlist->Clear();
@@ -2756,6 +2778,9 @@ void CSearchResultsWnd::EnsureActiveTabLoaded()
 	if (pParams == NULL || pParams->dwSearchID == 0)
 		return;
 
+	if (theApp.searchlist != NULL)
+		theApp.searchlist->RequestDownloadValidatorRecheckIfDirty(pParams->dwSearchID);
+
 	const int iSearchListItems = searchlistctrl.GetVirtualItemCount();
 	const int iControlItems = searchlistctrl.GetItemCount();
 	bool bReloadNeeded = searchlistctrl.m_nResultsID != pParams->dwSearchID || iControlItems != iSearchListItems;
@@ -2790,6 +2815,9 @@ void CSearchResultsWnd::ShowResults(const SSearchParams *pParams)
 		m_pwndParams->m_ctlCancel.EnableWindow(Kademlia::CSearchManager::IsSearching(pParams->dwSearchID));
 
 	UpdateMoreButtonState(pParams);
+	if (theApp.searchlist != NULL)
+		theApp.searchlist->SetDownloadValidatorPrioritySearch(pParams->dwSearchID);
+	EnsureSearchTabActivityTimer();
 	searchlistctrl.ReloadList(false, static_cast<EListStateField>(LSF_SELECTION | LSF_SCROLL));
 }
 
@@ -2941,8 +2969,10 @@ void CSearchResultsWnd::ShowSearchSelector(bool visible)
 	m_ctlFilter.ShowWindow(nCmdShow);
 	GetDlgItem(IDC_CHECK_COMPLETE)->ShowWindow(nCmdShow);
 	GetDlgItem(IDC_CHECK_KNOWN)->ShowWindow(SW_HIDE);
-	if (visible)
+	if (visible) {
 		EnsureFilterControlLayout();
+		EnsureSearchTabActivityTimer();
+	}
 	searchselect.UpdateTabToolTips();
 }
 
@@ -3011,26 +3041,37 @@ bool CSearchResultsWnd::CanSearchRelatedFiles() const
 // A client can give several hashes in the related search request since v17.14.
 void CSearchResultsWnd::SearchRelatedFiles(CPtrList &listFiles)
 {
-	POSITION pos = listFiles.GetHeadPosition();
-	if (pos == NULL) {
-		ASSERT(0);
-		return;
-	}
-	SSearchParams *pParams = new SSearchParams;
-	pParams->strExpression = _T("related");
-
-	CString strNames;
-	while (pos != NULL) {
+	std::vector<CString> hashes;
+	std::vector<CString> names;
+	for (POSITION pos = listFiles.GetHeadPosition(); pos != NULL;) {
 		CAbstractFile *pFile = static_cast<CAbstractFile*>(listFiles.GetNext(pos));
-		if (pFile->IsKindOf(RUNTIME_CLASS(CAbstractFile))) {
-			pParams->strExpression.AppendFormat(_T("::%s"), (LPCTSTR)md4str(pFile->GetFileHash()));
-			if (!strNames.IsEmpty())
-				strNames += _T(", ");
-			strNames += pFile->GetFileName();
+		if (pFile != NULL && pFile->IsKindOf(RUNTIME_CLASS(CAbstractFile))) {
+			hashes.push_back(md4str(pFile->GetFileHash()));
+			names.push_back(pFile->GetFileName());
 		} else
 			ASSERT(0);
 	}
+	SearchRelatedFiles(hashes, names);
+}
 
+void CSearchResultsWnd::SearchRelatedFiles(const std::vector<CString>& hashes, const std::vector<CString>& names)
+{
+	if (hashes.empty()) {
+		ASSERT(0);
+		return;
+	}
+
+	SSearchParams *pParams = new SSearchParams;
+	pParams->strExpression = _T("related");
+	for (size_t i = 0; i < hashes.size(); ++i)
+		pParams->strExpression.AppendFormat(_T("::%s"), (LPCTSTR)hashes[i]);
+
+	CString strNames;
+	for (size_t i = 0; i < names.size(); ++i) {
+		if (!strNames.IsEmpty())
+			strNames += _T(", ");
+		strNames += names[i];
+	}
 	pParams->strSpecialTitle.Format(_T("%s: %s"), (LPCTSTR)GetResString(_T("RELATED")), (LPCTSTR)strNames);
 	if (pParams->strSpecialTitle.GetLength() > 50)
 		pParams->strSpecialTitle = pParams->strSpecialTitle.Left(47) + _T("...");
@@ -3284,7 +3325,7 @@ CString CSearchResultsSelector::BuildSharedFilesTooltip(int iTab) const
 		AppendTooltipLine(strDetails, GetResString(_T("CD_MOD")), pClient->GetClientModVer());
 
 	AppendTooltipLine(strDetails, GetResString(_T("FIRST_SEEN")), FormatTooltipTimeValue(pClient->tFirstSeen));
-	AppendTooltipLine(strDetails, GetResString(_T("LAST_SEEN")), FormatTooltipTimeValue(pClient->tLastSeen));
+	AppendTooltipLine(strDetails, GetResString(_T("LASTSEEN")), FormatTooltipTimeValue(pClient->tLastSeen));
 
 	CString strSharedCount;
 	strSharedCount.Format(_T("%u"), pClient->m_uSharedFilesCount);
@@ -3582,7 +3623,7 @@ void CSearchResultsSelector::OnContextMenu(CWnd*, CPoint point)
 				if (pSelectedClient != NULL) {
 					const bool is_ed2k = pSelectedClient->IsEd2kClient();
 					const CFriend *pFriend = pSelectedClient->GetFriend();
-					ClientMenu.AppendMenu(MF_STRING | MF_ENABLED, MP_DETAIL, GetResString(_T("SHOWDETAILS")), _T("CLIENTDETAILS"));
+					ClientMenu.AppendMenu(MF_STRING | MF_ENABLED, MP_DETAIL, GetResString(_T("DL_INFO")), _T("CLIENTDETAILS"));
 					ClientMenu.AppendMenu(MF_STRING | ((is_ed2k && !pSelectedClient->IsFriend()) ? MF_ENABLED : MF_GRAYED), MP_ADDFRIEND, GetResString(_T("ADDFRIEND")), _T("ADDFRIEND"));
 					ClientMenu.AppendMenu(MF_STRING | (pFriend != NULL ? MF_ENABLED : MF_GRAYED), MP_FRIENDSLOT, GetResString(_T("FRIENDSLOT")), _T("FRIENDSLOT"));
 					ClientMenu.CheckMenuItem(MP_FRIENDSLOT, (pFriend != NULL && pFriend->GetFriendSlot()) ? MF_CHECKED : MF_UNCHECKED);
@@ -3637,7 +3678,7 @@ void CSearchResultsSelector::OnContextMenu(CWnd*, CPoint point)
 	menu.AppendMenu(MF_STRING, MP_DOWNLOAD_ALL_LISTED, GetResString(_T("DOWNLOAD_ALL_LISTED")), _T("RESUME"));
 	menu.AppendMenu(MF_STRING, MP_DOWNLOAD_ALL_UNKNOWN, GetResString(_T("DOWNLOAD_ALL_UNKNOWN")), _T("RESUME"));
 	menu.AppendMenu(MF_STRING | MF_SEPARATOR);
-	menu.AppendMenu(MF_STRING, MP_REMOVE, GetResString(_T("FD_CLOSE")), _T("CLOSETAB"));
+	menu.AppendMenu(MF_STRING, MP_REMOVE, GetResString(_T("CW_CLOSE")), _T("CLOSETAB"));
 
 	menu.SetDefaultItem(MP_RESTORESEARCHPARAMS);
 	menu.TrackPopupMenu(TPM_LEFTALIGN | TPM_RIGHTBUTTON, point.x, point.y, this);

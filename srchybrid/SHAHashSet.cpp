@@ -66,7 +66,7 @@ namespace
 	};
 
 	const ULONGLONG MAX_DEFERRED_AICH_RAM_BYTES = 100ull * 1024ull * 1024ull;
-	LPCTSTR DEFERRED_AICH_SPOOL_FILENAME = _T("known2_64.met.deferred");
+	LPCTSTR DEFERRED_AICH_SPOOL_FILENAME = KNOWN2_MET_FILENAME _T(".deferred");
 
 	CCriticalSection s_csDeferredAICHHashSetSaves;
 	CCriticalSection s_csFlushDeferredAICHHashSetSaves;

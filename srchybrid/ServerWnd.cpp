@@ -19,6 +19,7 @@
 #include <afxinet.h>
 #include "emule.h"
 #include "ServerWnd.h"
+#include "Preferences.h"
 #include "HTRichEditCtrl.h"
 #include "ED2KLink.h"
 #include "kademlia/kademlia/kademlia.h"
@@ -49,7 +50,7 @@ static char THIS_FILE[] = __FILE__;
 #define	SVWND_SPLITTER_YOFF		6
 #define	SVWND_SPLITTER_HEIGHT	4
 
-#define	SERVERMET_STRINGS_PROFILE	_T("AC_ServerMetURLs.dat")
+#define	SERVERMET_STRINGS_PROFILE	AC_SERVER_MET_URLS_FILENAME
 #define SZ_DEBUG_LOG_TITLE			_T("Verbose")
 
 struct SServerMetDownloadJob
@@ -424,6 +425,7 @@ CServerWnd::CServerWnd(CWnd *pParent /*=NULL*/)
 	m_cfDef.cbSize = (UINT)sizeof m_cfDef;
 	m_cfBold.cbSize = (UINT)sizeof m_cfBold;
 	StatusSelector.m_bClosable = false;
+	StatusSelector.m_bAllowTabReordering = false;
 }
 
 CServerWnd::~CServerWnd()
@@ -1325,11 +1327,11 @@ void CServerWnd::UpdateControlsState()
 {
 	LPCTSTR uid;
 	if (theApp.serverconnect->IsConnected())
-		uid = _T("MAIN_BTN_DISCONNECT");
+		uid = _T("IRC_DISCONNECT");
 	else if (theApp.serverconnect->IsConnecting())
-		uid = _T("MAIN_BTN_CANCEL");
+		uid = _T("CANCEL");
 	else
-		uid = _T("MAIN_BTN_CONNECT");
+		uid = _T("IRC_CONNECT");
 	SetDlgItemText(IDC_ED2KCONNECT, GetResNoAmp(uid));
 }
 

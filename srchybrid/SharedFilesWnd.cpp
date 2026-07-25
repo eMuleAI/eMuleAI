@@ -1182,6 +1182,7 @@ BOOL CSharedFileDetailsModelessSheet::OnInitDialog()
 	InitWindowStyles(this);
 
 	m_tabDark.m_bClosable = false;
+	m_tabDark.m_bAllowTabReordering = false;
 
 	EnsureDarkModeTabControl();
 

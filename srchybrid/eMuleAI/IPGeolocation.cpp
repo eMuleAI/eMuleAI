@@ -30,7 +30,7 @@ static char THIS_FILE[] = __FILE__;
 
 namespace
 {
-	const LPCTSTR DFLT_GEOLOCATION_DB_FILENAME = _T("dbip-city-lite.mmdb");
+	const LPCTSTR DFLT_GEOLOCATION_DB_FILENAME = IPGEOLOCATION_DB_FILENAME;
 	const LPCTSTR DFLT_GEOLOCATION_DB_URL_TEMPLATE = _T("https://download.db-ip.com/free/dbip-city-lite-%Y-%m.mmdb.gz");
 	const DWORD IPGEOLOCATION_DOWNLOAD_PROGRESS_INTERVAL = 250;
 
@@ -267,7 +267,7 @@ namespace
 				return false;
 			}
 
-			strDatabasePath = sConfDir + _T("dbip-city-lite.mmdb.unzip.tmp");
+			strDatabasePath = sConfDir + IPGEOLOCATION_DB_FILENAME _T(".unzip.tmp");
 			if (!zfile->Extract(strDatabasePath)) {
 				strError.Format(GetResString(_T("IPGEOLOCATION_ARCHIVE_ERROR")), (LPCTSTR)strArchivePath);
 				zip.Close();
@@ -279,7 +279,7 @@ namespace
 
 		CGZIPFile gz;
 		if (gz.Open(strArchivePath)) {
-			strDatabasePath = sConfDir + _T("dbip-city-lite.mmdb.unzip.tmp");
+			strDatabasePath = sConfDir + IPGEOLOCATION_DB_FILENAME _T(".unzip.tmp");
 			if (!gz.Extract(strDatabasePath)) {
 				strError.Format(GetResString(_T("IPGEOLOCATION_ARCHIVE_ERROR")), (LPCTSTR)strArchivePath);
 				gz.Close();
@@ -554,7 +554,7 @@ cleanup:
 			return false;
 
 		const CString& sConfDir(thePrefs.GetMuleDirectory(EMULE_CONFIGDIR));
-		const CString strTempFilePath = sConfDir + _T("dbip-city-lite.mmdb.download.tmp");
+		const CString strTempFilePath = sConfDir + IPGEOLOCATION_DB_FILENAME _T(".download.tmp");
 
 		SIPGeolocationDownloadJob* pJob = new SIPGeolocationDownloadJob;
 		pJob->hNotifyWnd = theApp.emuledlg->GetSafeHwnd();

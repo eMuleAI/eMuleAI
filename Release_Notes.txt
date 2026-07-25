@@ -1,7 +1,28 @@
-﻿
+
 ================================================================
 1) VERSION HISTORY
 ================================================================
+v1.6
+Improved Download Validator with a dedicated Options page, customizable matching rules, smarter similarity scoring and previously downloaded or shared file matches shown directly under search results.
+Reduced the eMule AI executable size by storing built-in translations more efficiently.
+Added helpful tooltips throughout Options with a Display setting to show or hide them.
+Added adjustable Options window sizing with improved high DPI readability, consistent layouts, more reliable Options behavior and updated help links.
+Improved Client Details with a clearer layout and separate country and city information.
+Added a Reset button to restore the current Options page to its default settings before applying changes.
+Added an option to move all A4AF sources to the selected download.
+Added multiple selection to the Client List for applying supported actions to several clients at once.
+Improved startup and shutdown progress windows to display translated status messages without truncation.
+Improved Upload Request Abuse Detection to avoid punishing legitimate clients after successful upload sessions.
+Fixed an issue where the Last reception time in the Downloads list could remain outdated while a file was actively downloading.
+Fixed an issue where expanded download sources could appear under the wrong file after switching categories.
+Fixed an issue where scrolling through expanded download sources could show an invalid argument error.
+Fixed an issue where the Asked for another file status could show empty parentheses in the Downloads list.
+Fixed an issue where comment and rating indicators were not shown after updating shared file details.
+Fixed an issue where protocol obfuscation could cause a Low ID or Firewalled status on dual stack IPv6 connections.
+Fixed an issue where MLDonkey clients sending legacy upload requests could be incorrectly penalized for invalid request tags.
+Fixed an issue where user hash conflicts could be incorrectly reported as aggressive behaviour.
+Removed outdated phishing site username rules from Shield to prevent users from being unfairly punished for old or inactive domain names.
+
 v1.5.2
 Added Known filtering checkbox to Search results.
 Added bulk download options to the Search Results context menu.

@@ -17,8 +17,148 @@
 //Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 #pragma once
 #include "AbstractFile.h"
+#include "OtherFunctions.h"
+#include <vector>
 
 class CFileDataIO;
+
+struct SDownloadValidatorFuzzyStructuralIdentity
+{
+	enum { MaximumGroupTokens = 2 };
+
+	SDownloadValidatorFuzzyStructuralIdentity()
+	{
+		Clear();
+	}
+
+	void Clear()
+	{
+		uIDHash = 0;
+		uGroupSignatureHash = 0;
+		uYear = 0;
+		uGroupLetterCount = 0;
+		uGroupTokenCount = 0;
+		uIDPartCount = 0;
+		bHasID = false;
+		bHasYear = false;
+		bIDBracketed = false;
+		for (int i = 0; i < MaximumGroupTokens; ++i)
+			auGroupTokenHashes[i] = 0;
+	}
+
+	uint64 uIDHash;
+	uint64 uGroupSignatureHash;
+	uint64 auGroupTokenHashes[MaximumGroupTokens];
+	uint32 uYear;
+	uint32 uGroupLetterCount;
+	uint8 uGroupTokenCount;
+	uint8 uIDPartCount;
+	bool bHasID;
+	bool bHasYear;
+	bool bIDBracketed;
+};
+
+struct SDownloadValidatorFuzzyQueryData
+{
+	SDownloadValidatorFuzzyQueryData()
+		: uNormalizationFingerprint(0)
+		, uStructuralIdentityKey(0)
+		, uFileType(0)
+		, bPrepared(false)
+	{
+	}
+
+	void Clear()
+	{
+		strSourceFileName.Empty();
+		strNormalizedName.Empty();
+		strBoundaryName.Empty();
+		grams.clear();
+		tokenHashes.clear();
+		orderedTokenHashes.clear();
+		structuralIdentity.Clear();
+		uNormalizationFingerprint = 0;
+		uStructuralIdentityKey = 0;
+		uFileType = 0;
+		bPrepared = false;
+	}
+
+	CString strSourceFileName;
+	CString strNormalizedName;
+	CString strBoundaryName;
+	std::vector<uint64> grams;
+	std::vector<uint64> tokenHashes;
+	std::vector<uint64> orderedTokenHashes;
+	SDownloadValidatorFuzzyStructuralIdentity structuralIdentity;
+	uint32 uNormalizationFingerprint;
+	uint64 uStructuralIdentityKey;
+	uint8 uFileType;
+	bool bPrepared;
+};
+
+struct SSearchFilePossibleKnownRow
+{
+	SSearchFilePossibleKnownRow()
+		: uSize(static_cast<uint64>(0))
+		, uMediaLengthSec(0)
+		, uMediaBitrateKbps(0)
+		, uSimilarityScore(0)
+		, uFileType(0)
+		, uSourceFlags(0)
+	{
+		md4clr(ucHash);
+	}
+
+	CString strName;
+	CString strFolder;
+	CString strMediaArtist;
+	CString strMediaAlbum;
+	CString strMediaTitle;
+	CString strMediaCodec;
+	CString strAICHHash;
+	EMFileSize uSize;
+	uint32 uMediaLengthSec;
+	uint32 uMediaBitrateKbps;
+	uint32 uSimilarityScore;
+	uint8 uFileType;
+	uint8 uSourceFlags;
+	uchar ucHash[MDX_DIGEST_SIZE];
+};
+
+struct SSearchFilePossibleKnownCache
+{
+	SSearchFilePossibleKnownCache()
+	{
+		Clear();
+	}
+
+	void Clear()
+	{
+		uRevision = 0;
+		uCandidateDataRevision = 0;
+		uSourceMediaLengthSec = 0;
+		uAliasFingerprint = 0;
+		bAvailabilityKnown = false;
+		bHasMatches = false;
+		bRowsLoaded = false;
+		rows.clear();
+	}
+
+	bool IsCurrent(uint32 uCurrentRevision, uint32 uCurrentCandidateDataRevision, uint32 uCurrentSourceMediaLengthSec, uint32 uCurrentAliasFingerprint) const
+	{
+		return bAvailabilityKnown && uRevision == uCurrentRevision && uCandidateDataRevision == uCurrentCandidateDataRevision
+			&& uSourceMediaLengthSec == uCurrentSourceMediaLengthSec && uAliasFingerprint == uCurrentAliasFingerprint;
+	}
+
+	uint32 uRevision;
+	uint32 uCandidateDataRevision;
+	uint32 uSourceMediaLengthSec;
+	uint32 uAliasFingerprint;
+	bool bAvailabilityKnown;
+	bool bHasMatches;
+	bool bRowsLoaded;
+	std::vector<SSearchFilePossibleKnownRow> rows;
+};
 
 class CSearchFile : public CAbstractFile
 {
@@ -75,6 +215,18 @@ public:
 	bool	HasAutomaticBlacklistEvaluation() const			{ return m_bAutomaticBlacklistEvaluated; }
 	void	SetAutomaticBlacklistEvaluation(bool bEvaluated, bool bAutomaticBlacklisted) { m_bAutomaticBlacklistEvaluated = bEvaluated; m_bAutomaticBlacklisted = bAutomaticBlacklisted; }
 	void	ClearAutomaticBlacklistEvaluation()				{ m_bAutomaticBlacklistEvaluated = false; }
+	bool	HasDownloadValidatorEvaluation() const			{ return m_bDownloadValidatorEvaluated; }
+	bool	HasDownloadValidatorEvaluation(uint32 uRevision) const { return m_bDownloadValidatorEvaluated && m_uDownloadValidatorRevision == uRevision; }
+	bool	GetDownloadValidatorSimilar() const			{ return m_bDownloadValidatorSimilar; }
+	void	SetDownloadValidatorEvaluation(bool bSimilar, uint32 uRevision) { m_bDownloadValidatorEvaluated = true; m_bDownloadValidatorSimilar = bSimilar; m_uDownloadValidatorRevision = uRevision; }
+	void	ClearDownloadValidatorEvaluation()			{ m_bDownloadValidatorEvaluated = false; m_bDownloadValidatorSimilar = false; m_uDownloadValidatorRevision = 0; }
+	const SDownloadValidatorFuzzyQueryData& GetDownloadValidatorFuzzyQueryData() const { return m_downloadValidatorFuzzyQueryData; }
+	SDownloadValidatorFuzzyQueryData& GetDownloadValidatorFuzzyQueryData() { return m_downloadValidatorFuzzyQueryData; }
+	void ClearDownloadValidatorFuzzyQueryData() { m_downloadValidatorFuzzyQueryData.Clear(); }
+	bool HasPossibleKnownCache(uint32 uRevision, uint32 uCandidateDataRevision, uint32 uSourceMediaLengthSec, uint32 uAliasFingerprint) const { return m_possibleKnownCache.IsCurrent(uRevision, uCandidateDataRevision, uSourceMediaLengthSec, uAliasFingerprint); }
+	const SSearchFilePossibleKnownCache& GetPossibleKnownCache() const { return m_possibleKnownCache; }
+	void SetPossibleKnownCache(const SSearchFilePossibleKnownCache& cache) { m_possibleKnownCache = cache; }
+	void ClearPossibleKnownCache() { m_possibleKnownCache.Clear(); }
 	bool	GetManualBlacklisted() const					{ return m_bManualBlacklisted; }
 	void	SetManualBlacklisted(bool bManualBlacklisted)	{ m_bManualBlacklisted = bManualBlacklisted; }
 
@@ -196,6 +348,11 @@ private:
 	uint32	m_nSpamRating;
 	bool m_bAutomaticBlacklisted;
 	bool m_bAutomaticBlacklistEvaluated;
+	bool m_bDownloadValidatorEvaluated;
+	bool m_bDownloadValidatorSimilar;
+	uint32 m_uDownloadValidatorRevision;
+	SDownloadValidatorFuzzyQueryData m_downloadValidatorFuzzyQueryData;
+	SSearchFilePossibleKnownCache m_possibleKnownCache;
 	bool m_bManualBlacklisted;
 
 	// GUI helpers

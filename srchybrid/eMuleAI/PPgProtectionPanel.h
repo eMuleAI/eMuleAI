@@ -4,6 +4,7 @@
 #pragma once
 #include "preferences.h"
 #include "TreeOptionsCtrlEx.h"
+#include "ToolTipCtrlX.h"
 
 class CPPgProtectionPanel : public CPropertyPage
 {
@@ -116,6 +117,8 @@ protected:
 	int		m_iKadRequestFloodBanTreshold;
 
 	CTreeOptionsCtrlEx m_ctrlTreeOptions;
+	CToolTipCtrlX m_tooltipTreeOptions;
+	CString m_strTreeOptionsToolTip;
 	bool m_bInitializedTreeOpts;
 
 	HTREEITEM	m_htiGeneralOptions;
@@ -240,13 +243,15 @@ protected:
 	afx_msg void OnHelp();
 	afx_msg BOOL OnHelpInfo(HELPINFO* pHelpInfo);
 	afx_msg void OnSize(UINT nType, int cx, int cy);
-	afx_msg HBRUSH OnCtlColor(CDC* pDC, CWnd* pWnd, UINT nCtlColor);
 	void UpdateLayout();
+	void UpdateTreeOptionsToolTip();
 
 	virtual BOOL OnCommand(WPARAM wParam, LPARAM lParam);
+	virtual BOOL PreTranslateMessage(MSG* pMsg);
 	virtual void DoDataExchange(CDataExchange* pDX);    // DDX/DDV support
 public:
 	void Localize(void);
+	void ResetToDefaults();
 	void LocalizeCommonItems(void);
 	virtual BOOL OnApply();
 	virtual BOOL OnInitDialog();

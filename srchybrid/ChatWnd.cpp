@@ -426,12 +426,12 @@ void CChatWnd::Localize()
 	SetDlgItemText(IDC_FRIENDS_LBL, GetResString(_T("CW_FRIENDS")));
 	SetDlgItemText(IDC_MESSAGES_LBL, GetResString(_T("CW_MESSAGES")));
 	m_cUserInfo.SetWindowText(GetResString(_T("INFO")));
-	SetDlgItemText(IDC_FRIENDS_DOWNLOADED, GetResString(_T("CHAT_DOWNLOADED")));
+	SetDlgItemText(IDC_FRIENDS_DOWNLOADED, GetResStringWithColon(_T("DOWNLOADED")));
 	SetDlgItemText(IDC_FRIENDS_UPLOADED, GetResString(_T("CHAT_UPLOADED")));
-	SetDlgItemText(IDC_FRIENDS_IDENT, GetResString(_T("CHAT_IDENT")));
+	SetDlgItemText(IDC_FRIENDS_IDENT, GetResString(_T("CD_IDENT")));
 	SetDlgItemText(IDC_FRIENDS_CLIENT, GetResString(_T("CD_CSOFT")));
-	SetDlgItemText(IDC_FRIENDS_NAME, GetResString(_T("CD_UNAME")));
-	SetDlgItemText(IDC_FRIENDS_USERHASH, GetResString(_T("CD_UHASH")));
+	SetDlgItemText(IDC_FRIENDS_NAME, GetResStringWithColon(_T("SW_NAME")));
+	SetDlgItemText(IDC_FRIENDS_USERHASH, GetResStringWithColon(_T("CD_UHASH2")));
 	m_wndSend.SetWindowText(GetResString(_T("CW_SEND")));
 	m_wndClose.SetWindowText(GetResString(_T("CW_CLOSE")));
 	m_wndFormat.SetBtnText(IDC_SMILEY, _T("Smileys"));

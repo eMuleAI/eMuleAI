@@ -15,6 +15,7 @@ public:
 	CPPgWebServer();
 
 	void Localize();
+	void ResetToDefaults();
 	void SetUPnPState();
 
 protected:

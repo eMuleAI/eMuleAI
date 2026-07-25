@@ -21,12 +21,14 @@
 #include "eMuleAI/MenuXP.h"
 #include "ListCtrlItemWalk.h"
 #include "ToolTipCtrlX.h"
+#include <map>
 #include <vector>
 
 #define AVBLYSHADECOUNT 13
 
 class CSearchList;
 class CSearchFile;
+struct SDownloadValidatorFuzzyQueryData;
 struct SSearchResultId;
 
 enum EFileSizeFormat
@@ -44,12 +46,43 @@ struct SearchCtrlItem_Struct
 	uint16		childcount;
 };
 
-class CSearchListCtrl : public CMuleListCtrl, public CListCtrlItemWalk, public CListStateTemplate<CSearchListCtrl, CSearchFile>
+enum ESearchListRowType
 {
-	friend class CListStateTemplate<CSearchListCtrl, CSearchFile>;
+	SearchListRowSearchFile = 0,
+	SearchListRowPossibleKnownHeader,
+	SearchListRowPossibleKnownFile
+};
+
+struct SSearchListRow
+{
+	SSearchListRow();
+	ESearchListRowType eType;
+	CSearchFile* pSearchFile;
+	CSearchFile* pParentSearchFile;
+	uint32 nSearchID;
+	CString strName;
+	CString strFolder;
+	CString strMediaArtist;
+	CString strMediaAlbum;
+	CString strMediaTitle;
+	CString strMediaCodec;
+	CString strAICHHash;
+	EMFileSize uSize;
+	uint32 uMediaLengthSec;
+	uint32 uMediaBitrateKbps;
+	uint32 uSimilarityScore;
+	uint8 uFileType;
+	uint8 uSourceFlags;
+	uint8 uBottomGroupStatusFlags;
+	uchar ucHash[MDX_DIGEST_SIZE];
+};
+
+class CSearchListCtrl : public CMuleListCtrl, public CListCtrlItemWalk, public CListStateTemplate<CSearchListCtrl, SSearchListRow>
+{
+	friend class CListStateTemplate<CSearchListCtrl, SSearchListRow>;
 
 private:
-	using ListStateHelper = CListStateTemplate<CSearchListCtrl, CSearchFile>;
+	using ListStateHelper = CListStateTemplate<CSearchListCtrl, SSearchListRow>;
 public:
 	using ListStateHelper::SaveListState;
 	using ListStateHelper::RestoreListState;
@@ -68,17 +101,33 @@ public:
 	void	StartChunkedRemoveSelectedSearchResults(CTypedPtrList<CPtrList, CSearchFile*> &selectedList);
 	void	CancelActiveChunkedSearchOperation();
 	void	ReloadList(const bool bSortCurrentList, const EListStateField LsfFlag);
-	void	QueueDeferredReload(const bool bSortCurrentList, const EListStateField LsfFlag, UINT uDelayMs);
+	void	QueueDeferredReload(const bool bSortCurrentList, const EListStateField LsfFlag, UINT uDelayMs, bool bKeepPendingWhileInactive = false);
+	void	QueuePossibleKnownRefresh(UINT uDelayMs);
+	void	QueuePossibleKnownSoftRefresh();
+	void	CancelPendingPossibleKnownProcessing(uint32 nSearchID);
+	bool	ApplyPreparedPossibleKnownCaches(uint32 nSearchID);
+	bool	HasPendingPossibleKnownProcessing(uint32 nSearchID) const;
+	void	ApplyPossibleKnownQueryResult(UINT_PTR uParentToken, uint32 nSearchID, const uchar* pHash, const CString& strFileName, EMFileSize uFileSize,
+		uint32 uMediaLengthSec, uint32 uAliasFingerprint, uint32 uRevision, uint32 uCandidateDataRevision, bool bReplaceRows, bool bRowsRequested, bool bHasMatches, bool bFinalResult, const SDownloadValidatorFuzzyQueryData& queryData,
+		const std::vector<SSearchListRow>& rows);
 	void	RebuildListedItemsMap();
 	void	CollectSearchDownloadItems(uint32 nSearchID, bool bOnlyUnknown, CTypedPtrList<CPtrList, CSearchFile*> &downloadItems) const;
-	virtual DWORD_PTR GetVirtualItemData(int iItem) const override { return (iItem < 0 || static_cast<size_t>(iItem) >= m_ListedItemsVector.size() ? 0 : static_cast<DWORD_PTR>(iItem + 1)); } // Owner-data row data is a stable visible index, not a backend pointer
-	int		GetVirtualItemCount() const override { return m_ListedItemsVector.size(); }
+	void	CollectSelectedSearchFiles(CTypedPtrList<CPtrList, CSearchFile*> &selectedList) const;
+	void	ClearListedItems(bool bClearSearchRows);
+	void	RemoveCachedSearchRows(uint32 nSearchID);
+	bool	IsPassiveRowIndex(int iItem) const;
+	virtual DWORD_PTR GetVirtualItemData(int iItem) const override {
+		return iItem < 0 || static_cast<size_t>(iItem) >= m_ListedItemsVector.size() ? 0 : static_cast<DWORD_PTR>(iItem + 1); // Owner-data row data is a stable visible index, not a backend pointer
+	}
+	int		GetVirtualItemCount() const override { return static_cast<int>(m_ListedItemsVector.size()); }
 	CObject* GetItemObject(int iIndex) const;
 	virtual void OnOperationOverlayCancel() override;
 
-	std::vector<CSearchFile*> m_ListedItemsVector; // This vector is used to list, iterate and sort results.
-	typedef	CMap<CSearchFile*, CSearchFile*, int, int&> CListedItemsMap;
-	CListedItemsMap m_ListedItemsMap; // This map is used to lookup search results index.
+	std::vector<SSearchListRow*> m_ListedItemsVector; // This vector contains visible view rows.
+	typedef CMap<SSearchListRow*, SSearchListRow*, int, int&> CListedItemsMap;
+	typedef CMap<CSearchFile*, CSearchFile*, int, int&> CSearchItemsMap;
+	CListedItemsMap m_ListedItemsMap; // This map is used by list state restore.
+	CSearchItemsMap m_SearchItemsMap; // This map resolves backend search files to visible rows.
 	void	Localize();
 	void	NoTabs()								{ m_nResultsID = 0; m_lListedItemsModelSequence = 0; }
 	bool	IsListedModelCurrent(uint32 nSearchID) const;
@@ -100,14 +149,19 @@ protected:
 	COLORREF	m_crSearchResultKnown;
 	COLORREF	m_crSearchResultSharing;
 	COLORREF	m_crSearchResultCancelled;
+	COLORREF	m_crPossibleKnownHeader;
 	COLORREF	m_crShades[AVBLYSHADECOUNT];
 	EFileSizeFormat m_eFileSizeFormat;
 	bool m_bDeferredSearchReloadPending;
 	bool m_bDeferredSearchReloadSort;
+	bool m_bDeferredSearchReloadKeepPendingWhileInactive;
 	EListStateField m_eDeferredSearchReloadState;
 	LONG m_lListedItemsModelSequence;
+	uint32 m_uPossibleKnownRevision;
+	uint32 m_uPossibleKnownCandidateDataRevision;
 
 	COLORREF GetSearchItemColor(const CSearchFile* src) const;
+	COLORREF GetPossibleKnownItemColor(const SSearchListRow* pRow) const;
 	bool	IsComplete(const CSearchFile *pFile, UINT uSources) const;
 	void	MarkListedModelCurrent();
 	CString GetCompleteSourcesDisplayString(const CSearchFile *pFile, UINT uSources, bool *pbComplete = NULL) const;
@@ -119,16 +173,82 @@ protected:
 	CString	FormatFileSize(ULONGLONG ullFileSize) const;
 	CString GetItemDisplayText(const CSearchFile *src, int iSubItem) const;
 	CString GetListedItemDisplayText(int iItem, int iSubItem) const;
+	CString GetPossibleKnownDisplayText(const SSearchListRow* pRow, int iSubItem) const;
 	void SortListedItemsRaw();
 	int CompareSearchFilesRaw(const CSearchFile *item1, const CSearchFile *item2, LPARAM lParamSort) const;
 	bool GroupListedItemsByBottomCandidates();
 	bool BuildSearchInfoTipText(int iItem, CString& strText) const;
+	SSearchListRow* ResolveRowByIndex(int iItem) const;
 	CSearchFile* ResolveSearchFileByRowIndex(int iItem) const;
-	void CollectSelectedSearchFiles(CTypedPtrList<CPtrList, CSearchFile*> &selectedList) const;
+	SSearchListRow* GetOrCreateSearchRow(CSearchFile* pSearchFile);
+	void RemoveRowsFromSavedStates(const std::vector<SSearchListRow*>& rows);
+	void RemovePossibleKnownRowsFromSavedStates();
+	void ClearPossibleKnownRows();
+	void RemoveCachedSearchRowsForFile(const CSearchFile* pFile);
+	bool IsPossibleKnownFeatureEnabled() const;
+	bool IsPossibleKnownFeatureActive() const;
+	bool HasPossibleKnownMatches(CSearchFile* pParent);
+	bool HasCachedPossibleKnownMatches(const CSearchFile* pParent) const;
+	bool CanExpandSearchParent(CSearchFile* pParent);
+	void RebuildPossibleKnownRows();
+	void AppendPossibleKnownRows(CSearchFile* pParent, std::vector<SSearchListRow*>& rows);
+	void DrawPossibleKnownRow(CDC& dc, LPDRAWITEMSTRUCT lpDrawItemStruct, const SSearchListRow* pRow, BOOL bCtrlFocused);
+	bool IsRowDescendantOfParent(const SSearchListRow* pRow, const CSearchFile* pParent) const;
+	bool HasSelectedPassiveRows() const;
+	bool CollectSelectedPossibleKnownRows(std::vector<const SSearchListRow*>& rows) const;
+	bool ExecutePossibleKnownCancelCommand(UINT uCommand);
+	bool ExecutePossibleKnownCopyCommand(UINT uCommand, const std::vector<const SSearchListRow*>& rows);
+	bool ExecutePossibleKnownSearchRelatedCommand(const std::vector<const SSearchListRow*>& rows);
+	bool ExecutePossibleKnownWebServiceCommand(UINT uCommand, const std::vector<const SSearchListRow*>& rows);
+	bool ExecutePossibleKnownPreviewCommand(UINT uCommand, const std::vector<const SSearchListRow*>& rows);
+	bool ResolvePossibleKnownSharedFilePath(const SSearchListRow* pRow, CString& strFilePath) const;
+	void ClearPossibleKnownAvailabilityQueue();
+	bool AppendSameHashPossibleKnownRow(CSearchFile* pParent, std::vector<SSearchListRow>& rows) const;
+	void QueuePossibleKnownAvailability(CSearchFile* pParent, bool bLoadRows = false, bool bReplaceRows = false);
+	void ProcessPossibleKnownAvailability();
 	bool ShouldShowSearchItemInList(const CSearchFile *pSearchFile) const;
-	void BuildVisibleSearchItems(const CTypedPtrList<CPtrList, CSearchFile*> &sourceList, std::vector<CSearchFile*> &visibleItems) const;
+	void BuildVisibleSearchItems(const CTypedPtrList<CPtrList, CSearchFile*> &sourceList, std::vector<SSearchListRow*> &visibleItems);
 	const bool	IsFilteredOut(const CSearchFile *pSearchFile) const;
 	static CString GetKnownTypeStr(const CSearchFile* src);
+	std::map<CSearchFile*, SSearchListRow*> m_SearchRows;
+	std::vector<SSearchListRow*> m_PossibleKnownRows;
+	struct SPossibleKnownCacheEntry
+	{
+		bool bAvailabilityKnown = false;
+		bool bHasMatches = false;
+		bool bAvailabilityPending = false;
+		bool bRowsLoaded = false;
+		bool bRowsPending = false;
+		bool bReplaceRowsPending = false;
+		bool bPendingHasMatches = false;
+		uint32 uRevision = 0;
+		uint32 uCandidateDataRevision = 0;
+		uint32 uSourceMediaLengthSec = 0;
+		uint32 uAliasFingerprint = 0;
+		uint32 uPendingCandidateDataRevision = 0;
+		std::vector<SSearchListRow> rows;
+		std::vector<SSearchListRow> pendingRows;
+	};
+	std::map<CSearchFile*, SPossibleKnownCacheEntry> m_PossibleKnownCache;
+	bool ImportPossibleKnownCache(CSearchFile* pParent, SPossibleKnownCacheEntry& cacheEntry, bool bForce = false);
+	void StorePossibleKnownCache(CSearchFile* pParent, const SPossibleKnownCacheEntry& cacheEntry);
+	struct SPossibleKnownAvailabilityItem
+	{
+		CSearchFile* pParent;
+		uint32 nSearchID;
+		CString strFileName;
+		std::vector<CString> astrFileNames;
+		EMFileSize uFileSize;
+		uint32 uMediaLengthSec;
+		uint32 uAliasFingerprint;
+		uchar ucHash[MDX_DIGEST_SIZE];
+		bool bLoadRows;
+		bool bReplaceRows;
+		uint32 uRevision;
+		uint32 uCandidateDataRevision;
+	};
+	std::vector<SPossibleKnownAvailabilityItem> m_PossibleKnownAvailabilityQueue;
+	size_t m_uNextPossibleKnownAvailability = 0;
 	struct SChunkedSearchRemoveItem
 	{
 		SChunkedSearchRemoveItem();

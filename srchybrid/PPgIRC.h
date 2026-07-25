@@ -10,11 +10,13 @@ class CPPgIRC : public CPropertyPage
 		IDD = IDD_PPG_IRC
 	};
 	void LocalizeItemText(HTREEITEM item, LPCTSTR strid);
+	void LocalizeItemInfoText(HTREEITEM item, LPCTSTR strid);
 
 public:
 	CPPgIRC();
 
 	void Localize();
+	void ResetToDefaults();
 
 protected:
 	bool m_bTimeStamp;

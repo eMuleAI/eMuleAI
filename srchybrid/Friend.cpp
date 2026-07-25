@@ -306,7 +306,7 @@ void CFriend::UpdateFriendConnectionState(EFriendConnectReport eEvent)
 			// nothing todo, just report about it
 			for (POSITION pos = m_liConnectionReport.GetHeadPosition(); pos != NULL;) {
 				CFriendConnectionListener *flistener = m_liConnectionReport.GetNext(pos);
-				flistener->ReportConnectionProgress(GetLinkedClient(), _T(" ...") + GetResString(_T("TREEOPTIONS_OK")) + _T('\n'), true);
+				flistener->ReportConnectionProgress(GetLinkedClient(), _T(" ...") + GetResString(_T("MB_OK")) + _T('\n'), true);
 				flistener->ReportConnectionProgress(GetLinkedClient(), _T("*** ") + CString(_T("Authenticating friend")) /*to stringlist*/, false);
 			}
 			if (m_FriendConnectState == FCS_CONNECTING)

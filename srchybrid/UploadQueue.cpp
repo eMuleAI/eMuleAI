@@ -930,6 +930,7 @@ void CUploadQueue::Process()
 			const DWORD productiveNoRequestRecycleTimeout = SEC2MS(max(thePrefs.GetHighBandwidthSlowUploadWarmupSeconds(), thePrefs.GetHighBandwidthZeroUploadGraceSeconds()));
 			const DWORD stalledRecycleTimeout = productiveNoRequestRecycleTimeout;
 			bool bRecycleIdleUploadSlot = false;
+			bool bUnproductiveNoRequestRecycle = false;
 			LPCTSTR pszRecycleReason = NULL;
 			CUpDownClient::EHighBandwidthUploadCooldownReason eCooldownReason = CUpDownClient::HBUCR_None;
 
@@ -941,6 +942,7 @@ void CUploadQueue::Process()
 			{
 				if (bLocalSendPipelineEmpty && !bSessionProducedPayload && (int)(curTick - upStart) >= (int)noRequestRecycleTimeout) {
 					bRecycleIdleUploadSlot = true;
+					bUnproductiveNoRequestRecycle = true;
 					pszRecycleReason = _T("No block requests after upload slot activation");
 					eCooldownReason = CUpDownClient::HBUCR_NoRequest;
 				} else if (bLocalSendPipelineEmpty && bSessionProducedPayload && idleReferenceTick != 0
@@ -971,7 +973,7 @@ void CUploadQueue::Process()
 				}
 				if (!bHasReplacementPressure)
 					continue;
-				if (eCooldownReason == CUpDownClient::HBUCR_NoRequest
+				if (bUnproductiveNoRequestRecycle
 					&& TrackUploadRequestAbuseEvent(cur_client, cur_client->GetUploadFileID(), curTick, UploadRequestAbuseNoRequestSlot))
 				{
 					if (IsDownloading(cur_client))
@@ -2017,6 +2019,15 @@ bool CUploadQueue::RemoveFromUploadQueue(CUpDownClient *client, LPCTSTR pszReaso
 		POSITION curPos = pos;
 		UploadingToClient_Struct *curClientStruct = uploadinglist.GetNext(pos);
 		if (client == curClientStruct->m_pClient) {
+
+			if (thePrefs.IsDetectUploadRequestAbuse()
+				&& thePrefs.IsDetectUploadRequestAbuseNoRequestSlots()
+				&& (client->GetSessionUp() > 0 || client->GetQueueSessionPayloadUp() > 0))
+			{
+				const CString strNoRequestEventKey = BuildUploadRequestAbuseEventKey(UploadRequestAbuseNoRequestSlot, client, client->GetUploadFileID());
+				if (!strNoRequestEventKey.IsEmpty())
+					m_mapUploadRequestAbuseByClientFile.erase(strNoRequestEventKey);
+			}
 
 			const CString strReason = pszReason != NULL ? CString(EscPercent(pszReason)) : CString(EMPTY);
 			CString strUploadFileName(EMPTY);
@@ -3396,8 +3407,10 @@ VOID CALLBACK CUploadQueue::UploadTimer(HWND /*hwnd*/, UINT /*uMsg*/, UINT_PTR /
 
 		theApp.uploadqueue->Process();
 		theApp.downloadqueue->Process();
-		if (theApp.DownloadValidator != NULL)
+		if (theApp.DownloadValidator != NULL) {
 			theApp.DownloadValidator->ProcessReloadMapSlice(false);
+			theApp.DownloadValidator->ProcessDeferredSourceCaptureSlice();
+		}
 		if (thePrefs.ShowOverhead()) {
 			theStats.CompUpDatarateOverhead();
 			theStats.CompDownDatarateOverhead();

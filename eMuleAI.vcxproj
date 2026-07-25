@@ -121,19 +121,20 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <CustomBuild Include="srchybrid\translations\translations.map">
-      <Message>Generating translations headers from translations.map</Message>
-      <Outputs>$(ProjectDir)srchybrid\translations\translations_data.gen.h;$(ProjectDir)srchybrid\translations\lang_registry.gen.h</Outputs>
-      <Command Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">python "$(ProjectDir)srchybrid\translations\ai_translator.py" map compile --map "$(ProjectDir)srchybrid\translations\translations.map" --data-header "$(ProjectDir)srchybrid\translations\translations_data.gen.h" --registry-header "$(ProjectDir)srchybrid\translations\lang_registry.gen.h"
+      <Message>Generating translation package from translations.map</Message>
+      <Outputs>$(ProjectDir)srchybrid\translations\translations_data.gen.h;$(ProjectDir)srchybrid\translations\lang_registry.gen.h;$(ProjectDir)srchybrid\translations\translations_data.gen.bin</Outputs>
+      <AdditionalInputs>$(ProjectDir)srchybrid\translations\ai_translator.py;%(AdditionalInputs)</AdditionalInputs>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">python "$(ProjectDir)srchybrid\translations\ai_translator.py" map compile --map "$(ProjectDir)srchybrid\translations\translations.map" --data-header "$(ProjectDir)srchybrid\translations\translations_data.gen.h" --registry-header "$(ProjectDir)srchybrid\translations\lang_registry.gen.h" --data-binary "$(ProjectDir)srchybrid\translations\translations_data.gen.bin"
 if errorlevel 1 exit 1</Command>
-      <Command Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">python "$(ProjectDir)srchybrid\translations\ai_translator.py" map compile --map "$(ProjectDir)srchybrid\translations\translations.map" --data-header "$(ProjectDir)srchybrid\translations\translations_data.gen.h" --registry-header "$(ProjectDir)srchybrid\translations\lang_registry.gen.h"
+      <Command Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">python "$(ProjectDir)srchybrid\translations\ai_translator.py" map compile --map "$(ProjectDir)srchybrid\translations\translations.map" --data-header "$(ProjectDir)srchybrid\translations\translations_data.gen.h" --registry-header "$(ProjectDir)srchybrid\translations\lang_registry.gen.h" --data-binary "$(ProjectDir)srchybrid\translations\translations_data.gen.bin"
 if errorlevel 1 exit 1</Command>
-      <Command Condition="'$(Configuration)|$(Platform)'=='Debug|ARM64'">python "$(ProjectDir)srchybrid\translations\ai_translator.py" map compile --map "$(ProjectDir)srchybrid\translations\translations.map" --data-header "$(ProjectDir)srchybrid\translations\translations_data.gen.h" --registry-header "$(ProjectDir)srchybrid\translations\lang_registry.gen.h"
+      <Command Condition="'$(Configuration)|$(Platform)'=='Debug|ARM64'">python "$(ProjectDir)srchybrid\translations\ai_translator.py" map compile --map "$(ProjectDir)srchybrid\translations\translations.map" --data-header "$(ProjectDir)srchybrid\translations\translations_data.gen.h" --registry-header "$(ProjectDir)srchybrid\translations\lang_registry.gen.h" --data-binary "$(ProjectDir)srchybrid\translations\translations_data.gen.bin"
 if errorlevel 1 exit 1</Command>
-      <Command Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">python "$(ProjectDir)srchybrid\translations\ai_translator.py" map compile --map "$(ProjectDir)srchybrid\translations\translations.map" --data-header "$(ProjectDir)srchybrid\translations\translations_data.gen.h" --registry-header "$(ProjectDir)srchybrid\translations\lang_registry.gen.h"
+      <Command Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">python "$(ProjectDir)srchybrid\translations\ai_translator.py" map compile --map "$(ProjectDir)srchybrid\translations\translations.map" --data-header "$(ProjectDir)srchybrid\translations\translations_data.gen.h" --registry-header "$(ProjectDir)srchybrid\translations\lang_registry.gen.h" --data-binary "$(ProjectDir)srchybrid\translations\translations_data.gen.bin"
 if errorlevel 1 exit 1</Command>
-      <Command Condition="'$(Configuration)|$(Platform)'=='Release|x64'">python "$(ProjectDir)srchybrid\translations\ai_translator.py" map compile --map "$(ProjectDir)srchybrid\translations\translations.map" --data-header "$(ProjectDir)srchybrid\translations\translations_data.gen.h" --registry-header "$(ProjectDir)srchybrid\translations\lang_registry.gen.h"
+      <Command Condition="'$(Configuration)|$(Platform)'=='Release|x64'">python "$(ProjectDir)srchybrid\translations\ai_translator.py" map compile --map "$(ProjectDir)srchybrid\translations\translations.map" --data-header "$(ProjectDir)srchybrid\translations\translations_data.gen.h" --registry-header "$(ProjectDir)srchybrid\translations\lang_registry.gen.h" --data-binary "$(ProjectDir)srchybrid\translations\translations_data.gen.bin"
 if errorlevel 1 exit 1</Command>
-      <Command Condition="'$(Configuration)|$(Platform)'=='Release|ARM64'">python "$(ProjectDir)srchybrid\translations\ai_translator.py" map compile --map "$(ProjectDir)srchybrid\translations\translations.map" --data-header "$(ProjectDir)srchybrid\translations\translations_data.gen.h" --registry-header "$(ProjectDir)srchybrid\translations\lang_registry.gen.h"
+      <Command Condition="'$(Configuration)|$(Platform)'=='Release|ARM64'">python "$(ProjectDir)srchybrid\translations\ai_translator.py" map compile --map "$(ProjectDir)srchybrid\translations\translations.map" --data-header "$(ProjectDir)srchybrid\translations\translations_data.gen.h" --registry-header "$(ProjectDir)srchybrid\translations\lang_registry.gen.h" --data-binary "$(ProjectDir)srchybrid\translations\translations_data.gen.bin"
 if errorlevel 1 exit 1</Command>
     </CustomBuild>
   </ItemGroup>
@@ -393,6 +394,7 @@ if errorlevel 1 exit 1</Command>
     <ClCompile Include="srchybrid\eMuleAI\PPgBlacklistPanel.cpp" />
     <ClCompile Include="srchybrid\eMuleAI\PPgProtectionPanel.cpp" />
     <ClCompile Include="srchybrid\eMuleAI\PPgMod.cpp" />
+    <ClCompile Include="srchybrid\eMuleAI\PPgDownloadValidator.cpp" />
     <ClCompile Include="srchybrid\eMuleAI\SafeKad.cpp" />
     <ClCompile Include="srchybrid\eMuleAI\SharedCache.cpp" />
     <ClCompile Include="srchybrid\eMuleAI\NetBind.cpp" />
@@ -694,6 +696,7 @@ if errorlevel 1 exit 1</Command>
     <ClInclude Include="srchybrid\eMuleAI\PPgBlacklistPanel.h" />
     <ClInclude Include="srchybrid\eMuleAI\PPgProtectionPanel.h" />
     <ClInclude Include="srchybrid\eMuleAI\PPgMod.h" />
+    <ClInclude Include="srchybrid\eMuleAI\PPgDownloadValidator.h" />
     <ClInclude Include="srchybrid\eMuleAI\SafeKad.h" />
     <ClInclude Include="srchybrid\eMuleAI\SharedCache.h" />
     <ClInclude Include="srchybrid\eMuleAI\NetBind.h" />

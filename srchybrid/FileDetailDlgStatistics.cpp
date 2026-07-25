@@ -324,10 +324,10 @@ void CFileDetailDlgStatistics::Localize()
 
 	SetDlgItemText(IDC_STATISTICS_GB_SESSION, GetResString(_T("SF_CURRENT")));
 	SetDlgItemText(IDC_STATISTICS_GB_TOTAL, GetResString(_T("SF_TOTAL")));
-	SetDlgItemText(IDC_FSTATIC6, GetResString(_T("SF_TRANS")));
+	SetDlgItemText(IDC_FSTATIC6, GetResStringWithColon(_T("DL_TRANSF")));
 	SetDlgItemText(IDC_FSTATIC5, GetResString(_T("SF_ACCEPTED")));
 	SetDlgItemText(IDC_FSTATIC4, GetResString(_T("SF_REQUESTS")) + _T(':'));
-	SetDlgItemText(IDC_FSTATIC9, GetResString(_T("SF_TRANS")));
+	SetDlgItemText(IDC_FSTATIC9, GetResStringWithColon(_T("DL_TRANSF")));
 	SetDlgItemText(IDC_FSTATIC8, GetResString(_T("SF_ACCEPTED")));
 	SetDlgItemText(IDC_FSTATIC7, GetResString(_T("SF_REQUESTS")) + _T(':'));
 	SetDlgItemText(IDC_FS_POPULARITY_LBL, GetResString(_T("POPULARITY")) + _T(':'));

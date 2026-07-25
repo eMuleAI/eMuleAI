@@ -147,11 +147,11 @@ END_MESSAGE_MAP()
 void CFileDetailDialog::Localize()
 {
 	m_wndInfo.Localize();
-	SetTabTitle(_T("FD_GENERAL"), &m_wndInfo, this);
+	SetTabTitle(_T("CD_GENERAL"), &m_wndInfo, this);
 	m_wndName.Localize();
 	SetTabTitle(_T("SW_NAME"), &m_wndName, this);
 	m_wndComments.Localize();
-	SetTabTitle(_T("CMT_READALL"), &m_wndComments, this);
+	SetTabTitle(_T("COMMENT"), &m_wndComments, this);
 	m_wndMediaInfo.Localize();
 	SetTabTitle(_T("CONTENT_INFO"), &m_wndMediaInfo, this);
 	m_wndMetaData.Localize();
@@ -253,6 +253,7 @@ BOOL CFileDetailDialog::OnInitDialog()
 	UpdateTitle();
 
 	m_tabDark.m_bClosable = false;
+	m_tabDark.m_bAllowTabReordering = false;
 
 	if (IsDarkModeEnabled()) {
 		HWND hTab = PropSheet_GetTabControl(m_hWnd);

@@ -208,6 +208,8 @@ CPartFileWriteThread::~CPartFileWriteThread()
 		delete currItem.pAsyncDiskWriteData;
 		delete currItem.pPartFileCreateData;
 		delete currItem.pPartFileDeleteData;
+		if (currItem.bOwnsBuffer)
+			delete currItem.pBuffer;
 	}
 
 	while (!m_listToWrite.IsEmpty()) {
@@ -217,6 +219,8 @@ CPartFileWriteThread::~CPartFileWriteThread()
 		delete currItem.pAsyncDiskWriteData;
 		delete currItem.pPartFileCreateData;
 		delete currItem.pPartFileDeleteData;
+		if (currItem.bOwnsBuffer)
+			delete currItem.pBuffer;
 	}
 
 	while (!m_deferredAsyncDiskWriteJobs.IsEmpty())
@@ -293,12 +297,11 @@ UINT CPartFileWriteThread::RunInternal()
 				while (!m_FlushList.IsEmpty()) {
 					const ToWrite& item = m_FlushList.RemoveHead();
 					CPartFile* pFile = item.pFile;
-					if (item.pAsyncDiskWriteData || item.pPartFileCreateData || item.pPartFileDeleteData || (pFile && !m_DeletedFilesList.Find(pFile)))
+					if (item.pAsyncDiskWriteData || item.pPartFileCreateData || item.pPartFileDeleteData || (pFile && !IsDeletedPartFile(pFile, item.uRuntimeID)))
 						m_listToWrite.AddTail(item);
 					else
 						CleanUp(item, NULL);
 				}
-				PruneDeletedFilesListLocked();
 				MoveDeferredAsyncDiskWriteJobsToDrainList(m_listToWrite);
 				InterlockedExchange8(&m_bNewData, 0);
 			}
@@ -313,6 +316,7 @@ UINT CPartFileWriteThread::RunInternal()
 			if (completionKey != WAKEUP) //ignore wakeups
 				WriteCompletionRoutine(dwWrite, pCurIO);
 		} while (::GetQueuedCompletionStatus(m_hPort, &dwWrite, &completionKey, (LPOVERLAPPED*)&pCurIO, 0));
+		PruneDeletedFilesList();
 
 		if (!completionKey) //thread termination
 			break;
@@ -398,7 +402,7 @@ void CPartFileWriteThread::WriteBuffers()
 				continue;
 			}
 			CSingleLock sDeletedFilesListLock(&m_DeletedFilesListLock, TRUE);
-			if (!pFile || m_DeletedFilesList.Find(pFile)) { // File is invalid or deleted
+			if (!pFile || IsDeletedPartFile(pFile, item.uRuntimeID)) { // File is invalid or deleted
 				CleanUp(item, NULL); // Since file isn't valid, we pass NULL here not to make unnecessary file checks again.
 				continue;
 			}
@@ -418,8 +422,10 @@ void CPartFileWriteThread::WriteBuffers()
 					if (pFile->m_hpartfile && (HANDLE)pFile->m_hpartfile != INVALID_HANDLE_VALUE) {
 						if (pFile->m_iAllocationSize && pFile->m_iAllocationSize != pFile->m_hpartfile.GetLength())
 							pFile->m_hpartfile.SetLength(pFile->m_iAllocationSize); // may throw 'diskFull'
-					} else
+					} else {
+						CleanUp(item, pFile);
 						continue; // Handle is not valid, skip
+					}
 				} catch (CException *ex) {
 					ex->Delete();
 					ASSERT(0);
@@ -435,15 +441,26 @@ void CPartFileWriteThread::WriteBuffers()
 					*(uint64*)&pOvWrite->oOverlap.Offset = pBuffer->start;
 					pOvWrite->oOverlap.hEvent = 0;
 					pOvWrite->pFile = pFile;
+					pOvWrite->uRuntimeID = item.uRuntimeID;
 					pOvWrite->pBuffer = pBuffer;
 					pOvWrite->pos = NULL;
+					pOvWrite->bOwnsBuffer = item.bOwnsBuffer;
+					try {
+						pOvWrite->pos = m_listPendingIO.AddTail(pOvWrite);
+					} catch (...) {
+						delete pOvWrite;
+						throw;
+					}
 
 					static const BYTE zero = 0;
 					if (!::WriteFile(pFile->m_hWrite, pBuffer->data ? pBuffer->data : &zero, (DWORD)(pBuffer->end - pBuffer->start + 1), NULL, (LPOVERLAPPED)pOvWrite)) {
 						DWORD dwError = ::GetLastError();
 						if (dwError != ERROR_IO_PENDING) {
+							m_listPendingIO.RemoveAt(pOvWrite->pos);
 							delete pOvWrite;
-							if (item.pBuffer->data) { //check for an allocation request
+							if (item.bOwnsBuffer)
+								delete item.pBuffer;
+							else if (item.pBuffer->data) { //check for an allocation request
 								item.pBuffer->dwError = dwError;
 								item.pBuffer->flushed = PB_ERROR;
 							}
@@ -451,10 +468,11 @@ void CPartFileWriteThread::WriteBuffers()
 							return;
 						}
 					}
-					pOvWrite->pos = m_listPendingIO.AddTail(pOvWrite);
 					++pFile->m_iWrites;
-				} else
+				} else {
 					theApp.QueueDebugLogLineEx(LOG_ERROR, _T("WriteBuffers error: CPartFile cannot be written"));
+					CleanUp(item, pFile);
+				}
 			} 
 			else if (item.pFlushPartMetData) { // Flush part met file
 				FlushPartMetData* pData = item.pFlushPartMetData;
@@ -665,36 +683,58 @@ void CPartFileWriteThread::WriteBuffers()
 			if (m_bVerbose)
 				theApp.QueueDebugLogLine(false, _T("CPartFileWriteThread::WriteBuffers - %s"), (LPCTSTR)EscPercent(CExceptionStrDash(*ex)));
 			ex->Delete();
-			CleanUp(item, pFile);
+			CleanUpAfterException(item);
 			ASSERT(0);
 		} catch (...) {
 			if (m_bVerbose)
 				theApp.QueueDebugLogLine(false, _T("CPartFileWriteThread::WriteBuffers exception occured"));
-			CleanUp(item, pFile);
+			CleanUpAfterException(item);
 			ASSERT(0);
 		}
 	}
 }
 
 
-bool CPartFileWriteThread::HasPendingIOForFile(const CPartFile* pFile) const
+bool CPartFileWriteThread::IsDeletedPartFile(const CPartFile* pFile, PartFileRuntimeID uRuntimeID) const
 {
-	if (pFile == NULL)
-		return false;
-	for (POSITION pos = m_listPendingIO.GetHeadPosition(); pos != NULL;) {
-		const OverlappedWrite_Struct* pPendingIO = m_listPendingIO.GetNext(pos);
-		if (pPendingIO != NULL && pPendingIO->pFile == pFile)
+	for (POSITION pos = m_DeletedFilesList.GetHeadPosition(); pos != NULL;) {
+		const DeletedPartFile deletedFile = m_DeletedFilesList.GetNext(pos);
+		if (deletedFile.pFile == pFile && deletedFile.uRuntimeID == uRuntimeID)
 			return true;
 	}
 	return false;
 }
 
-void CPartFileWriteThread::PruneDeletedFilesListLocked()
+bool CPartFileWriteThread::HasOutstandingPartFileWork(const CPartFile* pFile, PartFileRuntimeID uRuntimeID) const
 {
+	if (pFile == NULL)
+		return false;
+	for (POSITION pos = m_FlushList.GetHeadPosition(); pos != NULL;) {
+		const ToWrite item = m_FlushList.GetNext(pos);
+		if (item.pFile == pFile && item.uRuntimeID == uRuntimeID)
+			return true;
+	}
+	for (POSITION pos = m_listToWrite.GetHeadPosition(); pos != NULL;) {
+		const ToWrite item = m_listToWrite.GetNext(pos);
+		if (item.pFile == pFile && item.uRuntimeID == uRuntimeID)
+			return true;
+	}
+	for (POSITION pos = m_listPendingIO.GetHeadPosition(); pos != NULL;) {
+		const OverlappedWrite_Struct* pPendingIO = m_listPendingIO.GetNext(pos);
+		if (pPendingIO != NULL && pPendingIO->pFile == pFile && pPendingIO->uRuntimeID == uRuntimeID)
+			return true;
+	}
+	return false;
+}
+
+void CPartFileWriteThread::PruneDeletedFilesList()
+{
+	CSingleLock sFlushListLock(&m_lockFlushList, TRUE);
+	CSingleLock sDeletedFilesListLock(&m_DeletedFilesListLock, TRUE);
 	for (POSITION pos = m_DeletedFilesList.GetHeadPosition(); pos != NULL;) {
 		POSITION posCurrent = pos;
-		CPartFile* pDeletedFile = m_DeletedFilesList.GetNext(pos);
-		if (!HasPendingIOForFile(pDeletedFile))
+		const DeletedPartFile deletedFile = m_DeletedFilesList.GetNext(pos);
+		if (!HasOutstandingPartFileWork(deletedFile.pFile, deletedFile.uRuntimeID))
 			m_DeletedFilesList.RemoveAt(posCurrent);
 	}
 }
@@ -731,7 +771,7 @@ bool CPartFileWriteThread::AddDiskWriteJob(AsyncDiskWriteData* pData, bool* pbRe
 		AddDebugLogLine(DLP_HIGH, false, _T("Async disk write queue pressure rejected snapshot without dropping unrelated targets. count=%Id deferred=%Id\n"), m_FlushList.GetCount(), m_deferredAsyncDiskWriteJobs.GetCount());
 		return false;
 	}
-	m_FlushList.AddTail(ToWrite{ NULL, NULL, NULL, NULL, pData, NULL, NULL });
+	m_FlushList.AddTail(ToWrite{ NULL, 0, NULL, NULL, NULL, pData, NULL, NULL, false });
 	WakeUpCall();
 	return true;
 }
@@ -753,7 +793,7 @@ bool CPartFileWriteThread::AddPartFileCreateJob(PartFileCreateData* pData)
 		AddDebugLogLine(DLP_HIGH, false, _T("Part-file create queue rejected job under pressure. count=%Id pending=%ld\n"), m_FlushList.GetCount(), lPendingCreateJobs);
 		return false;
 	}
-	m_FlushList.AddTail(ToWrite{ NULL, NULL, NULL, NULL, NULL, pData, NULL });
+	m_FlushList.AddTail(ToWrite{ NULL, 0, NULL, NULL, NULL, NULL, pData, NULL, false });
 	InterlockedIncrement(&m_lPartFileCreateJobsPending);
 	WakeUpCall();
 	return true;
@@ -776,7 +816,7 @@ bool CPartFileWriteThread::AddPartFileDeleteJob(PartFileDeleteData* pData)
 		AddDebugLogLine(DLP_HIGH, false, _T("Part-file delete queue rejected job under pressure. count=%Id pending=%ld\n"), m_FlushList.GetCount(), lPendingDeleteJobs);
 		return false;
 	}
-	m_FlushList.AddTail(ToWrite{ NULL, NULL, NULL, NULL, NULL, NULL, pData });
+	m_FlushList.AddTail(ToWrite{ NULL, 0, NULL, NULL, NULL, NULL, NULL, pData, false });
 	InterlockedIncrement(&m_lPartFileDeleteJobsPending);
 	WakeUpCall();
 	return true;
@@ -853,7 +893,7 @@ void CPartFileWriteThread::RemoveDeferredAsyncDiskWriteJobsByFinalPath(const CSt
 void CPartFileWriteThread::MoveDeferredAsyncDiskWriteJobsToDrainList(CList<ToWrite>& jobsToDrain)
 {
 	while (!m_deferredAsyncDiskWriteJobs.IsEmpty())
-		jobsToDrain.AddTail(ToWrite{ NULL, NULL, NULL, NULL, m_deferredAsyncDiskWriteJobs.RemoveHead(), NULL, NULL });
+		jobsToDrain.AddTail(ToWrite{ NULL, 0, NULL, NULL, NULL, m_deferredAsyncDiskWriteJobs.RemoveHead(), NULL, NULL, false });
 }
 
 bool CPartFileWriteThread::QueueOrWriteDiskSnapshot(AsyncDiskWriteData* pData)
@@ -1122,24 +1162,26 @@ void CPartFileWriteThread::WriteCompletionRoutine(DWORD dwBytesWritten, const Ov
 		return;
 	}
 	CPartFile *pFile = pOvWrite->pFile;
+	PartFileBufferedData* pOwnedBuffer = pOvWrite->bOwnsBuffer ? pOvWrite->pBuffer : NULL;
 
 	try {
 		if (m_Run) {
 			POSITION posPendingIO = m_listPendingIO.Find(const_cast<OverlappedWrite_Struct*>(pOvWrite));
 			if (posPendingIO == NULL) {
 				AddDebugLogLine(DLP_HIGH, false, _T("Completed part-file write was not found in the pending I/O list. file=%p buffer=%p"), pOvWrite->pFile, pOvWrite->pBuffer);
+				delete pOwnedBuffer;
 				delete pOvWrite;
 				return;
 			}
 			m_listPendingIO.RemoveAt(posPendingIO);
-			{
-				CSingleLock sDeletedFilesListLock(&m_DeletedFilesListLock, TRUE);
-				if (m_DeletedFilesList.Find(pFile)) {
-					PruneDeletedFilesListLocked();
-					delete pOvWrite;
-					return;
-				}
+			CSingleLock sDeletedFilesListLock(&m_DeletedFilesListLock, TRUE);
+			if (pFile == NULL || IsDeletedPartFile(pFile, pOvWrite->uRuntimeID)) {
+				delete pOwnedBuffer;
+				delete pOvWrite;
+				return;
 			}
+			CSingleLock sPartFileDeleteLock(&pFile->m_PartFileDeleteLock, TRUE);
+			sDeletedFilesListLock.Unlock();
 			PartFileBufferedData *pBuffer = pOvWrite->pBuffer;
 			if (pBuffer == NULL) {
 				if (pFile) {
@@ -1158,33 +1200,37 @@ void CPartFileWriteThread::WriteCompletionRoutine(DWORD dwBytesWritten, const Ov
 
 			if (dwBytesWritten && dwWrite == dwBytesWritten) {
 				if (pFile) {
-					if (pBuffer->data) { //write data
+					if (!pOvWrite->bOwnsBuffer) { //write data
 						ASSERT(pBuffer->flushed == PB_PENDING);
 						pBuffer->flushed = PB_WRITTEN;
 					} else { //full file allocation
 						ASSERT(dwBytesWritten == 1);
 						::FlushFileBuffers(pFile->m_hWrite);
 						pFile->m_hpartfile.SetLength(pBuffer->start); //truncate the extra byte
-						delete pBuffer;
+						delete pOwnedBuffer;
+						pOwnedBuffer = NULL;
 					}
 				}
 			} else {
-				if (pBuffer->data)
+				if (!pOvWrite->bOwnsBuffer)
 					pBuffer->flushed = PB_ERROR; //error code is unknown
-				else
-					delete pBuffer;
+				else {
+					delete pOwnedBuffer;
+					pOwnedBuffer = NULL;
+				}
 				Debug(_T("  Completed write size: expected %lu, written %lu\n"), dwWrite, dwBytesWritten);
 			}
-		} else if (pFile) {
-			bool bFileDeleted = false;
-			{
+		} else {
+			if (pFile) {
 				CSingleLock sDeletedFilesListLock(&m_DeletedFilesListLock, TRUE);
-				bFileDeleted = m_DeletedFilesList.Find(pFile) != NULL;
-				if (bFileDeleted)
-					PruneDeletedFilesListLocked();
+				if (!IsDeletedPartFile(pFile, pOvWrite->uRuntimeID)) {
+					CSingleLock sPartFileDeleteLock(&pFile->m_PartFileDeleteLock, TRUE);
+					sDeletedFilesListLock.Unlock();
+					RemFile(pFile);
+				}
 			}
-			if (!bFileDeleted)
-				RemFile(pFile);
+			delete pOwnedBuffer;
+			pOwnedBuffer = NULL;
 		}
 	} catch (CException *ex) {
 		ex->Delete();
@@ -1193,6 +1239,7 @@ void CPartFileWriteThread::WriteCompletionRoutine(DWORD dwBytesWritten, const Ov
 		ASSERT(0);
 	}
 
+	delete pOwnedBuffer;
 	delete pOvWrite;
 }
 
@@ -1236,17 +1283,33 @@ void CPartFileWriteThread::WakeUpCall()
 		InterlockedExchange8(&m_bNewData, 1);
 }
 
+void CPartFileWriteThread::CleanUpAfterException(const ToWrite& item)
+{
+	CPartFile* pFile = item.pFile;
+	if (pFile == NULL) {
+		CleanUp(item, NULL);
+		return;
+	}
+
+	CSingleLock sDeletedFilesListLock(&m_DeletedFilesListLock, TRUE);
+	if (IsDeletedPartFile(pFile, item.uRuntimeID)) {
+		CleanUp(item, NULL);
+		return;
+	}
+	CSingleLock sPartFileDeleteLock(&pFile->m_PartFileDeleteLock, TRUE);
+	sDeletedFilesListLock.Unlock();
+	CleanUp(item, pFile);
+}
+
 void CPartFileWriteThread::CleanUp(const ToWrite& item, CPartFile* pFile) {
 	if (item.pFlushPartMetData) {
 		if (pFile) {
 			try {
-				if (!m_DeletedFilesList.Find(pFile)) { // File is not deleted
-					pFile->m_bFlushPartMetInQueue = false; // We should do this to make sure flushing not stuck.
-					if (item.pFlushPartMetData->bDeferredInitialPartMetSave) {
-						pFile->ClearDeferredInitialPartMetSaveWritePending();
-						if (theApp.downloadqueue != NULL)
-							theApp.downloadqueue->RequestBulkAddDiskFinalizationProgressUpdate(true);
-					}
+				pFile->m_bFlushPartMetInQueue = false; // We should do this to make sure flushing not stuck.
+				if (item.pFlushPartMetData->bDeferredInitialPartMetSave) {
+					pFile->ClearDeferredInitialPartMetSaveWritePending();
+					if (theApp.downloadqueue != NULL)
+						theApp.downloadqueue->RequestBulkAddDiskFinalizationProgressUpdate(true);
 				}
 			} catch (CException* ex) {
 				ex->Delete();
@@ -1259,8 +1322,7 @@ void CPartFileWriteThread::CleanUp(const ToWrite& item, CPartFile* pFile) {
 	} else if (item.pSaveSourcesData) {
 		if (pFile) {
 			try {
-				if (!m_DeletedFilesList.Find(pFile)) // File is not deleted
-					pFile->m_bSaveSourcesInQueue = false; // We should do this to make sure saving sources not stuck.
+				pFile->m_bSaveSourcesInQueue = false; // We should do this to make sure saving sources not stuck.
 			} catch (CException* ex) {
 				ex->Delete();
 				ASSERT(0);
@@ -1275,4 +1337,6 @@ void CPartFileWriteThread::CleanUp(const ToWrite& item, CPartFile* pFile) {
 		delete item.pPartFileCreateData;
 	else if (item.pPartFileDeleteData)
 		delete item.pPartFileDeleteData;
+	if (item.bOwnsBuffer)
+		delete item.pBuffer;
 }

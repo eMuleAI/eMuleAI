@@ -129,7 +129,7 @@ void CStatisticsTree::DoMenu(CPoint doWhere, UINT nFlags)
 	int myFlags = ::PathFileExists(thePrefs.GetMuleDirectory(EMULE_CONFIGDIR) + _T("statbkup.ini")) ? MF_STRING : MF_GRAYED;
 
 	mnuContext.CreatePopupMenu();
-	mnuContext.AddMenuSidebar(GetResString(_T("STATS_MNUTREETITLE")));
+	mnuContext.AddMenuSidebar(GetResString(_T("STREE")));
 	mnuContext.AppendMenu(MF_STRING, MP_STATTREE_RESET, GetResString(_T("STATS_BNRESET")), _T("DELETE"));
 	mnuContext.AppendMenu(myFlags, MP_STATTREE_RESTORE, GetResString(_T("STATS_BNRESTORE")), _T("RESTORE"));
 	mnuContext.AppendMenu(MF_SEPARATOR);
@@ -556,7 +556,7 @@ void CStatisticsTree::ExportHTML()
 			"<span id=\"pghdr\"><b>eMule %s</b></span><br><span id=\"pghdr2\">%s %s</span>\r\n<br><br>\r\n"
 			"%s</body></html>")
 			, (LPCTSTR)GetResString(_T("SF_STATISTICS")), (LPCTSTR)thePrefs.GetUserNick()
-			, (LPCTSTR)GetResString(_T("SF_STATISTICS")), (LPCTSTR)GetResString(_T("CD_UNAME")), (LPCTSTR)thePrefs.GetUserNick()
+			, (LPCTSTR)GetResString(_T("SF_STATISTICS")), (LPCTSTR)GetResStringWithColon(_T("SW_NAME")), (LPCTSTR)thePrefs.GetUserNick()
 			, (LPCTSTR)GetHTMLForExport());
 
 		CFile htmlFile;

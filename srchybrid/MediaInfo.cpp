@@ -863,7 +863,7 @@ bool GetRIFFHeaders(LPCTSTR pszFileName, SMediaInfo *mi, bool &rbIsAVI, bool bFu
 										mi->strInfo << _T("\n");
 									mi->OutputFileName();
 									mi->strInfo.SetSelectionCharFormat(mi->strInfo.m_cfBold);
-									mi->strInfo << GetResString(_T("FD_GENERAL")) << _T("\n");
+									mi->strInfo << GetResString(_T("CD_GENERAL")) << _T("\n");
 								}
 
 								CString strValue;
@@ -1487,7 +1487,7 @@ bool GetRMHeaders(LPCTSTR pszFileName, SMediaInfo *mi, bool &rbIsRM, bool bFullI
 			mi->strInfo << _T("\n");
 		mi->OutputFileName();
 		mi->strInfo.SetSelectionCharFormat(mi->strInfo.m_cfBold);
-		mi->strInfo << GetResString(_T("FD_GENERAL")) << _T("\n");
+		mi->strInfo << GetResString(_T("CD_GENERAL")) << _T("\n");
 
 		if (nFileBitrate) {
 			CString strBitrate;
@@ -2151,7 +2151,7 @@ bool GetWMHeaders(LPCTSTR pszFileName, SMediaInfo *mi, bool &rbIsWM, bool bFullI
 													mi->strInfo << _T("\n");
 												mi->OutputFileName();
 												mi->strInfo.SetSelectionCharFormat(mi->strInfo.m_cfBold);
-												mi->strInfo << GetResString(_T("FD_GENERAL")) << _T("\n");
+												mi->strInfo << GetResString(_T("CD_GENERAL")) << _T("\n");
 											}
 											CString strName(wszName);
 											if (strName.Left(3).Compare(_T("WM/")) == 0)
@@ -2168,7 +2168,7 @@ bool GetWMHeaders(LPCTSTR pszFileName, SMediaInfo *mi, bool &rbIsWM, bool bFullI
 												mi->strInfo << _T("\n");
 											mi->OutputFileName();
 											mi->strInfo.SetSelectionCharFormat(mi->strInfo.m_cfBold);
-											mi->strInfo << GetResString(_T("FD_GENERAL")) << _T("\n");
+											mi->strInfo << GetResString(_T("CD_GENERAL")) << _T("\n");
 										}
 										CString strName(wszName);
 										if (strName.Left(3).Compare(_T("WM/")) == 0)

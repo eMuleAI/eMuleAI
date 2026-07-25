@@ -67,6 +67,10 @@ class /*AFX_EXT_CLASS*/ CTreePropSheet : public CPropertySheet
 	DECLARE_DYNAMIC(CTreePropSheet)
 
 	void init();
+	BOOL CreateVisualFont();
+	void ApplyVisualFontToWindow(CWnd* pWnd);
+	void ApplyVisualFontToPage(CPropertyPage* pPage);
+	CFont* GetVisualFont();
 // Construction/Destruction
 public:
 	CTreePropSheet();
@@ -118,6 +122,9 @@ public:
 		created).
 	*/
 	BOOL SetTreeWidth(int nWidth);
+	BOOL SetVisualScalePercent(int nPercent);
+	int GetVisualScalePercent() const					{ return m_nVisualScalePercent; }
+	int ScaleVisualMetric(int nValue) const;
 
 	/**
 	Specifies the text to be drawn on empty pages (pages for tree view
@@ -449,6 +456,12 @@ private:
 
 	/** The width of the page tree control in pixels. */
 	int m_nPageTreeWidth;
+
+	/** Visual scale used by this property sheet. */
+	int m_nVisualScalePercent;
+
+	/** Font used for scaled property sheet controls. */
+	CFont m_fontVisual;
 
 // Static Properties
 private:

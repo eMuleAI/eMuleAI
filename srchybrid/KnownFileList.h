@@ -99,6 +99,7 @@ public:
 	void	ClearHistory();
 
 	uint32	DuplicatesCount(const uchar* hash);
+	void	CollectDuplicateFilePathsByIdentity(const uchar* hash, LPCTSTR filename, uint64 size, std::vector<CString>& filePaths);
 	CKnownFile*	PromoteDuplicateForSharedFile(CKnownFile* pOldPrimary);
 	CKnownFile*	IsOnDuplicatesForSharedScan(const LPCTSTR filename, time_t in_date, uint64 in_size);
 	CKnownFile*	IsOnDuplicates(const LPCTSTR filename, time_t in_date, uint64 in_size);

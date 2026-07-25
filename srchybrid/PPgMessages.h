@@ -31,6 +31,7 @@ public:
 	CPPgMessages();
 
 	void Localize();
+	void ResetToDefaults();
 
 protected:
 	void LoadSettings();

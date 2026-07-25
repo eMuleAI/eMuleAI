@@ -140,23 +140,33 @@ struct AsyncDiskWriteData
 	std::vector<std::vector<BYTE> > chunks;
 };
 
+struct DeletedPartFile
+{
+	CPartFile* pFile;
+	PartFileRuntimeID uRuntimeID;
+};
+
 struct ToWrite
 {
 	CPartFile *pFile;
+	PartFileRuntimeID uRuntimeID;
 	PartFileBufferedData *pBuffer;
 	FlushPartMetData* pFlushPartMetData;
 	SaveSourcesData* pSaveSourcesData;
 	AsyncDiskWriteData* pAsyncDiskWriteData;
 	PartFileCreateData* pPartFileCreateData;
 	PartFileDeleteData* pPartFileDeleteData;
+	bool bOwnsBuffer;
 };
 
 struct OverlappedWrite_Struct
 {
 	OVERLAPPED				oOverlap; // must be the first member
 	CPartFile				*pFile;
+	PartFileRuntimeID		uRuntimeID;
 	PartFileBufferedData	*pBuffer;
 	POSITION				pos; // in m_listPendingIO
+	bool					bOwnsBuffer;
 };
 
 class CPartFileWriteThread : public CWinThread
@@ -178,6 +188,7 @@ public:
 	bool	PopPartFileCreateResult(PartFileCreateResult*& pResult);
 	bool	TakeQueuedPartFileCreateJob(DWORD uRuntimeID, const uchar* pucHash, PartFileCreateData*& pData);
 	bool	HasPendingPartFileDiskJobs();
+	bool	IsDeletedPartFile(const CPartFile* pFile, PartFileRuntimeID uRuntimeID) const;
 	static bool	QueueOrWriteDiskSnapshot(AsyncDiskWriteData* pData);
 	static bool	WriteDiskSnapshotNow(const AsyncDiskWriteData& data, bool bCheckGeneration = true);
 	static bool	DeletePartFileDiskSnapshotNow(const PartFileDeleteData& data);
@@ -187,7 +198,7 @@ public:
 	CCriticalSection m_lockFlushList;
 	CList<ToWrite> m_FlushList;
 
-	CList<CPartFile*> m_DeletedFilesList;
+	CList<DeletedPartFile> m_DeletedFilesList;
 	CCriticalSection m_DeletedFilesListLock;
 	CCriticalSection m_lockSavePartFilePrefs;
 	bool m_bVerbose;
@@ -197,8 +208,8 @@ private:
 	UINT	RunInternal();
 
 	void	WriteBuffers();
-	bool	HasPendingIOForFile(const CPartFile* pFile) const;
-	void	PruneDeletedFilesListLocked();
+	bool	HasOutstandingPartFileWork(const CPartFile* pFile, PartFileRuntimeID uRuntimeID) const;
+	void	PruneDeletedFilesList();
 	bool	WriteDiskSnapshot(AsyncDiskWriteData* pData);
 	void	DrainPendingAsyncDiskSnapshotsForShutdown();
 	void	ProcessPartFileCreate(PartFileCreateData* pData);
@@ -207,6 +218,7 @@ private:
 	bool	AddDeferredAsyncDiskWriteJob(AsyncDiskWriteData* pData);
 	void	RemoveDeferredAsyncDiskWriteJobsByFinalPath(const CString& strFinalPath);
 	void	MoveDeferredAsyncDiskWriteJobsToDrainList(CList<ToWrite>& jobsToDrain);
+	void	CleanUpAfterException(const ToWrite& item);
 	void	CleanUp(const ToWrite& item, CPartFile* pFile);
 
 	CList<ToWrite>	m_listToWrite;

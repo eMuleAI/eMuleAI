@@ -195,7 +195,7 @@ void CDownloadClientsCtrl::Localize()
 		, _T("BAD_CLIENT_TYPE")
 		, _T("PUNISHMENT")
 		, _T("FIRST_SEEN")
-		, _T("LAST_SEEN")
+		, _T("LASTSEEN")
 		, _T("CLIENT_NOTE")
 
 	};
@@ -981,7 +981,7 @@ void CDownloadClientsCtrl::OnContextMenu(CWnd*, CPoint point)
 	CMenuXP ClientMenu;
 	ClientMenu.CreatePopupMenu();
 	ClientMenu.AddMenuSidebar(GetResString(_T("CLIENTS")));
-	ClientMenu.AppendMenu(MF_STRING | (client ? MF_ENABLED : MF_GRAYED), MP_DETAIL, GetResString(_T("SHOWDETAILS")), _T("CLIENTDETAILS"));
+	ClientMenu.AppendMenu(MF_STRING | (client ? MF_ENABLED : MF_GRAYED), MP_DETAIL, GetResString(_T("DL_INFO")), _T("CLIENTDETAILS"));
 	ClientMenu.SetDefaultItem(MP_DETAIL);
 	ClientMenu.AppendMenu(MF_STRING | ((is_ed2k && !client->IsFriend()) ? MF_ENABLED : MF_GRAYED), MP_ADDFRIEND, GetResString(_T("ADDFRIEND")), _T("ADDFRIEND"));
 	ClientMenu.AppendMenu(MF_STRING | (pFriend != NULL ? MF_ENABLED : MF_GRAYED), MP_FRIENDSLOT, GetResString(_T("FRIENDSLOT")), _T("FRIENDSLOT"));

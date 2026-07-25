@@ -106,7 +106,7 @@ void CKadSearchListCtrl::Localize()
 	static const LPCTSTR uids[8] =
 	{
 		_T("NUMBER"), _T("KEY"), _T("TYPE"), _T("SW_NAME"), _T("STATUS"),
-		_T("THELOAD"), _T("PACKSENT"), _T("RESPONSES")
+		_T("LOADURL"), _T("PACKSENT"), _T("RESPONSES")
 	};
 
 	LocaliseHeaderCtrl(uids, _countof(uids));
@@ -167,7 +167,7 @@ void CKadSearchListCtrl::UpdateSearch(int iItem, const Kademlia::CSearch *search
 #endif
 	SetItemText(iItem, colName, (CString)search->GetGUIName());
 	SetItemText(iItem, colKey, search->GetTarget().ToHexString());
-	SetItemText(iItem, colStop, GetResString(search->Stoping() ? _T("KADSTATUS_STOPPING") : _T("KADSTATUS_ACTIVE")));
+	SetItemText(iItem, colStop, GetResString(search->Stoping() ? _T("KADSTATUS_STOPPING") : _T("ACTIVE")));
 
 	id.Format(_T("%u (%u|%u)"), search->GetNodeLoad(), search->GetNodeLoadResponse(), search->GetNodeLoadTotal());
 	SetItemText(iItem, colLoad, id);

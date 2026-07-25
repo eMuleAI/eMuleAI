@@ -60,7 +60,7 @@ BOOL CNetworkInfoDlg::OnInitDialog()
 	EnableSaveRestore(PREF_INI_SECTION);
 
 	SetWindowText(GetResString(_T("NETWORK_INFO")));
-	SetDlgItemText(IDOK, GetResString(_T("TREEOPTIONS_OK")));
+	SetDlgItemText(IDOK, GetResString(_T("MB_OK")));
 	SetDlgItemText(IDC_NETWORK_INFO_LABEL, GetResString(_T("NETWORK_INFO")));
 
 	m_info.SendMessage(EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELONG(3, 3));
@@ -213,7 +213,7 @@ void CreateNetworkInfo(CRichEditCtrlX &rCtrl, CHARFORMAT &rcfDef, CHARFORMAT &rc
 		rCtrl.SetSelectionCharFormat(rcfDef);
 
 		rCtrl << GetResString(_T("PW_NICK")) << _T(":\t") << thePrefs.GetUserNick() << _T("\r\n");
-		rCtrl << GetResString(_T("CD_UHASH")) << _T("\t") << md4str(thePrefs.GetUserHash()) << _T("\r\n");
+		rCtrl << GetResStringWithColon(_T("CD_UHASH2")) << _T("\t") << md4str(thePrefs.GetUserHash()) << _T("\r\n");
 		rCtrl << _T("TCP ") << GetResString(_T("PORT")) << _T(":\t") << thePrefs.GetPort() << _T("\r\n");
 		rCtrl << _T("UDP ") << GetResString(_T("PORT")) << _T(":\t") << thePrefs.GetUDPPort() << _T("\r\n");
 		rCtrl << _T("\r\n");
@@ -244,7 +244,7 @@ void CreateNetworkInfo(CRichEditCtrlX &rCtrl, CHARFORMAT &rcfDef, CHARFORMAT &rc
 
 		theApp.serverlist->GetUserFileStatus(uTotalUser, uTotalFile);
 		rCtrl << GetResString(_T("UUSERS")) << _T(":\t") << GetFormatedUInt(uTotalUser) << _T("\r\n");
-		rCtrl << GetResString(_T("PW_FILES")) << _T(":\t") << GetFormatedUInt(uTotalFile) << _T("\r\n");
+		rCtrl << GetResString(_T("FILES")) << _T(":\t") << GetFormatedUInt(uTotalFile) << _T("\r\n");
 	}
 
 	CString buffer;
@@ -286,7 +286,7 @@ void CreateNetworkInfo(CRichEditCtrlX &rCtrl, CHARFORMAT &rcfDef, CHARFORMAT &rc
 			rCtrl << GetResString(_T("IP")) << _T(":") << GetResString(_T("PORT")) << _T(":\t") << srv->GetAddress() << _T(":") << srv->GetPort() << _T("\r\n");
 			rCtrl << GetResString(_T("VERSION")) << _T(":\t") << srv->GetVersion() << _T("\r\n");
 			rCtrl << GetResString(_T("UUSERS")) << _T(":\t") << GetFormatedUInt(srv->GetUsers()) << _T("\r\n");
-			rCtrl << GetResString(_T("PW_FILES")) << _T(":\t") << GetFormatedUInt(srv->GetFiles()) << _T("\r\n");
+			rCtrl << GetResString(_T("FILES")) << _T(":\t") << GetFormatedUInt(srv->GetFiles()) << _T("\r\n");
 			rCtrl << GetResString(_T("CONNECTIONS")) << _T(":\t");
 			rCtrl << GetResString(theApp.serverconnect->IsConnectedObfuscated() ? _T("OBFUSCATED") : _T("PRIONORMAL"));
 			rCtrl << _T("\r\n");
@@ -294,13 +294,13 @@ void CreateNetworkInfo(CRichEditCtrlX &rCtrl, CHARFORMAT &rcfDef, CHARFORMAT &rc
 
 			rCtrl << _T("eServer ") << GetResString(_T("SERVING_BUDDY")) << _T(": ");
 			if (!theApp.serverconnect->IsLowID())
-				uid = _T("SERVING_BUDDYNONE");
+				uid = _T("NONE");
 			else if (theApp.clientlist->GetEServerBuddyStatus() == Connected)
 				uid = _T("CONNECTED");
 			else if (theApp.clientlist->GetEServerBuddyStatus() == Connecting || theApp.clientlist->IsEServerBuddySearchActive())
 				uid = _T("CONNECTING");
 			else
-				uid = _T("SERVING_BUDDYNONE");
+				uid = _T("NONE");
 			rCtrl << GetResString(uid) << _T("\r\n");
 
 			if (theApp.serverconnect->IsLowID() && theApp.clientlist->GetServingEServerBuddy() && theApp.clientlist->GetEServerBuddyStatus() == Connected) {
@@ -434,7 +434,7 @@ void CreateNetworkInfo(CRichEditCtrlX &rCtrl, CHARFORMAT &rcfDef, CHARFORMAT &rc
 			else if (theApp.clientlist->GetServingBuddyStatus() == Connecting || theApp.clientlist->IsKadBuddySearchActive())
 				uid = _T("CONNECTING");
 			else
-				uid = _T("SERVING_BUDDYNONE");
+				uid = _T("NONE");
 			rCtrl << GetResString(uid) << _T("\r\n");
 			if (theApp.clientlist->GetServingBuddy() && theApp.clientlist->GetServingBuddyStatus() == Connected) {
 				CUpDownClient* pBuddy = theApp.clientlist->GetServingBuddy();
@@ -448,7 +448,7 @@ void CreateNetworkInfo(CRichEditCtrlX &rCtrl, CHARFORMAT &rcfDef, CHARFORMAT &rc
 		if (bFullInfo) {
 			CString sKadID;
 			Kademlia::CKademlia::GetPrefs()->GetKadID(sKadID);
-			rCtrl << GetResString(_T("CD_UHASH")) << _T("\t") << sKadID << _T("\r\n");
+			rCtrl << GetResStringWithColon(_T("CD_UHASH2")) << _T("\t") << sKadID << _T("\r\n");
 			// List served buddy clients (IP:Port and Kad ID)
 			if (theApp.clientlist->GetServedBuddyCount() > 0) {
 				CString servedHeader;
@@ -469,7 +469,7 @@ void CreateNetworkInfo(CRichEditCtrlX &rCtrl, CHARFORMAT &rcfDef, CHARFORMAT &rc
 							(LPCTSTR)GetResString(_T("IPPORT")),
 							(LPCTSTR)ipstr(dispIP),
 							(unsigned)p->GetKadPort(),
-							(LPCTSTR)GetResString(_T("CD_UHASH")),
+							(LPCTSTR)GetResStringWithColon(_T("CD_UHASH2")),
 							(LPCTSTR)sPeerKadID,
 							(LPCTSTR)GetResString(_T("CD_CSOFT")),
 							(LPCTSTR)EscPercent(p->DbgGetFullClientSoftVer()));
@@ -480,7 +480,7 @@ void CreateNetworkInfo(CRichEditCtrlX &rCtrl, CHARFORMAT &rcfDef, CHARFORMAT &rc
 			}
 
 			rCtrl << GetResString(_T("UUSERS")) << _T(":\t") << GetFormatedUInt(Kademlia::CKademlia::GetKademliaUsers()) << _T(" (Experimental: ") << GetFormatedUInt(Kademlia::CKademlia::GetKademliaUsers(true)) << _T(")\r\n");
-			rCtrl << GetResString(_T("PW_FILES")) << _T(":\t") << GetFormatedUInt(Kademlia::CKademlia::GetKademliaFiles()) << _T("\r\n");
+			rCtrl << GetResString(_T("FILES")) << _T(":\t") << GetFormatedUInt(Kademlia::CKademlia::GetKademliaFiles()) << _T("\r\n");
 			rCtrl << GetResString(_T("INDEXED")) << _T(":\r\n");
 			buffer.Format(GetResString(_T("KADINFO_SRC")), Kademlia::CKademlia::GetIndexed()->m_uTotalIndexSource);
 			rCtrl << buffer;
@@ -488,7 +488,7 @@ void CreateNetworkInfo(CRichEditCtrlX &rCtrl, CHARFORMAT &rcfDef, CHARFORMAT &rc
 			rCtrl << buffer;
 			buffer.Format(_T("\t%s: %u\r\n"), (LPCTSTR)GetResString(_T("NOTES")), Kademlia::CKademlia::GetIndexed()->m_uTotalIndexNotes);
 			rCtrl << buffer;
-			buffer.Format(_T("\t%s: %u\r\n"), (LPCTSTR)GetResString(_T("THELOAD")), Kademlia::CKademlia::GetIndexed()->m_uTotalIndexLoad);
+			buffer.Format(_T("\t%s: %u\r\n"), (LPCTSTR)GetResString(_T("LOADURL")), Kademlia::CKademlia::GetIndexed()->m_uTotalIndexLoad);
 			rCtrl << buffer;
 		}
 	} else
@@ -500,7 +500,7 @@ void CreateNetworkInfo(CRichEditCtrlX &rCtrl, CHARFORMAT &rcfDef, CHARFORMAT &rc
 	// Web Interface
 	///////////////////////////////////////////////////////////////////////////
 	rCtrl.SetSelectionCharFormat(rcfBold);
-	rCtrl << GetResString(_T("WEBSRV")) << _T("\r\n");
+	rCtrl << GetResString(_T("PW_WS")) << _T("\r\n");
 	rCtrl.SetSelectionCharFormat(rcfDef);
 	rCtrl << GetResString(_T("STATUS")) << _T(":\t");
 	rCtrl << GetResString(thePrefs.GetWSIsEnabled() ? _T("ENABLED") : _T("DISABLED")) << _T("\r\n");

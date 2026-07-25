@@ -20,6 +20,7 @@
 #include "emuledlg.h"
 #include "SearchDlg.h"
 #include "SearchParamsWnd.h"
+#include "Preferences.h"
 #include "SearchResultsWnd.h"
 #include "OtherFunctions.h"
 #include "CustomAutoComplete.h"
@@ -36,7 +37,7 @@ static char THIS_FILE[] = __FILE__;
 #endif
 
 
-#define	SEARCH_STRINGS_PROFILE	_T("AC_SearchStrings.dat")
+#define	SEARCH_STRINGS_PROFILE	AC_SEARCH_STRINGS_FILENAME
 
 IMPLEMENT_DYNAMIC(CSearchParamsWnd, CDialogBar);
 
@@ -482,7 +483,7 @@ void CSearchParamsWnd::Localize()
 	SetDlgItemText(IDC_SEARCH_RESET, GetResString(_T("PW_RESET")));
 	SetDlgItemText(IDC_METH, GetResString(_T("METHOD")));
 
-	m_ctlStart.SetWindowText(GetResString(_T("START_VERB")));
+	m_ctlStart.SetWindowText(GetResString(_T("START_NOUN")));
 	m_ctlCancel.SetWindowText(GetResString(_T("CANCEL")));
 	m_ctlMore.SetWindowText(GetResString(_T("MORE")));
 

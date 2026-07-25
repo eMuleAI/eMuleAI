@@ -426,7 +426,7 @@ void CSourceSaver::SaveSources(CPartFile* file, bool bForce)
 	CPartFileWriteThread* pThread = theApp.m_pPartFileWriteThread;
 	if (pThread && pThread->IsRunning()) {
 		CSingleLock sFlushListLock(&pThread->m_lockFlushList, TRUE);
-		pThread->m_FlushList.AddTail(ToWrite{ file, NULL, NULL, pSaveSourcesData, NULL, NULL, NULL });
+		pThread->m_FlushList.AddTail(ToWrite{ file, file->GetRuntimeID(), NULL, NULL, pSaveSourcesData, NULL, NULL, NULL, false });
 		pSaveSourcesData = NULL;
 
 		if (!pThread->m_FlushList.IsEmpty()) //let it sleep if nothing to do

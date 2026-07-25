@@ -77,7 +77,7 @@ BOOL CListViewSearchDlg::OnInitDialog()
 	SetDlgItemText(IDC_LISTVIEW_SEARCH_TEXT_LBL, GetResString(_T("SEARCH_TEXT")) + _T(':'));
 	SetDlgItemText(IDC_LISTVIEW_SEARCH_COLUMN_LBL, GetResString(_T("SEARCH_COLUMN")) + _T(':'));
 	SetDlgItemText(IDCANCEL, GetResString(_T("CANCEL")));
-	SetDlgItemText(IDOK, GetResString(_T("TREEOPTIONS_OK")));
+	SetDlgItemText(IDOK, GetResString(_T("MB_OK")));
 	
 	if (!m_bCanSearchInAllColumns)
 		m_iSearchColumn = 0;

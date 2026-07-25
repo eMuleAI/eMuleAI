@@ -73,8 +73,6 @@ static GetTcp6TableFunc GetTcp6TableProc()
 	return hModule != NULL ? reinterpret_cast<GetTcp6TableFunc>(::GetProcAddress(hModule, "GetTcp6Table")) : NULL;
 }
 
-#define SHAREDDIRS _T("shareddir.dat")
-LPCTSTR const strPreferencesDat = _T("preferences.dat");
 LPCTSTR const strDefaultToolbar = _T("009901020304059907069911131299089909109914");
 
 namespace
@@ -559,6 +557,36 @@ namespace
 	CPreferences* g_pPreferences = NULL;
 }
 
+int CPreferences::GetOptionsWindowScalePercent()
+{
+	switch (m_iOptionsWindowScalePercent) {
+	case OPTIONS_WINDOW_SCALE_10_PERCENT:
+	case OPTIONS_WINDOW_SCALE_20_PERCENT:
+	case OPTIONS_WINDOW_SCALE_30_PERCENT:
+	case OPTIONS_WINDOW_SCALE_40_PERCENT:
+	case OPTIONS_WINDOW_SCALE_50_PERCENT:
+		return m_iOptionsWindowScalePercent;
+	default:
+		return OPTIONS_WINDOW_SCALE_DISABLED;
+	}
+}
+
+void CPreferences::SetOptionsWindowScalePercent(int iPercent)
+{
+	switch (iPercent) {
+	case OPTIONS_WINDOW_SCALE_10_PERCENT:
+	case OPTIONS_WINDOW_SCALE_20_PERCENT:
+	case OPTIONS_WINDOW_SCALE_30_PERCENT:
+	case OPTIONS_WINDOW_SCALE_40_PERCENT:
+	case OPTIONS_WINDOW_SCALE_50_PERCENT:
+		m_iOptionsWindowScalePercent = iPercent;
+		break;
+	default:
+		m_iOptionsWindowScalePercent = OPTIONS_WINDOW_SCALE_DISABLED;
+		break;
+	}
+}
+
 CPreferences& GetPreferencesStorage()
 {
 	if (g_pPreferences == NULL)
@@ -905,7 +933,6 @@ bool	CPreferences::m_bFirstStart;
 bool	CPreferences::m_bUiLanguagePresent;
 bool	CPreferences::m_bMigrationWizardHandled;
 bool	CPreferences::m_bMigrationWizardRunOnNextStart;
-bool	CPreferences::m_bBetaNaggingDone;
 bool	CPreferences::m_bCreditSystem;
 bool	CPreferences::log2disk;
 bool	CPreferences::debug2disk;
@@ -992,6 +1019,8 @@ bool    CPreferences::m_bAllocFull;
 bool	CPreferences::m_bShowSharedFilesDetails;
 bool	CPreferences::m_bShowUpDownIconInTaskbar;
 bool	CPreferences::m_bShowWin7TaskbarGoodies;
+bool	CPreferences::m_bShowOptionsToolTips;
+int		CPreferences::m_iOptionsWindowScalePercent;
 bool	CPreferences::m_bForceSpeedsToKB;
 bool	CPreferences::m_bAutoShowLookups;
 
@@ -1087,6 +1116,7 @@ bool	CPreferences::m_bDownloadValidatorIgnoreExtension;
 bool	CPreferences::m_bDownloadValidatorIgnoreTags;
 bool	CPreferences::m_bDownloadValidatorDontIgnoreNumericTags;
 bool	CPreferences::m_bDownloadValidatorIgnoreNonAlphaNumeric;
+bool	CPreferences::m_bDownloadValidatorCleanMojibake;
 int		CPreferences::m_iDownloadValidatorMinimumComparisonLength;
 bool	CPreferences::m_bDownloadValidatorSkipIncompleteFileConfirmation;
 bool	CPreferences::m_bDownloadValidatorMarkAsBlacklisted;
@@ -1097,6 +1127,18 @@ int		CPreferences::m_iDownloadValidatorDateTimeYearStart;
 int		CPreferences::m_iDownloadValidatorDateTimeYearEnd;
 bool	CPreferences::m_bDownloadValidatorDateTimeCheckSeconds;
 bool	CPreferences::m_bDownloadValidatorDateTimeIncludeFollowingNumericValues;
+bool	CPreferences::m_bDownloadValidatorRegexMatching;
+bool	CPreferences::m_bDownloadValidatorFuzzyMatching;
+uint32	CPreferences::m_uDownloadValidatorFuzzySimilarityThreshold;
+uint32	CPreferences::m_uDownloadValidatorFuzzyMinimumSharedTokens;
+uint32	CPreferences::m_uDownloadValidatorFuzzyMinimumTokenCoveragePercent;
+uint32	CPreferences::m_uDownloadValidatorFuzzyMinimumLengthSimilarityPercent;
+uint32	CPreferences::m_uDownloadValidatorFuzzyMinimumEditSimilarityPercent;
+uint32	CPreferences::m_uDownloadValidatorFuzzyStructuralMinimumGroupLetters;
+uint32	CPreferences::m_uDownloadValidatorFuzzyStructuralMinimumIDDigits;
+uint32	CPreferences::m_uDownloadValidatorFuzzyDisplayThresholdPercent;
+bool	CPreferences::m_bDownloadValidatorMediaLengthMatching;
+uint32	CPreferences::m_uDownloadValidatorMediaLengthToleranceSec;
 
 int		CPreferences::m_iDownloadInspector;
 bool	CPreferences::m_bDownloadInspectorFake;
@@ -1526,6 +1568,49 @@ namespace
 		return !rule.strExtension.IsEmpty() || !rule.astrPositiveTerms.empty();
 	}
 
+	bool ParseBlacklistDefinitionsText(const CString& strDefinitions, CStringList* pNormalizedLines, UINT& uErrorLine, UINT& uRuleCount)
+	{
+		uErrorLine = 0;
+		uRuleCount = 0;
+		if (pNormalizedLines != NULL)
+			pNormalizedLines->RemoveAll();
+
+		const int iLength = strDefinitions.GetLength();
+		int iLineStart = 0;
+		UINT uLineNumber = 1;
+		while (iLineStart <= iLength) {
+			int iLineEnd = strDefinitions.Find(_T('\n'), iLineStart);
+			if (iLineEnd < 0)
+				iLineEnd = iLength;
+			CString strLine(strDefinitions.Mid(iLineStart, iLineEnd - iLineStart));
+			strLine.TrimRight(_T("\r"));
+			CString strTrimmed(strLine);
+			strTrimmed.Trim();
+			if (!strTrimmed.IsEmpty()) {
+				if (strTrimmed[0] != _T('#')) {
+					SCompiledBlacklistRule rule;
+					if (!CompileBlacklistLine(strTrimmed, rule)) {
+						uErrorLine = uLineNumber;
+						return false;
+					}
+					++uRuleCount;
+				}
+
+				if (pNormalizedLines != NULL) {
+					if (strTrimmed[0] != _T('#') && strTrimmed[0] != _T('\\'))
+						strTrimmed.MakeLower();
+					pNormalizedLines->AddTail(strTrimmed);
+				}
+			}
+
+			if (iLineEnd >= iLength)
+				break;
+			iLineStart = iLineEnd + 1;
+			++uLineNumber;
+		}
+		return true;
+	}
+
 	bool DoesCompiledBlacklistRuleMatch(const SCompiledBlacklistRule& rule, SBlacklistFilenameContext& context)
 	{
 		if (rule.eMode == CBRM_Regex) {
@@ -1800,15 +1885,14 @@ void CPreferences::Init()
 	// Move 'downloads.txt/bak' files from application and/or database directory
 	// into 'config' directory
 	//
-	static LPCTSTR const strDownloadsTxt = _T("downloads.txt");
 	static LPCTSTR const strDownloadsBak = _T("downloads.bak");
-	MovePreferences(EMULE_DATABASEDIR, strDownloadsTxt, sConfDir);
-	MovePreferences(EMULE_EXECUTABLEDIR, strDownloadsTxt, sConfDir);
+	MovePreferences(EMULE_DATABASEDIR, DOWNLOADS_TXT_FILENAME, sConfDir);
+	MovePreferences(EMULE_EXECUTABLEDIR, DOWNLOADS_TXT_FILENAME, sConfDir);
 	MovePreferences(EMULE_DATABASEDIR, strDownloadsBak, sConfDir);
 	MovePreferences(EMULE_EXECUTABLEDIR, strDownloadsBak, sConfDir);
 
 	// load preferences.dat or set standard values
-	CString strFullPath(sConfDir + strPreferencesDat);
+	CString strFullPath(sConfDir + PREFERENCES_DAT_FILENAME);
 	FILE* preffile = _tfsopen(strFullPath, _T("rb"), _SH_DENYWR);
 	bool bLoadedPrefsDat = false;
 	if (preffile != NULL) {
@@ -1863,7 +1947,7 @@ void CPreferences::Init()
 	// Do not expand shareddir_list at runtime; recursion is handled by search logic and tree builder.
 
 	// server list addresses
-	strFullPath.Format(_T("%s") _T("addresses.dat"), (LPCTSTR)sConfDir);
+	strFullPath.Format(_T("%s") ADDRESSES_DAT_FILENAME, (LPCTSTR)sConfDir);
 	bIsUnicodeFile = IsUnicodeFile(strFullPath);
 	if (sdirfile.Open(strFullPath, CFile::modeRead | CFile::shareDenyWrite | (bIsUnicodeFile ? CFile::typeBinary : 0))) {
 		try {
@@ -1923,6 +2007,56 @@ void CPreferences::Init()
 	// Create 'toolbars' directory
 	if (!DirectoryExistsLongPath(GetMuleDirectory(EMULE_TOOLBARDIR)) && !::CreateDirectory(PrepareDirectoryPathForWin32LongPath(GetMuleDirectory(EMULE_TOOLBARDIR)), 0))
 		m_sToolbarBitmapFolder = GetDefaultDirectory(EMULE_TOOLBARDIR, true); // will also try to create it if needed;
+}
+
+bool CPreferences::ValidateBlacklistDefinitions(const CString& strDefinitions, UINT& uErrorLine, UINT& uRuleCount)
+{
+	return ParseBlacklistDefinitionsText(strDefinitions, NULL, uErrorLine, uRuleCount);
+}
+
+bool CPreferences::ApplyBlacklistDefinitions(const CString& strDefinitions, UINT& uErrorLine, UINT& uRuleCount)
+{
+	CStringList normalizedLines;
+	if (!ParseBlacklistDefinitionsText(strDefinitions, &normalizedLines, uErrorLine, uRuleCount))
+		return false;
+	ReplaceBlacklistList(normalizedLines);
+	RebuildCompiledBlacklistRules();
+	return true;
+}
+
+bool CPreferences::LoadBlacklistDefinitionsText(CString& strDefinitions, UINT& uErrorLine, UINT& uRuleCount)
+{
+	strDefinitions.Empty();
+	uErrorLine = 0;
+	uRuleCount = 0;
+	const CString strFullPath(GetMuleDirectory(EMULE_CONFIGDIR) + BLACKLISTFILE);
+	if (!::PathFileExists(strFullPath))
+		return false;
+
+	CStdioFile file;
+	if (!file.Open(strFullPath, CFile::modeRead | CFile::shareDenyWrite | (IsUnicodeFile(strFullPath) ? CFile::typeBinary : 0)))
+		return false;
+
+	try {
+		if (IsUnicodeFile(strFullPath))
+			file.Seek(sizeof(WORD), CFile::begin);
+		CString strLine;
+		bool bFirstLine = true;
+		while (file.ReadString(strLine)) {
+			strLine.TrimRight(_T("\r\n"));
+			if (!bFirstLine)
+				strDefinitions += _T("\r\n");
+			strDefinitions += strLine;
+			bFirstLine = false;
+		}
+		file.Close();
+	} catch (CFileException* ex) {
+		ex->Delete();
+		file.Close();
+		strDefinitions.Empty();
+		return false;
+	}
+	return ValidateBlacklistDefinitions(strDefinitions, uErrorLine, uRuleCount);
 }
 
 void CPreferences::LoadBlacklistFile() {
@@ -2242,7 +2376,7 @@ void CPreferences::SaveStats(int bBackUp)
 	else if (bBackUp == 2)
 		p = _T("statbkuptmp.ini");
 	else
-		p = _T("statistics.ini");
+		p = STATISTICS_INI_FILENAME;
 	const CString& strFullPath(GetMuleDirectory(EMULE_CONFIGDIR) + p);
 
 	volatile LONG* plGeneration = &g_lStatisticsIniSaveGeneration;
@@ -2600,7 +2734,7 @@ void CPreferences::SetRecordStructMembers()
 
 void CPreferences::SaveCompletedDownloadsStat()
 {
-	CProfileIniSnapshotBuilder ini(GetMuleDirectory(EMULE_CONFIGDIR) + _T("statistics.ini"), _T("Statistics"), _T("statistics.ini"), _T("statistics-ini"), &g_lStatisticsIniSaveGeneration);
+	CProfileIniSnapshotBuilder ini(GetMuleDirectory(EMULE_CONFIGDIR) + STATISTICS_INI_FILENAME, _T("Statistics"), STATISTICS_INI_FILENAME, _T("statistics-ini"), &g_lStatisticsIniSaveGeneration);
 	ini.WriteInt(_T("DownCompletedFiles"), GetDownCompletedFiles());
 	ini.WriteInt(_T("DownSessionCompletedFiles"), GetDownSessionCompletedFiles());
 	ini.Commit();
@@ -2845,8 +2979,8 @@ bool CPreferences::LoadStats(int loadBackUp)
 	case 0:
 	default:
 		// for transition...
-		if (::PathFileExists(sINI + _T("statistics.ini")))
-			sINI += _T("statistics.ini");
+		if (::PathFileExists(sINI + STATISTICS_INI_FILENAME))
+			sINI += STATISTICS_INI_FILENAME;
 		else
 			sINI += _T("preferences.ini");
 	}
@@ -3067,7 +3201,7 @@ bool CPreferences::Save()
 {
 	static LPCTSTR const stmp = _T(".tmp");
 	const CString& sConfDir(GetMuleDirectory(EMULE_CONFIGDIR));
-	const CString &strPrefPath(sConfDir + strPreferencesDat);
+	const CString &strPrefPath(sConfDir + PREFERENCES_DAT_FILENAME);
 
 	prefsExt->version = PREFFILE_VERSION;
 	md4cpy(prefsExt->userhash, userhash);
@@ -3078,7 +3212,7 @@ bool CPreferences::Save()
 	pData->plGeneration = &g_lPreferencesDatSaveGeneration;
 	pData->strTempPath = strPrefPath + stmp;
 	pData->strFinalPath = strPrefPath;
-	pData->strLogName = strPreferencesDat;
+	pData->strLogName = PREFERENCES_DAT_FILENAME;
 	pData->strPayloadName = _T("preferences");
 	pData->eConflictPolicy = AsyncDiskWriteConflictLastSnapshotWins;
 	pData->eReplacePolicy = AsyncDiskWriteReplaceFinal;
@@ -3131,7 +3265,7 @@ void CPreferences::ReloadStartupStateAfterMigration()
 		return;
 
 	const CString &sConfDir(GetMuleDirectory(EMULE_CONFIGDIR));
-	CString strFullPath(sConfDir + strPreferencesDat);
+	CString strFullPath(sConfDir + PREFERENCES_DAT_FILENAME);
 	FILE *preffile = _tfsopen(strFullPath, _T("rb"), _SH_DENYWR);
 	bool bLoadedPrefsDat = false;
 	if (preffile != NULL) {
@@ -3180,7 +3314,7 @@ void CPreferences::ReloadStartupStateAfterMigration()
 	ReplaceSharedDirectoryList(loadedSharedDirs);
 	ReloadCats();
 
-	strFullPath.Format(_T("%s") _T("addresses.dat"), (LPCTSTR)sConfDir);
+	strFullPath.Format(_T("%s") ADDRESSES_DAT_FILENAME, (LPCTSTR)sConfDir);
 	bIsUnicodeFile = IsUnicodeFile(strFullPath);
 	if (sdirfile.Open(strFullPath, CFile::modeRead | CFile::shareDenyWrite | (bIsUnicodeFile ? CFile::typeBinary : 0))) {
 		try {
@@ -3318,10 +3452,6 @@ bool CPreferences::SavePreferences()
 	//---
 	ini.WriteString(_T("AppVersion"), theApp.GetAppVersion());
 	//---
-#ifdef _BETA
-	if (m_bBetaNaggingDone)
-		ini.WriteString(_T("BetaVersionNotified"), theApp.GetAppVersion().Mid(6));
-#endif
 #ifdef _DEBUG
 	ini.WriteInt(_T("DebugHeap"), m_iDbgHeap);
 #endif
@@ -3368,6 +3498,8 @@ bool CPreferences::SavePreferences()
 	ini.WriteBool(_T("MigrationWizardRunOnNextStart"), m_bMigrationWizardRunOnNextStart);
 	ini.WriteInt(_T("SeeShare"), m_iSeeShares);
 	ini.WriteInt(_T("ToolTipDelay"), m_iToolDelayTime);
+	ini.WriteBool(_T("ShowOptionsToolTips"), m_bShowOptionsToolTips);
+	ini.WriteInt(_T("OptionsWindowScalePercent"), GetOptionsWindowScalePercent());
 	ini.WriteInt(_T("StatGraphsInterval"), trafficOMeterInterval);
 	ini.WriteInt(_T("StatsInterval"), statsInterval);
 	ini.WriteBool(_T("StatsFillGraphs"), m_bFillGraphs);
@@ -3708,6 +3840,7 @@ bool CPreferences::SavePreferences()
 	ini.WriteBool(L"DownloadValidatorIgnoreTags", m_bDownloadValidatorIgnoreTags);
 	ini.WriteBool(L"DownloadValidatorDontIgnoreNumericTags", m_bDownloadValidatorDontIgnoreNumericTags);
 	ini.WriteBool(L"DownloadValidatorIgnoreNonAlphaNumeric", m_bDownloadValidatorIgnoreNonAlphaNumeric);
+	ini.WriteBool(L"DownloadValidatorCleanMojibake", m_bDownloadValidatorCleanMojibake);
 	ini.WriteInt(L"DownloadValidatorMinimumComparisonLength", m_iDownloadValidatorMinimumComparisonLength);
 	ini.WriteBool(L"DownloadValidatorSkipIncompleteFileConfirmation", m_bDownloadValidatorSkipIncompleteFileConfirmation);
 	ini.WriteBool(L"DownloadValidatorMarkAsBlacklisted", m_bDownloadValidatorMarkAsBlacklisted);
@@ -3718,6 +3851,18 @@ bool CPreferences::SavePreferences()
 	ini.WriteInt(L"DownloadValidatorDateTimeYearEnd", m_iDownloadValidatorDateTimeYearEnd);
 	ini.WriteBool(L"DownloadValidatorDateTimeCheckSeconds", m_bDownloadValidatorDateTimeCheckSeconds);
 	ini.WriteBool(L"DownloadValidatorDateTimeIncludeFollowingNumericValues", m_bDownloadValidatorDateTimeIncludeFollowingNumericValues);
+	ini.WriteBool(L"DownloadValidatorRegexMatching", m_bDownloadValidatorRegexMatching);
+	ini.WriteBool(L"DownloadValidatorFuzzyMatching", m_bDownloadValidatorFuzzyMatching);
+	ini.WriteInt(L"DownloadValidatorFuzzySimilarityThresholdPercent", static_cast<int>(m_uDownloadValidatorFuzzySimilarityThreshold));
+	ini.WriteInt(L"DownloadValidatorFuzzyMinimumSharedTokens", static_cast<int>(m_uDownloadValidatorFuzzyMinimumSharedTokens));
+	ini.WriteInt(L"DownloadValidatorFuzzyMinimumTokenCoveragePercent", static_cast<int>(m_uDownloadValidatorFuzzyMinimumTokenCoveragePercent));
+	ini.WriteInt(L"DownloadValidatorFuzzyMinimumLengthSimilarityPercent", static_cast<int>(m_uDownloadValidatorFuzzyMinimumLengthSimilarityPercent));
+	ini.WriteInt(L"DownloadValidatorFuzzyMinimumEditSimilarityPercent", static_cast<int>(m_uDownloadValidatorFuzzyMinimumEditSimilarityPercent));
+	ini.WriteInt(L"DownloadValidatorFuzzyStructuralMinimumGroupLetters", static_cast<int>(m_uDownloadValidatorFuzzyStructuralMinimumGroupLetters));
+	ini.WriteInt(L"DownloadValidatorFuzzyStructuralMinimumIDDigits", static_cast<int>(m_uDownloadValidatorFuzzyStructuralMinimumIDDigits));
+	ini.WriteInt(L"DownloadValidatorFuzzyDisplayThresholdPercent", static_cast<int>(m_uDownloadValidatorFuzzyDisplayThresholdPercent));
+	ini.WriteBool(L"DownloadValidatorMediaLengthMatching", m_bDownloadValidatorMediaLengthMatching);
+	ini.WriteInt(L"DownloadValidatorMediaLengthToleranceSec", static_cast<int>(m_uDownloadValidatorMediaLengthToleranceSec));
 	ini.WriteInt(L"DownloadInspector", m_iDownloadInspector);
 	ini.WriteBool(L"DownloadInspectorFake", m_bDownloadInspectorFake);
 	ini.WriteBool(L"DownloadInspectorDRM", m_bDownloadInspectorDRM);
@@ -4082,11 +4227,6 @@ void CPreferences::LoadPreferences()
 
 	m_bFirstStart = ini.GetString(_T("AppVersion")).IsEmpty();
 
-#ifdef _BETA
-	CString strCurrVersion(theApp.GetAppVersion().Mid(6));
-	m_bBetaNaggingDone = (ini.GetString(_T("BetaVersionNotified"), EMPTY) == strCurrVersion);
-#endif
-
 #ifdef _DEBUG
 	m_iDbgHeap = ini.GetInt(_T("DebugHeap"), 1);
 #else
@@ -4280,6 +4420,8 @@ void CPreferences::LoadPreferences()
 	m_bMigrationWizardRunOnNextStart = ini.GetBool(_T("MigrationWizardRunOnNextStart"), false);
 	m_iSeeShares = (EViewSharedFilesAccess)ini.GetInt(_T("SeeShare"), vsfaNobody);
 	m_iToolDelayTime = ini.GetInt(_T("ToolTipDelay"), 1);
+	m_bShowOptionsToolTips = ini.GetBool(_T("ShowOptionsToolTips"), true);
+	SetOptionsWindowScalePercent(ini.GetInt(_T("OptionsWindowScalePercent"), OPTIONS_WINDOW_SCALE_DISABLED));
 	trafficOMeterInterval = ini.GetInt(_T("StatGraphsInterval"), 3);
 	statsInterval = ini.GetInt(_T("statsInterval"), 5);
 	m_bFillGraphs = ini.GetBool(_T("StatsFillGraphs"));
@@ -4406,7 +4548,7 @@ void CPreferences::LoadPreferences()
 	m_bEnableMiniMule = ini.GetBool(_T("MiniMule"), true);
 
 	// Notifier
-	notifierConfiguration = ini.GetString(_T("NotifierConfiguration"), GetMuleDirectory(EMULE_CONFIGDIR) + _T("Notifier.ini"));
+	notifierConfiguration = ini.GetString(_T("NotifierConfiguration"), GetMuleDirectory(EMULE_CONFIGDIR) + NOTIFIER_INI_FILENAME);
 	notifierOnDownloadFinished = ini.GetBool(_T("NotifyOnDownload"));
 	notifierOnNewDownload = ini.GetBool(_T("NotifyOnNewDownload"));
 	notifierOnChat = ini.GetBool(_T("NotifyOnChat"));
@@ -4814,14 +4956,15 @@ void CPreferences::LoadPreferences()
 	m_bDownloadValidatorIgnoreTags = ini.GetBool(L"DownloadValidatorIgnoreTags", true);
 	m_bDownloadValidatorDontIgnoreNumericTags = ini.GetBool(L"DownloadValidatorDontIgnoreNumericTags", true);
 	m_bDownloadValidatorIgnoreNonAlphaNumeric = ini.GetBool(L"DownloadValidatorIgnoreNonAlphaNumeric", true);
+	m_bDownloadValidatorCleanMojibake = ini.GetBool(L"DownloadValidatorCleanMojibake", true);
 	m_iDownloadValidatorMinimumComparisonLength = ini.GetInt(L"DownloadValidatorMinimumComparisonLength", 8);
 	if (m_iDownloadValidatorMinimumComparisonLength < 4)
 		m_iDownloadValidatorMinimumComparisonLength = 8;
 	m_bDownloadValidatorSkipIncompleteFileConfirmation = ini.GetBool(L"DownloadValidatorSkipIncompleteFileConfirmation", false);
 	m_bDownloadValidatorMarkAsBlacklisted = ini.GetBool(L"DownloadValidatorMarkAsBlacklisted", true);
 	m_bDownloadValidatorAutoMarkAsBlacklisted = ini.GetBool(L"DownloadValidatorAutoMarkAsBlacklisted", true);
-	m_bDownloadValidatorDateTimeMatching = ini.GetBool(L"DownloadValidatorDateTimeMatching", false);
-	m_bDownloadValidatorDateTimeUseYearRange = ini.GetBool(L"DownloadValidatorDateTimeUseYearRange", false);
+	m_bDownloadValidatorDateTimeMatching = ini.GetBool(L"DownloadValidatorDateTimeMatching", true);
+	m_bDownloadValidatorDateTimeUseYearRange = ini.GetBool(L"DownloadValidatorDateTimeUseYearRange", true);
 	m_iDownloadValidatorDateTimeYearStart = ini.GetInt(L"DownloadValidatorDateTimeYearStart", 1900);
 	m_iDownloadValidatorDateTimeYearEnd = ini.GetInt(L"DownloadValidatorDateTimeYearEnd", 2040);
 	if (m_iDownloadValidatorDateTimeYearStart < 1000 || m_iDownloadValidatorDateTimeYearStart > 9999)
@@ -4834,10 +4977,57 @@ void CPreferences::LoadPreferences()
 		m_iDownloadValidatorDateTimeYearEnd = iTemp;
 	}
 	m_bDownloadValidatorDateTimeCheckSeconds = ini.GetBool(L"DownloadValidatorDateTimeCheckSeconds", true);
-	m_bDownloadValidatorDateTimeIncludeFollowingNumericValues = ini.GetBool(L"DownloadValidatorDateTimeIncludeFollowingNumericValues", false);
+	m_bDownloadValidatorDateTimeIncludeFollowingNumericValues = ini.GetBool(L"DownloadValidatorDateTimeIncludeFollowingNumericValues", true);
+	m_bDownloadValidatorRegexMatching = ini.GetBool(L"DownloadValidatorRegexMatching", true);
+	m_bDownloadValidatorFuzzyMatching = ini.GetBool(L"DownloadValidatorFuzzyMatching", false);
+	int iDownloadValidatorFuzzySimilarityThreshold = ini.GetInt(L"DownloadValidatorFuzzySimilarityThresholdPercent", -1);
+	if (iDownloadValidatorFuzzySimilarityThreshold < 0) {
+		int iLegacyThreshold = ini.GetInt(L"DownloadValidatorFuzzySimilarityThreshold", 10000);
+		if (iLegacyThreshold < 0 || iLegacyThreshold > 10000)
+			iLegacyThreshold = 10000;
+		iDownloadValidatorFuzzySimilarityThreshold = (iLegacyThreshold + 50) / 100;
+	}
+	if (iDownloadValidatorFuzzySimilarityThreshold < 0)
+		iDownloadValidatorFuzzySimilarityThreshold = 100;
+	if (iDownloadValidatorFuzzySimilarityThreshold > 100)
+		iDownloadValidatorFuzzySimilarityThreshold = 100;
+	m_uDownloadValidatorFuzzySimilarityThreshold = static_cast<uint32>(iDownloadValidatorFuzzySimilarityThreshold);
+	int iFuzzyMinimumSharedTokens = ini.GetInt(L"DownloadValidatorFuzzyMinimumSharedTokens", 2);
+	if (iFuzzyMinimumSharedTokens < 1 || iFuzzyMinimumSharedTokens > 32)
+		iFuzzyMinimumSharedTokens = 2;
+	m_uDownloadValidatorFuzzyMinimumSharedTokens = static_cast<uint32>(iFuzzyMinimumSharedTokens);
+	int iFuzzyMinimumTokenCoveragePercent = ini.GetInt(L"DownloadValidatorFuzzyMinimumTokenCoveragePercent", 75);
+	if (iFuzzyMinimumTokenCoveragePercent < 0 || iFuzzyMinimumTokenCoveragePercent > 100)
+		iFuzzyMinimumTokenCoveragePercent = 75;
+	m_uDownloadValidatorFuzzyMinimumTokenCoveragePercent = static_cast<uint32>(iFuzzyMinimumTokenCoveragePercent);
+	int iFuzzyMinimumLengthSimilarityPercent = ini.GetInt(L"DownloadValidatorFuzzyMinimumLengthSimilarityPercent", 75);
+	if (iFuzzyMinimumLengthSimilarityPercent < 0 || iFuzzyMinimumLengthSimilarityPercent > 100)
+		iFuzzyMinimumLengthSimilarityPercent = 75;
+	m_uDownloadValidatorFuzzyMinimumLengthSimilarityPercent = static_cast<uint32>(iFuzzyMinimumLengthSimilarityPercent);
+	int iFuzzyMinimumEditSimilarityPercent = ini.GetInt(L"DownloadValidatorFuzzyMinimumEditSimilarityPercent", 80);
+	if (iFuzzyMinimumEditSimilarityPercent < 0 || iFuzzyMinimumEditSimilarityPercent > 100)
+		iFuzzyMinimumEditSimilarityPercent = 80;
+	m_uDownloadValidatorFuzzyMinimumEditSimilarityPercent = static_cast<uint32>(iFuzzyMinimumEditSimilarityPercent);
+	int iFuzzyStructuralMinimumGroupLetters = ini.GetInt(L"DownloadValidatorFuzzyStructuralMinimumGroupLetters", 3);
+	if (iFuzzyStructuralMinimumGroupLetters < 1 || iFuzzyStructuralMinimumGroupLetters > 32)
+		iFuzzyStructuralMinimumGroupLetters = 3;
+	m_uDownloadValidatorFuzzyStructuralMinimumGroupLetters = static_cast<uint32>(iFuzzyStructuralMinimumGroupLetters);
+	int iFuzzyStructuralMinimumIDDigits = ini.GetInt(L"DownloadValidatorFuzzyStructuralMinimumIDDigits", 3);
+	if (iFuzzyStructuralMinimumIDDigits < 1 || iFuzzyStructuralMinimumIDDigits > 32)
+		iFuzzyStructuralMinimumIDDigits = 3;
+	m_uDownloadValidatorFuzzyStructuralMinimumIDDigits = static_cast<uint32>(iFuzzyStructuralMinimumIDDigits);
+	int iFuzzyDisplayThresholdPercent = ini.GetInt(L"DownloadValidatorFuzzyDisplayThresholdPercent", 30);
+	if (iFuzzyDisplayThresholdPercent < 0 || iFuzzyDisplayThresholdPercent > 100)
+		iFuzzyDisplayThresholdPercent = 30;
+	m_uDownloadValidatorFuzzyDisplayThresholdPercent = static_cast<uint32>(iFuzzyDisplayThresholdPercent);
+	m_bDownloadValidatorMediaLengthMatching = ini.GetBool(L"DownloadValidatorMediaLengthMatching", true);
+	int iDownloadValidatorMediaLengthToleranceSec = ini.GetInt(L"DownloadValidatorMediaLengthToleranceSec", 5);
+	if (iDownloadValidatorMediaLengthToleranceSec < 0)
+		iDownloadValidatorMediaLengthToleranceSec = 5;
+	m_uDownloadValidatorMediaLengthToleranceSec = static_cast<uint32>(iDownloadValidatorMediaLengthToleranceSec);
 	m_bDownloadInspectorFake = ini.GetBool(L"DownloadInspectorFake", ini.GetBool(L"DownloadInspectorFake", true));
 	m_bDownloadInspectorDRM = ini.GetBool(L"DownloadInspectorDRM", ini.GetBool(L"DownloadInspectorDRM", true));
-	m_bDownloadInspectorAutoRenameToMajorityName = ini.GetBool(L"DownloadInspectorAutoRenameToMajorityName", true);
+	m_bDownloadInspectorAutoRenameToMajorityName = ini.GetBool(L"DownloadInspectorAutoRenameToMajorityName", false);
 	m_bDownloadInspectorAutoRenameToMajorityNameForNewDownloadsOnly = ini.GetBool(L"DownloadInspectorAutoRenameToMajorityNameForNewDownloadsOnly", false);
 	SetDownloadInspectorAutoRenameToMajorityNameRequiredPercent(ini.GetInt(L"DownloadInspectorAutoRenameToMajorityNameRequiredPercent", GetDefaultDownloadInspectorAutoRenameToMajorityNameRequiredPercent()));
 	SetDownloadInspectorAutoRenameToMajorityNameMinimumVotes(ini.GetInt(L"DownloadInspectorAutoRenameToMajorityNameMinimumVotes", GetDefaultDownloadInspectorAutoRenameToMajorityNameMinimumVotes()));
@@ -5164,7 +5354,7 @@ void CPreferences::LoadPreferences()
 	m_bUploadRequestAbuseCounterGuard = ini.GetBool(L"UploadRequestAbuseCounterGuard", true);
 	m_bUploadRequestAbuseHashRotationTracking = ini.GetBool(L"UploadRequestAbuseHashRotationTracking", true);
 	m_bUploadRequestAbusePostHelloDisconnect = ini.GetBool(L"UploadRequestAbusePostHelloDisconnect", true);
-	m_uUploadRequestAbusePunishment = static_cast<uint8>(max(0, min(12, ini.GetInt(L"UploadRequestAbusePunishment", 0))));
+	m_uUploadRequestAbusePunishment = static_cast<uint8>(max(0, min(12, ini.GetInt(L"UploadRequestAbusePunishment", 1))));
 	m_bDetectAgressive = ini.GetBool(L"DetectAgressive", true);
 	m_iAgressiveTime = (uint16)ini.GetInt(L"AgressiveTime", 10);
 	m_iAgressiveCounter = (uint16)ini.GetInt(L"AgressiveCounter", 5);
@@ -5230,8 +5420,8 @@ UINT CPreferences::GetDefaultMaxConperFive()
 void CPreferences::SaveCats()
 {
 	CString strCatIniFilePath;
-	strCatIniFilePath.Format(_T("%s") _T("Category.ini"), (LPCTSTR)GetMuleDirectory(EMULE_CONFIGDIR));
-	CProfileIniSnapshotBuilder ini(strCatIniFilePath, _T("General"), _T("Category.ini"), _T("category-ini"), &g_lCategoryIniSaveGeneration, false);
+	strCatIniFilePath.Format(_T("%s") CATEGORY_INI_FILENAME, (LPCTSTR)GetMuleDirectory(EMULE_CONFIGDIR));
+	CProfileIniSnapshotBuilder ini(strCatIniFilePath, _T("General"), CATEGORY_INI_FILENAME, _T("category-ini"), &g_lCategoryIniSaveGeneration, false);
 	ini.WriteInt(_T("Count"), (int)catArr.GetCount() - 1, _T("General"));
 	for (INT_PTR i = 0; i < catArr.GetCount(); ++i) {
 		CString strSection;
@@ -5270,7 +5460,7 @@ void CPreferences::ReloadCats()
 void CPreferences::LoadCats()
 {
 	CString strCatIniFilePath;
-	strCatIniFilePath.Format(_T("%s") _T("Category.ini"), (LPCTSTR)GetMuleDirectory(EMULE_CONFIGDIR));
+	strCatIniFilePath.Format(_T("%s") CATEGORY_INI_FILENAME, (LPCTSTR)GetMuleDirectory(EMULE_CONFIGDIR));
 	CIni ini(strCatIniFilePath);
 	int iNumCategories = ini.GetInt(_T("Count"), 0, _T("General"));
 	for (INT_PTR i = 0; i <= iNumCategories; ++i) {
@@ -5348,7 +5538,7 @@ CString CPreferences::GetCatFilterLabel(int filter)
 		  _T("ALL"), _T("ALLOTHERS"), _T("STATUS_NOTCOMPLETED"), _T("DL_TRANSFCOMPL"), _T("WAITING")
 		, _T("DOWNLOADING"), _T("ERRORLIKE"), _T("PAUSED"), _T("SEENCOMPL"), NULL
 		, _T("VIDEO"), _T("AUDIO"), _T("SEARCH_ARC"), _T("SEARCH_CDIMG"), _T("SEARCH_DOC")
-		, _T("SEARCH_PICS"), _T("SEARCH_PRG"), NULL, _T("REGEXPRESSION"), NULL, _T("SEARCH_EMULECOLLECTION")
+		, _T("SEARCH_PICS"), _T("SEARCH_PRG"), NULL, _T("REGEXPRESSION"), NULL, _T("META_COLLECTION")
 	};
 
 	const LPCTSTR pszResKey = (filter >= 0 && filter < _countof(s_apszCatFilterKeys)) ? s_apszCatFilterKeys[filter] : NULL;
@@ -5796,16 +5986,6 @@ CString CPreferences::GetVersionCheckRawURL()
 		strVersionCheckRawUrl += _T("/");
 	strVersionCheckRawUrl += _T("current_version.txt");
 	return strVersionCheckRawUrl;
-}
-
-bool CPreferences::IsDefaultNick(const CString& strCheck)
-{
-	// not fast, but this function is not called often
-	for (int i = 0; i < 255; ++i)
-		if (GetHomepageBaseURLForLevel(i) == strCheck)
-			return true;
-
-	return strCheck == _T("http://emule-project.net") || strCheck == _T("https://emule-project.net");
 }
 
 void CPreferences::SetUserNick(LPCTSTR pszNick)

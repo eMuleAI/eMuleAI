@@ -51,6 +51,7 @@ their client on the eMule forum.
 #include "stdafx.h"
 #include <math.h>
 #include "emule.h"
+#include "Preferences.h"
 #include "emuledlg.h"
 #include "KadContactListCtrl.h"
 #include "kademliawnd.h"
@@ -92,7 +93,7 @@ CRoutingZone::CRoutingZone()
 	// Set our KadID for creating the contact tree
 	CKademlia::GetPrefs()->GetKadID(uMe);
 	// Set the nodes file name.
-	m_sFilename.Format(_T("%s") _T("nodes.dat"), (LPCTSTR)thePrefs.GetMuleDirectory(EMULE_CONFIGDIR));
+	m_sFilename.Format(_T("%s") NODES_DAT_FILENAME, (LPCTSTR)thePrefs.GetMuleDirectory(EMULE_CONFIGDIR));
 	// Init our root node.
 	Init(NULL, 0, CUInt128(0ul));
 }
@@ -389,7 +390,7 @@ void CRoutingZone::WriteFile()
 		pData->plGeneration = &s_lKadNodesSaveGeneration;
 		pData->strTempPath = m_sFilename + _T(".tmp");
 		pData->strFinalPath = m_sFilename;
-		pData->strLogName = _T("nodes.dat");
+		pData->strLogName = NODES_DAT_FILENAME;
 		pData->strPayloadName = _T("kad-nodes");
 		pData->eConflictPolicy = AsyncDiskWriteConflictLastSnapshotWins;
 		const ULONGLONG uLength = file.GetLength();
@@ -447,7 +448,7 @@ void CRoutingZone::DbgWriteBootstrapFile()
 		data.plGeneration = &s_lKadNodesSaveGeneration;
 		data.strTempPath = m_sFilename + _T(".tmp");
 		data.strFinalPath = m_sFilename;
-		data.strLogName = _T("nodes.dat");
+		data.strLogName = NODES_DAT_FILENAME;
 		data.strPayloadName = _T("kad-bootstrap-nodes");
 		data.eConflictPolicy = AsyncDiskWriteConflictLastSnapshotWins;
 		const ULONGLONG uLength = file.GetLength();

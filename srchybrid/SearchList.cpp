@@ -1,4 +1,4 @@
-﻿//This file is part of eMule AI
+//This file is part of eMule AI
 //Copyright (C)2002-2026 Merkur ( strEmail.Format("%s@%s", "devteam", "emule-project.net") / https://www.emule-project.net )
 //Copyright (C)2026 eMule AI
 //
@@ -16,6 +16,7 @@
 //along with this program; if not, write to the Free Software
 //Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 #include "stdafx.h"
+#include <utility>
 #include "emule.h"
 #include "StringConversion.h"
 #include "SearchFile.h"
@@ -40,6 +41,7 @@
 #include "MediaInfo.h"
 #include "PartFileWriteThread.h"
 #include "OtherFunctions.h"
+#include "eMuleAI/DownloadValidator.h"
 #ifdef _DEBUG
 #include "eMuleAI\DebugLeakHelper.h"
 #endif
@@ -53,6 +55,131 @@ static char THIS_FILE[] = __FILE__;
 namespace
 {
 	const size_t kLargeMetFileBufferSize = 256 * 1024;
+	const UINT kPossibleKnownMetadataItemsPerSlice = 16;
+	const DWORD kPossibleKnownMetadataSliceMs = 4;
+
+	UINT SaturateDownloadValidatorProgress(uint64 uValue)
+	{
+		return static_cast<UINT>((std::min)(uValue, static_cast<uint64>(_UI32_MAX)));
+	}
+
+	UINT GetDownloadValidatorProgressTotal(size_t uItemCount, bool bRecalculateAll, size_t uPossibleKnownCount = 0)
+	{
+		return SaturateDownloadValidatorProgress(static_cast<uint64>(uItemCount) * (bRecalculateAll ? 5ui64 : 3ui64) + uPossibleKnownCount);
+	}
+
+	CString BuildDownloadValidatorEvaluationKey(const uchar* pHash, const CString& strFileName, EMFileSize uFileSize, uint32 uMediaLengthSec)
+	{
+		CString strKey(md4str(pHash));
+		strKey.AppendChar(_T('\n'));
+		strKey.Append(strFileName);
+		strKey.AppendFormat(_T("\n%I64u\n%u"), static_cast<uint64>(uFileSize), uMediaLengthSec);
+		return strKey;
+	}
+
+	uint32 CalculatePossibleKnownAliasFingerprint(const std::vector<CString>& astrFileNames)
+	{
+		uint32 uFingerprint = 2166136261u;
+		for (std::vector<CString>::const_iterator it = astrFileNames.begin(); it != astrFileNames.end(); ++it) {
+			CString strName(*it);
+			strName.MakeLower();
+			for (int i = 0; i < strName.GetLength(); ++i) {
+				uFingerprint ^= static_cast<uint32>(strName[i]);
+				uFingerprint *= 16777619u;
+			}
+			uFingerprint ^= 0xFFu;
+			uFingerprint *= 16777619u;
+		}
+		return uFingerprint;
+	}
+
+	uint64 BuildPossibleKnownIdentityKey(const uchar* pHash, const CString& strName, EMFileSize uSize)
+	{
+		uint64 uKey = 1469598103934665603ui64;
+		for (size_t i = 0; i < MDX_DIGEST_SIZE; ++i) {
+			uKey ^= pHash[i];
+			uKey *= 1099511628211ui64;
+		}
+		const uint64 uFileSize = static_cast<uint64>(uSize);
+		for (size_t i = 0; i < sizeof(uFileSize); ++i) {
+			uKey ^= static_cast<uint8>((uFileSize >> (i * 8)) & 0xFF);
+			uKey *= 1099511628211ui64;
+		}
+		for (int i = 0; i < strName.GetLength(); ++i) {
+			uKey ^= static_cast<uint16>(strName[i]);
+			uKey *= 1099511628211ui64;
+		}
+		return uKey;
+	}
+
+	bool IsPossibleKnownCandidateBetter(const CDownloadValidator::FuzzyCandidateType& first, const CDownloadValidator::FuzzyCandidateType& second)
+	{
+		if (first.uSimilarityScore != second.uSimilarityScore)
+			return first.uSimilarityScore > second.uSimilarityScore;
+		if (first.bStructuralIdentityMatch != second.bStructuralIdentityMatch)
+			return first.bStructuralIdentityMatch;
+		if (first.bExactSubstring != second.bExactSubstring)
+			return first.bExactSubstring;
+		if (first.uSharedGramCount != second.uSharedGramCount)
+			return first.uSharedGramCount > second.uSharedGramCount;
+		return first.uCoverageScore > second.uCoverageScore;
+	}
+
+	void MergePossibleKnownCandidate(std::vector<CDownloadValidator::FuzzyCandidateType>& candidates, std::unordered_multimap<uint64, size_t>& identities, const CDownloadValidator::FuzzyCandidateType& candidate)
+	{
+		const uint64 uIdentity = BuildPossibleKnownIdentityKey(candidate.ucHash, candidate.strName, candidate.uSize);
+		const std::pair<std::unordered_multimap<uint64, size_t>::iterator, std::unordered_multimap<uint64, size_t>::iterator> range = identities.equal_range(uIdentity);
+		for (std::unordered_multimap<uint64, size_t>::iterator it = range.first; it != range.second; ++it) {
+			if (it->second >= candidates.size())
+				continue;
+			CDownloadValidator::FuzzyCandidateType& existing = candidates[it->second];
+			if (existing.uSize == candidate.uSize && existing.strName == candidate.strName && md4equ(existing.ucHash, candidate.ucHash)) {
+				if (IsPossibleKnownCandidateBetter(candidate, existing))
+					existing = candidate;
+				return;
+			}
+		}
+		identities.emplace(uIdentity, candidates.size());
+		candidates.push_back(candidate);
+	}
+
+	void MergePossibleKnownModelRow(std::vector<SSearchFilePossibleKnownRow>& rows, std::unordered_multimap<uint64, size_t>& identities, const SSearchFilePossibleKnownRow& row)
+	{
+		const uint64 uIdentity = BuildPossibleKnownIdentityKey(row.ucHash, row.strName, row.uSize);
+		const std::pair<std::unordered_multimap<uint64, size_t>::iterator, std::unordered_multimap<uint64, size_t>::iterator> range = identities.equal_range(uIdentity);
+		for (std::unordered_multimap<uint64, size_t>::iterator it = range.first; it != range.second; ++it) {
+			if (it->second >= rows.size())
+				continue;
+			SSearchFilePossibleKnownRow& existing = rows[it->second];
+			if (existing.uSize == row.uSize && existing.strName == row.strName && md4equ(existing.ucHash, row.ucHash)) {
+				if (row.uSimilarityScore > existing.uSimilarityScore)
+					existing = row;
+				return;
+			}
+		}
+		identities.emplace(uIdentity, rows.size());
+		rows.push_back(row);
+	}
+
+	SSearchFilePossibleKnownRow BuildPossibleKnownModelRow(const CDownloadValidator::FuzzyCandidateType& candidate)
+	{
+		SSearchFilePossibleKnownRow row;
+		row.strName = candidate.strName;
+		row.strFolder = candidate.strFolder;
+		row.strMediaArtist = candidate.strMediaArtist;
+		row.strMediaAlbum = candidate.strMediaAlbum;
+		row.strMediaTitle = candidate.strMediaTitle;
+		row.strMediaCodec = candidate.strMediaCodec;
+		row.strAICHHash = candidate.strAICHHash;
+		row.uSize = candidate.uSize;
+		row.uMediaLengthSec = candidate.uMediaLengthSec;
+		row.uMediaBitrateKbps = candidate.uMediaBitrateKbps;
+		row.uSimilarityScore = candidate.uSimilarityScore;
+		row.uFileType = candidate.uFileType;
+		row.uSourceFlags = candidate.uSourceFlags;
+		md4cpy(row.ucHash, candidate.ucHash);
+		return row;
+	}
 }
 
 SSearchResultId::SSearchResultId()
@@ -226,10 +353,8 @@ namespace
 	}
 }
 
-#define SPAMFILTER_FILENAME		_T("SearchSpam.met")
-#define SPAMFILTER_FILENAME_TMP	 _T("SearchSpam.met.tmp")
-#define STOREDSEARCHES_FILENAME	_T("StoredSearches.met")
-#define STOREDSEARCHES_FILENAME_TMP	_T("StoredSearches.met.tmp")
+#define SPAMFILTER_FILENAME_TMP	 SPAMFILTER_FILENAME _T(".tmp")
+#define STOREDSEARCHES_FILENAME_TMP	STOREDSEARCHES_FILENAME _T(".tmp")
 
 #define STOREDSEARCHES_VERSION	103
 
@@ -279,6 +404,7 @@ CSearchList::CSearchList()
 	, m_lStoredSearchStartupLoadGeneration(0)
 	, m_uStoredSearchStartupLoadCancellationToken(0)
 	, m_lSearchModelSequence(0)
+	, m_lDownloadValidatorPrioritySearchID(0)
 	, m_bChunkedSearchIngestPending()
 	, m_dwChunkedSearchIngestLastProgressTick()
 	, m_pStoredSearchStartupLoadParams(NULL)
@@ -297,6 +423,7 @@ CSearchList::CSearchList()
 	, m_dwStoredSearchStartupLoadStartedTick(0)
 	, m_dwStoredSearchStartupLoadLastProgressTick(0)
 {
+	m_bDownloadValidatorRecheckAllPending = false;
 	m_nLastSaved = ::GetTickCount();
 #ifdef _DEBUG
 	DebugLeakHelper::RegisterPreDumpHook(&ClearStoredSearchesBeforeLeakDump);
@@ -342,7 +469,9 @@ CSearchList::SStartupStoredSearchesLoadResult::SStartupStoredSearchesLoadResult(
 }
 
 CSearchList::SSearchIngestRecord::SSearchIngestRecord()
-	: m_nSearchID(0)
+	: m_uFileSize(0ull)
+	, m_uMediaLengthSec(0)
+	, m_nSearchID(0)
 	, m_nServerIP(0)
 	, m_nServerPort(0)
 	, m_uServerAvail(0)
@@ -353,6 +482,9 @@ CSearchList::SSearchIngestRecord::SSearchIngestRecord()
 	, m_bMultipleAICHFound(false)
 	, m_bAutomaticBlacklistEvaluated(false)
 	, m_bAutomaticBlacklisted(false)
+	, m_bDownloadValidatorEvaluated(false)
+	, m_bDownloadValidatorSimilar(false)
+	, m_uDownloadValidatorRevision(0)
 {
 }
 
@@ -363,6 +495,7 @@ CSearchList::SChunkedSearchIngestJob::SChunkedSearchIngestJob()
 	, m_dwFromUDPServerIP(0)
 	, m_bDoSpamRating(false)
 	, m_bUseKadReloadThrottle(false)
+	, m_bStartupStoredSearch(false)
 	, m_bNotifyUiOnCompletion(true)
 	, m_bNotifyLocalEd2kSearchEnd(false)
 	, m_bMoreResultsAvailable(false)
@@ -407,6 +540,7 @@ CSearchList::SStoredSearchIngestPrepareJob::SStoredSearchIngestPrepareJob()
 	, m_dwFromUDPServerIP(0)
 	, m_bDoSpamRating(false)
 	, m_bUseKadReloadThrottle(false)
+	, m_bStartupStoredSearch(true)
 	, m_bNotifyUiOnCompletion(true)
 	, m_uProcessed(0)
 	, m_uFailed(0)
@@ -421,11 +555,24 @@ CSearchList::SChunkedSpamRatingJob::SChunkedSpamRatingJob()
 	: m_pAutomaticBlacklistSnapshot(NULL)
 	, m_iNextItem(0)
 	, m_iNextPrepareItem(0)
+	, m_iNextPossibleKnownItem(0)
+	, m_uPossibleKnownAliasCount(0)
+	, m_uProcessedPossibleKnownAliases(0)
+	, m_posCapture(NULL)
+	, m_iCaptureIndex(0)
+	, m_lCaptureDestructiveSequence(0)
 	, m_nSearchID(0)
 	, m_bExpectHigher(false)
 	, m_bExpectLower(false)
 	, m_bRecalculateAll(false)
-	, m_ePhase(PhaseReset)
+	, m_bPrepareAutomaticBlacklist(false)
+	, m_bPrepareDownloadValidator(false)
+	, m_bPreparePossibleKnown(false)
+	, m_bDownloadValidatorGroupsAggregated(false)
+	, m_bShowDownloadValidatorOverlay(false)
+	, m_uPossibleKnownRevision(0)
+	, m_uPossibleKnownCandidateDataRevision(0)
+	, m_ePhase(PhaseCapture)
 	, m_uProcessed(0)
 	, m_dwStartedTick(::GetTickCount())
 	, m_dwLastProgressTick(0)
@@ -461,6 +608,7 @@ CSearchList::SParsedSearchIngestBatch::SParsedSearchIngestBatch()
 	, m_dwFromUDPServerIP(0)
 	, m_bDoSpamRating(false)
 	, m_bUseKadReloadThrottle(false)
+	, m_bStartupStoredSearch(false)
 	, m_bNotifyUiOnCompletion(false)
 	, m_bNotifyLocalEd2kSearchEnd(false)
 	, m_bMoreResultsAvailable(false)
@@ -468,6 +616,82 @@ CSearchList::SParsedSearchIngestBatch::SParsedSearchIngestBatch()
 	, m_lSearchGeneration(0)
 {
 }
+
+struct CSearchList::SPossibleKnownQueryJob
+{
+	SPossibleKnownQueryJob()
+		: uParentToken(0)
+		, nSearchID(0)
+		, uFileSize(static_cast<uint64>(0))
+		, uMediaLengthSec(0)
+		, uAliasFingerprint(0)
+		, bLoadRows(false)
+		, bTrustedStage(true)
+		, bReplaceRows(false)
+		, uRevision(0)
+		, uCandidateDataRevision(0)
+		, lGeneration(0)
+		, lSearchGeneration(0)
+	{
+		md4clr(ucHash);
+	}
+
+	UINT_PTR uParentToken;
+	uint32 nSearchID;
+	CString strFileName;
+	std::vector<CString> astrFileNames;
+	std::vector<SDownloadValidatorFuzzyQueryData> aQueryData;
+	EMFileSize uFileSize;
+	uint32 uMediaLengthSec;
+	uint32 uAliasFingerprint;
+	uchar ucHash[MDX_DIGEST_SIZE];
+	bool bLoadRows;
+	bool bTrustedStage;
+	bool bReplaceRows;
+	uint32 uRevision;
+	uint32 uCandidateDataRevision;
+	SDownloadValidatorFuzzyQueryData queryData;
+	LONG lGeneration;
+	LONG lSearchGeneration;
+};
+
+struct CSearchList::SPossibleKnownQueryResult
+{
+	SPossibleKnownQueryResult()
+		: uParentToken(0)
+		, nSearchID(0)
+		, uFileSize(static_cast<uint64>(0))
+		, uMediaLengthSec(0)
+		, uAliasFingerprint(0)
+		, bLoadRows(false)
+		, bHasMatches(false)
+		, bFinalResult(true)
+		, bReplaceRows(false)
+		, uRevision(0)
+		, uCandidateDataRevision(0)
+		, uNextMetadataCandidate(0)
+	{
+		md4clr(ucHash);
+	}
+
+	UINT_PTR uParentToken;
+	uint32 nSearchID;
+	CString strFileName;
+	EMFileSize uFileSize;
+	uint32 uMediaLengthSec;
+	uint32 uAliasFingerprint;
+	uchar ucHash[MDX_DIGEST_SIZE];
+	bool bLoadRows;
+	bool bHasMatches;
+	bool bFinalResult;
+	bool bReplaceRows;
+	uint32 uRevision;
+	uint32 uCandidateDataRevision;
+	SDownloadValidatorFuzzyQueryData queryData;
+	size_t uNextMetadataCandidate;
+	std::vector<CDownloadValidator::FuzzyCandidateType> candidates;
+	std::vector<SSearchListRow> rows;
+};
 
 LONG CSearchList::GetSearchModelSequence() const
 {
@@ -491,6 +715,9 @@ bool CSearchList::BuildSearchIngestRecord(const CSearchFile *pFile, SSearchInges
 		return false;
 
 	record = SSearchIngestRecord();
+	record.m_resultId.Set(pFile->GetSearchID(), pFile->GetFileHash(), true, pFile->GetFileName());
+	record.m_uFileSize = pFile->GetFileSize();
+	record.m_uMediaLengthSec = pFile->GetIntTagValue(FT_MEDIA_LENGTH);
 	record.m_nSearchID = pFile->GetSearchID();
 	record.m_nServerIP = pFile->GetClientServerIP();
 	record.m_nServerPort = pFile->GetClientServerPort();
@@ -510,6 +737,12 @@ bool CSearchList::BuildSearchIngestRecord(const CSearchFile *pFile, SSearchInges
 	if (bPrecomputeAutoBlacklist && thePrefs.GetBlacklistAutomatic()) {
 		record.m_bAutomaticBlacklisted = thePrefs.IsFilenameAutoBlacklisted(pFile->GetFileName(), NULL);
 		record.m_bAutomaticBlacklistEvaluated = true;
+	}
+	const uint32 uDownloadValidatorRevision = theApp.DownloadValidator != NULL ? theApp.DownloadValidator->GetEvaluationRevision() : 0;
+	if (pFile->HasDownloadValidatorEvaluation(uDownloadValidatorRevision)) {
+		record.m_bDownloadValidatorEvaluated = true;
+		record.m_bDownloadValidatorSimilar = pFile->GetDownloadValidatorSimilar();
+		record.m_uDownloadValidatorRevision = uDownloadValidatorRevision;
 	}
 	record.m_data.resize(static_cast<size_t>(uLength));
 	memcpy(&record.m_data[0], data.GetBuffer(), static_cast<size_t>(uLength));
@@ -538,6 +771,8 @@ CSearchFile* CSearchList::CreateSearchFileFromIngestRecord(const SSearchIngestRe
 		pFile->SetPreviewPossible(record.m_bPreviewPossible);
 		if (record.m_bAutomaticBlacklistEvaluated)
 			pFile->SetAutomaticBlacklistEvaluation(true, record.m_bAutomaticBlacklisted);
+		if (record.m_bDownloadValidatorEvaluated)
+			pFile->SetDownloadValidatorEvaluation(record.m_bDownloadValidatorSimilar, record.m_uDownloadValidatorRevision);
 		return pFile;
 	} catch (CException *ex) {
 		delete pFile;
@@ -575,6 +810,8 @@ bool CSearchList::QueueSearchFileForIngest(CSearchFile *pFile, const CString &st
 
 	std::vector<SSearchIngestRecord> records;
 	records.push_back(record);
+	if (bDoSpamRating)
+		return QueueStoredSearchIngestPrepareJob(records, nSearchID, strClientHash, bClientResponse, dwFromUDPServerIP, bDoSpamRating, bUseKadReloadThrottle, false);
 	QueueChunkedSearchIngestJob(records, nSearchID, strClientHash, bClientResponse, dwFromUDPServerIP, bDoSpamRating, bUseKadReloadThrottle);
 	return true;
 }
@@ -593,6 +830,13 @@ void CSearchList::ClearChunkedSearchIngestJobs()
 		while (!m_chunkedSpamRatingPrepareJobs.IsEmpty())
 			delete m_chunkedSpamRatingPrepareJobs.RemoveHead();
 		m_activeSpamRatingPrepareCounts.RemoveAll();
+		m_downloadValidatorProgressProcessed.RemoveAll();
+		m_downloadValidatorProgressTotal.RemoveAll();
+		m_downloadValidatorOverlayProgress.RemoveAll();
+		m_downloadValidatorRecheckDue.RemoveAll();
+		m_downloadValidatorDirtySearches.RemoveAll();
+		m_downloadValidatorStartupOverlaySearches.RemoveAll();
+		m_bDownloadValidatorRecheckAllPending = false;
 		m_cancelledSearchAnswerParseIds.RemoveAll();
 		m_searchAnswerParseGenerations.RemoveAll();
 	}
@@ -611,6 +855,7 @@ void CSearchList::ClearChunkedSearchIngestJobs()
 		while (!m_preparedSpamRatingJobs.IsEmpty())
 			delete m_preparedSpamRatingJobs.RemoveHead();
 	}
+	ClearPossibleKnownQueryJobs();
 	m_bDeferSearchListUpdates = false;
 }
 
@@ -718,11 +963,17 @@ void CSearchList::EnforceSpamRatingPrepareQueueLimitLocked(uint32 nSearchID)
 		SChunkedSpamRatingJob *pDroppedJob = m_chunkedSpamRatingPrepareJobs.GetAt(posRemove);
 		AddDebugLogLine(DLP_HIGH, false, _T("Spam rating prepare queue pressure dropped queued job. incomingSearch=%u droppedSearch=%u count=%Id\n"), nSearchID, pDroppedJob != NULL ? pDroppedJob->m_nSearchID : 0, m_chunkedSpamRatingPrepareJobs.GetCount());
 		m_chunkedSpamRatingPrepareJobs.RemoveAt(posRemove);
+		if (pDroppedJob != NULL) {
+			m_downloadValidatorProgressProcessed.RemoveKey(pDroppedJob->m_nSearchID);
+			m_downloadValidatorProgressTotal.RemoveKey(pDroppedJob->m_nSearchID);
+			m_downloadValidatorOverlayProgress.RemoveKey(pDroppedJob->m_nSearchID);
+			m_downloadValidatorRecheckDue[pDroppedJob->m_nSearchID] = ::GetTickCount() + 500;
+		}
 		delete pDroppedJob;
 	}
 }
 
-void CSearchList::EnforcePreparedSpamRatingQueueLimitLocked(uint32 nSearchID)
+void CSearchList::EnforcePreparedSpamRatingQueueLimitLocked(uint32 nSearchID, std::vector<uint32>* pDroppedSearchIDs)
 {
 	while (m_preparedSpamRatingJobs.GetCount() >= 64) {
 		POSITION posRemove = m_preparedSpamRatingJobs.GetHeadPosition();
@@ -731,6 +982,8 @@ void CSearchList::EnforcePreparedSpamRatingQueueLimitLocked(uint32 nSearchID)
 		SChunkedSpamRatingJob *pDroppedJob = m_preparedSpamRatingJobs.GetAt(posRemove);
 		AddDebugLogLine(DLP_HIGH, false, _T("Prepared spam rating queue pressure dropped queued job. incomingSearch=%u droppedSearch=%u count=%Id\n"), nSearchID, pDroppedJob != NULL ? pDroppedJob->m_nSearchID : 0, m_preparedSpamRatingJobs.GetCount());
 		m_preparedSpamRatingJobs.RemoveAt(posRemove);
+		if (pDroppedJob != NULL && pDroppedSearchIDs != NULL)
+			pDroppedSearchIDs->push_back(pDroppedJob->m_nSearchID);
 		delete pDroppedJob;
 	}
 }
@@ -744,6 +997,13 @@ void CSearchList::EnforceChunkedSpamRatingQueueLimit(uint32 nSearchID)
 		SChunkedSpamRatingJob *pDroppedJob = m_chunkedSpamRatingJobs.GetAt(posRemove);
 		AddDebugLogLine(DLP_HIGH, false, _T("Spam rating queue pressure dropped queued job. incomingSearch=%u droppedSearch=%u count=%Id\n"), nSearchID, pDroppedJob != NULL ? pDroppedJob->m_nSearchID : 0, m_chunkedSpamRatingJobs.GetCount());
 		m_chunkedSpamRatingJobs.RemoveAt(posRemove);
+		if (pDroppedJob != NULL) {
+			CSingleLock lock(&m_searchAnswerParseQueueLock, TRUE);
+			m_downloadValidatorProgressProcessed.RemoveKey(pDroppedJob->m_nSearchID);
+			m_downloadValidatorProgressTotal.RemoveKey(pDroppedJob->m_nSearchID);
+			m_downloadValidatorOverlayProgress.RemoveKey(pDroppedJob->m_nSearchID);
+			m_downloadValidatorRecheckDue[pDroppedJob->m_nSearchID] = ::GetTickCount() + 500;
+		}
 		delete pDroppedJob;
 	}
 }
@@ -777,6 +1037,77 @@ void CSearchList::QueueChunkedSearchIngestJob(std::vector<SSearchIngestRecord> &
 		ClearChunkedSearchIngestJobs();
 	}
 	theApp.QueueSearchActivityChangedEvent(nSearchID);
+}
+
+bool CSearchList::QueuePossibleKnownQuery(UINT_PTR uParentToken, uint32 nSearchID, const uchar* pHash, const CString& strFileName, const std::vector<CString>& astrFileNames, EMFileSize uFileSize, uint32 uMediaLengthSec,
+	uint32 uAliasFingerprint, bool bLoadRows, uint32 uRevision, uint32 uCandidateDataRevision, bool bReplaceRows, const SDownloadValidatorFuzzyQueryData* pQueryData)
+{
+	if (uParentToken == 0 || nSearchID == 0 || pHash == NULL || strFileName.IsEmpty() || !IsSearchProcessingAcceptingJobs() || theApp.DownloadValidator == NULL)
+		return false;
+	SPossibleKnownQueryJob *pJob = new SPossibleKnownQueryJob();
+	pJob->uParentToken = uParentToken;
+	pJob->nSearchID = nSearchID;
+	pJob->strFileName = strFileName;
+	pJob->astrFileNames = astrFileNames;
+	if (pJob->astrFileNames.empty())
+		pJob->astrFileNames.push_back(strFileName);
+	pJob->aQueryData.assign(pJob->astrFileNames.size(), SDownloadValidatorFuzzyQueryData());
+	if (pQueryData != NULL && !pJob->aQueryData.empty())
+		pJob->aQueryData[0] = *pQueryData;
+	pJob->uFileSize = uFileSize;
+	pJob->uMediaLengthSec = uMediaLengthSec;
+	pJob->uAliasFingerprint = uAliasFingerprint;
+	md4cpy(pJob->ucHash, pHash);
+	pJob->bLoadRows = bLoadRows;
+	pJob->bReplaceRows = bReplaceRows;
+	pJob->uRevision = uRevision;
+	pJob->uCandidateDataRevision = uCandidateDataRevision;
+	pJob->lGeneration = ::InterlockedCompareExchange(&m_lSearchAnswerParseGeneration, 0, 0);
+
+	{
+		CSingleLock lock(&m_searchAnswerParseQueueLock, TRUE);
+		m_searchAnswerParseGenerations.Lookup(nSearchID, pJob->lSearchGeneration);
+		m_cancelledSearchAnswerParseIds.RemoveKey(nSearchID);
+		for (POSITION pos = m_possibleKnownQueryJobs.GetHeadPosition(); pos != NULL;) {
+			POSITION posCurrent = pos;
+			SPossibleKnownQueryJob *pQueuedJob = m_possibleKnownQueryJobs.GetNext(pos);
+			if (pQueuedJob == NULL || pQueuedJob->uParentToken != uParentToken || pQueuedJob->nSearchID != nSearchID
+				|| pQueuedJob->uMediaLengthSec != uMediaLengthSec || pQueuedJob->uAliasFingerprint != uAliasFingerprint || pQueuedJob->uRevision != uRevision
+				|| pQueuedJob->uCandidateDataRevision != uCandidateDataRevision || pQueuedJob->bReplaceRows != bReplaceRows)
+				continue;
+			if (bLoadRows) {
+				pQueuedJob->bLoadRows = true;
+				m_possibleKnownQueryJobs.RemoveAt(posCurrent);
+				m_possibleKnownQueryJobs.AddHead(pQueuedJob);
+			}
+			delete pJob;
+			return true;
+		}
+		if (m_possibleKnownQueryJobs.GetCount() >= 2048) {
+			delete pJob;
+			return false;
+		}
+		if (bLoadRows)
+			m_possibleKnownQueryJobs.AddHead(pJob);
+		else
+			m_possibleKnownQueryJobs.AddTail(pJob);
+	}
+
+	if (!theApp.QueueDownloadValidatorCpuWork()) {
+		CSingleLock lock(&m_searchAnswerParseQueueLock, TRUE);
+		for (POSITION pos = m_possibleKnownQueryJobs.GetHeadPosition(); pos != NULL;) {
+			POSITION posCurrent = pos;
+			SPossibleKnownQueryJob *pQueuedJob = m_possibleKnownQueryJobs.GetNext(pos);
+			if (pQueuedJob == pJob) {
+				m_possibleKnownQueryJobs.RemoveAt(posCurrent);
+				delete pJob;
+				break;
+			}
+		}
+		return false;
+	}
+	theApp.QueueSearchActivityChangedEvent(nSearchID);
+	return true;
 }
 
 LONG CSearchList::GetSearchAnswerParseGeneration(uint32 nSearchID)
@@ -834,7 +1165,8 @@ void CSearchList::QueueChunkedSearchAnswerParseJob(SChunkedSearchAnswerParseJob 
 	}
 }
 
-bool CSearchList::QueueStoredSearchIngestPrepareJob(std::vector<SSearchIngestRecord> &records, uint32 nSearchID, const CString &strClientHash, bool bClientResponse, uint32 dwFromUDPServerIP, bool bDoSpamRating, bool bUseKadReloadThrottle)
+bool CSearchList::QueueStoredSearchIngestPrepareJob(std::vector<SSearchIngestRecord> &records, uint32 nSearchID, const CString &strClientHash,
+	bool bClientResponse, uint32 dwFromUDPServerIP, bool bDoSpamRating, bool bUseKadReloadThrottle, bool bStartupStoredSearch)
 {
 	if (records.empty())
 		return true;
@@ -852,6 +1184,7 @@ bool CSearchList::QueueStoredSearchIngestPrepareJob(std::vector<SSearchIngestRec
 	pJob->m_dwFromUDPServerIP = dwFromUDPServerIP;
 	pJob->m_bDoSpamRating = bDoSpamRating;
 	pJob->m_bUseKadReloadThrottle = bUseKadReloadThrottle;
+	pJob->m_bStartupStoredSearch = bStartupStoredSearch;
 	pJob->m_lGeneration = ::InterlockedCompareExchange(&m_lSearchAnswerParseGeneration, 0, 0);
 	{
 		CSingleLock lock(&m_searchAnswerParseQueueLock, TRUE);
@@ -900,6 +1233,41 @@ bool CSearchList::PostChunkedSearchIngestMessage()
 bool CSearchList::IsStartupLoadActiveForSearch(uint32 nSearchID) const
 {
 	return nSearchID != 0 && m_bStoredSearchStartupLoadActive && m_pStoredSearchStartupLoadParams != NULL && m_pStoredSearchStartupLoadParams->dwSearchID == nSearchID;
+}
+
+bool CSearchList::HasPendingStartupStoredSearchIngest(uint32 nSearchID)
+{
+	if (nSearchID == 0)
+		return false;
+
+	{
+		CSingleLock searchLock(GetSearchModelLock(), TRUE);
+		for (POSITION pos = m_chunkedSearchIngestJobs.GetHeadPosition(); pos != NULL;) {
+			const SChunkedSearchIngestJob *pJob = m_chunkedSearchIngestJobs.GetNext(pos);
+			if (pJob != NULL && pJob->m_nSearchID == nSearchID)
+				return true;
+		}
+	}
+
+	{
+		CSingleLock lock(&m_parsedSearchIngestBatchLock, TRUE);
+		for (POSITION pos = m_parsedSearchIngestBatches.GetHeadPosition(); pos != NULL;) {
+			const SParsedSearchIngestBatch *pBatch = m_parsedSearchIngestBatches.GetNext(pos);
+			if (pBatch != NULL && pBatch->m_nSearchID == nSearchID)
+				return true;
+		}
+	}
+
+	{
+		CSingleLock lock(&m_searchAnswerParseQueueLock, TRUE);
+		for (POSITION pos = m_storedSearchIngestPrepareJobs.GetHeadPosition(); pos != NULL;) {
+			const SStoredSearchIngestPrepareJob *pJob = m_storedSearchIngestPrepareJobs.GetNext(pos);
+			if (pJob != NULL && pJob->m_nSearchID == nSearchID)
+				return true;
+		}
+	}
+
+	return false;
 }
 
 bool CSearchList::HasPendingSearchProcessing(uint32 nSearchID)
@@ -956,6 +1324,23 @@ bool CSearchList::HasPendingSearchProcessing(uint32 nSearchID)
 			if (pJob != NULL && pJob->m_nSearchID == nSearchID)
 				return true;
 		}
+		for (POSITION pos = m_possibleKnownQueryJobs.GetHeadPosition(); pos != NULL;) {
+			const SPossibleKnownQueryJob *pJob = m_possibleKnownQueryJobs.GetNext(pos);
+			if (pJob != NULL && pJob->nSearchID == nSearchID)
+				return true;
+		}
+		BYTE bStartupPending = 0;
+		if (m_downloadValidatorStartupOverlaySearches.Lookup(nSearchID, bStartupPending) && bStartupPending != 0)
+			return true;
+	}
+
+	{
+		CSingleLock resultLock(&m_possibleKnownQueryResultLock, TRUE);
+		for (POSITION pos = m_possibleKnownQueryResults.GetHeadPosition(); pos != NULL;) {
+			const SPossibleKnownQueryResult *pResult = m_possibleKnownQueryResults.GetNext(pos);
+			if (pResult != NULL && pResult->nSearchID == nSearchID)
+				return true;
+		}
 	}
 
 	return false;
@@ -975,11 +1360,53 @@ bool CSearchList::HasPendingSearchProcessing() const
 	}
 	{
 		CSingleLock lock(const_cast<CCriticalSection*>(&m_searchAnswerParseQueueLock), TRUE);
-		return !const_cast<CSearchList*>(this)->m_chunkedSearchAnswerParseJobs.IsEmpty()
+		if (!const_cast<CSearchList*>(this)->m_chunkedSearchAnswerParseJobs.IsEmpty()
 			|| !const_cast<CSearchList*>(this)->m_storedSearchIngestPrepareJobs.IsEmpty()
 			|| !const_cast<CSearchList*>(this)->m_chunkedSpamRatingPrepareJobs.IsEmpty()
-			|| !const_cast<CSearchList*>(this)->m_activeSpamRatingPrepareCounts.IsEmpty();
+			|| !const_cast<CSearchList*>(this)->m_possibleKnownQueryJobs.IsEmpty()
+			|| !const_cast<CSearchList*>(this)->m_activeSpamRatingPrepareCounts.IsEmpty()
+			|| !const_cast<CSearchList*>(this)->m_downloadValidatorStartupOverlaySearches.IsEmpty())
+			return true;
 	}
+	{
+		CSingleLock resultLock(const_cast<CCriticalSection*>(&m_possibleKnownQueryResultLock), TRUE);
+		return !const_cast<CSearchList*>(this)->m_possibleKnownQueryResults.IsEmpty();
+	}
+}
+
+bool CSearchList::HasPendingPossibleKnownPreparation(uint32 nSearchID)
+{
+	if (nSearchID == 0)
+		return false;
+
+	{
+		CSingleLock searchLock(GetSearchModelLock(), TRUE);
+		for (POSITION pos = m_chunkedSpamRatingJobs.GetHeadPosition(); pos != NULL;) {
+			const SChunkedSpamRatingJob *pJob = m_chunkedSpamRatingJobs.GetNext(pos);
+			if (pJob != NULL && pJob->m_nSearchID == nSearchID && pJob->m_bPreparePossibleKnown)
+				return true;
+		}
+	}
+	{
+		CSingleLock lock(&m_parsedSearchIngestBatchLock, TRUE);
+		for (POSITION pos = m_preparedSpamRatingJobs.GetHeadPosition(); pos != NULL;) {
+			const SChunkedSpamRatingJob *pJob = m_preparedSpamRatingJobs.GetNext(pos);
+			if (pJob != NULL && pJob->m_nSearchID == nSearchID && pJob->m_bPreparePossibleKnown)
+				return true;
+		}
+	}
+	{
+		CSingleLock lock(&m_searchAnswerParseQueueLock, TRUE);
+		for (POSITION pos = m_chunkedSpamRatingPrepareJobs.GetHeadPosition(); pos != NULL;) {
+			const SChunkedSpamRatingJob *pJob = m_chunkedSpamRatingPrepareJobs.GetNext(pos);
+			if (pJob != NULL && pJob->m_nSearchID == nSearchID && pJob->m_bPreparePossibleKnown)
+				return true;
+		}
+		BYTE bStartupPending = 0;
+		if (m_downloadValidatorStartupOverlaySearches.Lookup(nSearchID, bStartupPending) && bStartupPending != 0)
+			return true;
+	}
+	return false;
 }
 
 bool CSearchList::HasPendingSpamRatingRecheck(uint32 nSearchID)
@@ -1042,6 +1469,23 @@ void CSearchList::CancelChunkedSpamRatingJobs(uint32 nSearchID)
 	}
 	{
 		CSingleLock lock(&m_searchAnswerParseQueueLock, TRUE);
+		if (nSearchID == 0) {
+			m_downloadValidatorProgressProcessed.RemoveAll();
+			m_downloadValidatorProgressTotal.RemoveAll();
+			m_downloadValidatorOverlayProgress.RemoveAll();
+			m_downloadValidatorRecheckDue.RemoveAll();
+			m_downloadValidatorStartupOverlaySearches.RemoveAll();
+			m_downloadValidatorDirtySearches.RemoveAll();
+			m_activeSpamRatingPrepareCounts.RemoveAll();
+			m_bDownloadValidatorRecheckAllPending = false;
+		} else {
+			m_downloadValidatorProgressProcessed.RemoveKey(nSearchID);
+			m_downloadValidatorProgressTotal.RemoveKey(nSearchID);
+			m_downloadValidatorOverlayProgress.RemoveKey(nSearchID);
+			m_downloadValidatorRecheckDue.RemoveKey(nSearchID);
+			m_downloadValidatorDirtySearches.RemoveKey(nSearchID);
+			m_activeSpamRatingPrepareCounts.RemoveKey(nSearchID);
+		}
 		for (POSITION pos = m_chunkedSpamRatingPrepareJobs.GetHeadPosition(); pos != NULL;) {
 			POSITION posCurrent = pos;
 			SChunkedSpamRatingJob *pJob = m_chunkedSpamRatingPrepareJobs.GetNext(pos);
@@ -1066,88 +1510,69 @@ void CSearchList::CancelChunkedSpamRatingJobs(uint32 nSearchID)
 		m_bChunkedSearchIngestPending = false;
 }
 
-void CSearchList::QueueChunkedSpamRatingJob(uint32 nSearchID, bool bExpectHigher, bool bExpectLower, bool bRecalculateAll)
+bool CSearchList::QueueChunkedSpamRatingJob(uint32 nSearchID, bool bExpectHigher, bool bExpectLower, bool bRecalculateAll, bool bShowDownloadValidatorOverlay)
 {
 	CSearchModelMutationLock mutationLock(this, _T("CSearchList::QueueChunkedSpamRatingJob"));
-	if (!mutationLock)
-		return;
-
-	if (!IsSearchProcessingAcceptingJobs())
-		return;
+	if (!mutationLock || !IsSearchProcessingAcceptingJobs())
+		return false;
 
 	ASSERT(!(bExpectHigher && bExpectLower));
 	ASSERT(m_bSpamFilterLoaded);
-
 	if (!thePrefs.GetBlacklistAutomatic() && !thePrefs.GetBlacklistManual() && !thePrefs.IsSearchSpamFilterEnabled())
-		return;
+		return false;
 
-	SearchList *list = GetSearchListForID(nSearchID);
+	SearchListsStruct *pListStruct = GetSearchListStructForID(nSearchID, false);
+	SearchList *list = pListStruct != NULL ? &pListStruct->m_listSearchFiles : NULL;
 	if (list == NULL || list->GetCount() == 0)
-		return;
+		return false;
 
 	CancelChunkedSpamRatingJobs(nSearchID);
+	if (bShowDownloadValidatorOverlay) {
+		ClearPossibleKnownQueryJobs(nSearchID);
+		if (outputwnd != NULL)
+			outputwnd->CancelPendingPossibleKnownProcessing(nSearchID);
+	}
 
 	SChunkedSpamRatingJob *pJob = new SChunkedSpamRatingJob();
 	pJob->m_nSearchID = nSearchID;
 	pJob->m_bExpectHigher = bExpectHigher;
 	pJob->m_bExpectLower = bExpectLower;
 	pJob->m_bRecalculateAll = bRecalculateAll;
-	pJob->m_ePhase = bRecalculateAll ? SChunkedSpamRatingJob::PhaseReset : SChunkedSpamRatingJob::PhaseParents;
+	pJob->m_bPrepareAutomaticBlacklist = thePrefs.GetBlacklistAutomatic();
+	pJob->m_bPrepareDownloadValidator = thePrefs.GetBlacklistManual() && thePrefs.GetDownloadValidator()
+		&& thePrefs.GetDownloadValidatorAutoMarkAsBlacklisted() && theApp.DownloadValidator != NULL;
+	pJob->m_bPreparePossibleKnown = bShowDownloadValidatorOverlay && thePrefs.GetDownloadValidator() != 0 && theApp.DownloadValidator != NULL;
+	pJob->m_bShowDownloadValidatorOverlay = bShowDownloadValidatorOverlay;
+	pJob->m_ePhase = SChunkedSpamRatingJob::PhaseCapture;
+	pJob->m_posCapture = list->GetHeadPosition();
+	pJob->m_iCaptureIndex = 0;
+	pJob->m_lCaptureDestructiveSequence = pListStruct->m_lDestructiveSequence;
 	pJob->m_lGeneration = ::InterlockedCompareExchange(&m_lSearchAnswerParseGeneration, 0, 0);
 	pJob->m_lSearchGeneration = GetSearchAnswerParseGeneration(nSearchID);
-	const bool bPrepareAutomaticBlacklist = thePrefs.GetBlacklistAutomatic();
-	pJob->m_ids.reserve(static_cast<size_t>(list->GetCount()));
-	if (bPrepareAutomaticBlacklist)
-		pJob->m_astrFileNames.reserve(static_cast<size_t>(list->GetCount()));
-	for (POSITION pos = list->GetHeadPosition(); pos != NULL;) {
-		CSearchFile *pFile = list->GetNext(pos);
-		if (pFile != NULL) {
-			SSearchResultId id;
-			id.Set(pFile->GetSearchID(), pFile->GetFileHash(), pFile->GetListParent() != NULL, pFile->GetFileName());
-			pJob->m_ids.push_back(id);
-			if (bPrepareAutomaticBlacklist)
-				pJob->m_astrFileNames.push_back(pFile->GetFileName());
-		}
+	pJob->m_ids.reserve(static_cast<size_t>((std::min)(list->GetCount(), static_cast<INT_PTR>(16384))));
+	if (pJob->m_bPrepareAutomaticBlacklist || pJob->m_bPrepareDownloadValidator || pJob->m_bPreparePossibleKnown) {
+		pJob->m_astrFileNames.reserve(static_cast<size_t>((std::min)(list->GetCount(), static_cast<INT_PTR>(16384))));
+		pJob->m_auFileSizes.reserve(static_cast<size_t>((std::min)(list->GetCount(), static_cast<INT_PTR>(16384))));
+		pJob->m_auMediaLengthSecs.reserve(static_cast<size_t>((std::min)(list->GetCount(), static_cast<INT_PTR>(16384))));
 	}
 
-	if (pJob->m_ids.empty()) {
-		delete pJob;
-		return;
+	if (pJob->m_bPrepareDownloadValidator || pJob->m_bPreparePossibleKnown) {
+		CSingleLock lock(&m_searchAnswerParseQueueLock, TRUE);
+		m_downloadValidatorProgressProcessed[nSearchID] = 0;
+		m_downloadValidatorProgressTotal[nSearchID] = GetDownloadValidatorProgressTotal(static_cast<size_t>(list->GetCount()), bRecalculateAll, pJob->m_bPreparePossibleKnown ? static_cast<size_t>(list->GetCount()) : 0);
+		if (pJob->m_bShowDownloadValidatorOverlay)
+			m_downloadValidatorOverlayProgress[nSearchID] = 1;
 	}
 
-	if (bPrepareAutomaticBlacklist) {
-		pJob->m_pAutomaticBlacklistSnapshot = CPreferences::CreateFilenameAutoBlacklistSnapshot();
-		pJob->m_abAutomaticBlacklistEvaluated.assign(pJob->m_ids.size(), 0);
-		pJob->m_abAutomaticBlacklisted.assign(pJob->m_ids.size(), 0);
-		bool bQueuedForPrepare = false;
-		bool bAddedToPrepareQueue = false;
-		if (StartSearchAnswerParseThread()) {
-			{
-				CSingleLock lock(&m_searchAnswerParseQueueLock, TRUE);
-				EnforceSpamRatingPrepareQueueLimitLocked(nSearchID);
-				m_chunkedSpamRatingPrepareJobs.AddTail(pJob);
-				bAddedToPrepareQueue = true;
-			}
-			bQueuedForPrepare = SignalSearchAnswerParseThread();
-		}
-		if (!bQueuedForPrepare) {
-			AddDebugLogLine(DLP_HIGH, false, _T("Chunked spam rating automatic blacklist prepare could not be queued. search=%u\n"), nSearchID);
-			if (bAddedToPrepareQueue)
-				CancelChunkedSpamRatingJobs(nSearchID);
-			else
-				delete pJob;
-			return;
-		}
-	} else {
-		EnforceChunkedSpamRatingQueueLimit(nSearchID);
-		m_chunkedSpamRatingJobs.AddTail(pJob);
-		if (!m_bChunkedSearchIngestPending && !PostChunkedSearchIngestMessage()) {
-			AddDebugLogLine(DLP_LOW, false, _T("Chunked spam rating recheck cancelled because the UI message target is unavailable. search=%u\n"), nSearchID);
-			CancelChunkedSpamRatingJobs(nSearchID);
-		}
+	EnforceChunkedSpamRatingQueueLimit(nSearchID);
+	m_chunkedSpamRatingJobs.AddTail(pJob);
+	if (!m_bChunkedSearchIngestPending && !PostChunkedSearchIngestMessage()) {
+		AddDebugLogLine(DLP_LOW, false, _T("Chunked spam rating capture cancelled because the UI message target is unavailable. search=%u\n"), nSearchID);
+		CancelChunkedSpamRatingJobs(nSearchID);
+		return false;
 	}
-
 	theApp.QueueSearchActivityChangedEvent(nSearchID);
+	return true;
 }
 
 void CSearchList::SetSpamRatingPrepareJobActive(uint32 nSearchID, bool bActive)
@@ -1182,10 +1607,20 @@ void CSearchList::QueuePreparedChunkedSpamRatingJob(SChunkedSpamRatingJob *pJob)
 		delete pJob;
 		return;
 	}
+	std::vector<uint32> droppedSearchIDs;
 	{
 		CSingleLock lock(&m_parsedSearchIngestBatchLock, TRUE);
-		EnforcePreparedSpamRatingQueueLimitLocked(pJob->m_nSearchID);
+		EnforcePreparedSpamRatingQueueLimitLocked(pJob->m_nSearchID, &droppedSearchIDs);
 		m_preparedSpamRatingJobs.AddTail(pJob);
+	}
+	if (!droppedSearchIDs.empty()) {
+		CSingleLock lock(&m_searchAnswerParseQueueLock, TRUE);
+		for (std::vector<uint32>::const_iterator it = droppedSearchIDs.begin(); it != droppedSearchIDs.end(); ++it) {
+			m_downloadValidatorProgressProcessed.RemoveKey(*it);
+			m_downloadValidatorProgressTotal.RemoveKey(*it);
+			m_downloadValidatorOverlayProgress.RemoveKey(*it);
+			m_downloadValidatorRecheckDue[*it] = ::GetTickCount() + 500;
+		}
 	}
 	theApp.QueueSearchIngestProcessing();
 }
@@ -1202,8 +1637,29 @@ void CSearchList::DrainPreparedChunkedSpamRatingJobs()
 		}
 		if (pJob != NULL) {
 			if (IsChunkedSpamRatingJobStale(pJob)) {
+				const uint32 nStaleSearchID = pJob->m_nSearchID;
 				delete pJob;
+				CSingleLock progressLock(&m_searchAnswerParseQueueLock, TRUE);
+				m_downloadValidatorProgressProcessed.RemoveKey(nStaleSearchID);
+				m_downloadValidatorProgressTotal.RemoveKey(nStaleSearchID);
+				m_downloadValidatorOverlayProgress.RemoveKey(nStaleSearchID);
+				m_downloadValidatorStartupOverlaySearches.RemoveKey(nStaleSearchID);
 				continue;
+			}
+			AggregatePreparedDownloadValidatorResults(*pJob);
+			if (pJob->m_bPrepareDownloadValidator && theApp.DownloadValidator != NULL) {
+				const uint32 uCurrentRevision = theApp.DownloadValidator->GetEvaluationRevision();
+				bool bNeedsFollowUp = false;
+				for (size_t i = 0; i < pJob->m_abDownloadValidatorEvaluated.size(); ++i) {
+					if (!pJob->m_abDownloadValidatorEvaluated[i] || (i < pJob->m_auDownloadValidatorRevisions.size() && pJob->m_auDownloadValidatorRevisions[i] == uCurrentRevision))
+						continue;
+					pJob->m_abDownloadValidatorEvaluated[i] = 0;
+					pJob->m_abDownloadValidatorSimilar[i] = 0;
+					pJob->m_auDownloadValidatorRevisions[i] = 0;
+					bNeedsFollowUp = true;
+				}
+				if (bNeedsFollowUp)
+					RequestDownloadValidatorRecheck(pJob->m_nSearchID, 1000);
 			}
 			EnforceChunkedSpamRatingQueueLimit(pJob->m_nSearchID);
 			m_chunkedSpamRatingJobs.AddTail(pJob);
@@ -1216,14 +1672,76 @@ bool CSearchList::IsChunkedSpamRatingJobStale(const SChunkedSpamRatingJob *pJob)
 	return pJob == NULL || IsSearchJobStale(pJob->m_nSearchID, pJob->m_lGeneration, pJob->m_lSearchGeneration);
 }
 
-void CSearchList::ApplyPreparedAutomaticBlacklistResult(const SChunkedSpamRatingJob &job, size_t uIndex, CSearchFile *pFile)
+void CSearchList::ApplyPreparedSearchFilterResults(const SChunkedSpamRatingJob &job, size_t uIndex, CSearchFile *pFile)
 {
-	if (pFile == NULL || uIndex >= job.m_abAutomaticBlacklistEvaluated.size() || !job.m_abAutomaticBlacklistEvaluated[uIndex])
+	if (pFile == NULL)
 		return;
-	pFile->SetAutomaticBlacklistEvaluation(true, uIndex < job.m_abAutomaticBlacklisted.size() && job.m_abAutomaticBlacklisted[uIndex] != 0);
+	if (uIndex < job.m_abAutomaticBlacklistEvaluated.size() && job.m_abAutomaticBlacklistEvaluated[uIndex])
+		pFile->SetAutomaticBlacklistEvaluation(true, uIndex < job.m_abAutomaticBlacklisted.size() && job.m_abAutomaticBlacklisted[uIndex] != 0);
+	if (uIndex < job.m_abDownloadValidatorEvaluated.size() && job.m_abDownloadValidatorEvaluated[uIndex]) {
+		const bool bSimilar = uIndex < job.m_abDownloadValidatorSimilar.size() && job.m_abDownloadValidatorSimilar[uIndex] != 0;
+		const uint32 uRevision = uIndex < job.m_auDownloadValidatorRevisions.size() ? job.m_auDownloadValidatorRevisions[uIndex] : 0;
+		pFile->SetDownloadValidatorEvaluation(bSimilar, uRevision);
+	}
+	if (uIndex < job.m_aDownloadValidatorQueryData.size() && job.m_aDownloadValidatorQueryData[uIndex].bPrepared)
+		pFile->GetDownloadValidatorFuzzyQueryData() = job.m_aDownloadValidatorQueryData[uIndex];
+	if (uIndex < job.m_aiPossibleKnownCacheIndices.size()) {
+		const INT_PTR iCacheIndex = job.m_aiPossibleKnownCacheIndices[uIndex];
+		if (iCacheIndex >= 0 && static_cast<size_t>(iCacheIndex) < job.m_aPossibleKnownCaches.size()) {
+			const size_t uCacheIndex = static_cast<size_t>(iCacheIndex);
+			if (uCacheIndex < job.m_aiPossibleKnownSourceIndices.size()) {
+				const size_t uSourceIndex = job.m_aiPossibleKnownSourceIndices[uCacheIndex];
+				if (uSourceIndex < job.m_aDownloadValidatorQueryData.size() && job.m_aDownloadValidatorQueryData[uSourceIndex].bPrepared)
+					pFile->GetDownloadValidatorFuzzyQueryData() = job.m_aDownloadValidatorQueryData[uSourceIndex];
+			}
+			pFile->SetPossibleKnownCache(job.m_aPossibleKnownCaches[uCacheIndex]);
+		}
+	}
 }
 
-void CSearchList::ProcessChunkedSpamRatingPrepareJobsOnParserThread()
+bool CSearchList::AggregatePreparedDownloadValidatorResults(SChunkedSpamRatingJob &job)
+{
+	if (!job.m_bPrepareDownloadValidator || theApp.DownloadValidator == NULL || job.m_bDownloadValidatorGroupsAggregated)
+		return true;
+
+	const uint32 uCurrentRevision = theApp.DownloadValidator->GetEvaluationRevision();
+	bool bNeedsFollowUp = false;
+	std::vector<BYTE> abGroupEvaluated(job.m_ids.size(), 0);
+	std::vector<BYTE> abGroupCurrent(job.m_ids.size(), 1);
+	std::vector<BYTE> abGroupSimilar(job.m_ids.size(), 0);
+	for (size_t i = 0; i < job.m_ids.size(); ++i) {
+		const size_t uRootIndex = i < job.m_aiDownloadValidatorRootIndices.size() ? job.m_aiDownloadValidatorRootIndices[i] : i;
+		if (uRootIndex >= job.m_ids.size() || i >= job.m_abDownloadValidatorEvaluated.size() || !job.m_abDownloadValidatorEvaluated[i])
+			continue;
+		abGroupEvaluated[uRootIndex] = 1;
+		if (i >= job.m_auDownloadValidatorRevisions.size() || job.m_auDownloadValidatorRevisions[i] != uCurrentRevision)
+			abGroupCurrent[uRootIndex] = 0;
+		if (i < job.m_abDownloadValidatorSimilar.size() && job.m_abDownloadValidatorSimilar[i])
+			abGroupSimilar[uRootIndex] = 1;
+	}
+
+	for (size_t i = 0; i < job.m_ids.size(); ++i) {
+		const size_t uRootIndex = i < job.m_aiDownloadValidatorRootIndices.size() ? job.m_aiDownloadValidatorRootIndices[i] : i;
+		if (uRootIndex >= abGroupEvaluated.size() || !abGroupEvaluated[uRootIndex])
+			continue;
+		if (!abGroupCurrent[uRootIndex]) {
+			job.m_abDownloadValidatorEvaluated[i] = 0;
+			job.m_abDownloadValidatorSimilar[i] = 0;
+			job.m_auDownloadValidatorRevisions[i] = 0;
+			bNeedsFollowUp = true;
+			continue;
+		}
+		job.m_abDownloadValidatorEvaluated[i] = 1;
+		job.m_abDownloadValidatorSimilar[i] = abGroupSimilar[uRootIndex];
+		job.m_auDownloadValidatorRevisions[i] = uCurrentRevision;
+	}
+	job.m_bDownloadValidatorGroupsAggregated = true;
+	if (bNeedsFollowUp)
+		RequestDownloadValidatorRecheck(job.m_nSearchID, 1000);
+	return true;
+}
+
+void CSearchList::ProcessChunkedSpamRatingPrepareJobsOnDownloadValidatorThread()
 {
 	const DWORD dwSliceStartTick = ::GetTickCount();
 	UINT uProcessedInSlice = 0;
@@ -1233,6 +1751,21 @@ void CSearchList::ProcessChunkedSpamRatingPrepareJobsOnParserThread()
 			CSingleLock lock(&m_searchAnswerParseQueueLock, TRUE);
 			if (m_chunkedSpamRatingPrepareJobs.IsEmpty())
 				break;
+			const uint32 nPrioritySearchID = static_cast<uint32>(::InterlockedCompareExchange(&m_lDownloadValidatorPrioritySearchID, 0, 0));
+			const POSITION posHead = m_chunkedSpamRatingPrepareJobs.GetHeadPosition();
+			if (nPrioritySearchID != 0 && posHead != NULL) {
+				for (POSITION pos = posHead; pos != NULL;) {
+					const POSITION posCurrent = pos;
+					SChunkedSpamRatingJob *pQueuedJob = m_chunkedSpamRatingPrepareJobs.GetNext(pos);
+					if (pQueuedJob != NULL && pQueuedJob->m_nSearchID == nPrioritySearchID) {
+						if (posCurrent != posHead) {
+							m_chunkedSpamRatingPrepareJobs.RemoveAt(posCurrent);
+							m_chunkedSpamRatingPrepareJobs.AddHead(pQueuedJob);
+						}
+						break;
+					}
+				}
+			}
 			pJob = m_chunkedSpamRatingPrepareJobs.RemoveHead();
 			if (pJob != NULL)
 				SetSpamRatingPrepareJobActive(pJob->m_nSearchID, true);
@@ -1244,6 +1777,10 @@ void CSearchList::ProcessChunkedSpamRatingPrepareJobsOnParserThread()
 			{
 				CSingleLock lock(&m_searchAnswerParseQueueLock, TRUE);
 				SetSpamRatingPrepareJobActive(pJob->m_nSearchID, false);
+				m_downloadValidatorProgressProcessed.RemoveKey(pJob->m_nSearchID);
+				m_downloadValidatorProgressTotal.RemoveKey(pJob->m_nSearchID);
+				m_downloadValidatorOverlayProgress.RemoveKey(pJob->m_nSearchID);
+				m_downloadValidatorStartupOverlaySearches.RemoveKey(pJob->m_nSearchID);
 			}
 			delete pJob;
 			continue;
@@ -1251,27 +1788,115 @@ void CSearchList::ProcessChunkedSpamRatingPrepareJobsOnParserThread()
 
 		while (pJob->m_iNextPrepareItem < static_cast<INT_PTR>(pJob->m_ids.size()) && !IsChunkedSpamRatingJobStale(pJob)) {
 			const size_t uIndex = static_cast<size_t>(pJob->m_iNextPrepareItem++);
-			const bool bMatched = uIndex < pJob->m_astrFileNames.size() && !pJob->m_astrFileNames[uIndex].IsEmpty() && CPreferences::IsFilenameAutoBlacklisted(pJob->m_pAutomaticBlacklistSnapshot, pJob->m_astrFileNames[uIndex], NULL);
-			if (uIndex < pJob->m_abAutomaticBlacklistEvaluated.size())
+			const CString* pFileName = uIndex < pJob->m_astrFileNames.size() ? &pJob->m_astrFileNames[uIndex] : NULL;
+			if (uIndex < pJob->m_abAutomaticBlacklistEvaluated.size()) {
+				const bool bMatched = pFileName != NULL && !pFileName->IsEmpty() && CPreferences::IsFilenameAutoBlacklisted(pJob->m_pAutomaticBlacklistSnapshot, *pFileName, NULL);
 				pJob->m_abAutomaticBlacklistEvaluated[uIndex] = 1;
-			if (uIndex < pJob->m_abAutomaticBlacklisted.size())
-				pJob->m_abAutomaticBlacklisted[uIndex] = bMatched ? 1 : 0;
+				if (uIndex < pJob->m_abAutomaticBlacklisted.size())
+					pJob->m_abAutomaticBlacklisted[uIndex] = bMatched ? 1 : 0;
+			}
+			std::vector<CDownloadValidator::FuzzyCandidateType> preparedFuzzyCandidates;
+			const std::vector<CDownloadValidator::FuzzyCandidateType>* pPreparedFuzzyCandidates = NULL;
+			if (uIndex < pJob->m_abDownloadValidatorEvaluated.size() && theApp.DownloadValidator != NULL && pFileName != NULL && !pFileName->IsEmpty() && uIndex < pJob->m_auFileSizes.size()) {
+				const size_t uSourceIndex = uIndex < pJob->m_aiDownloadValidatorSourceIndices.size() ? pJob->m_aiDownloadValidatorSourceIndices[uIndex] : uIndex;
+				if (uSourceIndex < uIndex && uSourceIndex < pJob->m_abDownloadValidatorEvaluated.size() && pJob->m_abDownloadValidatorEvaluated[uSourceIndex]) {
+					pJob->m_abDownloadValidatorEvaluated[uIndex] = 1;
+					pJob->m_abDownloadValidatorSimilar[uIndex] = pJob->m_abDownloadValidatorSimilar[uSourceIndex];
+					pJob->m_auDownloadValidatorRevisions[uIndex] = pJob->m_auDownloadValidatorRevisions[uSourceIndex];
+					if (uIndex < pJob->m_aDownloadValidatorQueryData.size() && uSourceIndex < pJob->m_aDownloadValidatorQueryData.size())
+						pJob->m_aDownloadValidatorQueryData[uIndex] = pJob->m_aDownloadValidatorQueryData[uSourceIndex];
+				} else {
+					uint32 uRevision = 0;
+					SDownloadValidatorFuzzyQueryData* pQueryData = uIndex < pJob->m_aDownloadValidatorQueryData.size() ? &pJob->m_aDownloadValidatorQueryData[uIndex] : NULL;
+					const uint32 uMediaLengthSec = uIndex < pJob->m_auMediaLengthSecs.size() ? pJob->m_auMediaLengthSecs[uIndex] : 0;
+					const CDownloadValidator::EFuzzyMediaLengthSource eMediaLengthSource = uMediaLengthSec != 0 ? CDownloadValidator::FuzzyMediaLengthRemoteMetadata : CDownloadValidator::FuzzyMediaLengthUnknown;
+					const bool bPrepareAliasCandidates = pJob->m_bPreparePossibleKnown && uIndex < pJob->m_aiPossibleKnownAliasCacheIndices.size()
+						&& pJob->m_aiPossibleKnownAliasCacheIndices[uIndex] >= 0;
+					std::vector<CDownloadValidator::FuzzyCandidateType>* pFuzzyOutput = bPrepareAliasCandidates ? &preparedFuzzyCandidates : NULL;
+					const bool bSimilar = theApp.DownloadValidator->EvaluateSearchResultSimilarity(pJob->m_ids[uIndex].m_abyFileHash, *pFileName, pJob->m_auFileSizes[uIndex], uMediaLengthSec, eMediaLengthSource, uRevision, pQueryData, pFuzzyOutput);
+					if (pFuzzyOutput != NULL)
+						pPreparedFuzzyCandidates = pFuzzyOutput;
+					pJob->m_abDownloadValidatorEvaluated[uIndex] = 1;
+					if (uIndex < pJob->m_abDownloadValidatorSimilar.size())
+						pJob->m_abDownloadValidatorSimilar[uIndex] = bSimilar ? 1 : 0;
+					if (uIndex < pJob->m_auDownloadValidatorRevisions.size())
+						pJob->m_auDownloadValidatorRevisions[uIndex] = uRevision;
+				}
+			}
+			if (pJob->m_bPreparePossibleKnown && theApp.DownloadValidator != NULL && uIndex < pJob->m_aiPossibleKnownAliasCacheIndices.size()) {
+				const INT_PTR iCacheIndex = pJob->m_aiPossibleKnownAliasCacheIndices[uIndex];
+				if (iCacheIndex >= 0 && static_cast<size_t>(iCacheIndex) < pJob->m_aPossibleKnownCaches.size()) {
+					SSearchFilePossibleKnownCache& cache = pJob->m_aPossibleKnownCaches[static_cast<size_t>(iCacheIndex)];
+					if (!cache.bAvailabilityKnown) {
+						cache.Clear();
+						cache.uRevision = pJob->m_uPossibleKnownRevision;
+						cache.uCandidateDataRevision = pJob->m_uPossibleKnownCandidateDataRevision;
+						cache.uAliasFingerprint = static_cast<size_t>(iCacheIndex) < pJob->m_auPossibleKnownAliasFingerprints.size() ? pJob->m_auPossibleKnownAliasFingerprints[static_cast<size_t>(iCacheIndex)] : 0;
+						const size_t uRootIndex = static_cast<size_t>(iCacheIndex) < pJob->m_aiPossibleKnownSourceIndices.size() ? pJob->m_aiPossibleKnownSourceIndices[static_cast<size_t>(iCacheIndex)] : uIndex;
+						cache.uSourceMediaLengthSec = uRootIndex < pJob->m_auMediaLengthSecs.size() ? pJob->m_auMediaLengthSecs[uRootIndex] : 0;
+						cache.bAvailabilityKnown = true;
+						cache.bRowsLoaded = true;
+					}
+					const size_t uRootIndex = static_cast<size_t>(iCacheIndex) < pJob->m_aiPossibleKnownSourceIndices.size() ? pJob->m_aiPossibleKnownSourceIndices[static_cast<size_t>(iCacheIndex)] : uIndex;
+					if (uRootIndex < pJob->m_auFileSizes.size()) {
+						std::vector<CDownloadValidator::FuzzyCandidateType> candidates;
+						SDownloadValidatorFuzzyQueryData* pQueryData = uIndex < pJob->m_aDownloadValidatorQueryData.size() ? &pJob->m_aDownloadValidatorQueryData[uIndex] : NULL;
+						const CDownloadValidator::EFuzzyMediaLengthSource eMediaLengthSource = cache.uSourceMediaLengthSec != 0 ? CDownloadValidator::FuzzyMediaLengthRemoteMetadata : CDownloadValidator::FuzzyMediaLengthUnknown;
+						theApp.DownloadValidator->FindPossibleKnownCandidates(NULL, *pFileName, pJob->m_auFileSizes[uRootIndex], cache.uSourceMediaLengthSec, eMediaLengthSource, candidates, 0, true, pQueryData, true, true, pPreparedFuzzyCandidates);
+						if (static_cast<size_t>(iCacheIndex) < pJob->m_aPossibleKnownRowIdentityIndices.size()) {
+							std::unordered_multimap<uint64, size_t>& identities = pJob->m_aPossibleKnownRowIdentityIndices[static_cast<size_t>(iCacheIndex)];
+							for (std::vector<CDownloadValidator::FuzzyCandidateType>::const_iterator it = candidates.begin(); it != candidates.end(); ++it)
+								MergePossibleKnownModelRow(cache.rows, identities, BuildPossibleKnownModelRow(*it));
+						}
+					}
+					++pJob->m_uProcessedPossibleKnownAliases;
+				}
+			}
 			++pJob->m_uProcessed;
+			if ((pJob->m_bPrepareDownloadValidator || pJob->m_bPreparePossibleKnown)
+				&& (((pJob->m_iNextPrepareItem & 0x3F) == 0) || pJob->m_iNextPrepareItem >= static_cast<INT_PTR>(pJob->m_ids.size()))) {
+				CSingleLock progressLock(&m_searchAnswerParseQueueLock, TRUE);
+				m_downloadValidatorProgressProcessed[pJob->m_nSearchID] = SaturateDownloadValidatorProgress(static_cast<uint64>(pJob->m_ids.size()) + static_cast<size_t>(pJob->m_iNextPrepareItem) + pJob->m_uProcessedPossibleKnownAliases);
+				m_downloadValidatorProgressTotal[pJob->m_nSearchID] = GetDownloadValidatorProgressTotal(pJob->m_ids.size(), pJob->m_bRecalculateAll, pJob->m_uPossibleKnownAliasCount);
+			}
 			++uProcessedInSlice;
 
 			const DWORD dwNow = ::GetTickCount();
 			if (pJob->m_dwLastProgressTick == 0 || static_cast<DWORD>(dwNow - pJob->m_dwLastProgressTick) >= theApp.GetTimeBudgetedProgressTraceMs(CemuleApp::TimeBudgetSearchIngest)) {
 				pJob->m_dwLastProgressTick = dwNow;
-				AddDebugLogLine(DLP_VERYLOW, false, _T("Chunked spam rating auto-blacklist prepare progress. search=%u processed=%u remaining=%d\n"), pJob->m_nSearchID, pJob->m_uProcessed, static_cast<int>(pJob->m_ids.size() - static_cast<size_t>(pJob->m_iNextPrepareItem)));
+				AddDebugLogLine(DLP_VERYLOW, false, _T("Chunked spam rating search-filter prepare progress. search=%u processed=%u remaining=%d\n"),
+					pJob->m_nSearchID, pJob->m_uProcessed, static_cast<int>(pJob->m_ids.size() - static_cast<size_t>(pJob->m_iNextPrepareItem)));
 			}
 
 			if (theApp.IsTimeBudgetExceeded(dwSliceStartTick, CemuleApp::TimeBudgetSearchIngest))
 				break;
 		}
 
+
+		if (pJob->m_iNextPrepareItem >= static_cast<INT_PTR>(pJob->m_ids.size()))
+			AggregatePreparedDownloadValidatorResults(*pJob);
+
+		if (pJob->m_bPreparePossibleKnown && pJob->m_iNextPrepareItem >= static_cast<INT_PTR>(pJob->m_ids.size())) {
+			for (size_t i = 0; i < pJob->m_aPossibleKnownCaches.size(); ++i)
+				pJob->m_aPossibleKnownCaches[i].bHasMatches = !pJob->m_aPossibleKnownCaches[i].rows.empty();
+			pJob->m_aPossibleKnownRowIdentityIndices.clear();
+			pJob->m_iNextPossibleKnownItem = static_cast<INT_PTR>(pJob->m_aiPossibleKnownSourceIndices.size());
+			if (theApp.DownloadValidator != NULL && pJob->m_uPossibleKnownRevision != theApp.DownloadValidator->GetPossibleKnownRevision())
+				RequestDownloadValidatorRecheck(pJob->m_nSearchID, 1000);
+		}
+
 		const bool bStale = IsChunkedSpamRatingJobStale(pJob);
-		const bool bFinished = pJob->m_iNextPrepareItem >= static_cast<INT_PTR>(pJob->m_ids.size()) || bStale;
+		const bool bFiltersPrepared = pJob->m_iNextPrepareItem >= static_cast<INT_PTR>(pJob->m_ids.size());
+		const bool bPossibleKnownPrepared = !pJob->m_bPreparePossibleKnown || pJob->m_iNextPossibleKnownItem >= static_cast<INT_PTR>(pJob->m_aiPossibleKnownSourceIndices.size());
+		const bool bFinished = (bFiltersPrepared && bPossibleKnownPrepared) || bStale;
 		if (bFinished) {
+			if (bStale) {
+				CSingleLock progressLock(&m_searchAnswerParseQueueLock, TRUE);
+				m_downloadValidatorProgressProcessed.RemoveKey(pJob->m_nSearchID);
+				m_downloadValidatorProgressTotal.RemoveKey(pJob->m_nSearchID);
+				m_downloadValidatorOverlayProgress.RemoveKey(pJob->m_nSearchID);
+				m_downloadValidatorStartupOverlaySearches.RemoveKey(pJob->m_nSearchID);
+			}
 			if (!bStale) {
 				const uint32 nSearchID = pJob->m_nSearchID;
 				pJob->m_uProcessed = 0;
@@ -1290,7 +1915,7 @@ void CSearchList::ProcessChunkedSpamRatingPrepareJobsOnParserThread()
 			}
 		} else {
 			CSingleLock lock(&m_searchAnswerParseQueueLock, TRUE);
-			m_chunkedSpamRatingPrepareJobs.AddHead(pJob);
+			m_chunkedSpamRatingPrepareJobs.AddTail(pJob);
 			SetSpamRatingPrepareJobActive(pJob->m_nSearchID, false);
 		}
 
@@ -1301,7 +1926,7 @@ void CSearchList::ProcessChunkedSpamRatingPrepareJobsOnParserThread()
 	DWORD dwSliceElapsed = 0;
 	if (theApp.IsTimeBudgetHardExceeded(dwSliceStartTick, CemuleApp::TimeBudgetSearchIngest, &dwSliceElapsed)) {
 		CSingleLock lock(&m_searchAnswerParseQueueLock, TRUE);
-		theApp.TraceTimeBudgetSlice(CemuleApp::TimeBudgetSearchIngest, _T("ProcessChunkedSpamRatingPrepareJobsOnParserThread"), dwSliceElapsed, uProcessedInSlice, m_chunkedSpamRatingPrepareJobs.GetCount());
+		theApp.TraceTimeBudgetSlice(CemuleApp::TimeBudgetSearchIngest, _T("ProcessChunkedSpamRatingPrepareJobsOnDownloadValidatorThread"), dwSliceElapsed, uProcessedInSlice, m_chunkedSpamRatingPrepareJobs.GetCount());
 	}
 
 	bool bHasMore = false;
@@ -1309,13 +1934,29 @@ void CSearchList::ProcessChunkedSpamRatingPrepareJobsOnParserThread()
 		CSingleLock lock(&m_searchAnswerParseQueueLock, TRUE);
 		bHasMore = !m_chunkedSpamRatingPrepareJobs.IsEmpty();
 	}
+	theApp.QueueBulkOperationOverlayRefreshEvent();
 	if (bHasMore)
-		SignalSearchAnswerParseThread();
+		theApp.QueueDownloadValidatorCpuWork();
 }
 
 void CSearchList::ProcessChunkedSpamRatingJobs(const DWORD dwSliceStartTick, UINT& uProcessedInSlice)
 {
 	while (!m_chunkedSpamRatingJobs.IsEmpty() && !theApp.IsTimeBudgetExceeded(dwSliceStartTick, CemuleApp::TimeBudgetSearchIngest)) {
+		const uint32 nPrioritySearchID = static_cast<uint32>(::InterlockedCompareExchange(&m_lDownloadValidatorPrioritySearchID, 0, 0));
+		const POSITION posHead = m_chunkedSpamRatingJobs.GetHeadPosition();
+		if (nPrioritySearchID != 0 && posHead != NULL) {
+			for (POSITION pos = posHead; pos != NULL;) {
+				const POSITION posCurrent = pos;
+				SChunkedSpamRatingJob *pQueuedJob = m_chunkedSpamRatingJobs.GetNext(pos);
+				if (pQueuedJob != NULL && pQueuedJob->m_nSearchID == nPrioritySearchID) {
+					if (posCurrent != posHead) {
+						m_chunkedSpamRatingJobs.RemoveAt(posCurrent);
+						m_chunkedSpamRatingJobs.AddHead(pQueuedJob);
+					}
+					break;
+				}
+			}
+		}
 		SChunkedSpamRatingJob *pJob = m_chunkedSpamRatingJobs.GetHead();
 		if (pJob == NULL) {
 			m_chunkedSpamRatingJobs.RemoveHead();
@@ -1323,14 +1964,218 @@ void CSearchList::ProcessChunkedSpamRatingJobs(const DWORD dwSliceStartTick, UIN
 		}
 
 		if (IsChunkedSpamRatingJobStale(pJob)) {
+			const uint32 nStaleSearchID = pJob->m_nSearchID;
 			delete m_chunkedSpamRatingJobs.RemoveHead();
+			CSingleLock progressLock(&m_searchAnswerParseQueueLock, TRUE);
+			m_downloadValidatorProgressProcessed.RemoveKey(nStaleSearchID);
+			m_downloadValidatorProgressTotal.RemoveKey(nStaleSearchID);
+			m_downloadValidatorOverlayProgress.RemoveKey(nStaleSearchID);
+			m_downloadValidatorStartupOverlaySearches.RemoveKey(nStaleSearchID);
 			continue;
 		}
 
-		SearchList *list = GetSearchListForID(pJob->m_nSearchID);
+		SearchListsStruct *pListStruct = GetSearchListStructForID(pJob->m_nSearchID, false);
+		SearchList *list = pListStruct != NULL ? &pListStruct->m_listSearchFiles : NULL;
 		if (list == NULL || list->GetCount() == 0) {
+			const uint32 nMissingSearchID = pJob->m_nSearchID;
 			delete m_chunkedSpamRatingJobs.RemoveHead();
+			CSingleLock progressLock(&m_searchAnswerParseQueueLock, TRUE);
+			m_downloadValidatorProgressProcessed.RemoveKey(nMissingSearchID);
+			m_downloadValidatorProgressTotal.RemoveKey(nMissingSearchID);
+			m_downloadValidatorOverlayProgress.RemoveKey(nMissingSearchID);
+			m_downloadValidatorStartupOverlaySearches.RemoveKey(nMissingSearchID);
 			continue;
+		}
+
+		if (pJob->m_ePhase == SChunkedSpamRatingJob::PhaseCapture) {
+			const INT_PTR iCurrentListCount = list->GetCount();
+			if (pJob->m_lCaptureDestructiveSequence != pListStruct->m_lDestructiveSequence || pJob->m_iCaptureIndex > iCurrentListCount) {
+				pJob->m_ids.clear();
+				pJob->m_astrFileNames.clear();
+				pJob->m_auFileSizes.clear();
+				pJob->m_auMediaLengthSecs.clear();
+				pJob->m_aiDownloadValidatorSourceIndices.clear();
+				pJob->m_aiDownloadValidatorRootIndices.clear();
+				pJob->m_downloadValidatorEvaluationSources.clear();
+				pJob->m_aiPossibleKnownCacheIndices.clear();
+				pJob->m_aiPossibleKnownAliasCacheIndices.clear();
+				pJob->m_aiPossibleKnownSourceIndices.clear();
+				pJob->m_auPossibleKnownAliasFingerprints.clear();
+				pJob->m_aPossibleKnownCaches.clear();
+				pJob->m_aPossibleKnownRowIdentityIndices.clear();
+				pJob->m_iNextPossibleKnownItem = 0;
+				pJob->m_uPossibleKnownAliasCount = 0;
+				pJob->m_uProcessedPossibleKnownAliases = 0;
+				pJob->m_bDownloadValidatorGroupsAggregated = false;
+				pJob->m_posCapture = list->GetHeadPosition();
+				pJob->m_iCaptureIndex = 0;
+				pJob->m_lCaptureDestructiveSequence = pListStruct->m_lDestructiveSequence;
+			}
+			while (pJob->m_posCapture != NULL) {
+				CSearchFile *pFile = list->GetNext(pJob->m_posCapture);
+				++pJob->m_iCaptureIndex;
+				if (pFile != NULL) {
+					SSearchResultId id;
+					id.Set(pFile->GetSearchID(), pFile->GetFileHash(), pFile->GetListParent() != NULL, pFile->GetFileName());
+					pJob->m_ids.push_back(id);
+					if (pJob->m_bPrepareAutomaticBlacklist || pJob->m_bPrepareDownloadValidator || pJob->m_bPreparePossibleKnown) {
+						pJob->m_astrFileNames.push_back(pFile->GetFileName());
+						pJob->m_auFileSizes.push_back(pFile->GetFileSize());
+						pJob->m_auMediaLengthSecs.push_back(pFile->GetIntTagValue(FT_MEDIA_LENGTH));
+					}
+				}
+				++uProcessedInSlice;
+				if ((pJob->m_bPrepareDownloadValidator || pJob->m_bPreparePossibleKnown) && ((pJob->m_iCaptureIndex & 0x3F) == 0 || pJob->m_posCapture == NULL)) {
+					CSingleLock progressLock(&m_searchAnswerParseQueueLock, TRUE);
+					m_downloadValidatorProgressProcessed[pJob->m_nSearchID] = SaturateDownloadValidatorProgress(static_cast<uint64>(pJob->m_iCaptureIndex));
+					m_downloadValidatorProgressTotal[pJob->m_nSearchID] = GetDownloadValidatorProgressTotal(static_cast<size_t>((std::max)(iCurrentListCount, pJob->m_iCaptureIndex)), pJob->m_bRecalculateAll,
+						pJob->m_bPreparePossibleKnown ? static_cast<size_t>((std::max)(iCurrentListCount, pJob->m_iCaptureIndex)) : 0);
+				}
+				if (theApp.IsTimeBudgetExceeded(dwSliceStartTick, CemuleApp::TimeBudgetSearchIngest))
+					break;
+			}
+
+			if (pJob->m_posCapture != NULL) {
+				m_chunkedSpamRatingJobs.RemoveHead();
+				m_chunkedSpamRatingJobs.AddTail(pJob);
+				theApp.QueueBulkOperationOverlayRefreshEvent();
+				break;
+			}
+
+			pJob->m_iNextPrepareItem = 0;
+			pJob->m_iNextPossibleKnownItem = 0;
+			pJob->m_uPossibleKnownAliasCount = 0;
+			pJob->m_uProcessedPossibleKnownAliases = 0;
+			pJob->m_iNextItem = 0;
+			pJob->m_bDownloadValidatorGroupsAggregated = false;
+			pJob->m_ePhase = pJob->m_bRecalculateAll ? SChunkedSpamRatingJob::PhaseReset : SChunkedSpamRatingJob::PhaseParents;
+			try {
+				if (pJob->m_bPrepareDownloadValidator || pJob->m_bPreparePossibleKnown) {
+					pJob->m_aiDownloadValidatorRootIndices.assign(pJob->m_ids.size(), 0);
+					std::map<CString, size_t> rootsByHash;
+					for (size_t i = 0; i < pJob->m_ids.size(); ++i) {
+						pJob->m_aiDownloadValidatorRootIndices[i] = i;
+						if (!pJob->m_ids[i].m_bChild)
+							rootsByHash[md4str(pJob->m_ids[i].m_abyFileHash)] = i;
+					}
+					for (size_t i = 0; i < pJob->m_ids.size(); ++i) {
+						if (!pJob->m_ids[i].m_bChild)
+							continue;
+						const std::map<CString, size_t>::const_iterator itRoot = rootsByHash.find(md4str(pJob->m_ids[i].m_abyFileHash));
+						if (itRoot != rootsByHash.end())
+							pJob->m_aiDownloadValidatorRootIndices[i] = itRoot->second;
+					}
+				}
+				if (pJob->m_bPrepareAutomaticBlacklist) {
+					pJob->m_pAutomaticBlacklistSnapshot = CPreferences::CreateFilenameAutoBlacklistSnapshot();
+					pJob->m_abAutomaticBlacklistEvaluated.assign(pJob->m_ids.size(), 0);
+					pJob->m_abAutomaticBlacklisted.assign(pJob->m_ids.size(), 0);
+				}
+				if (pJob->m_bPrepareDownloadValidator) {
+					pJob->m_aiDownloadValidatorSourceIndices.clear();
+					pJob->m_aiDownloadValidatorSourceIndices.reserve(pJob->m_ids.size());
+					pJob->m_downloadValidatorEvaluationSources.clear();
+					for (size_t i = 0; i < pJob->m_ids.size(); ++i) {
+						size_t uSourceIndex = i;
+						const CString strEvaluationKey(BuildDownloadValidatorEvaluationKey(pJob->m_ids[i].m_abyFileHash, pJob->m_astrFileNames[i], pJob->m_auFileSizes[i], pJob->m_auMediaLengthSecs[i]));
+						const std::map<CString, size_t>::const_iterator itSource = pJob->m_downloadValidatorEvaluationSources.find(strEvaluationKey);
+						if (itSource != pJob->m_downloadValidatorEvaluationSources.end())
+							uSourceIndex = itSource->second;
+						else
+							pJob->m_downloadValidatorEvaluationSources.insert(std::make_pair(strEvaluationKey, i));
+						pJob->m_aiDownloadValidatorSourceIndices.push_back(uSourceIndex);
+					}
+					pJob->m_abDownloadValidatorEvaluated.assign(pJob->m_ids.size(), 0);
+					pJob->m_abDownloadValidatorSimilar.assign(pJob->m_ids.size(), 0);
+					pJob->m_auDownloadValidatorRevisions.assign(pJob->m_ids.size(), 0);
+				}
+				if (pJob->m_bPrepareDownloadValidator || pJob->m_bPreparePossibleKnown)
+					pJob->m_aDownloadValidatorQueryData.assign(pJob->m_ids.size(), SDownloadValidatorFuzzyQueryData());
+				if (pJob->m_bPreparePossibleKnown && theApp.DownloadValidator != NULL) {
+					pJob->m_aiPossibleKnownCacheIndices.assign(pJob->m_ids.size(), static_cast<INT_PTR>(-1));
+					pJob->m_aiPossibleKnownAliasCacheIndices.assign(pJob->m_ids.size(), static_cast<INT_PTR>(-1));
+					pJob->m_aiPossibleKnownSourceIndices.clear();
+					pJob->m_auPossibleKnownAliasFingerprints.clear();
+					pJob->m_aPossibleKnownCaches.clear();
+					pJob->m_aPossibleKnownRowIdentityIndices.clear();
+					std::vector<std::vector<size_t> > childIndicesByRoot(pJob->m_ids.size());
+					for (size_t i = 0; i < pJob->m_ids.size(); ++i) {
+						if (!pJob->m_ids[i].m_bChild || i >= pJob->m_aiDownloadValidatorRootIndices.size())
+							continue;
+						const size_t uRootIndex = pJob->m_aiDownloadValidatorRootIndices[i];
+						if (uRootIndex < childIndicesByRoot.size() && uRootIndex != i)
+							childIndicesByRoot[uRootIndex].push_back(i);
+					}
+					for (size_t i = 0; i < pJob->m_ids.size(); ++i) {
+						if (pJob->m_ids[i].m_bChild)
+							continue;
+
+						std::vector<size_t> aliasIndices;
+						aliasIndices.push_back(i);
+						std::vector<size_t> childIndices;
+						const std::vector<size_t>& rootChildren = childIndicesByRoot[i];
+						for (std::vector<size_t>::const_iterator itChild = rootChildren.begin(); itChild != rootChildren.end(); ++itChild) {
+							const size_t j = *itChild;
+							if (j >= pJob->m_astrFileNames.size() || pJob->m_astrFileNames[j].IsEmpty())
+								continue;
+							bool bDuplicateName = pJob->m_astrFileNames[i].CompareNoCase(pJob->m_astrFileNames[j]) == 0;
+							for (std::vector<size_t>::const_iterator it = childIndices.begin(); !bDuplicateName && it != childIndices.end(); ++it)
+								bDuplicateName = pJob->m_astrFileNames[*it].CompareNoCase(pJob->m_astrFileNames[j]) == 0;
+							if (!bDuplicateName)
+								childIndices.push_back(j);
+						}
+						std::sort(childIndices.begin(), childIndices.end(), [pJob](size_t first, size_t second) {
+							return pJob->m_astrFileNames[first].CompareNoCase(pJob->m_astrFileNames[second]) < 0;
+						});
+						aliasIndices.insert(aliasIndices.end(), childIndices.begin(), childIndices.end());
+
+						std::vector<CString> aliasNames;
+						aliasNames.reserve(aliasIndices.size());
+						for (std::vector<size_t>::const_iterator it = aliasIndices.begin(); it != aliasIndices.end(); ++it)
+							aliasNames.push_back(pJob->m_astrFileNames[*it]);
+
+						const size_t uCacheIndex = pJob->m_aiPossibleKnownSourceIndices.size();
+						pJob->m_aiPossibleKnownSourceIndices.push_back(i);
+						pJob->m_auPossibleKnownAliasFingerprints.push_back(CalculatePossibleKnownAliasFingerprint(aliasNames));
+						pJob->m_aPossibleKnownCaches.push_back(SSearchFilePossibleKnownCache());
+						pJob->m_aPossibleKnownRowIdentityIndices.push_back(std::unordered_multimap<uint64, size_t>());
+						pJob->m_aiPossibleKnownCacheIndices[i] = static_cast<INT_PTR>(uCacheIndex);
+						for (std::vector<size_t>::const_iterator itAlias = aliasIndices.begin(); itAlias != aliasIndices.end(); ++itAlias) {
+							if (*itAlias < pJob->m_aiPossibleKnownAliasCacheIndices.size())
+								pJob->m_aiPossibleKnownAliasCacheIndices[*itAlias] = static_cast<INT_PTR>(uCacheIndex);
+						}
+						pJob->m_uPossibleKnownAliasCount += aliasIndices.size();
+					}
+					pJob->m_uPossibleKnownRevision = theApp.DownloadValidator->GetPossibleKnownRevision();
+					pJob->m_uPossibleKnownCandidateDataRevision = theApp.DownloadValidator->GetCandidateDataRevision();
+				}
+				pJob->m_downloadValidatorEvaluationSources.clear();
+				if (pJob->m_bPrepareDownloadValidator || pJob->m_bPreparePossibleKnown) {
+					CSingleLock progressLock(&m_searchAnswerParseQueueLock, TRUE);
+					m_downloadValidatorProgressProcessed[pJob->m_nSearchID] = SaturateDownloadValidatorProgress(pJob->m_ids.size());
+					m_downloadValidatorProgressTotal[pJob->m_nSearchID] = GetDownloadValidatorProgressTotal(pJob->m_ids.size(), pJob->m_bRecalculateAll, pJob->m_uPossibleKnownAliasCount);
+				}
+			} catch (CMemoryException* ex) {
+				ex->Delete();
+				CancelChunkedSpamRatingJobs(pJob->m_nSearchID);
+				return;
+			} catch (const std::exception&) {
+				CancelChunkedSpamRatingJobs(pJob->m_nSearchID);
+				return;
+			}
+			if (pJob->m_bPrepareAutomaticBlacklist || pJob->m_bPrepareDownloadValidator || pJob->m_bPreparePossibleKnown) {
+				m_chunkedSpamRatingJobs.RemoveHead();
+				{
+					CSingleLock lock(&m_searchAnswerParseQueueLock, TRUE);
+					EnforceSpamRatingPrepareQueueLimitLocked(pJob->m_nSearchID);
+					m_chunkedSpamRatingPrepareJobs.AddTail(pJob);
+				}
+				if (!theApp.QueueDownloadValidatorCpuWork()) {
+					CancelChunkedSpamRatingJobs(pJob->m_nSearchID);
+					return;
+				}
+				continue;
+			}
 		}
 
 		while (pJob->m_iNextItem < static_cast<INT_PTR>(pJob->m_ids.size())) {
@@ -1341,15 +2186,15 @@ void CSearchList::ProcessChunkedSpamRatingJobs(const DWORD dwSliceStartTick, UIN
 					if (pCurFile->GetKnownType() == CSearchFile::NotDetermined) {
 						pCurFile->SetAutomaticBlacklisted(false);
 						pCurFile->ClearAutomaticBlacklistEvaluation();
-						ApplyPreparedAutomaticBlacklistResult(*pJob, uCurrentIndex, pCurFile);
+						ApplyPreparedSearchFilterResults(*pJob, uCurrentIndex, pCurFile);
 						pCurFile->SetSpamRating(0);
 					}
 				} else if (pJob->m_ePhase == SChunkedSpamRatingJob::PhaseParents) {
-					ApplyPreparedAutomaticBlacklistResult(*pJob, uCurrentIndex, pCurFile);
+					ApplyPreparedSearchFilterResults(*pJob, uCurrentIndex, pCurFile);
 					if (pCurFile->GetListParent() == NULL && pCurFile->GetKnownType() == CSearchFile::NotDetermined && (pJob->m_bRecalculateAll || !(pCurFile->IsConsideredSpam(false) && pJob->m_bExpectHigher) && !(!pCurFile->IsConsideredSpam(false) && pJob->m_bExpectLower)))
 						DoSpamRating(pCurFile, false, Calculate, false, 0);
 				} else if (pCurFile->GetListParent() != NULL && pCurFile->GetKnownType() == CSearchFile::NotDetermined) {
-					ApplyPreparedAutomaticBlacklistResult(*pJob, uCurrentIndex, pCurFile);
+					ApplyPreparedSearchFilterResults(*pJob, uCurrentIndex, pCurFile);
 					if (thePrefs.GetBlacklistAutomatic() && pCurFile->GetListParent()->GetAutomaticBlacklisted())
 						pCurFile->SetAutomaticBlacklisted(true);
 					else if (thePrefs.GetBlacklistManual() && pCurFile->GetListParent()->GetManualBlacklisted())
@@ -1363,6 +2208,17 @@ void CSearchList::ProcessChunkedSpamRatingJobs(const DWORD dwSliceStartTick, UIN
 
 			++pJob->m_uProcessed;
 			++uProcessedInSlice;
+			if ((pJob->m_bPrepareDownloadValidator || pJob->m_bPreparePossibleKnown)
+				&& (((pJob->m_iNextItem & 0x3F) == 0) || pJob->m_iNextItem >= static_cast<INT_PTR>(pJob->m_ids.size()))) {
+				uint64 uProgressBase = static_cast<uint64>(pJob->m_ids.size()) * 2 + pJob->m_uPossibleKnownAliasCount;
+				if (pJob->m_bRecalculateAll && pJob->m_ePhase == SChunkedSpamRatingJob::PhaseParents)
+					uProgressBase += pJob->m_ids.size();
+				else if (pJob->m_bRecalculateAll && pJob->m_ePhase == SChunkedSpamRatingJob::PhaseChildren)
+					uProgressBase += static_cast<uint64>(pJob->m_ids.size()) * 2;
+				CSingleLock progressLock(&m_searchAnswerParseQueueLock, TRUE);
+				m_downloadValidatorProgressProcessed[pJob->m_nSearchID] = SaturateDownloadValidatorProgress(uProgressBase + static_cast<size_t>(pJob->m_iNextItem));
+				m_downloadValidatorProgressTotal[pJob->m_nSearchID] = GetDownloadValidatorProgressTotal(pJob->m_ids.size(), pJob->m_bRecalculateAll, pJob->m_uPossibleKnownAliasCount);
+			}
 
 			const DWORD dwNow = ::GetTickCount();
 			if (pJob->m_dwLastProgressTick == 0 || static_cast<DWORD>(dwNow - pJob->m_dwLastProgressTick) >= theApp.GetTimeBudgetedProgressTraceMs(CemuleApp::TimeBudgetSearchIngest)) {
@@ -1383,8 +2239,24 @@ void CSearchList::ProcessChunkedSpamRatingJobs(const DWORD dwSliceStartTick, UIN
 				pJob->m_iNextItem = 0;
 			} else {
 				const uint32 nSearchID = pJob->m_nSearchID;
+				const bool bPreparedPossibleKnown = pJob->m_bPreparePossibleKnown;
+				bool bDownloadValidatorFollowUpPending = false;
+				if (bPreparedPossibleKnown && outputwnd != NULL)
+					outputwnd->ApplyPreparedPossibleKnownCaches(nSearchID);
 				AddDebugLogLine(DLP_LOW, false, _T("Chunked spam rating recheck completed. search=%u processed=%u elapsed=%u\n"), nSearchID, pJob->m_uProcessed, static_cast<DWORD>(::GetTickCount() - pJob->m_dwStartedTick));
 				delete m_chunkedSpamRatingJobs.RemoveHead();
+				{
+					CSingleLock progressLock(&m_searchAnswerParseQueueLock, TRUE);
+					DWORD dwFollowUpTick = 0;
+					bDownloadValidatorFollowUpPending = m_downloadValidatorRecheckDue.Lookup(nSearchID, dwFollowUpTick);
+					m_downloadValidatorProgressProcessed.RemoveKey(nSearchID);
+					m_downloadValidatorProgressTotal.RemoveKey(nSearchID);
+					m_downloadValidatorOverlayProgress.RemoveKey(nSearchID);
+					m_downloadValidatorStartupOverlaySearches.RemoveKey(nSearchID);
+				}
+				theApp.QueueBulkOperationOverlayRefreshEvent();
+				if (bPreparedPossibleKnown && outputwnd != NULL && !bDownloadValidatorFollowUpPending)
+					outputwnd->QueuePossibleKnownSoftRefresh();
 				UpdateSearchIngestOutputWnd(nSearchID, EMPTY, false);
 				theApp.QueueSearchActivityChangedEvent(nSearchID);
 			}
@@ -1418,6 +2290,14 @@ void CSearchList::CancelSearchAnswerParseJobs(uint32 nSearchID)
 			delete pJob;
 		}
 	}
+	for (POSITION pos = m_possibleKnownQueryJobs.GetHeadPosition(); pos != NULL;) {
+		POSITION posCurrent = pos;
+		SPossibleKnownQueryJob *pJob = m_possibleKnownQueryJobs.GetNext(pos);
+		if (pJob != NULL && pJob->nSearchID == nSearchID) {
+			m_possibleKnownQueryJobs.RemoveAt(posCurrent);
+			delete pJob;
+		}
+	}
 	for (POSITION pos = m_chunkedSpamRatingPrepareJobs.GetHeadPosition(); pos != NULL;) {
 		POSITION posCurrent = pos;
 		SChunkedSpamRatingJob *pJob = m_chunkedSpamRatingPrepareJobs.GetNext(pos);
@@ -1426,6 +2306,11 @@ void CSearchList::CancelSearchAnswerParseJobs(uint32 nSearchID)
 			delete pJob;
 		}
 	}
+	m_downloadValidatorProgressProcessed.RemoveKey(nSearchID);
+	m_downloadValidatorProgressTotal.RemoveKey(nSearchID);
+	m_downloadValidatorOverlayProgress.RemoveKey(nSearchID);
+	m_downloadValidatorRecheckDue.RemoveKey(nSearchID);
+	m_activeSpamRatingPrepareCounts.RemoveKey(nSearchID);
 	parseLock.Unlock();
 
 	CSingleLock batchLock(&m_parsedSearchIngestBatchLock, TRUE);
@@ -1443,6 +2328,16 @@ void CSearchList::CancelSearchAnswerParseJobs(uint32 nSearchID)
 		if (pJob != NULL && pJob->m_nSearchID == nSearchID) {
 			m_preparedSpamRatingJobs.RemoveAt(posCurrent);
 			delete pJob;
+		}
+	}
+	batchLock.Unlock();
+	CSingleLock resultLock(&m_possibleKnownQueryResultLock, TRUE);
+	for (POSITION pos = m_possibleKnownQueryResults.GetHeadPosition(); pos != NULL;) {
+		POSITION posCurrent = pos;
+		SPossibleKnownQueryResult *pResult = m_possibleKnownQueryResults.GetNext(pos);
+		if (pResult != NULL && pResult->nSearchID == nSearchID) {
+			m_possibleKnownQueryResults.RemoveAt(posCurrent);
+			delete pResult;
 		}
 	}
 }
@@ -1521,6 +2416,7 @@ void CSearchList::QueueParsedSearchIngestBatch(SStoredSearchIngestPrepareJob &jo
 	pBatch->m_dwFromUDPServerIP = job.m_dwFromUDPServerIP;
 	pBatch->m_bDoSpamRating = job.m_bDoSpamRating;
 	pBatch->m_bUseKadReloadThrottle = job.m_bUseKadReloadThrottle;
+	pBatch->m_bStartupStoredSearch = job.m_bStartupStoredSearch;
 	pBatch->m_bNotifyUiOnCompletion = bNotifyUiOnCompletion;
 	pBatch->m_bNotifyLocalEd2kSearchEnd = false;
 	pBatch->m_bMoreResultsAvailable = false;
@@ -1561,6 +2457,7 @@ void CSearchList::DrainParsedSearchIngestBatches()
 		pIngestJob->m_dwFromUDPServerIP = pBatch->m_dwFromUDPServerIP;
 		pIngestJob->m_bDoSpamRating = pBatch->m_bDoSpamRating;
 		pIngestJob->m_bUseKadReloadThrottle = pBatch->m_bUseKadReloadThrottle;
+		pIngestJob->m_bStartupStoredSearch = pBatch->m_bStartupStoredSearch;
 		pIngestJob->m_bNotifyUiOnCompletion = pBatch->m_bNotifyUiOnCompletion;
 		pIngestJob->m_bNotifyLocalEd2kSearchEnd = pBatch->m_bNotifyLocalEd2kSearchEnd;
 		pIngestJob->m_bMoreResultsAvailable = pBatch->m_bMoreResultsAvailable;
@@ -1591,6 +2488,20 @@ void CSearchList::StopSearchAnswerParseThread()
 			delete m_storedSearchIngestPrepareJobs.RemoveHead();
 		while (!m_chunkedSpamRatingPrepareJobs.IsEmpty())
 			delete m_chunkedSpamRatingPrepareJobs.RemoveHead();
+		while (!m_possibleKnownQueryJobs.IsEmpty())
+			delete m_possibleKnownQueryJobs.RemoveHead();
+		m_downloadValidatorProgressProcessed.RemoveAll();
+		m_downloadValidatorProgressTotal.RemoveAll();
+		m_downloadValidatorOverlayProgress.RemoveAll();
+		m_downloadValidatorRecheckDue.RemoveAll();
+		m_downloadValidatorDirtySearches.RemoveAll();
+		m_activeSpamRatingPrepareCounts.RemoveAll();
+		m_bDownloadValidatorRecheckAllPending = false;
+	}
+	{
+		CSingleLock resultLock(&m_possibleKnownQueryResultLock, TRUE);
+		while (!m_possibleKnownQueryResults.IsEmpty())
+			delete m_possibleKnownQueryResults.RemoveHead();
 	}
 }
 
@@ -1613,7 +2524,14 @@ void CSearchList::ProcessNetworkParseCpuWorkerJobs()
 {
 	ProcessSearchAnswerParseJobsOnParserThread();
 	ProcessStoredSearchIngestPrepareJobsOnParserThread();
-	ProcessChunkedSpamRatingPrepareJobsOnParserThread();
+}
+
+bool CSearchList::ProcessDownloadValidatorWorkerJobs()
+{
+	ProcessPossibleKnownQueryJobsOnDownloadValidatorThread();
+	ProcessChunkedSpamRatingPrepareJobsOnDownloadValidatorThread();
+	CSingleLock lock(&m_searchAnswerParseQueueLock, TRUE);
+	return !m_chunkedSpamRatingPrepareJobs.IsEmpty() || !m_possibleKnownQueryJobs.IsEmpty();
 }
 
 
@@ -1653,6 +2571,7 @@ void CSearchList::Clear()
 	CSearchModelMutationLock mutationLock(this, _T("CSearchList::Clear"));
 	if (!mutationLock)
 		return;
+	::InterlockedExchange(&m_lDownloadValidatorPrioritySearchID, 0);
 	CancelStartupLoad();
 	ClearChunkedSearchIngestJobs();
 	TouchSearchModelSequence();
@@ -1673,8 +2592,13 @@ void CSearchList::RemoveResults(uint32 nSearchID)
 	CSearchModelMutationLock mutationLock(this, _T("CSearchList::RemoveResults"));
 	if (!mutationLock)
 		return;
+	::InterlockedCompareExchange(&m_lDownloadValidatorPrioritySearchID, 0, static_cast<LONG>(nSearchID));
 	CancelChunkedSearchIngestJobs(nSearchID);
 	CancelChunkedSpamRatingJobs(nSearchID);
+	{
+		CSingleLock lock(&m_searchAnswerParseQueueLock, TRUE);
+		m_downloadValidatorStartupOverlaySearches.RemoveKey(nSearchID);
+	}
 
 	// this will not delete the item from the window, make sure your code does it if you call this
 	for (POSITION pos = m_listFileLists.GetHeadPosition(); pos != NULL;) {
@@ -1731,6 +2655,7 @@ void CSearchList::RemoveResult(CSearchFile* todel)
 
 	list->RemoveAt(posParent); // Remove item
 	delete todel;
+	++listStruct->m_lDestructiveSequence;
 	RebuildSearchListIndexes(listStruct);
 	TouchSearchModelSequence();
 }
@@ -1782,6 +2707,7 @@ uint32 CSearchList::RemoveCleanUpSearchResults(uint32 nSearchID, bool *pbRemoved
 	}
 
 	if (bRemovedAny) {
+		++listStruct->m_lDestructiveSequence;
 		RebuildSearchListIndexes(listStruct);
 		TouchSearchModelSequence();
 		if (pbRemovedAny != NULL)
@@ -2010,7 +2936,8 @@ UINT CSearchList::ProcessSearchAnswer(const uchar *in_packet, uint32 size, bool 
 			pendingRecords.push_back(record);
 		delete toadd;
 	}
-	QueueChunkedSearchIngestJob(pendingRecords, m_nCurED2KSearchID, EMPTY, false, 0, true, false);
+	if (!QueueStoredSearchIngestPrepareJob(pendingRecords, m_nCurED2KSearchID, EMPTY, false, 0, true, false, false))
+		QueueChunkedSearchIngestJob(pendingRecords, m_nCurED2KSearchID, EMPTY, false, 0, true, false);
 
 	if (pbMoreResultsAvailable)
 		*pbMoreResultsAvailable = false;
@@ -2512,6 +3439,123 @@ CSearchFile* CSearchList::GetSearchFileByResultRow(const SSearchResultId &id, bo
 }
 
 
+void CSearchList::ProcessPossibleKnownQueryJobsOnDownloadValidatorThread()
+{
+	const DWORD dwSliceStartTick = ::GetTickCount();
+	UINT uProcessedInSlice = 0;
+	for (;;) {
+		SPossibleKnownQueryJob *pJob = NULL;
+		{
+			CSingleLock lock(&m_searchAnswerParseQueueLock, TRUE);
+			if (m_possibleKnownQueryJobs.IsEmpty())
+				break;
+			const uint32 nPrioritySearchID = static_cast<uint32>(::InterlockedCompareExchange(&m_lDownloadValidatorPrioritySearchID, 0, 0));
+			const POSITION posHead = m_possibleKnownQueryJobs.GetHeadPosition();
+			if (nPrioritySearchID != 0 && posHead != NULL) {
+				for (POSITION pos = posHead; pos != NULL;) {
+					const POSITION posCurrent = pos;
+					SPossibleKnownQueryJob *pQueuedJob = m_possibleKnownQueryJobs.GetNext(pos);
+					if (pQueuedJob != NULL && pQueuedJob->nSearchID == nPrioritySearchID) {
+						if (posCurrent != posHead) {
+							m_possibleKnownQueryJobs.RemoveAt(posCurrent);
+							m_possibleKnownQueryJobs.AddHead(pQueuedJob);
+						}
+						break;
+					}
+				}
+			}
+			pJob = m_possibleKnownQueryJobs.RemoveHead();
+		}
+		if (pJob == NULL)
+			continue;
+
+		bool bRequeueFuzzyStage = false;
+		if (!IsSearchJobStale(pJob->nSearchID, pJob->lGeneration, pJob->lSearchGeneration) && theApp.DownloadValidator != NULL
+			&& pJob->uRevision == theApp.DownloadValidator->GetPossibleKnownRevision()
+			&& pJob->uCandidateDataRevision == theApp.DownloadValidator->GetCandidateDataRevision()) {
+			SPossibleKnownQueryResult *pResult = NULL;
+			try {
+				const bool bFuzzyStage = !pJob->bTrustedStage;
+				std::vector<CDownloadValidator::FuzzyCandidateType> candidates;
+				std::unordered_multimap<uint64, size_t> candidateIdentities;
+				const CDownloadValidator::EFuzzyMediaLengthSource eMediaLengthSource = pJob->uMediaLengthSec != 0 ? CDownloadValidator::FuzzyMediaLengthRemoteMetadata : CDownloadValidator::FuzzyMediaLengthUnknown;
+				for (size_t i = 0; i < pJob->astrFileNames.size(); ++i) {
+					if (pJob->astrFileNames[i].IsEmpty())
+						continue;
+					std::vector<CDownloadValidator::FuzzyCandidateType> aliasCandidates;
+					SDownloadValidatorFuzzyQueryData* pAliasQueryData = i < pJob->aQueryData.size() ? &pJob->aQueryData[i] : NULL;
+					theApp.DownloadValidator->FindPossibleKnownCandidates(NULL, pJob->astrFileNames[i], pJob->uFileSize, pJob->uMediaLengthSec, eMediaLengthSource, aliasCandidates,
+						pJob->bLoadRows ? 0 : 1, true, pAliasQueryData, bFuzzyStage, pJob->bTrustedStage);
+					for (std::vector<CDownloadValidator::FuzzyCandidateType>::const_iterator it = aliasCandidates.begin(); it != aliasCandidates.end(); ++it)
+						MergePossibleKnownCandidate(candidates, candidateIdentities, *it);
+					if (!pJob->bLoadRows && !candidates.empty())
+						break;
+				}
+				const bool bHasMatches = !candidates.empty();
+				const bool bCanRunFuzzyStage = pJob->bTrustedStage && thePrefs.GetDownloadValidatorFuzzyMatching() && theApp.DownloadValidator->IsFuzzyIndexReady();
+				const bool bNeedFuzzyStage = bCanRunFuzzyStage && (pJob->bLoadRows || !bHasMatches);
+				if (bHasMatches || !bNeedFuzzyStage || bFuzzyStage) {
+					pResult = new SPossibleKnownQueryResult();
+					pResult->uParentToken = pJob->uParentToken;
+					pResult->nSearchID = pJob->nSearchID;
+					pResult->strFileName = pJob->strFileName;
+					pResult->uFileSize = pJob->uFileSize;
+					pResult->uMediaLengthSec = pJob->uMediaLengthSec;
+					pResult->uAliasFingerprint = pJob->uAliasFingerprint;
+					md4cpy(pResult->ucHash, pJob->ucHash);
+					pResult->bLoadRows = pJob->bLoadRows;
+					pResult->bHasMatches = bHasMatches;
+					pResult->bFinalResult = !bNeedFuzzyStage || bFuzzyStage;
+					pResult->bReplaceRows = pJob->bReplaceRows;
+					pResult->uRevision = pJob->uRevision;
+					pResult->uCandidateDataRevision = pJob->uCandidateDataRevision;
+					if (!pJob->aQueryData.empty())
+						pResult->queryData = pJob->aQueryData[0];
+					pResult->candidates.swap(candidates);
+					{
+						CSingleLock resultLock(&m_possibleKnownQueryResultLock, TRUE);
+						m_possibleKnownQueryResults.AddTail(pResult);
+					}
+					pResult = NULL;
+					theApp.QueueSearchIngestProcessing();
+					theApp.QueueSearchActivityChangedEvent(pJob->nSearchID);
+				}
+				if (bNeedFuzzyStage) {
+					pJob->bTrustedStage = false;
+					bRequeueFuzzyStage = true;
+				}
+			} catch (CMemoryException* ex) {
+				ex->Delete();
+				delete pResult;
+			} catch (const std::exception&) {
+				delete pResult;
+			}
+		}
+		if (bRequeueFuzzyStage) {
+			CSingleLock lock(&m_searchAnswerParseQueueLock, TRUE);
+			if (pJob->bLoadRows)
+				m_possibleKnownQueryJobs.AddHead(pJob);
+			else
+				m_possibleKnownQueryJobs.AddTail(pJob);
+		} else {
+			const uint32 nCompletedSearchID = pJob->nSearchID;
+			delete pJob;
+			theApp.QueueSearchActivityChangedEvent(nCompletedSearchID);
+		}
+		++uProcessedInSlice;
+		if (bRequeueFuzzyStage || (uProcessedInSlice != 0 && theApp.IsTimeBudgetExceeded(dwSliceStartTick, CemuleApp::TimeBudgetSearchIngest)))
+			break;
+	}
+
+	bool bHasMore = false;
+	{
+		CSingleLock lock(&m_searchAnswerParseQueueLock, TRUE);
+		bHasMore = !m_possibleKnownQueryJobs.IsEmpty();
+	}
+	if (bHasMore)
+		theApp.QueueDownloadValidatorCpuWork();
+}
+
 void CSearchList::ProcessSearchAnswerParseJobsOnParserThread()
 {
 	if (!theApp.GuardNetworkParse(CemuleApp::NetworkParseSearchAnswer, _T("CSearchList::ProcessSearchAnswerParseJobsOnParserThread")))
@@ -2697,17 +3741,24 @@ void CSearchList::ProcessStoredSearchIngestPrepareJobsOnParserThread()
 
 		std::vector<SSearchIngestRecord> records;
 		while (pJob->m_iNextRecord < static_cast<INT_PTR>(pJob->m_records.size()) && !IsStoredSearchIngestPrepareJobStale(pJob)) {
-			CSearchFile *pFile = CreateSearchFileFromIngestRecord(pJob->m_records[static_cast<size_t>(pJob->m_iNextRecord++)]);
-			if (pFile != NULL) {
-				SSearchIngestRecord record;
-				if (BuildSearchIngestRecord(pFile, record, true)) {
-					records.push_back(record);
-					++pJob->m_uProcessed;
+			SSearchIngestRecord& sourceRecord = pJob->m_records[static_cast<size_t>(pJob->m_iNextRecord++)];
+			const bool bNeedsAutomaticBlacklist = thePrefs.GetBlacklistAutomatic() && !sourceRecord.m_bAutomaticBlacklistEvaluated;
+			if (!bNeedsAutomaticBlacklist) {
+				records.push_back(std::move(sourceRecord));
+				++pJob->m_uProcessed;
+			} else {
+				CSearchFile* pFile = CreateSearchFileFromIngestRecord(sourceRecord);
+				if (pFile != NULL) {
+					SSearchIngestRecord preparedRecord;
+					if (BuildSearchIngestRecord(pFile, preparedRecord, true)) {
+						records.push_back(std::move(preparedRecord));
+						++pJob->m_uProcessed;
+					} else
+						++pJob->m_uFailed;
+					delete pFile;
 				} else
 					++pJob->m_uFailed;
-				delete pFile;
-			} else
-				++pJob->m_uFailed;
+			}
 			++uProcessedInSlice;
 
 			const DWORD dwNow = ::GetTickCount();
@@ -2749,6 +3800,139 @@ void CSearchList::ProcessStoredSearchIngestPrepareJobsOnParserThread()
 		SignalSearchAnswerParseThread();
 }
 
+void CSearchList::DrainPossibleKnownQueryResults()
+{
+	UINT uProcessed = 0;
+	for (;;) {
+		SPossibleKnownQueryResult* pResult = NULL;
+		{
+			CSingleLock resultLock(&m_possibleKnownQueryResultLock, TRUE);
+			if (m_possibleKnownQueryResults.IsEmpty())
+				break;
+			const uint32 nPrioritySearchID = static_cast<uint32>(
+				::InterlockedCompareExchange(&m_lDownloadValidatorPrioritySearchID, 0, 0));
+			const POSITION posHead = m_possibleKnownQueryResults.GetHeadPosition();
+			if (nPrioritySearchID != 0 && posHead != NULL) {
+				for (POSITION pos = posHead; pos != NULL;) {
+					const POSITION posCurrent = pos;
+					SPossibleKnownQueryResult *pQueuedResult = m_possibleKnownQueryResults.GetNext(pos);
+					if (pQueuedResult != NULL && pQueuedResult->nSearchID == nPrioritySearchID) {
+						if (posCurrent != posHead) {
+							m_possibleKnownQueryResults.RemoveAt(posCurrent);
+							m_possibleKnownQueryResults.AddHead(pQueuedResult);
+						}
+						break;
+					}
+				}
+			}
+			pResult = m_possibleKnownQueryResults.RemoveHead();
+		}
+		if (pResult == NULL)
+			continue;
+
+		if (pResult->uRevision != (theApp.DownloadValidator != NULL ? theApp.DownloadValidator->GetPossibleKnownRevision() : 0)
+			|| pResult->uCandidateDataRevision != (theApp.DownloadValidator != NULL ? theApp.DownloadValidator->GetCandidateDataRevision() : 0)) {
+			const uint32 nStaleSearchID = pResult->nSearchID;
+			delete pResult;
+			theApp.QueueSearchActivityChangedEvent(nStaleSearchID);
+			continue;
+		}
+
+		if (pResult->bLoadRows && pResult->bHasMatches && theApp.DownloadValidator != NULL) {
+			if (pResult->rows.empty())
+				pResult->rows.reserve(pResult->candidates.size());
+			const DWORD dwSliceStart = ::GetTickCount();
+			UINT uMetadataProcessed = 0;
+			while (pResult->uNextMetadataCandidate < pResult->candidates.size()) {
+				CDownloadValidator::FuzzyCandidateType& candidate = pResult->candidates[pResult->uNextMetadataCandidate++];
+				theApp.DownloadValidator->PopulateFuzzyDisplayMetadata(candidate);
+
+				SSearchListRow row;
+				row.eType = SearchListRowPossibleKnownFile;
+				row.strName = candidate.strName;
+				row.strFolder = candidate.strFolder;
+				row.strMediaArtist = candidate.strMediaArtist;
+				row.strMediaAlbum = candidate.strMediaAlbum;
+				row.strMediaTitle = candidate.strMediaTitle;
+				row.strMediaCodec = candidate.strMediaCodec;
+				row.strAICHHash = candidate.strAICHHash;
+				row.uSize = candidate.uSize;
+				row.uMediaLengthSec = candidate.uMediaLengthSec;
+				row.uMediaBitrateKbps = candidate.uMediaBitrateKbps;
+				row.uSimilarityScore = candidate.uSimilarityScore;
+				row.uFileType = candidate.uFileType;
+				row.uSourceFlags = candidate.uSourceFlags;
+				md4cpy(row.ucHash, candidate.ucHash);
+				pResult->rows.push_back(row);
+
+				++uMetadataProcessed;
+				if (uMetadataProcessed >= kPossibleKnownMetadataItemsPerSlice
+					|| static_cast<DWORD>(::GetTickCount() - dwSliceStart) >= kPossibleKnownMetadataSliceMs)
+					break;
+			}
+
+			if (pResult->uNextMetadataCandidate < pResult->candidates.size()) {
+				{
+					CSingleLock resultLock(&m_possibleKnownQueryResultLock, TRUE);
+					m_possibleKnownQueryResults.AddTail(pResult);
+				}
+				theApp.QueueSearchIngestProcessing();
+				break;
+			}
+		}
+
+		if (outputwnd != NULL)
+			outputwnd->ApplyPossibleKnownQueryResult(pResult->uParentToken, pResult->nSearchID, pResult->ucHash, pResult->strFileName,
+				pResult->uFileSize, pResult->uMediaLengthSec, pResult->uAliasFingerprint, pResult->uRevision, pResult->uCandidateDataRevision, pResult->bReplaceRows, pResult->bLoadRows, pResult->bHasMatches, pResult->bFinalResult, pResult->queryData, pResult->rows);
+		const bool bLoadedRows = pResult->bLoadRows;
+		const uint32 nCompletedSearchID = pResult->nSearchID;
+		delete pResult;
+		theApp.QueueSearchActivityChangedEvent(nCompletedSearchID);
+		++uProcessed;
+		if (bLoadedRows || uProcessed >= 16)
+			break;
+	}
+
+	bool bHasMore = false;
+	{
+		CSingleLock resultLock(&m_possibleKnownQueryResultLock, TRUE);
+		bHasMore = !m_possibleKnownQueryResults.IsEmpty();
+	}
+	if (bHasMore)
+		theApp.QueueSearchIngestProcessing();
+}
+
+void CSearchList::ClearPossibleKnownQueryJobs(uint32 nSearchID)
+{
+	bool bRemoved = false;
+	{
+		CSingleLock lock(&m_searchAnswerParseQueueLock, TRUE);
+		for (POSITION pos = m_possibleKnownQueryJobs.GetHeadPosition(); pos != NULL;) {
+			POSITION posCurrent = pos;
+			SPossibleKnownQueryJob *pJob = m_possibleKnownQueryJobs.GetNext(pos);
+			if (nSearchID == 0 || (pJob != NULL && pJob->nSearchID == nSearchID)) {
+				m_possibleKnownQueryJobs.RemoveAt(posCurrent);
+				delete pJob;
+				bRemoved = true;
+			}
+		}
+	}
+	{
+		CSingleLock resultLock(&m_possibleKnownQueryResultLock, TRUE);
+		for (POSITION pos = m_possibleKnownQueryResults.GetHeadPosition(); pos != NULL;) {
+			POSITION posCurrent = pos;
+			SPossibleKnownQueryResult *pResult = m_possibleKnownQueryResults.GetNext(pos);
+			if (nSearchID == 0 || (pResult != NULL && pResult->nSearchID == nSearchID)) {
+				m_possibleKnownQueryResults.RemoveAt(posCurrent);
+				delete pResult;
+				bRemoved = true;
+			}
+		}
+	}
+	if (bRemoved)
+		theApp.QueueSearchActivityChangedEvent(nSearchID);
+}
+
 void CSearchList::ProcessChunkedSearchIngestJobs()
 {
 	CSearchModelMutationLock mutationLock(this, _T("CSearchList::ProcessChunkedSearchIngestJobs"));
@@ -2759,6 +3943,7 @@ void CSearchList::ProcessChunkedSearchIngestJobs()
 		ClearChunkedSearchIngestJobs();
 		return;
 	}
+	DrainPossibleKnownQueryResults();
 
 	const DWORD dwSliceStartTick = ::GetTickCount();
 	UINT uProcessedInSlice = 0;
@@ -2789,6 +3974,20 @@ void CSearchList::ProcessChunkedSearchIngestJobs()
 				++uProcessedInSlice;
 
 				const DWORD dwNow = ::GetTickCount();
+				if (pJob->m_bStartupStoredSearch) {
+					bool bPostStartupProgress = false;
+					{
+						CSingleLock progressLock(&m_storedSearchStartupProgressLock, TRUE);
+						++m_uStoredSearchStartupLoadLoadedFiles;
+						m_uStoredSearchStartupLoadCurrentRemainingFiles = static_cast<uint32>(pJob->m_records.size() - static_cast<size_t>(pJob->m_iNextRecord));
+						if (m_dwStoredSearchStartupLoadLastProgressTick == 0 || static_cast<DWORD>(dwNow - m_dwStoredSearchStartupLoadLastProgressTick) >= 150) {
+							m_dwStoredSearchStartupLoadLastProgressTick = dwNow;
+							bPostStartupProgress = true;
+						}
+					}
+					if (bPostStartupProgress && theApp.emuledlg != NULL)
+						theApp.emuledlg->PostStartupOverlayRefresh();
+				}
 				if (m_dwChunkedSearchIngestLastProgressTick == 0 || static_cast<DWORD>(dwNow - m_dwChunkedSearchIngestLastProgressTick) >= theApp.GetTimeBudgetedProgressTraceMs(CemuleApp::TimeBudgetSearchIngest)) {
 					m_dwChunkedSearchIngestLastProgressTick = dwNow;
 					AddDebugLogLine(DLP_VERYLOW, false, _T("Chunked search ingest progress. search=%u processed=%u failed=%u remaining=%d\n"), pJob->m_nSearchID, pJob->m_uProcessed, pJob->m_uFailed, static_cast<int>(pJob->m_records.size() - static_cast<size_t>(pJob->m_iNextRecord)));
@@ -2800,6 +3999,12 @@ void CSearchList::ProcessChunkedSearchIngestJobs()
 		}
 
 		if (pJob->m_iNextRecord >= static_cast<INT_PTR>(pJob->m_records.size())) {
+			if (pJob->m_bDoSpamRating) {
+				if (pJob->m_bStartupStoredSearch)
+					RequestStartupDownloadValidatorCheck(pJob->m_nSearchID);
+				else
+					QueueIncrementalDownloadValidatorJob(pJob->m_records, pJob->m_nSearchID, pJob->m_lGeneration, pJob->m_lSearchGeneration, false);
+			}
 			if (pJob->m_bNotifyUiOnCompletion)
 				UpdateSearchIngestOutputWnd(pJob->m_nSearchID, pJob->m_strClientHash, pJob->m_bUseKadReloadThrottle);
 			if (pJob->m_bNotifyLocalEd2kSearchEnd)
@@ -3142,10 +4347,22 @@ bool CSearchList::DoSpamRating(CSearchFile *pSearchFile, bool bIsClientFile, uin
 			pSearchFile->SetManualBlacklisted(false);
 		} else if ((pSearchFile->GetListParent() && pSearchFile->GetListParent()->GetManualBlacklisted())) // This is a child item with a parent already marked as ManualBlacklisted (Since this case has a lower cost action, we check this before uActionType == MarkAsBlacklisted)
 			pSearchFile->SetManualBlacklisted(true);
-		else if (uActionType == MarkAsBlacklisted || m_mapBlacklistedHashes.Lookup(CSKey(pSearchFile->GetFileHash()), m_bDummyVar) || // Function is called to add file to Manual Blacklist OR this is already marked as Manual Blacklisted
-				(thePrefs.GetDownloadValidator() && thePrefs.GetDownloadValidatorAutoMarkAsBlacklisted() &&	theApp.DownloadValidator->CheckFile(pSearchFile->GetFileHash(), pSearchFile->GetFileName(), pSearchFile->GetFileSize(), false))) { // OR this is not blacklisted but DownloadValidator marks this file as manuel blacklisted
-			pSearchFile->SetManualBlacklisted(true);
-			MarkHashAsBlacklisted(CSKey(pSearchFile->GetFileHash()));
+		else {
+			bool bDownloadValidatorSimilar = false;
+			if (thePrefs.GetDownloadValidator() && thePrefs.GetDownloadValidatorAutoMarkAsBlacklisted() && theApp.DownloadValidator != NULL) {
+				const uint32 uDownloadValidatorRevision = theApp.DownloadValidator->GetEvaluationRevision();
+				if (pSearchFile->HasDownloadValidatorEvaluation(uDownloadValidatorRevision) || (uActionType == Calculate && pSearchFile->HasDownloadValidatorEvaluation()))
+					bDownloadValidatorSimilar = pSearchFile->GetDownloadValidatorSimilar();
+				else if (uActionType != Calculate) {
+					bDownloadValidatorSimilar = theApp.DownloadValidator->CheckFile(pSearchFile->GetFileHash(), pSearchFile->GetFileName(), pSearchFile->GetFileSize(), false) != CDownloadValidator::OK;
+					pSearchFile->SetDownloadValidatorEvaluation(bDownloadValidatorSimilar, uDownloadValidatorRevision);
+				}
+			}
+			if (uActionType == MarkAsBlacklisted || m_mapBlacklistedHashes.Lookup(CSKey(pSearchFile->GetFileHash()), m_bDummyVar) || bDownloadValidatorSimilar) {
+				// Function is called to add file to Manual Blacklist OR this is already marked as Manual Blacklisted
+				pSearchFile->SetManualBlacklisted(true);
+				MarkHashAsBlacklisted(CSKey(pSearchFile->GetFileHash()));
+			}
 		}
 
 		// Mark parent and children as Manual Blacklisted if MarkAsNotBlacklisted is false, otherwise mark them as not Manual Blacklisted.
@@ -3648,6 +4865,7 @@ SearchListsStruct* CSearchList::GetSearchListStructForID(uint32 nSearchID, bool 
 		return NULL;
 	SearchListsStruct *list = new SearchListsStruct;
 	list->m_nSearchID = nSearchID;
+	list->m_lDestructiveSequence = 0;
 	m_listFileLists.AddTail(list);
 	return list;
 }
@@ -3669,6 +4887,46 @@ const SearchChildList* CSearchList::GetSearchChildrenForParent(const CSearchFile
 
 	void *pChildren = NULL;
 	return list->m_mapChildrenByParent.Lookup(const_cast<CSearchFile*>(pParent), pChildren) ? static_cast<const SearchChildList*>(pChildren) : NULL;
+}
+
+bool CSearchList::BuildPossibleKnownAliasNames(const CSearchFile* pParent, std::vector<CString>& astrFileNames, uint32& uAliasFingerprint)
+{
+	astrFileNames.clear();
+	uAliasFingerprint = 0;
+	if (pParent == NULL || pParent->GetListParent() != NULL || pParent->GetFileName().IsEmpty())
+		return false;
+
+	astrFileNames.push_back(pParent->GetFileName());
+	std::vector<CString> astrChildren;
+	const SearchChildList* pChildren = GetSearchChildrenForParent(pParent);
+	if (pChildren != NULL) {
+		for (POSITION pos = pChildren->GetHeadPosition(); pos != NULL;) {
+			const CSearchFile* pChild = pChildren->GetNext(pos);
+			if (pChild == NULL || pChild->GetListParent() != pParent || pChild->GetFileName().IsEmpty())
+				continue;
+			bool bDuplicate = false;
+			for (std::vector<CString>::const_iterator it = astrFileNames.begin(); it != astrFileNames.end(); ++it) {
+				if (it->CompareNoCase(pChild->GetFileName()) == 0) {
+					bDuplicate = true;
+					break;
+				}
+			}
+			if (!bDuplicate) {
+				for (std::vector<CString>::const_iterator it = astrChildren.begin(); it != astrChildren.end(); ++it) {
+					if (it->CompareNoCase(pChild->GetFileName()) == 0) {
+						bDuplicate = true;
+						break;
+					}
+				}
+			}
+			if (!bDuplicate)
+				astrChildren.push_back(pChild->GetFileName());
+		}
+	}
+	std::sort(astrChildren.begin(), astrChildren.end(), [](const CString& first, const CString& second) { return first.CompareNoCase(second) < 0; });
+	astrFileNames.insert(astrFileNames.end(), astrChildren.begin(), astrChildren.end());
+	uAliasFingerprint = CalculatePossibleKnownAliasFingerprint(astrFileNames);
+	return true;
 }
 
 void CSearchList::SentUDPRequestNotification(uint32 nSearchID, uint32 dwServerIP)
@@ -3724,7 +4982,7 @@ bool CSearchList::IsFilenameAutoBlacklisted(CString strFilename)
 void CSearchList::RecalculateSpamRatings(uint32 nSearchID, bool bExpectHigher, bool bExpectLower, bool bRecalculateAll)
 {
 	if (bRecalculateAll) {
-		QueueChunkedSpamRatingJob(nSearchID, bExpectHigher, bExpectLower, bRecalculateAll);
+		QueueChunkedSpamRatingJob(nSearchID, bExpectHigher, bExpectLower, bRecalculateAll, true);
 		return;
 	}
 
@@ -4299,16 +5557,21 @@ bool CSearchList::StartStartupStoredSearchApplyTab(SStartupStoredSearchesLoadRes
 	m_uStoredSearchStartupLoadCurrentRemainingFiles = static_cast<uint32>(tab.vecFiles.size());
 	m_uStoredSearchStartupLoadCurrentTotalFiles = static_cast<uint32>(tab.vecFiles.size());
 
-	if (theApp.emuledlg->searchwnd->m_pwndResults != NULL)
-		theApp.emuledlg->searchwnd->m_pwndResults->RefreshSearchTabActivityAnimation();
 	if (!tab.bDeleteParams) {
-		CSingleLock searchLock(GetSearchModelLock(), TRUE);
-		m_foundFilesCount[tab.pParams->dwSearchID] = 0;
-		m_foundSourcesCount[tab.pParams->dwSearchID] = 0;
-		GetSearchListForID(tab.pParams->dwSearchID);
+		{
+			CSingleLock searchLock(GetSearchModelLock(), TRUE);
+			m_foundFilesCount[tab.pParams->dwSearchID] = 0;
+			m_foundSourcesCount[tab.pParams->dwSearchID] = 0;
+			GetSearchListForID(tab.pParams->dwSearchID);
+		}
+		if (!tab.vecFiles.empty())
+			RequestStartupDownloadValidatorCheck(tab.pParams->dwSearchID);
 	}
 	else
 		ASSERT(0);
+
+	if (theApp.emuledlg->searchwnd->m_pwndResults != NULL)
+		theApp.emuledlg->searchwnd->m_pwndResults->RefreshSearchTabActivityAnimation();
 
 	return true;
 }
@@ -4328,7 +5591,7 @@ bool CSearchList::QueueStartupStoredSearchTabIngest(SStartupStoredSearchTab &tab
 	std::vector<SSearchIngestRecord> records;
 	records.swap(tab.vecFiles);
 	const uint32 uQueued = static_cast<uint32>(records.size());
-	if (!QueueStoredSearchIngestPrepareJob(records, nSearchID, CString(), tab.pParams->bClientSharedFiles, 0, true, true)) {
+	if (!QueueStoredSearchIngestPrepareJob(records, nSearchID, CString(), tab.pParams->bClientSharedFiles, 0, true, true, true)) {
 		tab.vecFiles.swap(records);
 		return false;
 	}
@@ -4437,13 +5700,11 @@ bool CSearchList::ApplyStartupStoredSearchesLoadResult(SStartupStoredSearchesLoa
 		if (!pTab->bIngestQueued && pResult->uNextFile == 0 && !pTab->bDeleteParams && !pTab->vecFiles.empty()) {
 			if (QueueStartupStoredSearchTabIngest(*pTab)) {
 				pResult->uNextFile = pTab->uQueuedFileCount;
-				m_uStoredSearchStartupLoadLoadedFiles += pTab->uQueuedFileCount;
-				uAppliedInSlice += pTab->uQueuedFileCount;
 			}
 		}
 
 		if (pTab->bIngestQueued) {
-			if (HasPendingSearchProcessing(pTab->nAssignedSearchID)) {
+			if (HasPendingStartupStoredSearchIngest(pTab->nAssignedSearchID)) {
 				iRemaining = 1;
 				for (size_t i = pResult->uNextTab + 1; i < pResult->vecTabs.size(); ++i) {
 					const SStartupStoredSearchTab *pRemainingTab = pResult->vecTabs[i];
@@ -4498,10 +5759,6 @@ void CSearchList::BeginStartupLoad()
 {
 	if (m_bStoredSearchStartupLoadActive || m_bStoredSearchStartupLoadCompleted)
 		return;
-	if (!theApp.IsStartupMetadataDomainReady(CemuleApp::StartupMetadataDownloads) || !theApp.KnownFilesReady() || !theApp.IsStartupMetadataDomainReady(CemuleApp::StartupMetadataSharedRules))
-		return;
-	if (thePrefs.GetDownloadValidator() && theApp.DownloadValidator != NULL)
-		theApp.DownloadValidator->QueueReloadMap();
 
 	const bool bHasLiveSearches = !m_listFileLists.IsEmpty();
 	if (bHasLiveSearches)
@@ -4550,8 +5807,373 @@ void CSearchList::GetStartupLoadProgress(UINT& uLoadedSearches, UINT& uTotalSear
 	uLoadedFiles = m_uStoredSearchStartupLoadLoadedFiles;
 }
 
+bool CSearchList::QueueIncrementalDownloadValidatorJob(const std::vector<SSearchIngestRecord>& records, uint32 nSearchID, LONG lGeneration, LONG lSearchGeneration, bool bShowOverlay)
+{
+	if (records.empty() || nSearchID == 0 || theApp.DownloadValidator == NULL || !IsSearchProcessingAcceptingJobs()
+		|| !thePrefs.GetBlacklistManual() || !thePrefs.GetDownloadValidator() || !thePrefs.GetDownloadValidatorAutoMarkAsBlacklisted())
+		return false;
+
+	if (!bShowOverlay) {
+		CSingleLock lock(&m_searchAnswerParseQueueLock, TRUE);
+		BYTE bOverlayActive = 0;
+		if (m_downloadValidatorOverlayProgress.Lookup(nSearchID, bOverlayActive) && bOverlayActive != 0) {
+			m_downloadValidatorDirtySearches[nSearchID] = 1;
+			m_downloadValidatorRecheckDue[nSearchID] = ::GetTickCount() + 500;
+			return true;
+		}
+	}
+
+	SChunkedSpamRatingJob *pJob = NULL;
+	try {
+		SearchListsStruct* pListStruct = GetSearchListStructForID(nSearchID, false);
+		if (pListStruct == NULL)
+			return true;
+
+		const uint32 uRevision = theApp.DownloadValidator->GetEvaluationRevision();
+		std::vector<CSearchFile*> roots;
+		for (std::vector<SSearchIngestRecord>::const_iterator it = records.begin(); it != records.end(); ++it) {
+			if (!it->m_resultId.IsValid())
+				continue;
+			CSearchFile* pCurrentFile = GetSearchFileByResultId(it->m_resultId);
+			if (pCurrentFile == NULL || pCurrentFile->HasDownloadValidatorEvaluation(uRevision))
+				continue;
+			CSearchFile* pRootFile = pCurrentFile->GetListParent() != NULL ? pCurrentFile->GetListParent() : pCurrentFile;
+			if (pRootFile == NULL || pRootFile->GetSearchID() != nSearchID || pRootFile->GetFileSize() == 0ull || pRootFile->GetFileName().IsEmpty())
+				continue;
+			if (std::find(roots.begin(), roots.end(), pRootFile) == roots.end())
+				roots.push_back(pRootFile);
+		}
+		if (roots.empty())
+			return true;
+
+		pJob = new SChunkedSpamRatingJob();
+		pJob->m_nSearchID = nSearchID;
+		pJob->m_bPrepareDownloadValidator = true;
+		pJob->m_bShowDownloadValidatorOverlay = bShowOverlay;
+		pJob->m_ePhase = SChunkedSpamRatingJob::PhaseParents;
+		pJob->m_lGeneration = lGeneration;
+		pJob->m_lSearchGeneration = lSearchGeneration;
+
+		for (std::vector<CSearchFile*>::const_iterator itRoot = roots.begin(); itRoot != roots.end(); ++itRoot) {
+			CSearchFile* pRootFile = *itRoot;
+			const size_t uRootIndex = pJob->m_ids.size();
+			std::vector<CSearchFile*> groupFiles;
+			groupFiles.push_back(pRootFile);
+			SearchChildList* pChildren = GetChildrenForParent(pListStruct, pRootFile, false);
+			if (pChildren != NULL) {
+				for (POSITION pos = pChildren->GetHeadPosition(); pos != NULL;) {
+					CSearchFile* pChild = pChildren->GetNext(pos);
+					if (pChild != NULL && pChild->GetListParent() == pRootFile && pChild->GetFileSize() != 0ull && !pChild->GetFileName().IsEmpty())
+						groupFiles.push_back(pChild);
+				}
+			}
+
+			for (std::vector<CSearchFile*>::const_iterator itFile = groupFiles.begin(); itFile != groupFiles.end(); ++itFile) {
+				CSearchFile* pFile = *itFile;
+				SSearchResultId id;
+				id.Set(pFile->GetSearchID(), pFile->GetFileHash(), pFile->GetListParent() != NULL, pFile->GetFileName());
+				const size_t uCapturedIndex = pJob->m_ids.size();
+				pJob->m_ids.push_back(id);
+				pJob->m_astrFileNames.push_back(pFile->GetFileName());
+				pJob->m_auFileSizes.push_back(pFile->GetFileSize());
+				pJob->m_auMediaLengthSecs.push_back(pFile->GetIntTagValue(FT_MEDIA_LENGTH));
+				pJob->m_aiDownloadValidatorRootIndices.push_back(uRootIndex);
+
+				size_t uSourceIndex = uCapturedIndex;
+				const CString strEvaluationKey(BuildDownloadValidatorEvaluationKey(pFile->GetFileHash(), pFile->GetFileName(), pFile->GetFileSize(), pFile->GetIntTagValue(FT_MEDIA_LENGTH)));
+				const std::map<CString, size_t>::const_iterator itSource = pJob->m_downloadValidatorEvaluationSources.find(strEvaluationKey);
+				if (itSource != pJob->m_downloadValidatorEvaluationSources.end())
+					uSourceIndex = itSource->second;
+				else
+					pJob->m_downloadValidatorEvaluationSources.insert(std::make_pair(strEvaluationKey, uCapturedIndex));
+				pJob->m_aiDownloadValidatorSourceIndices.push_back(uSourceIndex);
+			}
+		}
+
+		if (pJob->m_ids.empty()) {
+			delete pJob;
+			return true;
+		}
+
+		pJob->m_abDownloadValidatorEvaluated.assign(pJob->m_ids.size(), 0);
+		pJob->m_abDownloadValidatorSimilar.assign(pJob->m_ids.size(), 0);
+		pJob->m_auDownloadValidatorRevisions.assign(pJob->m_ids.size(), 0);
+		pJob->m_aDownloadValidatorQueryData.assign(pJob->m_ids.size(), SDownloadValidatorFuzzyQueryData());
+		for (size_t i = 0; i < pJob->m_ids.size(); ++i) {
+			CSearchFile* pCurrentFile = GetSearchFileByResultId(pJob->m_ids[i]);
+			if (pCurrentFile == NULL || !pCurrentFile->HasDownloadValidatorEvaluation(uRevision))
+				continue;
+			pJob->m_abDownloadValidatorEvaluated[i] = 1;
+			pJob->m_abDownloadValidatorSimilar[i] = pCurrentFile->GetDownloadValidatorSimilar() ? 1 : 0;
+			pJob->m_auDownloadValidatorRevisions[i] = uRevision;
+			pJob->m_aDownloadValidatorQueryData[i] = pCurrentFile->GetDownloadValidatorFuzzyQueryData();
+		}
+		pJob->m_downloadValidatorEvaluationSources.clear();
+	} catch (CMemoryException* ex) {
+		ex->Delete();
+		delete pJob;
+		return false;
+	} catch (const std::exception&) {
+		delete pJob;
+		return false;
+	}
+
+	try {
+		CSingleLock lock(&m_searchAnswerParseQueueLock, TRUE);
+		EnforceSpamRatingPrepareQueueLimitLocked(nSearchID);
+		m_chunkedSpamRatingPrepareJobs.AddTail(pJob);
+		m_downloadValidatorProgressProcessed[nSearchID] = SaturateDownloadValidatorProgress(pJob->m_ids.size());
+		m_downloadValidatorProgressTotal[nSearchID] = GetDownloadValidatorProgressTotal(pJob->m_ids.size(), false);
+		if (pJob->m_bShowDownloadValidatorOverlay)
+			m_downloadValidatorOverlayProgress[nSearchID] = 1;
+	} catch (CMemoryException* ex) {
+		ex->Delete();
+		delete pJob;
+		RequestDownloadValidatorRecheck(nSearchID, 1000);
+		return false;
+	} catch (const std::exception&) {
+		delete pJob;
+		RequestDownloadValidatorRecheck(nSearchID, 1000);
+		return false;
+	}
+	if (theApp.QueueDownloadValidatorCpuWork()) {
+		theApp.QueueBulkOperationOverlayRefreshEvent();
+		theApp.QueueSearchActivityChangedEvent(nSearchID);
+		return true;
+	}
+
+	bool bRemoved = false;
+	{
+		CSingleLock lock(&m_searchAnswerParseQueueLock, TRUE);
+		for (POSITION pos = m_chunkedSpamRatingPrepareJobs.GetHeadPosition(); pos != NULL;) {
+			POSITION posCurrent = pos;
+			SChunkedSpamRatingJob *pQueuedJob = m_chunkedSpamRatingPrepareJobs.GetNext(pos);
+			if (pQueuedJob != pJob)
+				continue;
+			m_chunkedSpamRatingPrepareJobs.RemoveAt(posCurrent);
+			m_downloadValidatorProgressProcessed.RemoveKey(nSearchID);
+			m_downloadValidatorProgressTotal.RemoveKey(nSearchID);
+			m_downloadValidatorOverlayProgress.RemoveKey(nSearchID);
+			bRemoved = true;
+			break;
+		}
+	}
+	if (bRemoved) {
+		delete pJob;
+		RequestDownloadValidatorRecheck(nSearchID, 500);
+		return false;
+	}
+	return true;
+}
+
+void CSearchList::RequestDownloadValidatorRecheck(uint32 nSearchID, DWORD dwDelayMs)
+{
+	if (nSearchID == 0)
+		return;
+	CSingleLock lock(&m_searchAnswerParseQueueLock, TRUE);
+	m_downloadValidatorRecheckDue[nSearchID] = ::GetTickCount() + dwDelayMs;
+}
+
+void CSearchList::RequestStartupDownloadValidatorCheck(uint32 nSearchID)
+{
+	if (nSearchID == 0 || theApp.DownloadValidator == NULL || !thePrefs.GetBlacklistManual() || !thePrefs.GetDownloadValidator()
+		|| !thePrefs.GetDownloadValidatorAutoMarkAsBlacklisted())
+		return;
+	{
+		CSingleLock lock(&m_searchAnswerParseQueueLock, TRUE);
+		m_downloadValidatorDirtySearches[nSearchID] = 1;
+		m_downloadValidatorStartupOverlaySearches[nSearchID] = 1;
+		m_downloadValidatorRecheckDue[nSearchID] = ::GetTickCount();
+	}
+	theApp.QueueSearchActivityChangedEvent(nSearchID);
+}
+
+void CSearchList::RequestDownloadValidatorRecheckForAllSearches()
+{
+	CSingleLock lock(&m_searchAnswerParseQueueLock, TRUE);
+	m_bDownloadValidatorRecheckAllPending = true;
+}
+
+void CSearchList::RequestDownloadValidatorRecheckIfDirty(uint32 nSearchID)
+{
+	if (nSearchID == 0)
+		return;
+	CSingleLock lock(&m_searchAnswerParseQueueLock, TRUE);
+	BYTE bDirty = 0;
+	if (m_downloadValidatorDirtySearches.Lookup(nSearchID, bDirty) && bDirty != 0)
+		m_downloadValidatorRecheckDue[nSearchID] = ::GetTickCount();
+}
+
+void CSearchList::SetDownloadValidatorPrioritySearch(uint32 nSearchID)
+{
+	::InterlockedExchange(&m_lDownloadValidatorPrioritySearchID, static_cast<LONG>(nSearchID));
+	if (nSearchID == 0)
+		return;
+	RequestDownloadValidatorRecheckIfDirty(nSearchID);
+	theApp.QueueDownloadValidatorCpuWork();
+	theApp.QueueSearchActivityChangedEvent(nSearchID);
+}
+
+bool CSearchList::GetDownloadValidatorSearchProgress(uint32 nSearchID, UINT& uProcessed, UINT& uTotal)
+{
+	UINT uWorkDone = 0;
+	UINT uWorkTotal = 0;
+	bool bHasActiveProgress = false;
+	bool bShowPendingProgress = false;
+	{
+		CSingleLock lock(&m_searchAnswerParseQueueLock, TRUE);
+		BYTE bShowOverlay = 0;
+		BYTE bStartupPending = 0;
+		const bool bOverlayRequested = nSearchID != 0 && m_downloadValidatorOverlayProgress.Lookup(nSearchID, bShowOverlay) && bShowOverlay != 0;
+		const bool bStartupRequested = nSearchID != 0 && m_downloadValidatorStartupOverlaySearches.Lookup(nSearchID, bStartupPending) && bStartupPending != 0;
+		bHasActiveProgress = bOverlayRequested
+			&& m_downloadValidatorProgressProcessed.Lookup(nSearchID, uWorkDone)
+			&& m_downloadValidatorProgressTotal.Lookup(nSearchID, uWorkTotal) && uWorkTotal != 0;
+		bShowPendingProgress = !bHasActiveProgress && (bOverlayRequested || bStartupRequested);
+	}
+
+	if (!bHasActiveProgress && !bShowPendingProgress) {
+		uProcessed = 0;
+		uTotal = 0;
+		return false;
+	}
+
+	const UINT uVisibleResultTotal = GetFoundFiles(nSearchID);
+	if (bShowPendingProgress) {
+		uProcessed = 0;
+		uTotal = (std::max)(uVisibleResultTotal, 1U);
+		return true;
+	}
+	if (uVisibleResultTotal == 0) {
+		uProcessed = (std::min)(uWorkDone, uWorkTotal);
+		uTotal = uWorkTotal;
+		return true;
+	}
+
+	uTotal = uVisibleResultTotal;
+	uProcessed = static_cast<UINT>((static_cast<uint64>(uVisibleResultTotal) * (std::min)(uWorkDone, uWorkTotal)) / uWorkTotal);
+	if (uProcessed >= uTotal && uWorkDone < uWorkTotal)
+		uProcessed = uTotal - 1;
+	return true;
+}
+
+void CSearchList::ProcessPendingDownloadValidatorRechecks()
+{
+	if (theApp.DownloadValidator == NULL)
+		return;
+
+	bool bMarkAllDirty = false;
+	{
+		CSingleLock lock(&m_searchAnswerParseQueueLock, TRUE);
+		bMarkAllDirty = m_bDownloadValidatorRecheckAllPending;
+		if (bMarkAllDirty) {
+			m_bDownloadValidatorRecheckAllPending = false;
+			m_downloadValidatorRecheckDue.RemoveAll();
+		}
+	}
+
+	if (bMarkAllDirty) {
+		std::vector<uint32> allSearchIds;
+		{
+			CSearchModelMutationLock mutationLock(this, _T("CSearchList::ProcessPendingDownloadValidatorRechecks"));
+			if (!mutationLock) {
+				RequestDownloadValidatorRecheckForAllSearches();
+				return;
+			}
+			for (POSITION pos = m_listFileLists.GetHeadPosition(); pos != NULL;) {
+				const SearchListsStruct* pList = m_listFileLists.GetNext(pos);
+				if (pList != NULL && pList->m_nSearchID != 0)
+					allSearchIds.push_back(pList->m_nSearchID);
+			}
+		}
+		CSingleLock lock(&m_searchAnswerParseQueueLock, TRUE);
+		for (std::vector<uint32>::const_iterator it = allSearchIds.begin(); it != allSearchIds.end(); ++it)
+			m_downloadValidatorDirtySearches[*it] = 1;
+	}
+
+	UINT uBackgroundDone = 0;
+	UINT uBackgroundTotal = 0;
+	const bool bDownloadValidatorBackgroundActive = theApp.DownloadValidator->GetBackgroundProgress(uBackgroundDone, uBackgroundTotal);
+	const bool bStartupChecksReady = m_bStoredSearchStartupLoadCompleted && !bDownloadValidatorBackgroundActive
+		&& theApp.DownloadValidator->IsPossibleKnownSearchReady()
+		&& (!thePrefs.GetDownloadValidatorFuzzyMatching() || theApp.DownloadValidator->IsFuzzyIndexReady());
+
+	const uint32 nActiveSearchID = theApp.emuledlg != NULL && theApp.emuledlg->searchwnd != NULL && theApp.emuledlg->searchwnd->m_pwndResults != NULL
+		? theApp.emuledlg->searchwnd->m_pwndResults->searchlistctrl.m_nResultsID : 0;
+	std::vector<uint32> searchIds;
+	const DWORD dwNow = ::GetTickCount();
+	{
+		CSingleLock lock(&m_searchAnswerParseQueueLock, TRUE);
+		for (POSITION pos = m_downloadValidatorRecheckDue.GetStartPosition(); pos != NULL;) {
+			uint32 nSearchID = 0;
+			DWORD dwDueTick = 0;
+			m_downloadValidatorRecheckDue.GetNextAssoc(pos, nSearchID, dwDueTick);
+			BYTE bStartupOverlay = 0;
+			const bool bStartupSearch = m_downloadValidatorStartupOverlaySearches.Lookup(nSearchID, bStartupOverlay) && bStartupOverlay != 0;
+			if (bStartupSearch && !bStartupChecksReady)
+				continue;
+			if (static_cast<LONG>(dwNow - dwDueTick) >= 0)
+				searchIds.push_back(nSearchID);
+		}
+		for (POSITION pos = m_downloadValidatorDirtySearches.GetStartPosition(); pos != NULL;) {
+			uint32 nSearchID = 0;
+			BYTE bSearchDirty = 0;
+			m_downloadValidatorDirtySearches.GetNextAssoc(pos, nSearchID, bSearchDirty);
+			if (bSearchDirty == 0)
+				continue;
+			BYTE bStartupOverlay = 0;
+			const bool bStartupSearch = m_downloadValidatorStartupOverlaySearches.Lookup(nSearchID, bStartupOverlay) && bStartupOverlay != 0;
+			if (bStartupSearch && !bStartupChecksReady)
+				continue;
+			if (std::find(searchIds.begin(), searchIds.end(), nSearchID) == searchIds.end())
+				searchIds.push_back(nSearchID);
+		}
+		for (std::vector<uint32>::const_iterator it = searchIds.begin(); it != searchIds.end(); ++it) {
+			m_downloadValidatorRecheckDue.RemoveKey(*it);
+			m_downloadValidatorDirtySearches.RemoveKey(*it);
+		}
+	}
+
+	if (nActiveSearchID != 0) {
+		std::stable_sort(searchIds.begin(), searchIds.end(), [nActiveSearchID](uint32 first, uint32 second) {
+			return first == nActiveSearchID && second != nActiveSearchID;
+		});
+	}
+	for (std::vector<uint32>::const_iterator it = searchIds.begin(); it != searchIds.end(); ++it) {
+		BYTE bStartupOverlay = 0;
+		{
+			CSingleLock lock(&m_searchAnswerParseQueueLock, TRUE);
+			m_downloadValidatorStartupOverlaySearches.Lookup(*it, bStartupOverlay);
+		}
+
+		SearchListsStruct *pListStruct = GetSearchListStructForID(*it, false);
+		SearchList *list = pListStruct != NULL ? &pListStruct->m_listSearchFiles : NULL;
+		if (list == NULL || list->GetCount() == 0) {
+			CSingleLock lock(&m_searchAnswerParseQueueLock, TRUE);
+			m_downloadValidatorProgressProcessed.RemoveKey(*it);
+			m_downloadValidatorProgressTotal.RemoveKey(*it);
+			m_downloadValidatorOverlayProgress.RemoveKey(*it);
+			m_downloadValidatorStartupOverlaySearches.RemoveKey(*it);
+			theApp.QueueSearchActivityChangedEvent(*it);
+			continue;
+		}
+
+		if (HasPendingSpamRatingRecheck(*it)) {
+			CSingleLock lock(&m_searchAnswerParseQueueLock, TRUE);
+			m_downloadValidatorDirtySearches[*it] = 1;
+			continue;
+		}
+		const bool bShowOverlay = bStartupOverlay != 0;
+		if (!QueueChunkedSpamRatingJob(*it, false, false, false, bShowOverlay)) {
+			CSingleLock lock(&m_searchAnswerParseQueueLock, TRUE);
+			m_downloadValidatorDirtySearches[*it] = 1;
+		}
+	}
+}
+
 void CSearchList::Process()
 {
+	ProcessPendingDownloadValidatorRechecks();
 	if (::GetTickCount() >= m_nLastSaved + MIN2MS(12)) {
 		if (m_bStoredSearchStartupLoadCompleted) {
 			if (thePrefs.IsStoringSearchesEnabled())

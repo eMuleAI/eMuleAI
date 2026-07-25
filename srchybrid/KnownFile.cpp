@@ -2036,9 +2036,9 @@ CString CKnownFile::GetInfoSummary(bool bNoFormatCommands) const
 		_T("%s: %s\n")
 		_T("%s: %s\n")
 		_T("%s: %s%s")
-		, (LPCTSTR)GetResString(_T("FD_HASH")), (LPCTSTR)md4str(GetFileHash())
+		, (LPCTSTR)GetResStringWithColon(_T("CD_UHASH2")), (LPCTSTR)md4str(GetFileHash())
 		, (LPCTSTR)GetResString(_T("AICHHASH")), (LPCTSTR)strAICHHash
-		, (LPCTSTR)GetResString(_T("FD_SIZE")), (LPCTSTR)CastItoXBytes(GetFileSize())
+		, (LPCTSTR)GetResStringWithColon(_T("DL_SIZE")), (LPCTSTR)CastItoXBytes(GetFileSize())
 		, bNoFormatCommands ? (LPCTSTR)EMPTY : (LPCTSTR)_T("<br_head>")
 		, (LPCTSTR)GetResString(_T("TYPE")), (LPCTSTR)strType
 		, (LPCTSTR)GetResString(_T("FOLDER")), (LPCTSTR)strFolder

@@ -119,6 +119,37 @@ void CPPgDebug::DoDataExchange(CDataExchange *pDX)
 		DDX_TreeEdit(pDX, IDC_DEBUG_OPTS, m_htiInteger[i], m_iValInteger[i]);
 }
 
+void CPPgDebug::LocalizeItemInfoText(HTREEITEM item, LPCTSTR strid)
+{
+	if (item != NULL)
+		m_ctrlTreeOptions.SetItemInfo(item, GetResString(strid));
+}
+
+void CPPgDebug::Localize()
+{
+	if (m_hWnd == NULL || !m_bInitializedTreeOpts)
+		return;
+
+	LocalizeItemInfoText(m_htiServer, _T("OPTIONS_TIP_DEBUG_SERVER_GROUP"));
+	LocalizeItemInfoText(m_htiClient, _T("OPTIONS_TIP_DEBUG_CLIENT_GROUP"));
+
+	static const LPCTSTR aDetailKeys[MAX_DETAIL_ITEMS] = {
+		_T("OPTIONS_TIP_DEBUG_SERVER_TCP"),
+		_T("OPTIONS_TIP_DEBUG_SERVER_UDP"),
+		_T("OPTIONS_TIP_DEBUG_SERVER_SOURCES"),
+		_T("OPTIONS_TIP_DEBUG_SERVER_SEARCHES"),
+		_T("OPTIONS_TIP_DEBUG_CLIENT_TCP"),
+		_T("OPTIONS_TIP_DEBUG_CLIENT_ED2K_UDP"),
+		_T("OPTIONS_TIP_DEBUG_CLIENT_KAD_UDP")
+	};
+	for (unsigned i = 0; i < _countof(aDetailKeys); ++i) {
+		LocalizeItemInfoText(m_cb[i], aDetailKeys[i]);
+		LocalizeItemInfoText(m_lv[i], aDetailKeys[i]);
+	}
+
+	LocalizeItemInfoText(m_htiInteger[0], _T("OPTIONS_TIP_DEBUG_MEMORY_CHECK"));
+}
+
 BOOL CPPgDebug::OnInitDialog()
 {
 #define	SET_DETAIL_OPT(idx, var) \
@@ -144,6 +175,7 @@ BOOL CPPgDebug::OnInitDialog()
 	m_ctrlTreeOptions.SetImageListColorFlags(theApp.m_iDfltImageListColorFlags);
 	CPropertyPage::OnInitDialog();
 	InitWindowStyles(this);
+	Localize();
 
 	return TRUE;  // return TRUE unless you set the focus to the control
 				  // EXCEPTION: OCX Property Pages should return FALSE
@@ -155,6 +187,17 @@ BOOL CPPgDebug::OnKillActive()
 	// any possibly pending data from an open edit control
 	m_ctrlTreeOptions.HandleChildControlLosingFocus();
 	return CPropertyPage::OnKillActive();
+}
+
+void CPPgDebug::ResetToDefaults()
+{
+	m_ctrlTreeOptions.HandleChildControlLosingFocus();
+	memset(m_checks, 0, sizeof m_checks);
+	memset(m_levels, 0, sizeof m_levels);
+	memset(m_iValInteger, 0, sizeof m_iValInteger);
+	m_iValInteger[0] = 1;
+	UpdateData(FALSE);
+	SetModified(TRUE);
 }
 
 BOOL CPPgDebug::OnApply()

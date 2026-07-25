@@ -93,7 +93,7 @@ namespace IPGeolocationDB
 			* 
 			* @note The MMDB database must be available before this class can be constructed.
 			*/
-			DB( const std::string &database_filename = "dbip-city-lite.mmdb" );
+			DB( const std::string &database_filename = IPGEOLOCATION_DB_FILENAMEA );
 
 			/** Get the MMDB library version number.
 			 *

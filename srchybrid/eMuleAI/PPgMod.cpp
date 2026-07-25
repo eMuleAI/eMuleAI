@@ -49,8 +49,8 @@ BEGIN_MESSAGE_MAP(CPPgMod, CPropertyPage)
 	ON_MESSAGE(UM_TREEOPTSCTRL_NOTIFY, OnTreeOptsCtrlNotify)
 	ON_MESSAGE(WM_TREEITEM_HELP, DrawTreeItemHelp)
 	ON_WM_HELPINFO()
-	ON_WM_CTLCOLOR()
 	ON_WM_SIZE()
+	ON_NOTIFY(TVN_ITEMEXPANDED, IDC_MOD_OPTS, OnTvnItemexpanded)
 END_MESSAGE_MAP()
 
 namespace
@@ -78,6 +78,46 @@ namespace
 
 		fValue = static_cast<float>(dValue);
 		return true;
+	}
+	CString FormatToolTipText(const CString& strText)
+	{
+		CString strNormalized(strText);
+		strNormalized.Replace(_T("\r\n"), _T("\n"));
+		strNormalized.Replace(_T('\r'), _T('\n'));
+
+		CString strResult;
+		int iPos = 0;
+		const int iWrapColumn = 88;
+		while (iPos >= 0) {
+			CString strRemaining(strNormalized.Tokenize(_T("\n"), iPos));
+			if (strRemaining.IsEmpty()) {
+				if (!strResult.IsEmpty())
+					strResult += _T("\r\n");
+				continue;
+			}
+
+			while (!strRemaining.IsEmpty()) {
+				if (strRemaining.GetLength() <= iWrapColumn) {
+					if (!strResult.IsEmpty())
+						strResult += _T("\r\n");
+					strResult += strRemaining;
+					break;
+				}
+
+				int iBreakPos = strRemaining.Left(iWrapColumn + 1).ReverseFind(_T(' '));
+				if (iBreakPos <= 0)
+					iBreakPos = iWrapColumn;
+				CString strWrappedLine(strRemaining.Left(iBreakPos));
+				strWrappedLine.TrimRight();
+				if (!strResult.IsEmpty())
+					strResult += _T("\r\n");
+				strResult += strWrappedLine;
+				strRemaining = strRemaining.Mid(iBreakPos);
+				strRemaining.TrimLeft();
+			}
+		}
+		strResult.TrimRight(_T("\r\n"));
+		return strResult;
 	}
 }
 
@@ -197,51 +237,6 @@ CPPgMod::CPPgMod()
 
 	, m_htiReAskFileSrc()
 	, m_iReAskFileSrc()
-
-	, m_htiDownloadValidator()
-	, m_htiDownloadValidatorPassive()
-	, m_htiDownloadValidatorAlwaysAsk()
-	, m_htiDownloadValidatorReject()
-	, m_htiDownloadValidatorAccept()
-	, m_htiDownloadValidatorAcceptPercentage()
-	, m_htiDownloadValidatorRejectCanceled()
-	, m_htiDownloadValidatorRejectSameHash()
-	, m_htiDownloadValidatorRejectBlacklisted()
-	, m_htiDownloadValidatorCaseInsensitive()
-	, m_htiDownloadValidatorIgnoreExtension()
-	, m_htiDownloadValidatorIgnoreTags()
-	, m_htiDownloadValidatorDontIgnoreNumericTags()
-	, m_htiDownloadValidatorIgnoreNonAlphaNumeric()
-	, m_htiDownloadValidatorMinimumComparisonLength()
-	, m_htiDownloadValidatorSkipIncompleteFileConfirmation()
-	, m_htiDownloadValidatorMarkAsBlacklisted()
-	, m_htiDownloadValidatorAutoMarkAsBlacklisted()
-	, m_htiDownloadValidatorDateTimeMatching()
-	, m_htiDownloadValidatorDateTimeUseYearRange()
-	, m_htiDownloadValidatorDateTimeYearStart()
-	, m_htiDownloadValidatorDateTimeYearEnd()
-	, m_htiDownloadValidatorDateTimeCheckSeconds()
-	, m_htiDownloadValidatorDateTimeIncludeFollowingNumericValues()
-	, m_iDownloadValidator()
-	, m_iDownloadValidatorAcceptPercentage()
-	, m_bDownloadValidatorRejectCanceled()
-	, m_bDownloadValidatorRejectSameHash()
-	, m_bDownloadValidatorRejectBlacklisted()
-	, m_bDownloadValidatorCaseInsensitive()
-	, m_bDownloadValidatorIgnoreExtension()
-	, m_bDownloadValidatorIgnoreTags()
-	, m_bDownloadValidatorDontIgnoreNumericTags()
-	, m_bDownloadValidatorIgnoreNonAlphaNumeric()
-	, m_iDownloadValidatorMinimumComparisonLength()
-	, m_bDownloadValidatorSkipIncompleteFileConfirmation()
-	, m_bDownloadValidatorMarkAsBlacklisted()
-	, m_bDownloadValidatorAutoMarkAsBlacklisted()
-	, m_bDownloadValidatorDateTimeMatching()
-	, m_bDownloadValidatorDateTimeUseYearRange()
-	, m_iDownloadValidatorDateTimeYearStart()
-	, m_iDownloadValidatorDateTimeYearEnd()
-	, m_bDownloadValidatorDateTimeCheckSeconds()
-	, m_bDownloadValidatorDateTimeIncludeFollowingNumericValues()
 
 	, m_htiDownloadInspector()
 	, m_htiDownloadInspectorDisable()
@@ -576,7 +571,6 @@ void CPPgMod::DoDataExchange(CDataExchange *pDX)
 		int iImgIPGeolocation = 8;
 		int iImgConTweaks = 8;
 		int iImgUploadSettings = 8;
-		int iImgPrefBlue = 8;
 		int iImgInspect = 8;
 		int iImgESearch = 8;
 		int iImgEServer = 8;
@@ -604,7 +598,6 @@ void CPPgMod::DoDataExchange(CDataExchange *pDX)
 			iImgIPGeolocation = piml->Add(CTempIconLoader(_T("LOCATION")));
 			iImgConTweaks = piml->Add(CTempIconLoader(_T("CONNECTION2")));
 			iImgUploadSettings = piml->Add(CTempIconLoader(_T("UPLOADSETTINGS")));
-			iImgPrefBlue = piml->Add(CTempIconLoader(_T("PREFERENCESBLUE")));
 			iImgInspect = piml->Add(CTempIconLoader(_T("INSPECT")));
 			iImgESearch = piml->Add(CTempIconLoader(_T("SEARCH")));
 			iImgEServer = piml->Add(CTempIconLoader(_T("ESERVER")));
@@ -626,8 +619,8 @@ void CPPgMod::DoDataExchange(CDataExchange *pDX)
 
 		m_htiUITweaks = m_ctrlTreeOptions.InsertGroup(GetResString(_T("UI_TWEAKS")), iImgUITweaks, TVI_ROOT);
 		m_htiUIDarkMode = m_ctrlTreeOptions.InsertGroup(GetResString(_T("DARK_MODE")), iImgUIDarkMode, m_htiUITweaks);
-		m_htiUIDarkModeAuto = m_ctrlTreeOptions.InsertRadioButton(GetResString(_T("DARK_MODE_AUTO")), m_htiUIDarkMode, m_iUIDarkMode == 0);
-		m_htiUIDarkModeOn = m_ctrlTreeOptions.InsertRadioButton(GetResString(_T("DARK_MODE_ON")), m_htiUIDarkMode, m_iUIDarkMode == 1);
+		m_htiUIDarkModeAuto = m_ctrlTreeOptions.InsertRadioButton(GetResString(_T("AUTOMATIC")), m_htiUIDarkMode, m_iUIDarkMode == 0);
+		m_htiUIDarkModeOn = m_ctrlTreeOptions.InsertRadioButton(GetResString(_T("DARK_MODE")), m_htiUIDarkMode, m_iUIDarkMode == 1);
 		m_htiUIDarkModeOff = m_ctrlTreeOptions.InsertRadioButton(GetResString(_T("DARK_MODE_OFF")), m_htiUIDarkMode, m_iUIDarkMode == 2);
 		m_ctrlTreeOptions.Expand(m_htiUIDarkMode, TVE_EXPAND);
 		m_htiUITweaksSpeedGraph = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("SHOW_SPEED_GRAPH")), m_htiUITweaks, m_bUITweaksSpeedGraph);
@@ -659,7 +652,7 @@ void CPPgMod::DoDataExchange(CDataExchange *pDX)
 		m_ctrlTreeOptions.Expand(m_htiUITweaksMaxSortHistory, TVE_EXPAND);
 	
 		m_htiIPGeolocation = m_ctrlTreeOptions.InsertGroup(GetResString(_T("IPGEOLOCATION_MAIN")), iImgIPGeolocation, TVI_ROOT);
-		m_htiIPGeolocationNameDisable = m_ctrlTreeOptions.InsertRadioButton(GetResString(_T("IPGEOLOCATION_DISABLED")), m_htiIPGeolocation, m_iIPGeolocationMode == IPGEO_DISABLE);
+		m_htiIPGeolocationNameDisable = m_ctrlTreeOptions.InsertRadioButton(GetResString(_T("UDPDISABLED")), m_htiIPGeolocation, m_iIPGeolocationMode == IPGEO_DISABLE);
 		m_htiIPGeolocationCountryCode = m_ctrlTreeOptions.InsertRadioButton(GetResString(_T("IPGEOLOCATION_COUNTRYCODE")), m_htiIPGeolocation, m_iIPGeolocationMode == IPGEO_COUNTRYCODE);
 		m_htiIPGeolocationCountry = m_ctrlTreeOptions.InsertRadioButton(GetResString(_T("IPGEOLOCATION_COUNTRY")), m_htiIPGeolocation, m_iIPGeolocationMode == IPGEO_COUNTRY);
 		m_htiIPGeolocationCountryCity = m_ctrlTreeOptions.InsertRadioButton(GetResString(_T("IPGEOLOCATION_COUNTRYCITY")), m_htiIPGeolocation, m_iIPGeolocationMode == IPGEO_COUNTRYCITY);
@@ -675,7 +668,7 @@ void CPPgMod::DoDataExchange(CDataExchange *pDX)
 
 		m_htiConnectionChecker = m_ctrlTreeOptions.InsertGroup(GetResString(_T("CONNECTION_CHECK")), iImgConnection, m_htiConTweaks);
 		m_htiConnectionCheckerActivate = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("CONNECTION_CHECK_ACTIVATE")), m_htiConnectionChecker, m_bConnectionChecker);
-		m_htiConnectionCheckerServer = m_ctrlTreeOptions.InsertItem(GetResString(_T("URL_ADDR")), TREEOPTSCTRLIMG_EDIT, TREEOPTSCTRLIMG_EDIT, m_htiConnectionChecker);
+		m_htiConnectionCheckerServer = m_ctrlTreeOptions.InsertItem(GetResString(_T("SV_URL")), TREEOPTSCTRLIMG_EDIT, TREEOPTSCTRLIMG_EDIT, m_htiConnectionChecker);
 		m_ctrlTreeOptions.AddEditBox(m_htiConnectionCheckerServer, RUNTIME_CLASS(CTreeOptionsEditEx));
 		m_ctrlTreeOptions.Expand(m_htiConnectionChecker, TVE_EXPAND);
 
@@ -733,7 +726,7 @@ void CPPgMod::DoDataExchange(CDataExchange *pDX)
 		m_htiLowRatioQueueScoreBonus = m_ctrlTreeOptions.InsertItem(GetResString(_T("LOW_RATIO_QUEUE_SCORE_BONUS")), TREEOPTSCTRLIMG_EDIT, TREEOPTSCTRLIMG_EDIT, m_htiLowRatioQueueScoreBoost);
 		m_ctrlTreeOptions.AddEditBox(m_htiLowRatioQueueScoreBonus, RUNTIME_CLASS(CNumTreeOptionsEdit));
 		m_htiUploadSessionTransferLimit = m_ctrlTreeOptions.InsertGroup(GetResString(_T("UPLOAD_SESSION_TRANSFER_LIMIT")), 0, m_htiUploadSettings);
-		m_htiUploadSessionTransferLimitDisabled = m_ctrlTreeOptions.InsertRadioButton(GetResString(_T("UPLOAD_SESSION_TRANSFER_LIMIT_DISABLED")), m_htiUploadSessionTransferLimit, m_iUploadSessionTransferLimitMode == static_cast<int>(ESessionTransferLimitMode::Disabled));
+		m_htiUploadSessionTransferLimitDisabled = m_ctrlTreeOptions.InsertRadioButton(GetResString(_T("DISABLED")), m_htiUploadSessionTransferLimit, m_iUploadSessionTransferLimitMode == static_cast<int>(ESessionTransferLimitMode::Disabled));
 		m_htiUploadSessionTransferLimitPercent = m_ctrlTreeOptions.InsertRadioButton(GetResString(_T("UPLOAD_SESSION_TRANSFER_LIMIT_PERCENT")), m_htiUploadSessionTransferLimit, m_iUploadSessionTransferLimitMode == static_cast<int>(ESessionTransferLimitMode::PercentOfFile));
 		m_htiUploadSessionTransferLimitPercentValue = m_ctrlTreeOptions.InsertItem(GetResString(_T("UPLOAD_SESSION_TRANSFER_LIMIT_PERCENT_VALUE")), TREEOPTSCTRLIMG_EDIT, TREEOPTSCTRLIMG_EDIT, m_htiUploadSessionTransferLimitPercent);
 		m_ctrlTreeOptions.AddEditBox(m_htiUploadSessionTransferLimitPercentValue, RUNTIME_CLASS(CNumTreeOptionsEdit));
@@ -749,41 +742,8 @@ void CPPgMod::DoDataExchange(CDataExchange *pDX)
 		m_ctrlTreeOptions.Expand(m_htiUploadSessionTransferLimitPercent, TVE_EXPAND);
 		m_ctrlTreeOptions.Expand(m_htiUploadSessionTransferLimitMiB, TVE_EXPAND);
 
-		m_htiDownloadValidator = m_ctrlTreeOptions.InsertGroup(GetResString(_T("DOWNLOAD_VALIDATOR")), iImgPrefBlue, TVI_ROOT);
-		m_htiDownloadValidatorPassive = m_ctrlTreeOptions.InsertRadioButton(GetResString(_T("DOWNLOAD_VALIDATOR_PASSIVE")), m_htiDownloadValidator, m_iDownloadValidator == 0);
-		m_htiDownloadValidatorAlwaysAsk = m_ctrlTreeOptions.InsertRadioButton(GetResString(_T("DOWNLOAD_VALIDATOR_ALWAYS_ASK")), m_htiDownloadValidator, m_iDownloadValidator == 1);
-		m_htiDownloadValidatorReject = m_ctrlTreeOptions.InsertRadioButton(GetResString(_T("DOWNLOAD_VALIDATOR_REJECT")), m_htiDownloadValidator, m_iDownloadValidator == 2);
-		m_htiDownloadValidatorAccept = m_ctrlTreeOptions.InsertRadioButton(GetResString(_T("DOWNLOAD_VALIDATOR_ACCEPT")), m_htiDownloadValidator, m_iDownloadValidator == 3);
-		m_htiDownloadValidatorAcceptPercentage = m_ctrlTreeOptions.InsertItem(GetResString(_T("DOWNLOAD_VALIDATOR_ACCEPT_PERCENTAGE")), TREEOPTSCTRLIMG_EDIT, TREEOPTSCTRLIMG_EDIT, m_htiDownloadValidatorAccept);
-		m_ctrlTreeOptions.AddEditBox(m_htiDownloadValidatorAcceptPercentage, RUNTIME_CLASS(CNumTreeOptionsEdit));
-		m_ctrlTreeOptions.Expand(m_htiDownloadValidatorAccept, TVE_EXPAND);
-		m_htiDownloadValidatorRejectCanceled = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("DOWNLOAD_VALIDATOR_REJECT_CANCELED")), m_htiDownloadValidator, m_bDownloadValidatorRejectCanceled);
-		m_htiDownloadValidatorRejectSameHash = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("DOWNLOAD_VALIDATOR_REJECT_SAME_HASH")), m_htiDownloadValidator, m_bDownloadValidatorRejectSameHash);
-		m_htiDownloadValidatorRejectBlacklisted = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("DOWNLOAD_VALIDATOR_REJECT_BLACKLISTED")), m_htiDownloadValidator, m_bDownloadValidatorRejectBlacklisted);
-		m_htiDownloadValidatorCaseInsensitive = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("DOWNLOAD_VALIDATOR_CASE_INSENSITIVE")), m_htiDownloadValidator, m_bDownloadValidatorCaseInsensitive);
-		m_htiDownloadValidatorIgnoreExtension = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("DOWNLOAD_VALIDATOR_IGNORE_EXTENSION")), m_htiDownloadValidator, m_bDownloadValidatorIgnoreExtension);
-		m_htiDownloadValidatorIgnoreTags = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("DOWNLOAD_VALIDATOR_IGNORE_TAGS")), m_htiDownloadValidator, m_bDownloadValidatorIgnoreTags);
-		m_htiDownloadValidatorDontIgnoreNumericTags = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("DOWNLOAD_VALIDATOR_DONT_IGNORE_NUMERIC_TAGS")), m_htiDownloadValidator, m_bDownloadValidatorDontIgnoreNumericTags);
-		m_htiDownloadValidatorIgnoreNonAlphaNumeric = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("DOWNLOAD_VALIDATOR_IGNORE_NON_ALPHANUMERIC")), m_htiDownloadValidator, m_bDownloadValidatorIgnoreNonAlphaNumeric);
-		m_htiDownloadValidatorMinimumComparisonLength = m_ctrlTreeOptions.InsertItem(GetResString(_T("DOWNLOAD_VALIDATOR_MINIMUM_COMPARISON_LENGTH")), TREEOPTSCTRLIMG_EDIT, TREEOPTSCTRLIMG_EDIT, m_htiDownloadValidator);
-		m_ctrlTreeOptions.AddEditBox(m_htiDownloadValidatorMinimumComparisonLength, RUNTIME_CLASS(CNumTreeOptionsEdit));
-		m_htiDownloadValidatorDateTimeMatching = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("DOWNLOAD_VALIDATOR_DATETIME_MATCHING")), m_htiDownloadValidator, m_bDownloadValidatorDateTimeMatching);
-		m_htiDownloadValidatorDateTimeUseYearRange = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("DOWNLOAD_VALIDATOR_DATETIME_USE_YEAR_RANGE")), m_htiDownloadValidatorDateTimeMatching, m_bDownloadValidatorDateTimeUseYearRange);
-		m_htiDownloadValidatorDateTimeYearStart = m_ctrlTreeOptions.InsertItem(GetResString(_T("DOWNLOAD_VALIDATOR_DATETIME_YEAR_START")), TREEOPTSCTRLIMG_EDIT, TREEOPTSCTRLIMG_EDIT, m_htiDownloadValidatorDateTimeUseYearRange);
-		m_ctrlTreeOptions.AddEditBox(m_htiDownloadValidatorDateTimeYearStart, RUNTIME_CLASS(CNumTreeOptionsEdit));
-		m_htiDownloadValidatorDateTimeYearEnd = m_ctrlTreeOptions.InsertItem(GetResString(_T("DOWNLOAD_VALIDATOR_DATETIME_YEAR_END")), TREEOPTSCTRLIMG_EDIT, TREEOPTSCTRLIMG_EDIT, m_htiDownloadValidatorDateTimeUseYearRange);
-		m_ctrlTreeOptions.AddEditBox(m_htiDownloadValidatorDateTimeYearEnd, RUNTIME_CLASS(CNumTreeOptionsEdit));
-		m_htiDownloadValidatorDateTimeCheckSeconds = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("DOWNLOAD_VALIDATOR_DATETIME_CHECK_SECONDS")), m_htiDownloadValidatorDateTimeMatching, m_bDownloadValidatorDateTimeCheckSeconds);
-		m_htiDownloadValidatorDateTimeIncludeFollowingNumericValues = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("DOWNLOAD_VALIDATOR_DATETIME_INCLUDE_FOLLOWING_NUMERIC_VALUES")),
-			m_htiDownloadValidatorDateTimeMatching, m_bDownloadValidatorDateTimeIncludeFollowingNumericValues);
-		m_ctrlTreeOptions.Expand(m_htiDownloadValidatorDateTimeMatching, TVE_EXPAND);
-		m_ctrlTreeOptions.Expand(m_htiDownloadValidatorDateTimeUseYearRange, TVE_EXPAND);
-		m_htiDownloadValidatorSkipIncompleteFileConfirmation = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("DOWNLOAD_VALIDATOR_SKIP_INCOMPLETE_CONFIRMATION")), m_htiDownloadValidator, m_bDownloadValidatorSkipIncompleteFileConfirmation);
-		m_htiDownloadValidatorMarkAsBlacklisted = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("DOWNLOAD_VALIDATOR_MARK_AS_BLACKLISTED")), m_htiDownloadValidator, m_bDownloadValidatorMarkAsBlacklisted);
-		m_htiDownloadValidatorAutoMarkAsBlacklisted = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("DOWNLOAD_VALIDATOR_AUTO_MARK_AS_BLACKLISTED")), m_htiDownloadValidator, m_bDownloadValidatorAutoMarkAsBlacklisted);
-		
 		m_htiDownloadInspector = m_ctrlTreeOptions.InsertGroup(GetResString(_T("DOWNLOAD_INSPECTOR")), iImgInspect, TVI_ROOT);
-		m_htiDownloadInspectorDisable = m_ctrlTreeOptions.InsertRadioButton(GetResString(_T("DOWNLOAD_INSPECTOR_DISABLE")), m_htiDownloadInspector, m_iDownloadInspector == 0);
+		m_htiDownloadInspectorDisable = m_ctrlTreeOptions.InsertRadioButton(GetResString(_T("UDPDISABLED")), m_htiDownloadInspector, m_iDownloadInspector == 0);
 		m_htiDownloadInspectorLogOnly = m_ctrlTreeOptions.InsertRadioButton(GetResString(_T("DOWNLOAD_INSPECTOR_LOG_ONLY")), m_htiDownloadInspector, m_iDownloadInspector == 1);
 		m_htiDownloadInspectorDelete = m_ctrlTreeOptions.InsertRadioButton(GetResString(_T("DOWNLOAD_INSPECTOR_DELETE")), m_htiDownloadInspector, m_iDownloadInspector == 2);
 		m_htiDownloadInspectorFake = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("DOWNLOAD_INSPECTOR_INCLUDE_FAKE")), m_htiDownloadInspector, m_bDownloadInspectorFake);
@@ -805,7 +765,7 @@ void CPPgMod::DoDataExchange(CDataExchange *pDX)
 		m_htiDownloadInspectorAutoDeleteLastReceivedBefore = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("DOWNLOAD_INSPECTOR_AUTO_DELETE_LAST_RECEIVED_BEFORE")), m_htiDownloadInspectorAutoDelete, m_bDownloadInspectorAutoDeleteLastReceivedBeforeEnabled);
 		m_htiDownloadInspectorAutoDeleteLastReceivedBeforeDays = m_ctrlTreeOptions.InsertItem(GetResString(_T("DOWNLOAD_INSPECTOR_AUTO_DELETE_DAYS_THRESHOLD")), TREEOPTSCTRLIMG_EDIT, TREEOPTSCTRLIMG_EDIT, m_htiDownloadInspectorAutoDeleteLastReceivedBefore);
 		m_ctrlTreeOptions.AddEditBox(m_htiDownloadInspectorAutoDeleteLastReceivedBeforeDays, RUNTIME_CLASS(CNumTreeOptionsEdit));
-		m_htiDownloadInspectorAutoDeleteDownloadedLessThanPercent = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("DOWNLOAD_INSPECTOR_AUTO_DELETE_DOWNLOADED_LESS_THAN_PERCENT")), m_htiDownloadInspectorAutoDelete, m_bDownloadInspectorAutoDeleteDownloadedLessThanPercentEnabled);
+		m_htiDownloadInspectorAutoDeleteDownloadedLessThanPercent = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("DOWNLOAD_INSPECTOR_AUTO_DELETE_DOWNLOADED_LESS_THAN_MB")), m_htiDownloadInspectorAutoDelete, m_bDownloadInspectorAutoDeleteDownloadedLessThanPercentEnabled);
 		m_htiDownloadInspectorAutoDeleteDownloadedLessThanPercentValue = m_ctrlTreeOptions.InsertItem(GetResString(_T("PERCENT_THRESHOLD")), TREEOPTSCTRLIMG_EDIT, TREEOPTSCTRLIMG_EDIT, m_htiDownloadInspectorAutoDeleteDownloadedLessThanPercent);
 		m_ctrlTreeOptions.AddEditBox(m_htiDownloadInspectorAutoDeleteDownloadedLessThanPercentValue, RUNTIME_CLASS(CNumTreeOptionsEdit));
 		m_htiDownloadInspectorAutoDeleteDownloadedLessThanMb = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("DOWNLOAD_INSPECTOR_AUTO_DELETE_DOWNLOADED_LESS_THAN_MB")), m_htiDownloadInspectorAutoDelete, m_bDownloadInspectorAutoDeleteDownloadedLessThanMbEnabled);
@@ -863,16 +823,16 @@ void CPPgMod::DoDataExchange(CDataExchange *pDX)
 		m_htiSelectiveShare = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("SELECTIVESHARE")), m_htiHideOvershares, m_bSelectiveShare);
 		m_htiShareOnlyTheNeed = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("SHAREONLYTHENEED")), m_htiShareTweaks, m_bShareOnlyTheNeed);
 		m_htiPowerShareGroup = m_ctrlTreeOptions.InsertGroup(GetResString(_T("POWERSHARE")), iImgPowerShare, m_htiShareTweaks);
-		m_htiPowerShareDisabled = m_ctrlTreeOptions.InsertRadioButton(GetResString(_T("POWERSHARE_DISABLED")), m_htiPowerShareGroup, m_iPowerShareMode == 0);
+		m_htiPowerShareDisabled = m_ctrlTreeOptions.InsertRadioButton(GetResString(_T("DISABLED")), m_htiPowerShareGroup, m_iPowerShareMode == 0);
 		m_htiPowerShareActivated = m_ctrlTreeOptions.InsertRadioButton(GetResString(_T("POWERSHARE_ACTIVATED")), m_htiPowerShareGroup, m_iPowerShareMode == 1);
-		m_htiPowerShareAuto = m_ctrlTreeOptions.InsertRadioButton(GetResString(_T("POWERSHARE_AUTO")), m_htiPowerShareGroup, m_iPowerShareMode == 2);
+		m_htiPowerShareAuto = m_ctrlTreeOptions.InsertRadioButton(GetResString(_T("PRIOAUTO")), m_htiPowerShareGroup, m_iPowerShareMode == 2);
 		m_htiPowerShareLimited = m_ctrlTreeOptions.InsertRadioButton(GetResString(_T("POWERSHARE_LIMITED")), m_htiPowerShareGroup, m_iPowerShareMode == 3);
 		m_htiPowerShareLimit = m_ctrlTreeOptions.InsertItem(GetResString(_T("POWERSHARE_LIMIT")), TREEOPTSCTRLIMG_EDIT, TREEOPTSCTRLIMG_EDIT, m_htiPowerShareLimited);
 		m_ctrlTreeOptions.AddEditBox(m_htiPowerShareLimit, RUNTIME_CLASS(CNumTreeOptionsEdit));
 		m_htiPowerShareInternalPrio = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("POWERSHARE_INTERPRIO")), m_htiPowerShareGroup, m_bPowerShareInternalPrio);
 		m_htiPermissionsGroup = m_ctrlTreeOptions.InsertGroup(GetResString(_T("SHARE_PERMISSION_GROUP")), iImgPermission, m_htiShareTweaks);
-		m_htiPermissionEverybody = m_ctrlTreeOptions.InsertRadioButton(GetResString(_T("SHARE_PERMISSION_EVERYBODY")), m_htiPermissionsGroup, m_iSharePermissions == PERM_ALL);
-		m_htiPermissionFriendsOnly = m_ctrlTreeOptions.InsertRadioButton(GetResString(_T("SHARE_PERMISSION_FRIENDSONLY")), m_htiPermissionsGroup, m_iSharePermissions == PERM_FRIENDS);
+		m_htiPermissionEverybody = m_ctrlTreeOptions.InsertRadioButton(GetResString(_T("PW_EVER")), m_htiPermissionsGroup, m_iSharePermissions == PERM_ALL);
+		m_htiPermissionFriendsOnly = m_ctrlTreeOptions.InsertRadioButton(GetResString(_T("FSTATUS_FRIENDSONLY")), m_htiPermissionsGroup, m_iSharePermissions == PERM_FRIENDS);
 		m_htiPermissionHidden = m_ctrlTreeOptions.InsertRadioButton(GetResString(_T("SHARE_PERMISSION_HIDDEN")), m_htiPermissionsGroup, m_iSharePermissions == PERM_NOONE);
 		m_htiPermissionColorRows = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("SHARE_PERMISSION_COLOR_ROWS")), m_htiPermissionsGroup, m_bSharePermissionColorRows);
 		m_htiAdjustNTFSDaylightFileTime = m_ctrlTreeOptions.InsertCheckBox(GetResString(_T("ADJUSTNTFSDAYLIGHTFILETIME")), m_htiFileTweaks, m_bAdjustNTFSDaylightFileTime);
@@ -1121,39 +1081,6 @@ void CPPgMod::DoDataExchange(CDataExchange *pDX)
 		DDX_TreeEdit(pDX, IDC_MOD_OPTS, m_htiReAskFileSrc, m_iReAskFileSrc);
 		DDV_MinMaxInt(pDX, m_iReAskFileSrc, (MS2MIN(FILEREASKTIME)), 55);
 	}
-
-	DDX_TreeRadio(pDX, IDC_MOD_OPTS, m_htiDownloadValidator, m_iDownloadValidator);
-	if (m_htiDownloadValidatorAcceptPercentage) {
-		DDX_TreeEdit(pDX, IDC_MOD_OPTS, m_htiDownloadValidatorAcceptPercentage, m_iDownloadValidatorAcceptPercentage);
-		DDV_MinMaxInt(pDX, m_iDownloadValidatorAcceptPercentage, 1, 100);
-	}
-	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiDownloadValidatorRejectCanceled, m_bDownloadValidatorRejectCanceled);
-	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiDownloadValidatorRejectSameHash, m_bDownloadValidatorRejectSameHash);
-	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiDownloadValidatorRejectBlacklisted, m_bDownloadValidatorRejectBlacklisted);
-	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiDownloadValidatorCaseInsensitive, m_bDownloadValidatorCaseInsensitive);
-	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiDownloadValidatorIgnoreExtension, m_bDownloadValidatorIgnoreExtension);
-	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiDownloadValidatorIgnoreTags, m_bDownloadValidatorIgnoreTags);
-	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiDownloadValidatorDontIgnoreNumericTags, m_bDownloadValidatorDontIgnoreNumericTags);
-	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiDownloadValidatorIgnoreNonAlphaNumeric, m_bDownloadValidatorIgnoreNonAlphaNumeric);
-	if (m_htiDownloadValidatorMinimumComparisonLength) {
-		DDX_TreeEdit(pDX, IDC_MOD_OPTS, m_htiDownloadValidatorMinimumComparisonLength, m_iDownloadValidatorMinimumComparisonLength);
-		DDV_MinMaxInt(pDX, m_iDownloadValidatorMinimumComparisonLength, 4, INT_MAX);
-	}
-	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiDownloadValidatorDateTimeMatching, m_bDownloadValidatorDateTimeMatching);
-	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiDownloadValidatorDateTimeUseYearRange, m_bDownloadValidatorDateTimeUseYearRange);
-	if (m_htiDownloadValidatorDateTimeYearStart) {
-		DDX_TreeEdit(pDX, IDC_MOD_OPTS, m_htiDownloadValidatorDateTimeYearStart, m_iDownloadValidatorDateTimeYearStart);
-		DDV_MinMaxInt(pDX, m_iDownloadValidatorDateTimeYearStart, 1000, 9999);
-	}
-	if (m_htiDownloadValidatorDateTimeYearEnd) {
-		DDX_TreeEdit(pDX, IDC_MOD_OPTS, m_htiDownloadValidatorDateTimeYearEnd, m_iDownloadValidatorDateTimeYearEnd);
-		DDV_MinMaxInt(pDX, m_iDownloadValidatorDateTimeYearEnd, 1000, 9999);
-	}
-	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiDownloadValidatorDateTimeCheckSeconds, m_bDownloadValidatorDateTimeCheckSeconds);
-	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiDownloadValidatorDateTimeIncludeFollowingNumericValues, m_bDownloadValidatorDateTimeIncludeFollowingNumericValues);
-	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiDownloadValidatorSkipIncompleteFileConfirmation, m_bDownloadValidatorSkipIncompleteFileConfirmation);
-	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiDownloadValidatorMarkAsBlacklisted, m_bDownloadValidatorMarkAsBlacklisted);
-	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiDownloadValidatorAutoMarkAsBlacklisted, m_bDownloadValidatorAutoMarkAsBlacklisted);
 
 	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiDownloadInspectorFake, m_bDownloadInspectorFake);
 	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiDownloadInspectorDRM, m_bDownloadInspectorDRM);
@@ -1476,8 +1403,221 @@ void CPPgMod::DoDataExchange(CDataExchange *pDX)
 	DDX_TreeCheck(pDX, IDC_MOD_OPTS, m_htiKeepUnavailableFixedSharedDirs, m_bKeepUnavailableFixedSharedDirs);
 }
 
+void CPPgMod::ResetToDefaults()
+{
+	m_ctrlTreeOptions.HandleChildControlLosingFocus();
+
+	m_iUIDarkMode = 0;
+	m_bUITweaksSpeedGraph = true;
+	m_bShowDownloadCommandsToolbar = true;
+	m_bDisableFindAsYouType = false;
+	m_iUITweaksListUpdatePeriod = 500;
+	m_iUITweaksServerListMaxSortHistory = 4;
+	m_iUITweaksSearchMaxSortHistory = 4;
+	m_iUITweaksFilesMaxSortHistory = 1;
+	m_iUITweaksDownloadMaxSortHistory = 2;
+	m_iUITweaksDownloadClientsMaxSortHistory = 4;
+	m_iUITweaksUploadMaxSortHistory = 4;
+	m_iUITweaksQueueMaxSortHistory = 4;
+	m_iUITweaksClientMaxSortHistory = 1;
+	m_iUITweaksKadContactSortHistory = 4;
+	m_iUITweaksKadSearchSortHistory = 4;
+
+	m_iIPGeolocationMode = IPGEO_COUNTRYCITY;
+	m_bIPGeolocationShowFlag = true;
+	m_bIPGeolocationAutoUpdate = false;
+	m_sIPGeolocationUpdateURL = _T("https://download.db-ip.com/free/dbip-city-lite-%Y-%m.mmdb.gz");
+	m_iIPGeolocationUpdatePeriodDays = 30;
+
+	m_bConnectionChecker = true;
+	m_sConnectionCheckerServer = _T("https://www.google.com");
+	m_bEnableNatTraversal = true;
+	m_iNatTraversalProtocolMode = NAT_TRAVERSAL_PROTOCOL_PREFER_QUIC;
+	m_iNatTraversalPortWindow = 512;
+	m_iNatTraversalSweepWindow = 16;
+	m_iNatTraversalJitterMinMs = 50;
+	m_iNatTraversalJitterMaxMs = 150;
+	m_iMaxServedBuddies = 5;
+	m_bRetryFailedTcpConnectionAttempts = true;
+	m_bIsreaskSourceAfterIPChange = true;
+	m_bInformQueuedClientsAfterIPChange = true;
+	m_iReAskFileSrc = MS2MIN(FILEREASKTIME);
+
+	m_iDownloadInspector = 2;
+	m_bDownloadInspectorFake = true;
+	m_bDownloadInspectorDRM = true;
+	m_bDownloadInspectorInvalidExt = true;
+	m_bDownloadInspectorAutoRenameToMajorityName = true;
+	m_bDownloadInspectorAutoRenameToMajorityNameForNewDownloadsOnly = false;
+	m_iDownloadInspectorAutoRenameToMajorityNameRequiredPercent = CPreferences::GetDefaultDownloadInspectorAutoRenameToMajorityNameRequiredPercent();
+	m_iDownloadInspectorAutoRenameToMajorityNameMinimumVotes = CPreferences::GetDefaultDownloadInspectorAutoRenameToMajorityNameMinimumVotes();
+	m_bDownloadInspectorAutoDeleteEnabled = false;
+	m_bDownloadInspectorAutoDeleteAddedBeforeEnabled = true;
+	m_iDownloadInspectorAutoDeleteAddedBeforeDays = 180;
+	m_bDownloadInspectorAutoDeleteLastSeenCompleteBeforeEnabled = true;
+	m_iDownloadInspectorAutoDeleteLastSeenCompleteBeforeDays = 180;
+	m_bDownloadInspectorAutoDeleteLastReceivedBeforeEnabled = true;
+	m_iDownloadInspectorAutoDeleteLastReceivedBeforeDays = 180;
+	m_bDownloadInspectorAutoDeleteDownloadedLessThanPercentEnabled = true;
+	m_iDownloadInspectorAutoDeleteDownloadedLessThanPercent = 5;
+	m_bDownloadInspectorAutoDeleteDownloadedLessThanMbEnabled = true;
+	m_iDownloadInspectorAutoDeleteDownloadedLessThanMb = 1;
+	m_bDownloadInspectorAutoDeleteBackupEd2kLinks = true;
+	m_bDownloadInspectorAutoDeleteDontMarkAsCanceled = true;
+	m_iDownloadInspectorCheckPeriod = 30;
+	m_iDownloadInspectorCompletedThreshold = 1024;
+	m_iDownloadInspectorZeroPercentageThreshold = 1;
+	m_iDownloadInspectorCompressionThreshold = 100;
+	m_bDownloadInspectorBypassZeroPercentage = true;
+	m_iDownloadInspectorCompressionThresholdToBypassZero = 10000;
+
+	m_bGroupKnownAtTheBottom = true;
+	m_iSpamThreshold = SEARCH_SPAM_THRESHOLD;
+	m_iEd2kSearchMaxResults = CPreferences::GetDefaultEd2kSearchMaxResults();
+	m_iEd2kSearchMaxMoreRequests = CPreferences::GetDefaultEd2kSearchMaxMoreRequests();
+	m_iKadFileSearchTotal = CPreferences::GetDefaultKadFileSearchTotal();
+	m_iKadSearchKeywordTotal = CPreferences::GetDefaultKadSearchKeywordTotal();
+	m_iKadFileSearchLifetime = CPreferences::GetDefaultKadFileSearchLifetime();
+	m_iKadSearchKeywordLifetime = CPreferences::GetDefaultKadSearchKeywordLifetime();
+	m_bShowCloseButtonOnSearchTabs = true;
+	m_bRepeatServerList = true;
+	m_bDontRemoveStaticServers = true;
+	m_bDontSavePartOnReconnect = true;
+
+	m_bFileHistoryShowPart = true;
+	m_bFileHistoryShowShared = true;
+	m_bFileHistoryShowDuplicate = true;
+	m_bAutoShareSubdirs = true;
+	m_bDontShareExtensions = true;
+	m_sDontShareExtensionsList = _T(".bt!,.jc!,.bc!,.part,.met,.bak");
+	m_bSpreadbarSetStatus = true;
+	m_iHideOvershares = 0;
+	m_bSelectiveShare = false;
+	m_bShareOnlyTheNeed = false;
+	m_iPowerShareMode = 0;
+	m_bPowerShareInternalPrio = false;
+	m_iPowerShareLimit = 0;
+	m_iSharePermissions = 0;
+	m_bSharePermissionColorRows = false;
+	m_bAdjustNTFSDaylightFileTime = true;
+	m_bAllowDSTTimeTolerance = true;
+
+	m_bHighBandwidthUploadPolicy = false;
+	m_iHighBandwidthTargetUploadClients = 12;
+	m_iHighBandwidthUploadSlotElasticPercent = 80;
+	m_bAutoHighBandwidthDownloadBuffer = false;
+	m_sHighBandwidthSlowUploadThresholdFactor = _T("0.75");
+	m_iHighBandwidthSlowUploadGraceSeconds = 30;
+	m_iHighBandwidthSlowUploadWarmupSeconds = 30;
+	m_iHighBandwidthZeroUploadGraceSeconds = 5;
+	m_iHighBandwidthSlowUploadCooldownSeconds = 30;
+	m_bLowRatioQueueScoreBoost = false;
+	m_sLowRatioQueueScoreThreshold = _T("0.50");
+	m_iLowRatioQueueScoreBonus = 50;
+	m_iUploadSessionTransferLimitMode = static_cast<int>(ESessionTransferLimitMode::Disabled);
+	m_iUploadSessionTransferLimitPercent = 55;
+	m_iUploadSessionTransferLimitMiB = 1;
+	m_iUploadSessionTimeLimitSeconds = 0;
+
+	m_bEmulateMLDonkey = true;
+	m_bEmulateEdonkey = true;
+	m_bEmulateEdonkeyHybrid = true;
+	m_bEmulateShareaza = true;
+	m_bEmulateLphant = true;
+	m_bEmulateCommunity = true;
+	m_iEmulateCommunityTagSavingTreshold = 3;
+	m_bLogEmulator = true;
+	m_bUseIntelligentChunkSelection = true;
+	m_iCreditSystem = CS_LOVELACE;
+
+	m_bClientHistory = true;
+	m_iClientHistoryExpDays = 150;
+	m_bClientHistoryLog = false;
+	m_bRemoteSharedFilesUserHash = true;
+	m_bRemoteSharedFilesClientNote = true;
+	m_iRemoteSharedFilesAutoQueryPeriod = 1;
+	m_iRemoteSharedFilesAutoQueryMaxClients = 3;
+	m_iRemoteSharedFilesAutoQueryClientPeriod = 30;
+	m_bRemoteSharedFilesSetAutoQueryDownload = false;
+	m_iRemoteSharedFilesSetAutoQueryDownloadThreshold = 100;
+	m_bRemoteSharedFilesSetAutoQueryUpload = false;
+	m_iRemoteSharedFilesSetAutoQueryUploadThreshold = 100;
+	m_bSaveLoadSources = true;
+	m_iSaveLoadSourcesMaxSources = 100;
+	m_iSaveLoadSourcesExpirationDays = 7;
+	m_iPurgeMode = 0;
+	m_iKnownMetDays = 180;
+	m_bRemoveAichImmediately = true;
+	m_iClientsExpDays = 180;
+
+	m_bBackupOnExit = false;
+	m_bBackupPeriodic = true;
+	m_iBackupPeriod = 12;
+	m_iBackupMax = 10;
+	m_bBackupCompressed = true;
+
+	bMiniMuleAutoClose = false;
+	iMiniMuleTransparency = 0;
+	m_bRestoreLastMainWndDlg = false;
+	m_bRestoreLastLogPane = false;
+	m_iStraightWindowStyles = 0;
+	m_bRTLWindowsLayout = false;
+	m_bShowActiveDownloadsBold = true;
+	m_iMaxChatHistory = 100;
+	m_umaxmsgsessions = 50;
+	m_strDateTimeFormat = _T("%c");
+	m_strDateTimeFormat4List = _T("%c");
+	m_bShowVerticalHourMarkers = true;
+	m_bReBarToolbar = false;
+	m_bIconflashOnNewMessage = true;
+	m_bShowCopyEd2kLinkCmd = true;
+	m_bUpdateQueue = true;
+	m_bRepaint = false;
+	m_bShowUpDownIconInTaskbar = false;
+
+	iMaxLogBuff = 64;
+	m_iLogFileFormat = Unicode;
+	m_strDateTimeFormat4Log = _T("%c");
+	bCreateCrashDump = false;
+	bIgnoreInstances = false;
+	sNotifierMailEncryptCertName.Empty();
+	m_iPreviewSmallBlocks = 1;
+	m_bPreviewCopiedArchives = false;
+	m_bPreviewOnIconDblClk = true;
+	sInternetSecurityZone = _T("Untrusted");
+	sTxtEditor = _T("notepad.exe");
+	iServerUDPPort = USHRT_MAX;
+	m_bRemoveFilesToBin = true;
+	m_bHighresTimer = true;
+	m_bTrustEveryHash = false;
+	m_bPreferRestrictedOverUser = false;
+	m_bUseUserSortedServerList = true;
+	m_iWebFileUploadSizeLimitMB = 5;
+	m_iMaxEServerBuddySlots = ESERVERBUDDY_DEFAULT_SLOTS;
+	m_sAllowedIPs.Empty();
+	m_iDebugSearchResultDetailLevel = 0;
+	m_iCryptTCPPaddingLength = 128;
+	m_ICH = true;
+	m_dontcompressavi = false;
+	m_bRearrangeKadSearchKeywords = true;
+	m_bBeeper = true;
+	m_bMsgOnlySec = true;
+	m_bKeepUnavailableFixedSharedDirs = false;
+
+	UpdateData(FALSE);
+	UpdateNatTraversalProtocolUi();
+	SetModified(TRUE);
+}
+
 BOOL CPPgMod::OnInitDialog()
 {	
+	if (thePrefs.DoPartiallyPurgeOldKnownFiles())
+		m_iPurgeMode = 1;
+	else if (thePrefs.GetCompletlyPurgeOldKnownFiles())
+		m_iPurgeMode = 2;
+	else
+		m_iPurgeMode = 0;
+
 	m_iUIDarkMode = thePrefs.GetUIDarkMode();
 	m_bUITweaksSpeedGraph = thePrefs.GetUITweaksSpeedGraph();
 	m_bShowDownloadCommandsToolbar = thePrefs.IsDownloadToolbarEnabled();
@@ -1518,27 +1658,6 @@ BOOL CPPgMod::OnInitDialog()
 	m_bInformQueuedClientsAfterIPChange = thePrefs.IsIQCAOC();
 
 	m_iReAskFileSrc = MS2MIN(thePrefs.GetReAskTimeDif() + FILEREASKTIME);
-
-	m_iDownloadValidator = thePrefs.GetDownloadValidator();
-	m_iDownloadValidatorAcceptPercentage = thePrefs.GetDownloadValidatorAcceptPercentage();
-	m_bDownloadValidatorRejectCanceled = thePrefs.GetDownloadValidatorRejectCanceled();
-	m_bDownloadValidatorRejectSameHash = thePrefs.GetDownloadValidatorRejectSameHash();
-	m_bDownloadValidatorRejectBlacklisted = thePrefs.GetDownloadValidatorRejectBlacklisted();
-	m_bDownloadValidatorCaseInsensitive = thePrefs.GetDownloadValidatorCaseInsensitive();
-	m_bDownloadValidatorIgnoreExtension = thePrefs.GetDownloadValidatorIgnoreExtension();
-	m_bDownloadValidatorIgnoreTags = thePrefs.GetDownloadValidatorIgnoreTags();
-	m_bDownloadValidatorDontIgnoreNumericTags = thePrefs.GetDownloadValidatorDontIgnoreNumericTags();
-	m_bDownloadValidatorIgnoreNonAlphaNumeric = thePrefs.GetDownloadValidatorIgnoreNonAlphaNumeric();
-	m_iDownloadValidatorMinimumComparisonLength = thePrefs.GetDownloadValidatorMinimumComparisonLength();
-	m_bDownloadValidatorSkipIncompleteFileConfirmation = thePrefs.GetDownloadValidatorSkipIncompleteFileConfirmation();
-	m_bDownloadValidatorMarkAsBlacklisted = thePrefs.GetDownloadValidatorMarkAsBlacklisted();
-	m_bDownloadValidatorAutoMarkAsBlacklisted = thePrefs.GetDownloadValidatorAutoMarkAsBlacklisted();
-	m_bDownloadValidatorDateTimeMatching = thePrefs.GetDownloadValidatorDateTimeMatching();
-	m_bDownloadValidatorDateTimeUseYearRange = thePrefs.GetDownloadValidatorDateTimeUseYearRange();
-	m_iDownloadValidatorDateTimeYearStart = thePrefs.GetDownloadValidatorDateTimeYearStart();
-	m_iDownloadValidatorDateTimeYearEnd = thePrefs.GetDownloadValidatorDateTimeYearEnd();
-	m_bDownloadValidatorDateTimeCheckSeconds = thePrefs.GetDownloadValidatorDateTimeCheckSeconds();
-	m_bDownloadValidatorDateTimeIncludeFollowingNumericValues = thePrefs.GetDownloadValidatorDateTimeIncludeFollowingNumericValues();
 
 	m_iDownloadInspector = thePrefs.GetDownloadInspector();
 	m_bDownloadInspectorFake = thePrefs.GetDownloadInspectorFake();
@@ -1713,8 +1832,13 @@ BOOL CPPgMod::OnInitDialog()
 	m_ctrlTreeOptions.SetImageListColorFlags(theApp.m_iDfltImageListColorFlags);
 	CPropertyPage::OnInitDialog();
 	InitWindowStyles(this);
+	if (m_tooltipTreeOptions.GetSafeHwnd() == NULL && m_tooltipTreeOptions.Create(this)) {
+		m_tooltipTreeOptions.AddTool(&m_ctrlTreeOptions, _T(""));
+		m_tooltipTreeOptions.SetMaxTipWidth(CPreferencesDlg::ScaleOptionsValue(420));
+		m_tooltipTreeOptions.SetAutoTabHeaderIcon(false);
+		m_tooltipTreeOptions.Activate(true);
+	}
 	Localize();
-	UpdateDownloadValidatorDateTimeUi();
 	UpdateLayout();
 
 	return TRUE;  // return TRUE unless you set the focus to the control. EXCEPTION: OCX Property Pages should return FALSE
@@ -1723,27 +1847,17 @@ BOOL CPPgMod::OnInitDialog()
 void CPPgMod::UpdateLayout()
 {
 	CWnd* pTree = GetDlgItem(IDC_MOD_OPTS);
-	CWnd* pInfo = GetDlgItem(IDC_MOD_OPTS_INFO);
-	if (pTree == NULL || pInfo == NULL || !::IsWindow(pTree->GetSafeHwnd()) || !::IsWindow(pInfo->GetSafeHwnd()))
+	if (pTree == NULL || !::IsWindow(pTree->GetSafeHwnd()))
 		return;
 
 	CRect rcClient;
 	GetClientRect(&rcClient);
-
 	CRect rcTree;
 	pTree->GetWindowRect(&rcTree);
 	ScreenToClient(&rcTree);
-
-	CRect rcInfo;
-	pInfo->GetWindowRect(&rcInfo);
-	ScreenToClient(&rcInfo);
-
-	const int iBottomMargin = max(1, rcInfo.left);
-	const int iInfoTop = max(rcTree.top + 1, rcClient.bottom - iBottomMargin - rcInfo.Height());
-	rcInfo.OffsetRect(0, iInfoTop - rcInfo.top);
-	pInfo->MoveWindow(&rcInfo);
-
-	rcTree.bottom = rcInfo.top;
+	const int iMargin = max(1, rcTree.left);
+	rcTree.right = rcClient.right - iMargin;
+	rcTree.bottom = rcClient.bottom - iMargin;
 	if (rcTree.bottom > rcTree.top)
 		pTree->MoveWindow(&rcTree);
 }
@@ -1889,47 +2003,6 @@ BOOL CPPgMod::OnApply()
 	thePrefs.m_bInformQueuedClientsAfterIPChange = m_bInformQueuedClientsAfterIPChange;
 
 	thePrefs.m_uReAskTimeDif = MIN2MS(m_iReAskFileSrc) - FILEREASKTIME;
-
-	if (thePrefs.GetDownloadValidator() != m_iDownloadValidator) {
-		thePrefs.SetDownloadValidator(m_iDownloadValidator);
-		theApp.emuledlg->searchwnd->CreateMenus();
-
-	} // Download Validator selection changed
-
-	if (m_iDownloadValidatorDateTimeYearStart > m_iDownloadValidatorDateTimeYearEnd) {
-		const int iTemp = m_iDownloadValidatorDateTimeYearStart;
-		m_iDownloadValidatorDateTimeYearStart = m_iDownloadValidatorDateTimeYearEnd;
-		m_iDownloadValidatorDateTimeYearEnd = iTemp;
-	}
-
-	// Download Validator parameters changed
-	if (thePrefs.GetDownloadValidatorIgnoreExtension() != m_bDownloadValidatorIgnoreExtension || thePrefs.GetDownloadValidatorIgnoreTags() != m_bDownloadValidatorIgnoreTags || thePrefs.GetDownloadValidatorDontIgnoreNumericTags() != m_bDownloadValidatorDontIgnoreNumericTags
-			|| thePrefs.GetDownloadValidatorIgnoreNonAlphaNumeric() != m_bDownloadValidatorIgnoreNonAlphaNumeric || thePrefs.GetDownloadValidatorCaseInsensitive() != m_bDownloadValidatorCaseInsensitive
-			|| thePrefs.GetDownloadValidatorDateTimeMatching() != m_bDownloadValidatorDateTimeMatching || thePrefs.GetDownloadValidatorDateTimeUseYearRange() != m_bDownloadValidatorDateTimeUseYearRange
-			|| thePrefs.GetDownloadValidatorDateTimeYearStart() != m_iDownloadValidatorDateTimeYearStart || thePrefs.GetDownloadValidatorDateTimeYearEnd() != m_iDownloadValidatorDateTimeYearEnd
-			|| thePrefs.GetDownloadValidatorDateTimeCheckSeconds() != m_bDownloadValidatorDateTimeCheckSeconds || thePrefs.GetDownloadValidatorDateTimeIncludeFollowingNumericValues() != m_bDownloadValidatorDateTimeIncludeFollowingNumericValues) {
-		thePrefs.SetDownloadValidatorIgnoreExtension(m_bDownloadValidatorIgnoreExtension);
-		thePrefs.SetDownloadValidatorIgnoreTags(m_bDownloadValidatorIgnoreTags);
-		thePrefs.SetDownloadValidatorDontIgnoreNumericTags(m_bDownloadValidatorDontIgnoreNumericTags);
-		thePrefs.SetDownloadValidatorIgnoreNonAlphaNumeric(m_bDownloadValidatorIgnoreNonAlphaNumeric);
-		thePrefs.SetDownloadValidatorCaseInsensitive(m_bDownloadValidatorCaseInsensitive);
-		thePrefs.SetDownloadValidatorDateTimeMatching(m_bDownloadValidatorDateTimeMatching);
-		thePrefs.SetDownloadValidatorDateTimeUseYearRange(m_bDownloadValidatorDateTimeUseYearRange);
-		thePrefs.SetDownloadValidatorDateTimeYearStart(m_iDownloadValidatorDateTimeYearStart);
-		thePrefs.SetDownloadValidatorDateTimeYearEnd(m_iDownloadValidatorDateTimeYearEnd);
-		thePrefs.SetDownloadValidatorDateTimeCheckSeconds(m_bDownloadValidatorDateTimeCheckSeconds);
-		thePrefs.SetDownloadValidatorDateTimeIncludeFollowingNumericValues(m_bDownloadValidatorDateTimeIncludeFollowingNumericValues);
-		theApp.DownloadValidator->ReloadMap();
-	}
-
-	thePrefs.SetDownloadValidatorAcceptPercentage(m_iDownloadValidatorAcceptPercentage);
-	thePrefs.SetDownloadValidatorRejectCanceled(m_bDownloadValidatorRejectCanceled);
-	thePrefs.SetDownloadValidatorRejectSameHash(m_bDownloadValidatorRejectSameHash);
-	thePrefs.SetDownloadValidatorRejectBlacklisted(m_bDownloadValidatorRejectBlacklisted);
-	thePrefs.SetDownloadValidatorMinimumComparisonLength(m_iDownloadValidatorMinimumComparisonLength);
-	thePrefs.SetDownloadValidatorSkipIncompleteFileConfirmation(m_bDownloadValidatorSkipIncompleteFileConfirmation);
-	thePrefs.SetDownloadValidatorMarkAsBlacklisted(m_bDownloadValidatorMarkAsBlacklisted);
-	thePrefs.SetDownloadValidatorAutoMarkAsBlacklisted(m_bDownloadValidatorAutoMarkAsBlacklisted);
 
 		const bool bDownloadInspectorAutoDeleteSettingsChanged = thePrefs.GetDownloadInspector() != m_iDownloadInspector
 			|| thePrefs.IsDownloadInspectorAutoDeleteEnabled() != m_bDownloadInspectorAutoDeleteEnabled
@@ -2289,9 +2362,9 @@ void CPPgMod::Localize()
 		LocalizeItemInfoText(m_htiUITweaks, _T("UI_TWEAKS_INFO"));
 		LocalizeItemText(m_htiUIDarkMode, _T("DARK_MODE"));
 		LocalizeItemInfoText(m_htiUIDarkMode, _T("DARK_MODE_INFO"));
-		LocalizeItemText(m_htiUIDarkModeAuto, _T("DARK_MODE_AUTO"));
+		LocalizeItemText(m_htiUIDarkModeAuto, _T("AUTOMATIC"));
 		LocalizeItemInfoText(m_htiUIDarkModeAuto, _T("DARK_MODE_AUTO_INFO"));
-		LocalizeItemText(m_htiUIDarkModeOn, _T("DARK_MODE_ON"));
+		LocalizeItemText(m_htiUIDarkModeOn, _T("DARK_MODE"));
 		LocalizeItemInfoText(m_htiUIDarkModeOn, _T("DARK_MODE_ON_INFO"));
 		LocalizeItemText(m_htiUIDarkModeOff, _T("DARK_MODE_OFF"));
 		LocalizeItemInfoText(m_htiUIDarkModeOff, _T("DARK_MODE_OFF_INFO"));
@@ -2328,7 +2401,7 @@ void CPPgMod::Localize()
 
 		LocalizeItemText(m_htiIPGeolocation, _T("IPGEOLOCATION_MAIN"));
 		LocalizeItemInfoText(m_htiIPGeolocation, _T("IPGEOLOCATION_MAIN_INFO"));
-		LocalizeItemText(m_htiIPGeolocationNameDisable, _T("IPGEOLOCATION_DISABLED"));
+		LocalizeItemText(m_htiIPGeolocationNameDisable, _T("UDPDISABLED"));
 		LocalizeItemInfoText(m_htiIPGeolocationNameDisable, _T("IPGEOLOCATION_DISABLED_INFO"));
 		LocalizeItemText(m_htiIPGeolocationCountryCode, _T("IPGEOLOCATION_COUNTRYCODE"));
 		LocalizeItemInfoText(m_htiIPGeolocationCountryCode, _T("IPGEOLOCATION_COUNTRYCODE_INFO"));
@@ -2378,7 +2451,7 @@ void CPPgMod::Localize()
 		LocalizeItemInfoText(m_htiLowRatioQueueScoreBonus, _T("LOW_RATIO_QUEUE_SCORE_BONUS_INFO"));
 		LocalizeItemText(m_htiUploadSessionTransferLimit, _T("UPLOAD_SESSION_TRANSFER_LIMIT"));
 		LocalizeItemInfoText(m_htiUploadSessionTransferLimit, _T("UPLOAD_SESSION_TRANSFER_LIMIT_INFO"));
-		LocalizeItemText(m_htiUploadSessionTransferLimitDisabled, _T("UPLOAD_SESSION_TRANSFER_LIMIT_DISABLED"));
+		LocalizeItemText(m_htiUploadSessionTransferLimitDisabled, _T("DISABLED"));
 		LocalizeItemInfoText(m_htiUploadSessionTransferLimitDisabled, _T("UPLOAD_SESSION_TRANSFER_LIMIT_DISABLED_INFO"));
 		LocalizeItemText(m_htiUploadSessionTransferLimitPercent, _T("UPLOAD_SESSION_TRANSFER_LIMIT_PERCENT"));
 		LocalizeItemInfoText(m_htiUploadSessionTransferLimitPercent, _T("UPLOAD_SESSION_TRANSFER_LIMIT_PERCENT_INFO"));
@@ -2395,7 +2468,7 @@ void CPPgMod::Localize()
 		LocalizeItemInfoText(m_htiConnectionChecker, _T("CONNECTION_CHECK_INFO"));
 		LocalizeItemText(m_htiConnectionCheckerActivate, _T("CONNECTION_CHECK_ACTIVATE"));
 		LocalizeItemInfoText(m_htiConnectionCheckerActivate, _T("CONNECTION_CHECK_ACTIVATE_INFO"));
-		LocalizeEditLabel(m_htiConnectionCheckerServer, _T("URL_ADDR"));
+		LocalizeEditLabel(m_htiConnectionCheckerServer, _T("SV_URL"));
 		LocalizeItemInfoText(m_htiConnectionCheckerServer, _T("CONNECTION_CHECK_SERVER_INFO"));
 		
 		LocalizeItemText(m_htiEnableNatTraversal, _T("ENABLE_NATT"));
@@ -2436,58 +2509,9 @@ void CPPgMod::Localize()
 		LocalizeEditLabel(m_htiReAskFileSrc, _T("REASK_FILE_SRC"));
 		LocalizeItemInfoText(m_htiReAskFileSrc, _T("REASK_FILE_SRC_INFO"));
 
-		LocalizeItemText(m_htiDownloadValidator, _T("DOWNLOAD_VALIDATOR"));
-		LocalizeItemInfoText(m_htiDownloadValidator, _T("DOWNLOAD_VALIDATOR_INFO"));
-		LocalizeItemText(m_htiDownloadValidatorPassive, _T("DOWNLOAD_VALIDATOR_PASSIVE"));
-		LocalizeItemInfoText(m_htiDownloadValidatorPassive, _T("DOWNLOAD_VALIDATOR_PASSIVE_INFO"));
-		LocalizeItemText(m_htiDownloadValidatorAlwaysAsk, _T("DOWNLOAD_VALIDATOR_ALWAYS_ASK"));
-		LocalizeItemInfoText(m_htiDownloadValidatorAlwaysAsk, _T("DOWNLOAD_VALIDATOR_ALWAYS_ASK_INFO"));
-		LocalizeItemText(m_htiDownloadValidatorReject, _T("DOWNLOAD_VALIDATOR_REJECT"));
-		LocalizeItemInfoText(m_htiDownloadValidatorReject, _T("DOWNLOAD_VALIDATOR_REJECT_INFO"));
-		LocalizeItemText(m_htiDownloadValidatorAccept, _T("DOWNLOAD_VALIDATOR_ACCEPT"));
-		LocalizeItemInfoText(m_htiDownloadValidatorAccept, _T("DOWNLOAD_VALIDATOR_ACCEPT_INFO"));
-		LocalizeEditLabel(m_htiDownloadValidatorAcceptPercentage, _T("DOWNLOAD_VALIDATOR_ACCEPT_PERCENTAGE"));
-		LocalizeItemInfoText(m_htiDownloadValidatorAcceptPercentage, _T("DOWNLOAD_VALIDATOR_ACCEPT_PERCENTAGE_INFO"));
-		LocalizeItemText(m_htiDownloadValidatorRejectCanceled, _T("DOWNLOAD_VALIDATOR_REJECT_CANCELED"));
-		LocalizeItemInfoText(m_htiDownloadValidatorRejectCanceled, _T("DOWNLOAD_VALIDATOR_REJECT_CANCELED_INFO"));
-		LocalizeItemText(m_htiDownloadValidatorRejectSameHash, _T("DOWNLOAD_VALIDATOR_REJECT_SAME_HASH"));
-		LocalizeItemInfoText(m_htiDownloadValidatorRejectSameHash, _T("DOWNLOAD_VALIDATOR_REJECT_SAME_HASH_INFO"));
-		LocalizeItemText(m_htiDownloadValidatorRejectBlacklisted, _T("DOWNLOAD_VALIDATOR_REJECT_BLACKLISTED"));
-		LocalizeItemInfoText(m_htiDownloadValidatorRejectBlacklisted, _T("DOWNLOAD_VALIDATOR_REJECT_BLACKLISTED_INFO"));
-		LocalizeItemText(m_htiDownloadValidatorCaseInsensitive, _T("DOWNLOAD_VALIDATOR_CASE_INSENSITIVE"));
-		LocalizeItemInfoText(m_htiDownloadValidatorCaseInsensitive, _T("DOWNLOAD_VALIDATOR_CASE_INSENSITIVE_INFO"));
-		LocalizeItemText(m_htiDownloadValidatorIgnoreExtension, _T("DOWNLOAD_VALIDATOR_IGNORE_EXTENSION"));
-		LocalizeItemInfoText(m_htiDownloadValidatorIgnoreExtension, _T("DOWNLOAD_VALIDATOR_IGNORE_EXTENSION_INFO"));
-		LocalizeItemText(m_htiDownloadValidatorIgnoreTags, _T("DOWNLOAD_VALIDATOR_IGNORE_TAGS"));
-		LocalizeItemInfoText(m_htiDownloadValidatorIgnoreTags, _T("DOWNLOAD_VALIDATOR_IGNORE_TAGS_INFO"));
-		LocalizeItemText(m_htiDownloadValidatorDontIgnoreNumericTags, _T("DOWNLOAD_VALIDATOR_DONT_IGNORE_NUMERIC_TAGS"));
-		LocalizeItemInfoText(m_htiDownloadValidatorDontIgnoreNumericTags, _T("DOWNLOAD_VALIDATOR_DONT_IGNORE_NUMERIC_TAGS_INFO"));
-		LocalizeItemText(m_htiDownloadValidatorIgnoreNonAlphaNumeric, _T("DOWNLOAD_VALIDATOR_IGNORE_NON_ALPHANUMERIC"));
-		LocalizeItemInfoText(m_htiDownloadValidatorIgnoreNonAlphaNumeric, _T("DOWNLOAD_VALIDATOR_IGNORE_NON_ALPHANUMERIC_INFO"));
-		LocalizeEditLabel(m_htiDownloadValidatorMinimumComparisonLength, _T("DOWNLOAD_VALIDATOR_MINIMUM_COMPARISON_LENGTH"));
-		LocalizeItemInfoText(m_htiDownloadValidatorMinimumComparisonLength, _T("DOWNLOAD_VALIDATOR_MINIMUM_COMPARISON_LENGTH_INFO"));
-		LocalizeItemText(m_htiDownloadValidatorDateTimeMatching, _T("DOWNLOAD_VALIDATOR_DATETIME_MATCHING"));
-		LocalizeItemInfoText(m_htiDownloadValidatorDateTimeMatching, _T("DOWNLOAD_VALIDATOR_DATETIME_MATCHING_INFO"));
-		LocalizeItemText(m_htiDownloadValidatorDateTimeUseYearRange, _T("DOWNLOAD_VALIDATOR_DATETIME_USE_YEAR_RANGE"));
-		LocalizeItemInfoText(m_htiDownloadValidatorDateTimeUseYearRange, _T("DOWNLOAD_VALIDATOR_DATETIME_USE_YEAR_RANGE_INFO"));
-		LocalizeEditLabel(m_htiDownloadValidatorDateTimeYearStart, _T("DOWNLOAD_VALIDATOR_DATETIME_YEAR_START"));
-		LocalizeItemInfoText(m_htiDownloadValidatorDateTimeYearStart, _T("DOWNLOAD_VALIDATOR_DATETIME_YEAR_START_INFO"));
-		LocalizeEditLabel(m_htiDownloadValidatorDateTimeYearEnd, _T("DOWNLOAD_VALIDATOR_DATETIME_YEAR_END"));
-		LocalizeItemInfoText(m_htiDownloadValidatorDateTimeYearEnd, _T("DOWNLOAD_VALIDATOR_DATETIME_YEAR_END_INFO"));
-		LocalizeItemText(m_htiDownloadValidatorDateTimeCheckSeconds, _T("DOWNLOAD_VALIDATOR_DATETIME_CHECK_SECONDS"));
-		LocalizeItemInfoText(m_htiDownloadValidatorDateTimeCheckSeconds, _T("DOWNLOAD_VALIDATOR_DATETIME_CHECK_SECONDS_INFO"));
-		LocalizeItemText(m_htiDownloadValidatorDateTimeIncludeFollowingNumericValues, _T("DOWNLOAD_VALIDATOR_DATETIME_INCLUDE_FOLLOWING_NUMERIC_VALUES"));
-		LocalizeItemInfoText(m_htiDownloadValidatorDateTimeIncludeFollowingNumericValues, _T("DOWNLOAD_VALIDATOR_DATETIME_INCLUDE_FOLLOWING_NUMERIC_VALUES_INFO"));
-		LocalizeItemText(m_htiDownloadValidatorSkipIncompleteFileConfirmation, _T("DOWNLOAD_VALIDATOR_SKIP_INCOMPLETE_CONFIRMATION"));
-		LocalizeItemInfoText(m_htiDownloadValidatorSkipIncompleteFileConfirmation, _T("DOWNLOAD_VALIDATOR_SKIP_INCOMPLETE_CONFIRMATION_INFO"));
-		LocalizeItemText(m_htiDownloadValidatorMarkAsBlacklisted, _T("DOWNLOAD_VALIDATOR_MARK_AS_BLACKLISTED"));
-		LocalizeItemInfoText(m_htiDownloadValidatorMarkAsBlacklisted, _T("DOWNLOAD_VALIDATOR_MARK_AS_BLACKLISTED_INFO"));
-		LocalizeItemText(m_htiDownloadValidatorAutoMarkAsBlacklisted, _T("DOWNLOAD_VALIDATOR_AUTO_MARK_AS_BLACKLISTED"));
-		LocalizeItemInfoText(m_htiDownloadValidatorAutoMarkAsBlacklisted, _T("DOWNLOAD_VALIDATOR_AUTO_MARK_AS_BLACKLISTED_INFO"));
-
 		LocalizeItemText(m_htiDownloadInspector, _T("DOWNLOAD_INSPECTOR"));
 		LocalizeItemInfoText(m_htiDownloadInspector, _T("DOWNLOAD_INSPECTOR_INFO"));
-		LocalizeItemText(m_htiDownloadInspectorDisable, _T("DOWNLOAD_INSPECTOR_DISABLE"));
+		LocalizeItemText(m_htiDownloadInspectorDisable, _T("UDPDISABLED"));
 		LocalizeItemInfoText(m_htiDownloadInspectorDisable, _T("DOWNLOAD_INSPECTOR_DISABLE_INFO"));
 		LocalizeItemText(m_htiDownloadInspectorLogOnly, _T("DOWNLOAD_INSPECTOR_LOG_ONLY"));
 		LocalizeItemInfoText(m_htiDownloadInspectorLogOnly, _T("DOWNLOAD_INSPECTOR_LOG_ONLY_INFO"));
@@ -2521,7 +2545,7 @@ void CPPgMod::Localize()
 		LocalizeItemInfoText(m_htiDownloadInspectorAutoDeleteLastReceivedBefore, _T("DOWNLOAD_INSPECTOR_AUTO_DELETE_LAST_RECEIVED_BEFORE_INFO"));
 		LocalizeEditLabel(m_htiDownloadInspectorAutoDeleteLastReceivedBeforeDays, _T("DOWNLOAD_INSPECTOR_AUTO_DELETE_DAYS_THRESHOLD"));
 		LocalizeItemInfoText(m_htiDownloadInspectorAutoDeleteLastReceivedBeforeDays, _T("DOWNLOAD_INSPECTOR_AUTO_DELETE_LAST_RECEIVED_BEFORE_INFO"));
-		LocalizeItemText(m_htiDownloadInspectorAutoDeleteDownloadedLessThanPercent, _T("DOWNLOAD_INSPECTOR_AUTO_DELETE_DOWNLOADED_LESS_THAN_PERCENT"));
+		LocalizeItemText(m_htiDownloadInspectorAutoDeleteDownloadedLessThanPercent, _T("DOWNLOAD_INSPECTOR_AUTO_DELETE_DOWNLOADED_LESS_THAN_MB"));
 		LocalizeItemInfoText(m_htiDownloadInspectorAutoDeleteDownloadedLessThanPercent, _T("DOWNLOAD_INSPECTOR_AUTO_DELETE_DOWNLOADED_LESS_THAN_PERCENT_INFO"));
 		LocalizeEditLabel(m_htiDownloadInspectorAutoDeleteDownloadedLessThanPercentValue, _T("PERCENT_THRESHOLD"));
 		LocalizeItemInfoText(m_htiDownloadInspectorAutoDeleteDownloadedLessThanPercentValue, _T("DOWNLOAD_INSPECTOR_AUTO_DELETE_DOWNLOADED_LESS_THAN_PERCENT_INFO"));
@@ -2602,11 +2626,11 @@ void CPPgMod::Localize()
 		LocalizeItemInfoText(m_htiShareOnlyTheNeed, _T("SHAREONLYTHENEED_INFO"));
 		LocalizeItemText(m_htiPowerShareGroup, _T("POWERSHARE"));
 		LocalizeItemInfoText(m_htiPowerShareGroup, _T("POWERSHARE_INFO"));
-		LocalizeItemText(m_htiPowerShareDisabled, _T("POWERSHARE_DISABLED"));
+		LocalizeItemText(m_htiPowerShareDisabled, _T("DISABLED"));
 		LocalizeItemInfoText(m_htiPowerShareDisabled, _T("POWERSHARE_DISABLED_INFO"));
 		LocalizeItemText(m_htiPowerShareActivated, _T("POWERSHARE_ACTIVATED"));
 		LocalizeItemInfoText(m_htiPowerShareActivated, _T("POWERSHARE_ACTIVATED_INFO"));
-		LocalizeItemText(m_htiPowerShareAuto, _T("POWERSHARE_AUTO"));
+		LocalizeItemText(m_htiPowerShareAuto, _T("PRIOAUTO"));
 		LocalizeItemInfoText(m_htiPowerShareAuto, _T("POWERSHARE_AUTO_INFO"));
 		LocalizeItemText(m_htiPowerShareLimited, _T("POWERSHARE_LIMITED"));
 		LocalizeItemInfoText(m_htiPowerShareLimited, _T("POWERSHARE_LIMITED_INFO"));
@@ -2618,9 +2642,9 @@ void CPPgMod::Localize()
 		LocalizeItemInfoText(m_htiPermissionsGroup, _T("SHARE_PERMISSION_GROUP_INFO"));
 		LocalizeItemText(m_htiPermissionColorRows, _T("SHARE_PERMISSION_COLOR_ROWS"));
 		LocalizeItemInfoText(m_htiPermissionColorRows, _T("SHARE_PERMISSION_COLOR_ROWS_INFO"));
-		LocalizeItemText(m_htiPermissionEverybody, _T("SHARE_PERMISSION_EVERYBODY"));
+		LocalizeItemText(m_htiPermissionEverybody, _T("PW_EVER"));
 		LocalizeItemInfoText(m_htiPermissionEverybody, _T("SHARE_PERMISSION_EVERYBODY_INFO"));
-		LocalizeItemText(m_htiPermissionFriendsOnly, _T("SHARE_PERMISSION_FRIENDSONLY"));
+		LocalizeItemText(m_htiPermissionFriendsOnly, _T("FSTATUS_FRIENDSONLY"));
 		LocalizeItemInfoText(m_htiPermissionFriendsOnly, _T("SHARE_PERMISSION_FRIENDSONLY_INFO"));
 		LocalizeItemText(m_htiPermissionHidden, _T("SHARE_PERMISSION_HIDDEN"));
 		LocalizeItemInfoText(m_htiPermissionHidden, _T("SHARE_PERMISSION_HIDDEN_INFO"));
@@ -2790,10 +2814,10 @@ void CPPgMod::Localize()
 		LocalizeItemInfoText(m_htiMaxMsgSessions, _T("MAXMSGSESSIONS_INFO"));
 
 		LocalizeEditLabel(m_htiDateTimeFormat, _T("DATETIMEFORMAT"));
-		LocalizeItemInfoText(m_htiDateTimeFormat, _T("DATETIMEFORMAT_INFO"));
+		LocalizeItemInfoText(m_htiDateTimeFormat, _T("DATETIMEFORMAT"));
 
 		LocalizeEditLabel(m_htiDateTimeFormat4list, _T("DATETIMEFORMAT4LIST"));
-		LocalizeItemInfoText(m_htiDateTimeFormat4list, _T("DATETIMEFORMAT4LIST_INFO"));
+		LocalizeItemInfoText(m_htiDateTimeFormat4list, _T("DATETIMEFORMAT4LIST"));
 
 		LocalizeItemText(m_htiShowVerticalHourMarkers, _T("SHOWVERTICALHOURMARKERS"));
 		LocalizeItemInfoText(m_htiShowVerticalHourMarkers, _T("SHOWVERTICALHOURMARKERS_INFO"));
@@ -2827,7 +2851,7 @@ void CPPgMod::Localize()
 		LocalizeItemInfoText(m_htiLogFileFormat, _T("LOGFILEFORMAT_INFO"));
 
 		LocalizeEditLabel(m_htiDateTimeFormat4Log, _T("DATETIMEFORMAT4LOG"));
-		LocalizeItemInfoText(m_htiDateTimeFormat4Log, _T("DATETIMEFORMAT4LOG_INFO"));
+		LocalizeItemInfoText(m_htiDateTimeFormat4Log, _T("DATETIMEFORMAT4LOG"));
 
 		LocalizeItemText(m_htiCreateCrashDump, _T("CREATECRASHDUMP"));
 		LocalizeItemInfoText(m_htiCreateCrashDump, _T("CREATECRASHDUMP_INFO"));
@@ -2893,10 +2917,10 @@ void CPPgMod::Localize()
 		LocalizeItemInfoText(m_htiRearrangeKadSearchKeywords, _T("REARRANGEKADSEARCH_INFO"));
 
 		LocalizeItemText(m_htiBeeper, _T("PW_BEEP"));
-		LocalizeItemInfoText(m_htiBeeper, _T("PW_BEEP_INFO"));
+		LocalizeItemInfoText(m_htiBeeper, _T("PW_BEEP"));
 
 		LocalizeItemText(m_htiMsgOnlySec, _T("MSGONLYSEC"));
-		LocalizeItemInfoText(m_htiMsgOnlySec, _T("MSGONLYSEC_INFO"));
+		LocalizeItemInfoText(m_htiMsgOnlySec, _T("MSGONLYSEC"));
 
 		LocalizeItemText(m_htiKeepUnavailableFixedSharedDirs, _T("KEEPUNAVAILABLEFIXEDSHAREDDIRS"));
 		LocalizeItemInfoText(m_htiKeepUnavailableFixedSharedDirs, _T("KEEPUNAVAILABLEFIXEDSHAREDDIRS_INFO"));
@@ -2905,6 +2929,11 @@ void CPPgMod::Localize()
 
 void CPPgMod::OnDestroy()
 {
+	if (m_tooltipTreeOptions.GetSafeHwnd() != NULL) {
+		m_tooltipTreeOptions.DelTool(&m_ctrlTreeOptions);
+		m_tooltipTreeOptions.CleanupWindow();
+	}
+	m_strTreeOptionsToolTip.Empty();
 	m_ctrlTreeOptions.DeleteAllItems();
 	m_ctrlTreeOptions.DestroyWindow();
 	m_bInitializedTreeOpts = false;
@@ -2985,31 +3014,6 @@ void CPPgMod::OnDestroy()
 	m_htiInformQueuedClientsAfterIPChange = NULL;
 
 	m_htiReAskFileSrc = NULL;
-
-	m_htiDownloadValidator = NULL;
-	m_htiDownloadValidatorPassive = NULL;
-	m_htiDownloadValidatorAlwaysAsk = NULL;
-	m_htiDownloadValidatorReject = NULL;
-	m_htiDownloadValidatorAccept = NULL;
-	m_htiDownloadValidatorAcceptPercentage = NULL;
-	m_htiDownloadValidatorRejectCanceled = NULL;
-	m_htiDownloadValidatorRejectSameHash = NULL;
-	m_htiDownloadValidatorRejectBlacklisted = NULL;
-	m_htiDownloadValidatorCaseInsensitive = NULL;
-	m_htiDownloadValidatorIgnoreExtension = NULL;
-	m_htiDownloadValidatorIgnoreTags = NULL;
-	m_htiDownloadValidatorDontIgnoreNumericTags = NULL;
-	m_htiDownloadValidatorIgnoreNonAlphaNumeric = NULL;
-	m_htiDownloadValidatorMinimumComparisonLength = NULL;
-	m_htiDownloadValidatorSkipIncompleteFileConfirmation = NULL;
-	m_htiDownloadValidatorMarkAsBlacklisted = NULL;
-	m_htiDownloadValidatorAutoMarkAsBlacklisted = NULL;
-	m_htiDownloadValidatorDateTimeMatching = NULL;
-	m_htiDownloadValidatorDateTimeUseYearRange = NULL;
-	m_htiDownloadValidatorDateTimeYearStart = NULL;
-	m_htiDownloadValidatorDateTimeYearEnd = NULL;
-	m_htiDownloadValidatorDateTimeCheckSeconds = NULL;
-	m_htiDownloadValidatorDateTimeIncludeFollowingNumericValues = NULL;
 
 	m_htiDownloadInspector = NULL;
 	m_htiDownloadInspectorDisable = NULL;
@@ -3235,8 +3239,6 @@ LRESULT CPPgMod::OnTreeOptsCtrlNotify(WPARAM wParam, LPARAM lParam)
 			}
 			if (pton->hItem == m_htiNatTraversalProtocolPreferQuic || pton->hItem == m_htiNatTraversalProtocolUtpOnly)
 				UpdateNatTraversalProtocolUi();
-			if (pton->hItem == m_htiDownloadValidatorDateTimeMatching)
-				UpdateDownloadValidatorDateTimeUi();
 		}
 		SetModified();
 	}
@@ -3248,23 +3250,6 @@ void CPPgMod::UpdateNatTraversalProtocolUi()
 	if (!m_bInitializedTreeOpts || m_htiNatTraversalProtocol == NULL)
 		return;
 
-	m_ctrlTreeOptions.Invalidate(FALSE);
-}
-
-void CPPgMod::UpdateDownloadValidatorDateTimeUi()
-{
-	if (!m_bInitializedTreeOpts || m_htiDownloadValidatorDateTimeMatching == NULL)
-		return;
-
-	BOOL bDateTimeMatching = FALSE;
-	m_ctrlTreeOptions.GetCheckBox(m_htiDownloadValidatorDateTimeMatching, bDateTimeMatching);
-
-	if (m_htiDownloadValidatorDateTimeUseYearRange != NULL)
-		m_ctrlTreeOptions.SetCheckBoxEnable(m_htiDownloadValidatorDateTimeUseYearRange, bDateTimeMatching);
-	if (m_htiDownloadValidatorDateTimeCheckSeconds != NULL)
-		m_ctrlTreeOptions.SetCheckBoxEnable(m_htiDownloadValidatorDateTimeCheckSeconds, bDateTimeMatching);
-	if (m_htiDownloadValidatorDateTimeIncludeFollowingNumericValues != NULL)
-		m_ctrlTreeOptions.SetCheckBoxEnable(m_htiDownloadValidatorDateTimeIncludeFollowingNumericValues, bDateTimeMatching);
 	m_ctrlTreeOptions.Invalidate(FALSE);
 }
 
@@ -3304,27 +3289,73 @@ BOOL CPPgMod::OnHelpInfo(HELPINFO*)
 
 LRESULT CPPgMod::DrawTreeItemHelp(WPARAM wParam, LPARAM lParam)
 {
-	if (!IsWindowVisible())
-		return 0;
-
-	if (wParam == IDC_MOD_OPTS) {
-		CString* sInfo = (CString*)lParam;
-		SetDlgItemText(IDC_MOD_OPTS_INFO, *sInfo);
-	}
+	UNREFERENCED_PARAMETER(wParam);
+	UNREFERENCED_PARAMETER(lParam);
 	return FALSE;
 }
 
-HBRUSH CPPgMod::OnCtlColor(CDC* pDC, CWnd* pWnd, UINT nCtlColor)
+void CPPgMod::UpdateTreeOptionsToolTip()
 {
-	switch (nCtlColor)
-	{
-	case CTLCOLOR_STATIC:
-		if (pWnd->GetSafeHwnd() == GetDlgItem(IDC_MOD_OPTS_INFO)->GetSafeHwnd()) {
-			pDC->SetTextColor(GetCustomSysColor(COLOR_WINDOWTEXT));	// Text font colour
-			pDC->SetBkColor(RGB(230, 230, 230)); // Text background colour
-			return CDarkMode::s_brHelpTextBackground;
+	if (m_tooltipTreeOptions.GetSafeHwnd() == NULL)
+		return;
+
+	CString strToolTip;
+	POINT ptScreen = {};
+	if (::GetCursorPos(&ptScreen)) {
+		CRect rcTree;
+		m_ctrlTreeOptions.GetWindowRect(&rcTree);
+		if (rcTree.PtInRect(ptScreen)) {
+			CPoint ptClient(ptScreen);
+			m_ctrlTreeOptions.ScreenToClient(&ptClient);
+			UINT uFlags = 0;
+			HTREEITEM hItem = m_ctrlTreeOptions.HitTest(ptClient, &uFlags);
+			if (hItem != NULL && (uFlags & TVHT_ONITEM)) {
+				CTreeOptionsItemData* pItemData = reinterpret_cast<CTreeOptionsItemData*>(m_ctrlTreeOptions.GetItemData(hItem));
+				if (pItemData != NULL && !pItemData->m_sInfo.IsEmpty())
+					strToolTip = FormatToolTipText(pItemData->m_sInfo);
+			}
 		}
-	default:
-		return CDialog::OnCtlColor(pDC, pWnd, nCtlColor);
+	}
+
+	if (strToolTip != m_strTreeOptionsToolTip) {
+		m_strTreeOptionsToolTip = strToolTip;
+		if (!m_strTreeOptionsToolTip.IsEmpty())
+			m_tooltipTreeOptions.UpdateTipText(m_strTreeOptionsToolTip, &m_ctrlTreeOptions);
+	}
+	m_tooltipTreeOptions.Activate(AreOptionsToolTipsEnabled(this) && !m_strTreeOptionsToolTip.IsEmpty());
+}
+
+BOOL CPPgMod::PreTranslateMessage(MSG* pMsg)
+{
+	if (m_tooltipTreeOptions.GetSafeHwnd() != NULL) {
+		if (pMsg != NULL && (pMsg->message == WM_MOUSEMOVE || pMsg->message == WM_NCMOUSEMOVE || pMsg->message == WM_LBUTTONDOWN || pMsg->message == WM_RBUTTONDOWN || pMsg->message == WM_MOUSEWHEEL))
+			UpdateTreeOptionsToolTip();
+		if (AreOptionsToolTipsEnabled(this))
+			m_tooltipTreeOptions.RelayEvent(pMsg);
+	}
+	return CPropertyPage::PreTranslateMessage(pMsg);
+}
+
+void CPPgMod::OnTvnItemexpanded(NMHDR *pNMHDR, LRESULT *pResult)
+{
+	LPNMTREEVIEW pNMTreeView = reinterpret_cast<LPNMTREEVIEW>(pNMHDR);
+	if (pNMTreeView != NULL && pNMTreeView->action == TVE_EXPAND) {
+		HTREEITEM hItem = pNMTreeView->itemNew.hItem;
+		if (hItem == m_htiDownloadInspector || hItem == m_htiAdvancedPreferences) {
+			ExpandAllChildren(hItem);
+		}
+	}
+	*pResult = 0;
+}
+
+void CPPgMod::ExpandAllChildren(HTREEITEM hParent)
+{
+	HTREEITEM hChild = m_ctrlTreeOptions.GetChildItem(hParent);
+	while (hChild != NULL) {
+		if (m_ctrlTreeOptions.ItemHasChildren(hChild)) {
+			m_ctrlTreeOptions.Expand(hChild, TVE_EXPAND);
+			ExpandAllChildren(hChild);
+		}
+		hChild = m_ctrlTreeOptions.GetNextSiblingItem(hChild);
 	}
 }

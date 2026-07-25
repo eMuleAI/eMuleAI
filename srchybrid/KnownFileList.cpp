@@ -46,9 +46,7 @@ static char THIS_FILE[] = __FILE__;
 #endif
 
 
-#define KNOWN_MET_FILENAME		_T("known.met")
-#define KNOWN_MET_FILENAME_TMP	_T("known.met.tmp")
-#define CANCELLED_MET_FILENAME	_T("cancelled.met")
+#define KNOWN_MET_FILENAME_TMP	KNOWN_MET_FILENAME _T(".tmp")
 
 #define CANCELLED_HEADER_OLD	MET_HEADER
 #define CANCELLED_HEADER		MET_HEADER_I64TAGS
@@ -463,8 +461,12 @@ bool CKnownFileList::AttachStartupKnownFilesLoadChunk(std::vector<CKnownFile*>& 
 	if (uNextParsedFile > parsedFiles.size())
 		return false;
 	const size_t uLimit = uMaxFiles == 0 ? static_cast<size_t>(-1) : uMaxFiles;
-	if (uNextParsedFile == 0 && !parsedFiles.empty())
-		PrepareKnownFileLoadCapacity(static_cast<uint32>(parsedFiles.size()));
+	if (uNextParsedFile == 0) {
+		if (!parsedFiles.empty())
+			PrepareKnownFileLoadCapacity(static_cast<uint32>(parsedFiles.size()));
+		if (theApp.DownloadValidator != NULL)
+			theApp.DownloadValidator->BeginStartupKnownFilesMapLoad(static_cast<UINT>((std::min)(parsedFiles.size(), static_cast<size_t>(_UI32_MAX))));
+	}
 	const DWORD dwSliceStart = ::GetTickCount();
 	const size_t uTimeCheckGranularity = 64;
 	size_t uProcessed = 0;
@@ -472,8 +474,13 @@ bool CKnownFileList::AttachStartupKnownFilesLoadChunk(std::vector<CKnownFile*>& 
 		const size_t uCurrentIndex = uNextParsedFile;
 		CKnownFile* pFile = parsedFiles[uCurrentIndex];
 		parsedFiles[uCurrentIndex] = NULL;
-		if (pFile != NULL && !SafeAddKFile(pFile, false, false))
-			delete pFile;
+		if (pFile != NULL) {
+			if (SafeAddKFile(pFile, false, false)) {
+				if (theApp.DownloadValidator != NULL)
+					theApp.DownloadValidator->AddStartupKnownFileToMap(pFile->GetFileHash(), pFile->GetFileName(), pFile->GetFileSize(), pFile->GetIntTagValue(FT_MEDIA_LENGTH));
+			} else
+				delete pFile;
+		}
 		if (puAppliedWorkUnits != NULL)
 			*puAppliedWorkUnits += (pWorkUnits != NULL && uCurrentIndex < pWorkUnits->size()) ? (*pWorkUnits)[uCurrentIndex] : 1;
 		++uNextParsedFile;
@@ -481,6 +488,8 @@ bool CKnownFileList::AttachStartupKnownFilesLoadChunk(std::vector<CKnownFile*>& 
 		if ((uProcessed % uTimeCheckGranularity) == 0 && theApp.IsTimeBudgetExceeded(dwSliceStart, CemuleApp::TimeBudgetStartupApply))
 			break;
 	}
+	if (uNextParsedFile == parsedFiles.size() && theApp.DownloadValidator != NULL)
+		theApp.DownloadValidator->CompleteStartupKnownFilesMapLoad();
 	return true;
 }
 
@@ -1093,7 +1102,7 @@ bool CKnownFileList::SafeAddKFile(CKnownFile *toadd, bool bUpdateDownloadValidat
 				m_mapKnownFilesByAICH[toadd->GetFileIdentifier().GetAICHHash()] = toadd;
 
 			if (bUpdateDownloadValidator && theApp.DownloadValidator != NULL)
-				theApp.DownloadValidator->AddToMap(toadd->GetFileHash(), toadd->GetFileName(), toadd->GetFileSize());
+				theApp.DownloadValidator->AddToMap(toadd->GetFileHash(), toadd->GetFileName(), toadd->GetFileSize(), true);
 
 			if (bLogDuplicateDetails) {
 				AddDebugLogLine(DLP_VERYLOW, false, _T("%hs: File is removed from duplicate list: %s %I64u \"%s\""), __FUNCTION__, (LPCTSTR)md4str(toadd->GetFileHash()), (uint64)toadd->GetFileSize(), (LPCTSTR)EscPercent(toadd->GetFileName()));
@@ -1118,6 +1127,8 @@ bool CKnownFileList::SafeAddKFile(CKnownFile *toadd, bool bUpdateDownloadValidat
 		m_duplicateFileList.push_back(toadd);
 		AddDupSizeIndex(toadd); // Sync duplicate index
 		slDuplicatesLock.Unlock();
+		if (bUpdateDownloadValidator && theApp.DownloadValidator != NULL)
+			theApp.DownloadValidator->AddToMap(toadd->GetFileHash(), toadd->GetFileName(), toadd->GetFileSize(), true);
 		if (theApp.searchlist != NULL)
 			theApp.searchlist->QueueKnownTypeRefreshForHash(toadd->GetFileHash());
 		return true;
@@ -1141,7 +1152,7 @@ bool CKnownFileList::SafeAddKFile(CKnownFile *toadd, bool bUpdateDownloadValidat
 		m_mapKnownFilesByAICH[toadd->GetFileIdentifier().GetAICHHash()] = toadd;
 
 	if (bUpdateDownloadValidator && theApp.DownloadValidator != NULL) // Startup load rebuilds the validator map once after known files are ready.
-		theApp.DownloadValidator->AddToMap(toadd->GetFileHash(), toadd->GetFileName(), toadd->GetFileSize());
+		theApp.DownloadValidator->AddToMap(toadd->GetFileHash(), toadd->GetFileName(), toadd->GetFileSize(), true);
 	if (theApp.searchlist != NULL)
 		theApp.searchlist->QueueKnownTypeRefreshForHash(toadd->GetFileHash());
 
@@ -1213,7 +1224,7 @@ CKnownFile* CKnownFileList::PromoteDuplicateForSharedFile(CKnownFile* pOldPrimar
 	}
 
 	if (theApp.DownloadValidator != NULL)
-		theApp.DownloadValidator->AddToMap(pPromotedFile->GetFileHash(), pPromotedFile->GetFileName(), pPromotedFile->GetFileSize());
+		theApp.DownloadValidator->AddToMap(pPromotedFile->GetFileHash(), pPromotedFile->GetFileName(), pPromotedFile->GetFileSize(), true);
 	if (theApp.searchlist != NULL)
 		theApp.searchlist->QueueKnownTypeRefreshForHash(pPromotedFile->GetFileHash());
 	theApp.QueueSharedFilesListChangedEvent(_T("known-duplicate-promoted"));
@@ -1714,6 +1725,31 @@ uint32 CKnownFileList::DuplicatesCount(const uchar* hash)
 	uint32 uCount = 0;
 	m_dupHashCounts.Lookup(CSKey(hash), uCount);
 	return uCount;
+}
+
+void CKnownFileList::CollectDuplicateFilePathsByIdentity(const uchar* hash, LPCTSTR filename, uint64 size, std::vector<CString>& filePaths)
+{
+	filePaths.clear();
+	if (hash == NULL || filename == NULL || *filename == _T('\0'))
+		return;
+
+	CSingleLock lock(&m_csDuplicatesLock, TRUE);
+	const auto range = m_dupFileSizeIndex.equal_range(size);
+	for (SizeIndexMap::const_iterator it = range.first; it != range.second; ++it) {
+		const CKnownFile* pFile = it->second;
+		if (pFile == NULL || memcmp(pFile->GetFileHash(), hash, MDX_DIGEST_SIZE) != 0 || pFile->GetFileName().CompareNoCase(filename) != 0 || pFile->GetFilePath().IsEmpty())
+			continue;
+
+		bool bDuplicatePath = false;
+		for (std::vector<CString>::const_iterator pathIt = filePaths.begin(); pathIt != filePaths.end(); ++pathIt) {
+			if (pathIt->CompareNoCase(pFile->GetFilePath()) == 0) {
+				bDuplicatePath = true;
+				break;
+			}
+		}
+		if (!bDuplicatePath)
+			filePaths.push_back(pFile->GetFilePath());
+	}
 }
 
 void CKnownFileList::IncrementDuplicateHashCount(const uchar* hash)

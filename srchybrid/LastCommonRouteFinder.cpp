@@ -461,7 +461,7 @@ UINT LastCommonRouteFinder::RunInternal()
 						m_upload = m_maxUpload;
 
 						pingLocker.Lock();
-						m_strState = _T("USS_STATE_WAITING");
+						m_strState = _T("WAITING");
 						pingLocker.Unlock();
 
 						m_eventPrefs.Lock(MIN2MS(3));
@@ -488,7 +488,7 @@ UINT LastCommonRouteFinder::RunInternal()
 						enabled = false;
 
 						pingLocker.Lock();
-						m_strState = _T("USS_STATE_ERROR");
+						m_strState = _T("ERROR");
 						pingLocker.Unlock();
 
 						// PENDING: this may be not thread safe

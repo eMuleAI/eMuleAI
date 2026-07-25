@@ -1162,7 +1162,7 @@ bool CClientReqSocket::ProcessPacket(const BYTE *packet, uint32 size, UINT opcod
 				else
 					client->CheckFailedFileIdReqs(packet);
 			}
-			else if (thePrefs.IsDetectWrongTag()) // ban it as 'WrongTag' - sFrQlXeRt // IsHarderPunishment isn't necessary here since the cost is low
+			else if (size != 0 && thePrefs.IsDetectWrongTag()) // ban it as 'WrongTag' - sFrQlXeRt // IsHarderPunishment isn't necessary here since the cost is low
 				theApp.shield->SetPunishment(client, GetResString(_T("PUNISHMENT_REASON_WRONG_OPSTARTUPLOADREQ_TAG")), PR_WRONGTAGUPLOADREQ);
 			break;
 		case OP_QUEUERANK:

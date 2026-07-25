@@ -218,7 +218,7 @@ CString GetTagNameByID(UINT id)
 		uid = _T("IP");
 		break;
 	case 0x11:
-		uid = _T("META_VERSION");
+		uid = _T("VERSION");
 		break;
 	case FT_PARTFILENAME:
 		uid = _T("META_TEMPFILE");
@@ -434,7 +434,7 @@ void CMetaDataDlg::RefreshData()
 			lvi.mask = LVIF_TEXT;
 			lvi.iItem = INT_MAX;
 			lvi.iSubItem = META_DATA_COL_NAME;
-			strBuff = GetResString(_T("FD_HASH"));
+			strBuff = GetResStringWithColon(_T("CD_UHASH2"));
 			StripTrailingColon(strBuff);
 			lvi.pszText = const_cast<LPTSTR>((LPCTSTR)strBuff);
 			int iItem = m_tags.InsertItem(&lvi);

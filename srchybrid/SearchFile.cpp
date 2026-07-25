@@ -218,6 +218,11 @@ CSearchFile::CSearchFile(const CSearchFile *copyfrom)
 	m_nSpamRating = copyfrom->GetSpamRating();
 	m_bAutomaticBlacklisted = copyfrom->GetAutomaticBlacklisted();
 	m_bAutomaticBlacklistEvaluated = copyfrom->HasAutomaticBlacklistEvaluation();
+	m_bDownloadValidatorEvaluated = copyfrom->m_bDownloadValidatorEvaluated;
+	m_bDownloadValidatorSimilar = copyfrom->m_bDownloadValidatorSimilar;
+	m_uDownloadValidatorRevision = copyfrom->m_uDownloadValidatorRevision;
+	m_downloadValidatorFuzzyQueryData = copyfrom->m_downloadValidatorFuzzyQueryData;
+	m_possibleKnownCache.Clear();
 	m_bManualBlacklisted = copyfrom->GetManualBlacklisted();
 	m_nKadPublishInfo = copyfrom->GetKadPublishInfo();
 	m_bMultipleAICHFound = copyfrom->m_bMultipleAICHFound;
@@ -239,6 +244,9 @@ CSearchFile::CSearchFile(CFileDataIO &in_data, bool bOptUTF8, uint32 nSearchID, 
 	, m_nSpamRating()
 	, m_bAutomaticBlacklisted()
 	, m_bAutomaticBlacklistEvaluated()
+	, m_bDownloadValidatorEvaluated()
+	, m_bDownloadValidatorSimilar()
+	, m_uDownloadValidatorRevision()
 	, m_bManualBlacklisted()
 	, m_list_childcount()
 	, m_list_parent()

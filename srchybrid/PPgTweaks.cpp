@@ -24,6 +24,7 @@
 #include "Scheduler.h"
 #include "DownloadQueue.h"
 #include "Preferences.h"
+#include "PreferencesDlg.h"
 #include "TransferDlg.h"
 #include "emuledlg.h"
 #include "SharedFilesWnd.h"
@@ -498,7 +499,7 @@ BOOL CPPgTweaks::OnInitDialog()
 	m_ctrlTreeOptions.SetImageListColorFlags(theApp.m_iDfltImageListColorFlags);
 	CPropertyPage::OnInitDialog();
 	InitWindowStyles(this);
-	m_ctrlTreeOptions.SetItemHeight(m_ctrlTreeOptions.GetItemHeight() + 2);
+	m_ctrlTreeOptions.SetItemHeight(m_ctrlTreeOptions.GetItemHeight() + CPreferencesDlg::ScaleOptionsValue(2));
 
 	m_uFileBufferTimeLimit = thePrefs.GetFileBufferTimeLimit() / 60000 ;
 	m_ctlFileBufferTimeLimit.SetRange(1, 30, TRUE);
@@ -531,6 +532,67 @@ BOOL CPPgTweaks::OnKillActive()
 	// data from an open edit control
 	m_ctrlTreeOptions.HandleChildControlLosingFocus();
 	return CPropertyPage::OnKillActive();
+}
+
+void CPPgTweaks::ResetToDefaults()
+{
+	m_ctrlTreeOptions.HandleChildControlLosingFocus();
+	m_iMaxConnPerFive = CPreferences::GetDefaultMaxConperFive();
+	m_iMaxHalfOpen = 50;
+	m_bConditionalTCPAccept = false;
+	m_bAutoTakeEd2kLinks = true;
+	m_bVerbose = false;
+	m_bDebug2Disk = false;
+	m_bDebugSourceExchange = false;
+	m_bLogBannedClients = true;
+	m_bLogRatingDescReceived = true;
+	m_bLogSecureIdent = true;
+	m_bLogFilteredIPs = true;
+	m_bLogFileSaving = false;
+	m_bLogA4AF = false;
+	m_bLogUlDlEvents = true;
+	m_bLogSpamRating = false;
+	m_bLogRetryFailedTcp = false;
+	m_bLogExtendedSXEvents = false;
+	m_bLogNatTraversalEvents = false;
+	m_bLogUiResponsivenessEvents = false;
+	m_iLogLevel = 5 - DLP_VERYLOW;
+	m_bLog2Disk = false;
+	m_bCreditSystem = true;
+	m_iCommitFiles = 2;
+	m_iExtractMetaData = 1;
+	m_bFilterLANIPs = true;
+	m_bExtControls = true;
+	m_uServerKeepAliveTimeout = 0;
+	m_bSparsePartFiles = false;
+	m_bImportParts = false;
+	m_bFullAlloc = false;
+	m_bCheckDiskspace = true;
+	m_bResolveShellLinks = false;
+	m_fMinFreeDiskSpaceMB = 2000.0f;
+	m_uFreeDiskSpaceCheckPeriod = MIN2S(DISKSPACERECHECKTIME);
+	m_sYourHostname.Empty();
+	m_bAutoArchDisable = false;
+	m_bDynUpEnabled = false;
+	m_iDynUpMinUpload = 1;
+	m_iDynUpPingTolerance = 500;
+	m_iDynUpPingToleranceMilliseconds = 200;
+	m_iDynUpRadioPingTolerance = 0;
+	m_iDynUpGoingUpDivider = 1000;
+	m_iDynUpGoingDownDivider = 1000;
+	m_iDynUpNumberOfPings = 1;
+	m_bCloseUPnPOnExit = true;
+	m_bSkipWANIPSetup = false;
+	m_bSkipWANPPPSetup = false;
+	m_bA4AFSaveCpu = false;
+	m_uFileBufferTimeLimit = 10;
+	m_uFileBufferSize = 20 * 1024 * 1024;
+	m_iQueueSize = 20000;
+	UpdateData(FALSE);
+	m_ctlFileBufferTimeLimit.SetPos(m_uFileBufferTimeLimit);
+	m_ctlFileBuffSize.SetPos(m_uFileBufferSize / (1024 * 512));
+	m_ctlQueueSize.SetPos(static_cast<int>(m_iQueueSize / 100));
+	SetModified(TRUE);
 }
 
 BOOL CPPgTweaks::OnApply()
@@ -681,6 +743,12 @@ void CPPgTweaks::LocalizeItemText(HTREEITEM item, LPCTSTR strid)
 		m_ctrlTreeOptions.SetItemText(item, GetResString(strid));
 }
 
+void CPPgTweaks::LocalizeItemInfoText(HTREEITEM item, LPCTSTR strid)
+{
+	if (item)
+		m_ctrlTreeOptions.SetItemInfo(item, GetResString(strid));
+}
+
 void CPPgTweaks::LocalizeEditLabel(HTREEITEM item, LPCTSTR strid)
 {
 	if (item)
@@ -824,6 +892,65 @@ void CPPgTweaks::Localize()
 		LocalizeItemText(m_htiUPnP, _T("UPNP"));
 		LocalizeItemText(m_htiVerbose, _T("ENABLED"));
 		LocalizeItemText(m_htiVerboseGroup, _T("VERBOSE"));
+		LocalizeItemInfoText(m_htiTCPGroup, _T("OPTIONS_TIP_EXT_TCP_GROUP"));
+		LocalizeItemInfoText(m_htiMaxCon5Sec, _T("OPTIONS_TIP_EXT_MAX_CONNECTIONS_5_SEC"));
+		LocalizeItemInfoText(m_htiMaxHalfOpen, _T("OPTIONS_TIP_EXT_MAX_HALF_OPEN"));
+		LocalizeItemInfoText(m_htiConditionalTCPAccept, _T("OPTIONS_TIP_EXT_CONDITIONAL_TCP_ACCEPT"));
+		LocalizeItemInfoText(m_htiServerKeepAliveTimeout, _T("OPTIONS_TIP_EXT_SERVER_KEEPALIVE"));
+		LocalizeItemInfoText(m_htiAutoTakeEd2kLinks, _T("OPTIONS_TIP_EXT_AUTO_ED2K_LINKS"));
+		LocalizeItemInfoText(m_htiCreditSystem, _T("OPTIONS_TIP_EXT_CREDIT_SYSTEM"));
+		LocalizeItemInfoText(m_htiFilterLANIPs, _T("OPTIONS_TIP_EXT_FILTER_LAN_IPS"));
+		LocalizeItemInfoText(m_htiExtControls, _T("OPTIONS_TIP_EXT_CONTROLS"));
+		LocalizeItemInfoText(m_htiA4AFSaveCpu, _T("OPTIONS_TIP_EXT_A4AF_CPU"));
+		LocalizeItemInfoText(m_htiAutoArch, _T("OPTIONS_TIP_EXT_AUTO_ARCHIVE_PREVIEW"));
+		LocalizeItemInfoText(m_htiYourHostname, _T("OPTIONS_TIP_EXT_HOSTNAME"));
+		LocalizeItemInfoText(m_htiSparsePartFiles, _T("OPTIONS_TIP_EXT_SPARSE_PART_FILES"));
+		LocalizeItemInfoText(m_htiFullAlloc, _T("OPTIONS_TIP_EXT_FULL_ALLOCATION"));
+		LocalizeItemInfoText(m_htiCheckDiskspace, _T("OPTIONS_TIP_EXT_DISK_SPACE_CHECK"));
+		LocalizeItemInfoText(m_htiMinFreeDiskSpace, _T("OPTIONS_TIP_EXT_MIN_FREE_SPACE"));
+		LocalizeItemInfoText(m_htiFreeDiskSpaceCheckPeriod, _T("OPTIONS_TIP_EXT_DISK_CHECK_PERIOD"));
+		LocalizeItemInfoText(m_htiCommit, _T("OPTIONS_TIP_EXT_COMMIT_GROUP"));
+		LocalizeItemInfoText(m_htiCommitNever, _T("OPTIONS_TIP_EXT_COMMIT_NEVER"));
+		LocalizeItemInfoText(m_htiCommitOnShutdown, _T("OPTIONS_TIP_EXT_COMMIT_SHUTDOWN"));
+		LocalizeItemInfoText(m_htiCommitAlways, _T("OPTIONS_TIP_EXT_COMMIT_ALWAYS"));
+		LocalizeItemInfoText(m_htiExtractMetaData, _T("OPTIONS_TIP_EXT_METADATA_GROUP"));
+		LocalizeItemInfoText(m_htiExtractMetaDataNever, _T("OPTIONS_TIP_EXT_METADATA_NEVER"));
+		LocalizeItemInfoText(m_htiExtractMetaDataID3Lib, _T("OPTIONS_TIP_EXT_METADATA_LIBRARY"));
+		LocalizeItemInfoText(m_htiResolveShellLinks, _T("OPTIONS_TIP_EXT_RESOLVE_LINKS"));
+		LocalizeItemInfoText(m_htiLog2Disk, _T("OPTIONS_TIP_EXT_LOG_TO_DISK"));
+		LocalizeItemInfoText(m_htiVerboseGroup, _T("OPTIONS_TIP_EXT_VERBOSE_GROUP"));
+		LocalizeItemInfoText(m_htiVerbose, _T("OPTIONS_TIP_EXT_VERBOSE_ENABLE"));
+		LocalizeItemInfoText(m_htiLogLevel, _T("OPTIONS_TIP_EXT_LOG_LEVEL"));
+		LocalizeItemInfoText(m_htiDebug2Disk, _T("OPTIONS_TIP_EXT_DEBUG_TO_DISK"));
+		LocalizeItemInfoText(m_htiDebugSourceExchange, _T("OPTIONS_TIP_EXT_LOG_SOURCE_EXCHANGE"));
+		LocalizeItemInfoText(m_htiLogBannedClients, _T("OPTIONS_TIP_EXT_LOG_BANNED_CLIENTS"));
+		LocalizeItemInfoText(m_htiLogRatingDescReceived, _T("OPTIONS_TIP_EXT_LOG_RATINGS"));
+		LocalizeItemInfoText(m_htiLogSecureIdent, _T("OPTIONS_TIP_EXT_LOG_SECURE_IDENT"));
+		LocalizeItemInfoText(m_htiLogFilteredIPs, _T("OPTIONS_TIP_EXT_LOG_FILTERED_IPS"));
+		LocalizeItemInfoText(m_htiLogFileSaving, _T("OPTIONS_TIP_EXT_LOG_FILE_SAVING"));
+		LocalizeItemInfoText(m_htiLogA4AF, _T("OPTIONS_TIP_EXT_LOG_A4AF"));
+		LocalizeItemInfoText(m_htiLogUlDlEvents, _T("OPTIONS_TIP_EXT_LOG_TRANSFER_EVENTS"));
+		LocalizeItemInfoText(m_htiLogSpamRating, _T("OPTIONS_TIP_EXT_LOG_SPAM_RATING"));
+		LocalizeItemInfoText(m_htiLogRetryFailedTcp, _T("OPTIONS_TIP_EXT_LOG_TCP_RETRY"));
+		LocalizeItemInfoText(m_htiLogExtendedSXEvents, _T("OPTIONS_TIP_EXT_LOG_EXTENDED_SOURCE_EXCHANGE"));
+		LocalizeItemInfoText(m_htiLogNatTraversalEvents, _T("OPTIONS_TIP_EXT_LOG_NAT_TRAVERSAL"));
+		LocalizeItemInfoText(m_htiLogUiResponsivenessEvents, _T("OPTIONS_TIP_EXT_LOG_UI_RESPONSIVENESS"));
+		LocalizeItemInfoText(m_htiDynUp, _T("OPTIONS_TIP_EXT_DYNAMIC_UPLOAD_GROUP"));
+		LocalizeItemInfoText(m_htiDynUpEnabled, _T("OPTIONS_TIP_EXT_DYNAMIC_UPLOAD_ENABLE"));
+		LocalizeItemInfoText(m_htiDynUpMinUpload, _T("OPTIONS_TIP_EXT_DYNAMIC_UPLOAD_MIN"));
+		LocalizeItemInfoText(m_htiDynUpPingTolerance, _T("OPTIONS_TIP_EXT_DYNAMIC_UPLOAD_TOLERANCE"));
+		LocalizeItemInfoText(m_htiDynUpPingToleranceMilliseconds, _T("OPTIONS_TIP_EXT_DYNAMIC_UPLOAD_TOLERANCE_MS"));
+		LocalizeItemInfoText(m_htiDynUpPingToleranceGroup, _T("OPTIONS_TIP_EXT_DYNAMIC_UPLOAD_TOLERANCE_MODE"));
+		LocalizeItemInfoText(m_htiDynUpRadioPingTolerance, _T("OPTIONS_TIP_EXT_DYNAMIC_UPLOAD_PERCENT_MODE"));
+		LocalizeItemInfoText(m_htiDynUpRadioPingToleranceMilliseconds, _T("OPTIONS_TIP_EXT_DYNAMIC_UPLOAD_MS_MODE"));
+		LocalizeItemInfoText(m_htiDynUpGoingUpDivider, _T("OPTIONS_TIP_EXT_DYNAMIC_UPLOAD_UP_DIVIDER"));
+		LocalizeItemInfoText(m_htiDynUpGoingDownDivider, _T("OPTIONS_TIP_EXT_DYNAMIC_UPLOAD_DOWN_DIVIDER"));
+		LocalizeItemInfoText(m_htiDynUpNumberOfPings, _T("OPTIONS_TIP_EXT_DYNAMIC_UPLOAD_PINGS"));
+		LocalizeItemInfoText(m_htiUPnP, _T("OPTIONS_TIP_EXT_UPNP_GROUP"));
+		LocalizeItemInfoText(m_htiCloseUPnPPorts, _T("OPTIONS_TIP_EXT_UPNP_CLOSE"));
+		LocalizeItemInfoText(m_htiSkipWANIPSetup, _T("OPTIONS_TIP_EXT_UPNP_SKIP_WANIP"));
+		LocalizeItemInfoText(m_htiSkipWANPPPSetup, _T("OPTIONS_TIP_EXT_UPNP_SKIP_WANPPP"));
+		LocalizeItemInfoText(m_htiImportParts, _T("OPTIONS_TIP_EXT_IMPORT_PARTS"));
 
 		CString temp;
 		temp.Format(_T("%s: %i min"), GetResString(_T("BTL_TEXT")), m_uFileBufferTimeLimit);

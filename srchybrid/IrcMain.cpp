@@ -700,7 +700,7 @@ void CIrcMain::ParseMessage(const CString &sRawMessage)
 				//Although it says this is obsolete, so far every server has sent it, so I use it. :/
 				m_pwndIRC->AddStatus(_T("Start of /LIST"));
 				if (m_pwndIRC->m_wndChanSel.m_pChanList == NULL)
-					m_pwndIRC->m_wndChanSel.m_pChanList = m_pwndIRC->m_wndChanSel.NewChannel(GetResString(_T("IRC_CHANNELLIST")), Channel::ctChannelList);
+					m_pwndIRC->m_wndChanSel.m_pChanList = m_pwndIRC->m_wndChanSel.NewChannel(GetResString(_T("CHANNELS")), Channel::ctChannelList);
 				else
 					m_pwndIRC->m_wndChanList.ResetServerChannelList();
 				return;

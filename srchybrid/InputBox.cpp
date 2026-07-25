@@ -78,7 +78,7 @@ BOOL InputBox::OnInitDialog()
 	SetDlgItemText(IDC_TEXT, m_default);
 	SetWindowText(m_title);
 
-	SetDlgItemText(IDOK, GetResString(_T("TREEOPTIONS_OK")));
+	SetDlgItemText(IDOK, GetResString(_T("MB_OK")));
 	SetDlgItemText(IDCANCEL, GetResString(_T("CANCEL")));
 	SetDlgItemText(IDC_CLEANFILENAME, GetResString(_T("CLEANUP")));
 	GetDlgItem(IDC_CLEANFILENAME)->ShowWindow(m_bFilenameMode ? SW_NORMAL : SW_HIDE);

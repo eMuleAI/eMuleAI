@@ -32,6 +32,7 @@ public:
 	CPPgConnection();
 
 	void Localize();
+	void ResetToDefaults();
 	void LoadSettings();
 
 	static bool CheckUp(uint32 mUp, uint32 &mDown);
@@ -89,6 +90,7 @@ public:
 	CPPgNetworkInterface();
 
 	void Localize();
+	void ResetToDefaults();
 	void LoadSettings();
 
 protected:

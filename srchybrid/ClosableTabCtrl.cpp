@@ -109,6 +109,7 @@ CClosableTabCtrl::CClosableTabCtrl()
 	, m_bShowCloseButton(true)
 	, m_iiCloseButton()
 	, m_ptCtxMenu(-1, -1)
+	, m_bAllowTabReordering(true)
 	, m_bDragging()
 	, m_nSrcTab()
 	, m_nDstTab()
@@ -116,6 +117,28 @@ CClosableTabCtrl::CClosableTabCtrl()
 	, m_bDownloadCategoryStyle(false)
 	, m_pSpinCtrl()
 {
+	m_nVisualScalePercent = 100;
+}
+
+BOOL CClosableTabCtrl::SetVisualScalePercent(int nPercent)
+{
+	if (nPercent <= 0) {
+		ASSERT(0);
+		return FALSE;
+	}
+
+	m_nVisualScalePercent = nPercent;
+	if (::IsWindow(m_hWnd)) {
+		if (m_bClosable)
+			SetAllIcons();
+		Invalidate();
+	}
+	return TRUE;
+}
+
+int CClosableTabCtrl::ScaleVisualMetric(int iValue) const
+{
+	return ::MulDiv(iValue, m_nVisualScalePercent, 100);
 }
 
 CClosableTabCtrl::~CClosableTabCtrl()
@@ -128,24 +151,24 @@ CClosableTabCtrl::~CClosableTabCtrl()
 
 void CClosableTabCtrl::GetCloseButtonRect(int iItem, const CRect &rcItem, CRect &rcCloseButton, bool bItemSelected, bool bVistaThemeActive)
 {
-	rcCloseButton.top = rcItem.top + 2;
+	rcCloseButton.top = rcItem.top + ScaleVisualMetric(2);
 	rcCloseButton.bottom = rcCloseButton.top + (m_iiCloseButton.rcImage.bottom - m_iiCloseButton.rcImage.top);
-	rcCloseButton.right = rcItem.right - 2;
+	rcCloseButton.right = rcItem.right - ScaleVisualMetric(2);
 	rcCloseButton.left = rcCloseButton.right - (m_iiCloseButton.rcImage.right - m_iiCloseButton.rcImage.left);
 	if (bVistaThemeActive)
-		rcCloseButton.left -= 1; // the close button does not look 'symmetric' with a width of 16, give it 17
+		rcCloseButton.left -= ScaleVisualMetric(1); // the close button does not look 'symmetric' with a width of 16, give it 17
 	if (bItemSelected) {
-		rcCloseButton.OffsetRect(-1, 0);
+		rcCloseButton.OffsetRect(-ScaleVisualMetric(1), 0);
 		if (bVistaThemeActive) {
 			int iItems = GetItemCount();
 			if (iItems > 1 && iItem == iItems - 1)
-				rcCloseButton.OffsetRect(-2, 0);
+				rcCloseButton.OffsetRect(-ScaleVisualMetric(2), 0);
 		}
 	} else {
 		if (bVistaThemeActive) {
 			int iItems = GetItemCount();
 			if (iItems > 1 && iItem < iItems - 1)
-				rcCloseButton.OffsetRect(2, 0);
+				rcCloseButton.OffsetRect(ScaleVisualMetric(2), 0);
 		}
 	}
 }
@@ -155,7 +178,8 @@ int CClosableTabCtrl::GetTabUnderPoint(const CPoint &point) const
 	CRect rcItem;
 	for (int i = GetItemCount(); --i >= 0;)
 		if (GetItemRect(i, rcItem)) {
-			rcItem.InflateRect(2, 2); // get the real tab item rect
+			const int iHitPadding = ScaleVisualMetric(2);
+			rcItem.InflateRect(iHitPadding, iHitPadding); // get the real tab item rect
 			if (rcItem.PtInRect(point))
 				return i;
 		}
@@ -173,7 +197,8 @@ bool CClosableTabCtrl::SetDefaultContextMenuPos()
 	if (iTab >= 0) {
 		CRect rcItem;
 		if (GetItemRect(iTab, &rcItem)) {
-			rcItem.InflateRect(2, 2); // get the real tab item rect
+			const int iHitPadding = ScaleVisualMetric(2);
+			rcItem.InflateRect(iHitPadding, iHitPadding); // get the real tab item rect
 			m_ptCtxMenu.SetPoint(rcItem.left + rcItem.Width() / 2, (rcItem.top + rcItem.bottom) / 2);
 			return true;
 		}
@@ -344,9 +369,9 @@ void CClosableTabCtrl::OnPaint()
 		// Draw the icon if it exists
 		CImageList* pImageList = GetImageList();
 		if (pImageList && tci.iImage >= 0) {
-			SafeImageListDraw(pImageList, &dc, tci.iImage, CPoint(rcItem.left + 4, rcItem.top + 2), ILD_TRANSPARENT);
+			SafeImageListDraw(pImageList, &dc, tci.iImage, CPoint(rcItem.left + ScaleVisualMetric(4), rcItem.top + ScaleVisualMetric(2)), ILD_TRANSPARENT);
 			if (!m_bClosable || !m_bShowCloseButton) // Closable tabs in search window already have a padding
-				rcItemText.left += 20; // Move the text position to the right of the icon
+				rcItemText.left += ScaleVisualMetric(20); // Move the text position to the right of the icon
 		}
 
 		// Keep the selected category tab close to the classic look while compensating bold width slightly.
@@ -371,7 +396,7 @@ void CClosableTabCtrl::OnPaint()
 		}
 
 		// Draw the tab label
-		rcItemText.top += bSelected ? 4 : 3; // Adjust position based on selection
+		rcItemText.top += ScaleVisualMetric(bSelected ? 4 : 3); // Adjust position based on selection
 		dc.DrawText(szLabel, rcItemText, DT_SINGLELINE | DT_TOP | DT_CENTER);
 
 		// Restore previous settings
@@ -392,12 +417,14 @@ void CClosableTabCtrl::OnPaint()
 		}
 
 		// Draw a black vertical line to separate each tab
-		if (nTabIndex < tabCount - 1) // No line after the last tab
-			dc.FillSolidRect(rcItem.right - 2, rcItem.top, 2, rcItem.Height(), GetCustomSysColor(COLOR_WINDOW)); // Draw 2-pixel black line
+		if (nTabIndex < tabCount - 1) {
+			const int iSeparatorWidth = ScaleVisualMetric(2);
+			dc.FillSolidRect(rcItem.right - iSeparatorWidth, rcItem.top, iSeparatorWidth, rcItem.Height(), GetCustomSysColor(COLOR_WINDOW));
+		}
 
 		// Draw a line at the top of the selected tab
 		if (bSelected)
-			dc.FillSolidRect(rcItem.left, rcItem.top, rcItem.Width() - 1, 2, GetCustomSysColor(COLOR_TABBORDER)); // Draw 2-pixel medium slate blue line
+			dc.FillSolidRect(rcItem.left, rcItem.top, rcItem.Width() - ScaleVisualMetric(1), ScaleVisualMetric(2), GetCustomSysColor(COLOR_TABBORDER));
 	}
 
 	dc.Flush();
@@ -454,11 +481,11 @@ void CClosableTabCtrl::DrawItem(LPDRAWITEMSTRUCT lpDIS)
 		if (CanSafeDrawImageList(piml, pDC, tci.iImage)) {
 			IMAGEINFO ii;
 			piml->GetImageInfo(0, &ii);
-			rcItem.left += bSelected ? 8 : 4;
-			SafeImageListDraw(piml, pDC, tci.iImage, POINT{ rcItem.left, rcItem.top + 2 }, ILD_TRANSPARENT);
-			rcItem.left += (ii.rcImage.right - ii.rcImage.left + 1);
+			rcItem.left += ScaleVisualMetric(bSelected ? 8 : 4);
+			SafeImageListDraw(piml, pDC, tci.iImage, POINT{ rcItem.left, rcItem.top + ScaleVisualMetric(2) }, ILD_TRANSPARENT);
+			rcItem.left += ii.rcImage.right - ii.rcImage.left + ScaleVisualMetric(1);
 			if (!bSelected)
-				rcItem.left += 4;
+				rcItem.left += ScaleVisualMetric(4);
 		}
 
 		bool bShowCloseButton = m_bClosable && m_bShowCloseButton;
@@ -471,9 +498,9 @@ void CClosableTabCtrl::DrawItem(LPDRAWITEMSTRUCT lpDIS)
 			GetCloseButtonRect(nTabIndex, rcItem, rcCloseButton, bSelected, false);
 			SafeImageListDraw(&m_ImgLstCloseButton, pDC, static_cast<int>(!bSelected && true), rcCloseButton.TopLeft(), ILD_TRANSPARENT);
 
-			rcItem.right = rcCloseButton.left - 2;
+			rcItem.right = rcCloseButton.left - ScaleVisualMetric(2);
 			if (bSelected)
-				rcItem.left += 2;
+				rcItem.left += ScaleVisualMetric(2);
 		}
 
 		if (tci.dwState & TCIS_HIGHLIGHTED)
@@ -482,7 +509,7 @@ void CClosableTabCtrl::DrawItem(LPDRAWITEMSTRUCT lpDIS)
 			crOldColor = pDC->SetTextColor(GetCustomSysColor(COLOR_BTNTEXT));
 	}
 
-	rcItem.top += bSelected ? 4 : 3;
+	rcItem.top += ScaleVisualMetric(bSelected ? 4 : 3);
 	// Vista: Tab control has troubles with determining the width of a tab if the
 	// label contains one '&' character. To get around this, we use the old code which
 	// replaces one '&' character with two '&' characters and we do not specify DT_NOPREFIX
@@ -543,7 +570,7 @@ void CClosableTabCtrl::SetAllIcons()
 // The handler examines whether we have initiated a drag 'n drop process.
 void CClosableTabCtrl::OnLButtonDown(UINT nFlags, CPoint point)
 {
-	if (DragDetectPlus(this, point)) {
+	if (m_bAllowTabReordering && DragDetectPlus(this, point)) {
 		// Yes, we're beginning to drag, so capture the mouse...
 		m_bDragging = true;
 
@@ -563,13 +590,15 @@ void CClosableTabCtrl::OnLButtonDown(UINT nFlags, CPoint point)
 			if (iTab >= 0) {
 				CRect rcItem;
 				GetItemRect(iTab, rcItem);
-				rcItem.InflateRect(2, 2); // get the real tab item rect
+				const int iHitPadding = ScaleVisualMetric(2);
+				rcItem.InflateRect(iHitPadding, iHitPadding); // get the real tab item rect
 
 				CRect rcCloseButton;
 				GetCloseButtonRect(iTab, rcItem, rcCloseButton, iTab == GetCurSel(), false);
 
 				// The visible part of our close icon is one pixel less on each side
-				rcCloseButton.InflateRect(-1, -1);
+				const int iPressedInset = ScaleVisualMetric(1);
+				rcCloseButton.InflateRect(-iPressedInset, -iPressedInset);
 
 				if (rcCloseButton.PtInRect(point)) {
 					GetParent()->SendMessage(UM_CLOSETAB, (WPARAM)iTab);
@@ -835,13 +864,15 @@ bool CClosableTabCtrl::DrawIndicator(CPoint point)
 		--m_nDstTab;
 
 	GetItemRect(m_nDstTab, &rcItem);
-	CRect newInsertPosRect(rcItem.left - 1, rcItem.top, rcItem.left - 1 + INDICATOR_WIDTH, rcItem.bottom);
+	const int iIndicatorOffset = ScaleVisualMetric(1);
+	const int iIndicatorWidth = ScaleVisualMetric(INDICATOR_WIDTH);
+	CRect newInsertPosRect(rcItem.left - iIndicatorOffset, rcItem.top, rcItem.left - iIndicatorOffset + iIndicatorWidth, rcItem.bottom);
 
 	// Determine whether the indicator should be painted at the right of
 	// the tab - in which case we update the indicator position and the
 	// destination tab...
 	if (point.x >= rcItem.right - rcItem.Width() / 2) {
-		newInsertPosRect.MoveToX(rcItem.right - 1);
+		newInsertPosRect.MoveToX(rcItem.right - iIndicatorOffset);
 		++m_nDstTab;
 	}
 

@@ -15,6 +15,7 @@ public:
 	CPPgScheduler();
 
 	void Localize();
+	void ResetToDefaults();
 
 protected:
 	CComboBox m_timesel;

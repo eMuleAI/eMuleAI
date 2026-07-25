@@ -40,8 +40,7 @@
 static char THIS_FILE[] = __FILE__;
 #endif
 
-#define CLIENTS_MET_FILENAME	_T("clients.met")
-#define CLIENTS_MET_FILENAME_TMP _T("clients.met.tmp")
+#define CLIENTS_MET_FILENAME_TMP CLIENTS_MET_FILENAME _T(".tmp")
 
 namespace
 {
@@ -983,7 +982,7 @@ void CClientCreditsList::InitalizeCrypting()
 		return;
 	// check if keyfile is there
 	bool bCreateNewKey = false;
-	const CString &cryptkeypath(thePrefs.GetMuleDirectory(EMULE_CONFIGDIR) + _T("cryptkey.dat"));
+	const CString &cryptkeypath(thePrefs.GetMuleDirectory(EMULE_CONFIGDIR) + CRYPTKEY_DAT_FILENAME);
 	HANDLE hKeyFile = ::CreateFile(cryptkeypath
 		, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
 	if (hKeyFile != INVALID_HANDLE_VALUE) {
@@ -1022,7 +1021,7 @@ bool CClientCreditsList::CreateKeyPair()
 		InvertibleRSAFunction privkey;
 		privkey.Initialize(rng, RSAKEYSIZE);
 
-		Base64Encoder privkeysink(new FileSink((CStringA)(thePrefs.GetMuleDirectory(EMULE_CONFIGDIR) + _T("cryptkey.dat"))));
+		Base64Encoder privkeysink(new FileSink((CStringA)(thePrefs.GetMuleDirectory(EMULE_CONFIGDIR) + CRYPTKEY_DAT_FILENAME)));
 		privkey.DEREncode(privkeysink);
 		privkeysink.MessageEnd();
 

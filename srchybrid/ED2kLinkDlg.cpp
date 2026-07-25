@@ -159,7 +159,7 @@ void CED2kLinkDlg::Localize()
 	SetTabTitle(_T("SW_LINK"), this);
 
 	SetDlgItemText(IDC_LD_LINKGROUP, m_strCaption);
-	SetDlgItemText(IDC_LD_CLIPBOARDBUT, GetResString(_T("LD_COPYCLIPBOARD")));
+	SetDlgItemText(IDC_LD_CLIPBOARDBUT, GetResString(_T("COPY")));
 	if (!m_bReducedDlg) {
 		SetDlgItemText(IDC_LD_BASICGROUP, GetResString(_T("LD_BASICOPT")));
 		SetDlgItemText(IDC_LD_SOURCECHE, GetResString(_T("LD_ADDSOURCE")));

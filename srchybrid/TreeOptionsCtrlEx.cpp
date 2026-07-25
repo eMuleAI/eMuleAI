@@ -17,6 +17,7 @@
 //Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 #include "stdafx.h"
 #include "TreeOptionsCtrlEx.h"
+#include "Preferences.h"
 #include "UserMsgs.h"
 #include "eMuleAI/DarkMode.h"
 
@@ -26,6 +27,13 @@
 static char THIS_FILE[] = __FILE__;
 #endif
 
+namespace
+{
+	const int TREE_OPTIONS_IMAGE_BASE_SIZE = 16;
+	const int TREE_OPTIONS_COMMAND_BASE_HEIGHT = 23;
+	const int TREE_OPTIONS_COMMAND_BASE_WIDTH = 80;
+	const int TREE_OPTIONS_COMMAND_TEXT_BASE_PADDING = 22;
+}
 
 BEGIN_MESSAGE_MAP(CTreeOptionsCtrlEx, CTreeOptionsCtrl)
 	ON_WM_DESTROY()
@@ -43,7 +51,14 @@ CTreeOptionsCtrlEx::CTreeOptionsCtrlEx(UINT uImageListColorFlags)
 	, m_bTrackingCommandButtonMouse(FALSE)
 {
 	m_uImageListColorFlags = uImageListColorFlags;
+	SetVisualScalePercent(thePrefs.GetOptionsWindowScalePercent());
 	SetToggleOverIconOnly(TRUE);
+}
+
+void CTreeOptionsCtrlEx::PreSubclassWindow()
+{
+	m_nVisualScalePercent = thePrefs.GetOptionsWindowScalePercent();
+	CTreeOptionsCtrl::PreSubclassWindow();
 }
 
 HTREEITEM CTreeOptionsCtrlEx::InsertGroup(LPCTSTR lpszItem, int nImage, HTREEITEM hParent, HTREEITEM hAfter, DWORD dwItemData)
@@ -70,7 +85,7 @@ HTREEITEM CTreeOptionsCtrlEx::InsertCommandButton(LPCTSTR lpszItem, HTREEITEM hP
 		iDpiY = pDC->GetDeviceCaps(LOGPIXELSY);
 		ReleaseDC(pDC);
 	}
-	SetItemMinHeight(hItem, MulDiv(23, iDpiY, 96));
+	SetItemMinHeight(hItem, MulDiv(ScaleVisualMetric(TREE_OPTIONS_COMMAND_BASE_HEIGHT), iDpiY, 96));
 
 	return hItem;
 }
@@ -119,13 +134,13 @@ CRect CTreeOptionsCtrlEx::GetCommandButtonRect(HTREEITEM hItem)
 		return CRect(0, 0, 0, 0);
 
 	CString strText = GetItemText(hItem);
-	int iButtonWidth = 80;
+	int iButtonWidth = ScaleVisualMetric(TREE_OPTIONS_COMMAND_BASE_WIDTH);
 	CDC *pDC = GetDC();
 	if (pDC != NULL) {
 		CFont *pFont = GetFont();
 		CFont *pOldFont = pFont != NULL ? pDC->SelectObject(pFont) : NULL;
 		CSize sizeText = pDC->GetTextExtent(strText, strText.GetLength());
-		iButtonWidth = sizeText.cx + 22;
+		iButtonWidth = sizeText.cx + ScaleVisualMetric(TREE_OPTIONS_COMMAND_TEXT_BASE_PADDING);
 		if (pOldFont != NULL)
 			pDC->SelectObject(pOldFont);
 		ReleaseDC(pDC);
@@ -144,16 +159,18 @@ CRect CTreeOptionsCtrlEx::GetCommandButtonRect(HTREEITEM hItem)
 		ReleaseDC(pDCHeight);
 	}
 
-	const int iMinButtonHeight = MulDiv(23, iDpiY, 96);
-	int iButtonHeight = min(iMinButtonHeight, rcItem.Height() - 2);
+	const int iMinButtonHeight = MulDiv(ScaleVisualMetric(TREE_OPTIONS_COMMAND_BASE_HEIGHT), iDpiY, 96);
+	int iButtonHeight = min(iMinButtonHeight, rcItem.Height() - ScaleVisualMetric(2));
 	if (iButtonHeight < 1)
 		iButtonHeight = rcItem.Height();
 
-	CRect rcButton(iButtonLeft, rcItem.top + 1, iButtonLeft + iButtonWidth, rcItem.top + 1 + iButtonHeight);
-	if (rcButton.bottom > rcItem.bottom - 1)
-		rcButton.bottom = rcItem.bottom - 1;
-	if (rcButton.right > rcItem.right - 2)
-		rcButton.right = rcItem.right - 2;
+	const int iEdgeInset = ScaleVisualMetric(1);
+	CRect rcButton(iButtonLeft, rcItem.top + iEdgeInset, iButtonLeft + iButtonWidth, rcItem.top + iEdgeInset + iButtonHeight);
+	if (rcButton.bottom > rcItem.bottom - iEdgeInset)
+		rcButton.bottom = rcItem.bottom - iEdgeInset;
+	const int iRightInset = ScaleVisualMetric(2);
+	if (rcButton.right > rcItem.right - iRightInset)
+		rcButton.right = rcItem.right - iRightInset;
 	return rcButton;
 }
 
@@ -174,7 +191,7 @@ void CTreeOptionsCtrlEx::DrawCommandButton(CDC &dc, HTREEITEM hItem)
 	CRect rcItemText;
 	CRect rcItem = GetItemReservedRect(hItem);
 	if (GetItemRect(hItem, rcItemText, TRUE) && !rcItem.IsRectEmpty()) {
-		CRect rcErase(rcButton.left, rcItem.top, max(rcButton.right, rcItemText.right + 2), rcItem.bottom);
+		CRect rcErase(rcButton.left, rcItem.top, max(rcButton.right, rcItemText.right + ScaleVisualMetric(2)), rcItem.bottom);
 		dc.FillSolidRect(rcErase, crItemBackground);
 	}
 
@@ -198,7 +215,8 @@ void CTreeOptionsCtrlEx::DrawCommandButton(CDC &dc, HTREEITEM hItem)
 		CPen penBorder(PS_SOLID, 1, crBorder);
 		CBrush *pOldBrush = dc.SelectObject(&brFill);
 		CPen *pOldPen = dc.SelectObject(&penBorder);
-		dc.RoundRect(rcButton, CPoint(4, 4));
+		const int iCornerRadius = ScaleVisualMetric(4);
+		dc.RoundRect(rcButton, CPoint(iCornerRadius, iCornerRadius));
 		if (pOldPen != NULL)
 			dc.SelectObject(pOldPen);
 		if (pOldBrush != NULL)
@@ -206,7 +224,7 @@ void CTreeOptionsCtrlEx::DrawCommandButton(CDC &dc, HTREEITEM hItem)
 	}
 
 	CRect rcButtonText(rcButton);
-	rcButtonText.DeflateRect(2, 1);
+	rcButtonText.DeflateRect(ScaleVisualMetric(2), ScaleVisualMetric(1));
 	dc.SetBkMode(TRANSPARENT);
 	dc.SetTextColor(crText);
 	CString strText = GetItemText(hItem);
@@ -521,8 +539,8 @@ void CTreeOptionsCtrlEx::OnCreateImageList()
 
 	CDC* pDCScreen = CDC::FromHandle(::GetDC(HWND_DESKTOP)); // use screen DC for correct DPI and theme rendering
 	if (pDCScreen) {
-		static const int iBmpWidth = 16;
-		static const int iBmpHeight = 16;
+		const int iBmpWidth = TREE_OPTIONS_IMAGE_BASE_SIZE;
+		const int iBmpHeight = TREE_OPTIONS_IMAGE_BASE_SIZE;
 		static const int iBitmaps = 14;
 		CBitmap bmpControls;
 
@@ -538,8 +556,8 @@ void CTreeOptionsCtrlEx::OnCreateImageList()
 					dcMem.FillSolidRect(0, 0, iBmpWidth * iBitmaps, iBmpHeight, GetCustomSysColor(COLOR_WINDOW));
 
 					// Compute control glyph dimensions and offsets
-					int iCtrlWidth = 16 - 3;
-					int iCtrlHeight = 16 - 3;
+					int iCtrlWidth = iBmpWidth - 3;
+					int iCtrlHeight = iBmpHeight - 3;
 					int iCtrlLeft = (iBmpWidth - iCtrlWidth) / 2;
 					int iCtrlTop = (iBmpHeight - iCtrlHeight) / 2;
 

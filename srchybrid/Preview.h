@@ -57,7 +57,10 @@ public:
 	void RemoveAllApps();
 
 	int GetAllMenuEntries(CMenuXP &rMenu, const CPartFile *file, LPCTSTR pszExcludeCommand = NULL);
+	int GetAllMenuEntriesForFilePath(CMenuXP &rMenu, LPCTSTR pszFilePath, LPCTSTR pszExcludeCommand = NULL);
 	void RunApp(CPartFile *file, UINT uMenuID) const;
+	void RunAppForFilePath(LPCTSTR pszFilePath, UINT uMenuID) const;
+	void RunCommandForFilePath(LPCTSTR pszFilePath, LPCTSTR pszCommand, LPCTSTR pszCommandArgs = NULL) const;
 
 	enum ECanPreviewRes
 	{

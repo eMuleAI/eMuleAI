@@ -1160,7 +1160,7 @@ void CWebServer::_ProcessURL(const ThreadData &Data)
 					++myfaults;
 		}
 		if (myfaults > 4) {
-			Data.pSocket->SendContent(HTTPInit, _GetPlainResString(_T("ACCESSDENIED")));
+			Data.pSocket->SendContent(HTTPInit, _GetPlainResString(_T("SFS_ACCESS_DENIED")));
 			CoUninitialize();
 			return;
 		}
@@ -1209,7 +1209,7 @@ void CWebServer::_ProcessURL(const ThreadData &Data)
 				BadLogin newban = {myip, curTick};	// save failed attempt (ip,time)
 				pThis->m_Params.badlogins.Add(newban);
 				if (++myfaults > 4) {
-					Data.pSocket->SendContent(HTTPInit, _GetPlainResString(_T("ACCESSDENIED")));
+					Data.pSocket->SendContent(HTTPInit, _GetPlainResString(_T("SFS_ACCESS_DENIED")));
 					CoUninitialize();
 					return;
 				}
@@ -1511,26 +1511,26 @@ CString CWebServer::_GetHeader(const ThreadData &Data, long lSession)
 	Out.Replace(_T("[eMuleAppName]"), _T("eMule"));
 	Out.Replace(_T("[version]"), theApp.GetAppVersion().Mid(6));
 	Out.Replace(_T("[StyleSheet]"), pThis->m_Templates.sHeaderStylesheet);
-	Out.Replace(_T("[WebControl]"), _GetPlainResString(_T("WEB_CONTROL")));
+	Out.Replace(_T("[WebControl]"), _GetPlainResString(_T("PW_WS")));
 	Out.Replace(_T("[Transfer]"), _GetPlainResString(_T("CD_TRANS")));
-	Out.Replace(_T("[Server]"), _GetPlainResString(_T("SV_SERVERLIST")));
-	Out.Replace(_T("[Shared]"), _GetPlainResString(_T("SHAREDFILES")));
+	Out.Replace(_T("[Server]"), _GetPlainResString(_T("FSTAT_SERVERS")));
+	Out.Replace(_T("[Shared]"), _GetPlainResString(_T("SF_FILES")));
 	Out.Replace(_T("[Graphs]"), _GetPlainResString(_T("GRAPHS")));
 	Out.Replace(_T("[Log]"), _GetPlainResString(_T("SV_LOG")));
 	Out.Replace(_T("[ServerInfo]"), _GetPlainResString(_T("SV_SERVERINFO")));
 	Out.Replace(_T("[DebugLog]"), _GetPlainResString(_T("SV_DEBUGLOG")));
 	Out.Replace(_T("[MyInfo]"), _GetPlainResString(_T("MYINFO")));
 	Out.Replace(_T("[Stats]"), _GetPlainResString(_T("SF_STATISTICS")));
-	Out.Replace(_T("[Options]"), _GetPlainResString(_T("EM_PREFS")));
+	Out.Replace(_T("[Options]"), _GetPlainResString(_T("OPTIONS")));
 	Out.Replace(_T("[Ed2klink]"), _GetPlainResString(_T("SW_LINK")));
 	Out.Replace(_T("[Close]"), _GetPlainResString(_T("WEB_SHUTDOWN")));
 	Out.Replace(_T("[Reboot]"), _GetPlainResString(_T("WEB_REBOOT")));
 	Out.Replace(_T("[Shutdown]"), _GetPlainResString(_T("WEB_SHUTDOWNSYSTEM")));
 	Out.Replace(_T("[WebOptions]"), _GetPlainResString(_T("WEB_ADMINMENU")));
 	Out.Replace(_T("[Logout]"), _GetPlainResString(_T("WEB_LOGOUT")));
-	Out.Replace(_T("[Search]"), _GetPlainResString(_T("EM_SEARCH")));
-	Out.Replace(_T("[Download]"), _GetPlainResString(_T("SW_DOWNLOAD")));
-	Out.Replace(_T("[Start]"), _GetPlainResString(_T("START_VERB")));
+	Out.Replace(_T("[Search]"), _GetPlainResString(_T("SW_SEARCHBOX")));
+	Out.Replace(_T("[Download]"), _GetPlainResString(_T("DOWNLOAD")));
+	Out.Replace(_T("[Start]"), _GetPlainResString(_T("START_NOUN")));
 	Out.Replace(_T("[Version]"), _GetPlainResString(_T("VERSION")));
 	Out.Replace(_T("[VersionCheck]"), thePrefs.GetVersionCheckURL());
 	Out.Replace(_T("[Kad]"), _GetPlainResString(_T("KADEMLIA")));
@@ -1539,24 +1539,24 @@ CString CWebServer::_GetHeader(const ThreadData &Data, long lSession)
 	Out.Replace(_T("[FileIsErroneous]"), _GetPlainResString(_T("ERRORLIKE")));
 	Out.Replace(_T("[FileIsCompleting]"), _GetPlainResString(_T("COMPLETING")));
 	Out.Replace(_T("[FileDetails]"), _GetPlainResString(_T("FD_TITLE")));
-	Out.Replace(_T("[FileComments]"), _GetPlainResString(_T("CMT_SHOWALL")));
+	Out.Replace(_T("[FileComments]"), _GetPlainResString(_T("COMMENT")));
 	Out.Replace(_T("[ClearCompleted]"), _GetPlainResString(_T("DL_CLEAR")));
 	Out.Replace(_T("[RunFile]"), _GetPlainResString(_T("DOWNLOAD")));
 	Out.Replace(_T("[Resume]"), _GetPlainResString(_T("DL_RESUME")));
 	Out.Replace(_T("[Stop]"), _GetPlainResString(_T("DL_STOP")));
 	Out.Replace(_T("[Pause]"), _GetPlainResString(_T("DL_PAUSE")));
 	Out.Replace(_T("[ConfirmCancel]"), _GetPlainResString(_T("Q_CANCELDL2")));
-	Out.Replace(_T("[Cancel]"), _GetPlainResString(_T("MAIN_BTN_CANCEL")));
+	Out.Replace(_T("[Cancel]"), _GetPlainResString(_T("CANCEL")));
 	Out.Replace(_T("[GetFLC]"), _GetPlainResString(_T("DOWNLOADMOVIECHUNKS")));
 	Out.Replace(_T("[Rename]"), _GetPlainResString(_T("RENAME")));
 	Out.Replace(_T("[Connect]"), _GetPlainResString(_T("IRC_CONNECT")));
 	Out.Replace(_T("[ConfirmRemove]"), _GetPlainResString(_T("WEB_CONFIRM_REMOVE_SERVER")));
-	Out.Replace(_T("[ConfirmClose]"), _GetPlainResString(_T("WEB_MAIN_CLOSE")));
+	Out.Replace(_T("[ConfirmClose]"), _GetPlainResString(_T("MAIN_EXIT")));
 	Out.Replace(_T("[ConfirmReboot]"), _GetPlainResString(_T("WEB_MAIN_REBOOT")));
 	Out.Replace(_T("[ConfirmShutdown]"), _GetPlainResString(_T("WEB_MAIN_SHUTDOWN")));
-	Out.Replace(_T("[RemoveServer]"), _GetPlainResString(_T("REMOVETHIS")));
+	Out.Replace(_T("[RemoveServer]"), _GetPlainResString(_T("REMOVE")));
 	Out.Replace(_T("[StaticServer]"), _GetPlainResString(_T("STATICSERVER")));
-	Out.Replace(_T("[Friend]"), _GetPlainResString(_T("PW_FRIENDS")));
+	Out.Replace(_T("[Friend]"), _GetPlainResString(_T("CW_FRIENDS")));
 
 	Out.Replace(_T("[PriorityVeryLow]"), _GetPlainResString(_T("PRIOVERYLOW")));
 	Out.Replace(_T("[PriorityLow]"), _GetPlainResString(_T("PRIOLOW")));
@@ -1685,9 +1685,9 @@ CString CWebServer::_GetHeader(const ThreadData &Data, long lSession)
 
 	Out.Replace(_T("[Users]"), _GetPlainResString(_T("UUSERS")));
 	Out.Replace(_T("[Files]"), _GetPlainResString(_T("FILES")));
-	Out.Replace(_T("[Con]"), _GetPlainResString(_T("ST_ACTIVEC")));
+	Out.Replace(_T("[Con]"), _GetPlainResString(_T("SP_ACTCON")));
 	Out.Replace(_T("[Up]"), _GetPlainResString(_T("PW_CON_UPLBL")));
-	Out.Replace(_T("[Down]"), _GetPlainResString(_T("PW_CON_DOWNLBL")));
+	Out.Replace(_T("[Down]"), _GetPlainResString(_T("DOWNLOAD")));
 
 	if (thePrefs.GetCatCount() > 1)
 		_InsertCatBox(Out, 0, pThis->m_Templates.sCatArrow, false, false, sSession, _T(""), true);
@@ -2416,7 +2416,7 @@ CString CWebServer::_GetServerList(const ThreadData &Data)
 		Out.Replace(_T("[SortVersion]"), strTmp);
 	else
 		Out.Replace(_T("[SortVersion]"), _T(""));
-	Out.Replace(_T("[ServerList]"), _GetPlainResString(_T("SV_SERVERLIST")));
+	Out.Replace(_T("[ServerList]"), _GetPlainResString(_T("FSTAT_SERVERS")));
 
 	CString sSortIcon = _WebSelectString(pThis->m_Params.bServerSortReverse, pThis->m_Templates.sUpArrow, pThis->m_Templates.sDownArrow);
 		LPCTSTR pcSortIcon = sSortIcon;
@@ -3456,7 +3456,7 @@ void CWebServer::_MakeTransferList(CString &Out, CWebServer *pThis, const Thread
 	mCounter.Format(_T("%i"), nCountQueueSecure + nCountQueueBannedSecure + nCountQueueFriendSecure);
 	Out.Replace(_T("[CounterAllSecure]"), mCounter);
 	Out.Replace(_T("[ShowUploadQueue]"), _GetPlainResString(_T("VIEWQUEUE")));
-	Out.Replace(_T("[ShowUploadQueueList]"), _GetPlainResString(_T("WEB_SHOW_UPLOAD_QUEUE")));
+	Out.Replace(_T("[ShowUploadQueueList]"), _GetPlainResString(_T("VIEWQUEUE")));
 
 	Out.Replace(_T("[ShowUploadQueueListBanned]"), _GetPlainResString(_T("WEB_SHOW_UPLOAD_QUEUE_BANNED")));
 	Out.Replace(_T("[ShowUploadQueueListFriend]"), _GetPlainResString(_T("WEB_SHOW_UPLOAD_QUEUE_FRIEND")));
@@ -3779,7 +3779,7 @@ CString CWebServer::_GetSharedFilesList(const ThreadData &Data)
 	Out.Replace(_T("[Actions]"), _GetPlainResString(_T("WEB_ACTIONS")));
 	Out.Replace(_T("[Reload]"), _GetPlainResString(_T("SF_RELOAD")));
 	Out.Replace(_T("[Session]"), sSession);
-	Out.Replace(_T("[SharedList]"), _GetPlainResString(_T("SHAREDFILES")));
+	Out.Replace(_T("[SharedList]"), _GetPlainResString(_T("SF_FILES")));
 
 	CString OutE(pThis->m_Templates.sSharedLine);
 
@@ -3934,7 +3934,7 @@ CString CWebServer::_GetGraphs(const ThreadData &Data)
 	Out.Replace(_T("[TxtDownload]"), _GetPlainResString(_T("TW_DOWNLOADS")));
 	Out.Replace(_T("[TxtUpload]"), _GetPlainResString(_T("TW_UPLOADS")));
 	Out.Replace(_T("[TxtTime]"), _GetPlainResString(_T("TIME")));
-	Out.Replace(_T("[KByteSec]"), _GetPlainResString(_T("KBYTESPERSEC")));
+	Out.Replace(_T("[KByteSec]"), _GetPlainResString(_T("KBYTESSEC")));
 	Out.Replace(_T("[TxtConnections]"), _GetPlainResString(_T("SP_ACTCON")));
 
 	Out.Replace(_T("[ScaleTime]"), (LPCTSTR)CastSecondsToHM(((time_t)thePrefs.GetTrafficOMeterInterval()) * WEB_GRAPH_WIDTH));
@@ -4159,7 +4159,7 @@ CString CWebServer::_GetKadDlg(const ThreadData &Data)
 		Out.Replace(_T("[BS_IP]"), GetResString(_T("IP")));
 		Out.Replace(_T("[BS_PORT]"), GetResString(_T("PORT")));
 		Out.Replace(_T("[BOOTSTRAP]"), GetResString(_T("BOOTSTRAP")));
-		Out.Replace(_T("[KADSTAT]"), GetResString(_T("STATSSETUPINFO")));
+		Out.Replace(_T("[KADSTAT]"), GetResString(_T("SF_STATISTICS")));
 		Out.Replace(_T("[STATUS]"), GetResString(_T("STATUS")));
 		Out.Replace(_T("[KAD]"), GetResString(_T("KADEMLIA")));
 		Out.Replace(_T("[Session]"), sSession);
@@ -4246,8 +4246,8 @@ CString CWebServer::_GetPreferences(const ThreadData &Data)
 	sRefresh.Format(_T("%u"), thePrefs.GetMaxConperFive());
 	Out.Replace(_T("[MaxConnectionsPer5Val]"), sRefresh);
 
-	Out.Replace(_T("[KBS]"), _GetPlainResString(thePrefs.GetForceSpeedsToKB() ? _T("KBYTESPERSEC") : _T("MBITSSEC")) + _T(':'));
-	Out.Replace(_T("[LimitForm]"), _GetPlainResString(_T("WEB_CONLIMITS")) + _T(':'));
+	Out.Replace(_T("[KBS]"), _GetPlainResString(thePrefs.GetForceSpeedsToKB() ? _T("KBYTESSEC") : _T("MBITSSEC")) + _T(':'));
+	Out.Replace(_T("[LimitForm]"), _GetPlainResString(_T("PW_CONLIMITS")) + _T(':'));
 	Out.Replace(_T("[MaxSources]"), _GetPlainResString(_T("PW_MAXSOURCES")) + _T(':'));
 	Out.Replace(_T("[MaxConnections]"), _GetPlainResString(_T("PW_MAXC")) + _T(':'));
 	Out.Replace(_T("[MaxConnectionsPer5]"), _GetPlainResString(_T("MAXCON5SECLABEL")) + _T(':'));
@@ -4259,11 +4259,11 @@ CString CWebServer::_GetPreferences(const ThreadData &Data)
 	Out.Replace(_T("[SpeedForm]"), _GetPlainResString(_T("SPEED_LIMITS")));
 	Out.Replace(_T("[SpeedCapForm]"), _GetPlainResString(_T("CAPACITY_LIMITS")));
 
-	Out.Replace(_T("[MaxCapDown]"), _GetPlainResString(_T("PW_CON_DOWNLBL")));
+	Out.Replace(_T("[MaxCapDown]"), _GetPlainResString(_T("DOWNLOAD")));
 	Out.Replace(_T("[MaxCapUp]"), _GetPlainResString(_T("PW_CON_UPLBL")));
-	Out.Replace(_T("[MaxDown]"), _GetPlainResString(_T("PW_CON_DOWNLBL")));
+	Out.Replace(_T("[MaxDown]"), _GetPlainResString(_T("DOWNLOAD")));
 	Out.Replace(_T("[MaxUp]"), _GetPlainResString(_T("PW_CON_UPLBL")));
-	Out.Replace(_T("[WebControl]"), _GetPlainResString(_T("WEB_CONTROL")));
+	Out.Replace(_T("[WebControl]"), _GetPlainResString(_T("PW_WS")));
 	Out.Replace(_T("[eMuleAppName]"), _T("eMule"));
 	Out.Replace(_T("[Apply]"), _GetPlainResString(_T("PW_APPLY")));
 
@@ -4308,7 +4308,7 @@ CString CWebServer::_GetLoginScreen(const ThreadData &Data)
 	Out.Replace(_T("[Login]"), _GetPlainResString(_T("WEB_LOGIN")));
 	Out.Replace(_T("[EnterPassword]"), _GetPlainResString(_T("WEB_ENTER_PASSWORD")));
 	Out.Replace(_T("[LoginNow]"), _GetPlainResString(_T("WEB_LOGIN_NOW")));
-	Out.Replace(_T("[WebControl]"), _GetPlainResString(_T("WEB_CONTROL")));
+	Out.Replace(_T("[WebControl]"), _GetPlainResString(_T("PW_WS")));
 
 	CString sFailed;
 	if (pThis->m_nIntruderDetect >= 1)
@@ -4439,7 +4439,7 @@ bool CWebServer::_IsSessionAdmin(const ThreadData &Data, const CString &strSsess
 CString CWebServer::_GetPermissionDenied()
 {
 	CString s;
-	s.Format(_T("javascript:alert(\'%s\')"), (LPCTSTR)_GetPlainResString(_T("ACCESSDENIED")));
+	s.Format(_T("javascript:alert(\'%s\')"), (LPCTSTR)_GetPlainResString(_T("SFS_ACCESS_DENIED")));
 	return s;
 }
 
@@ -4596,7 +4596,7 @@ CString CWebServer::_GetSearch(const ThreadData &Data)
 
 	} else {
 		bool b = (_ParseURL(Data.sURL, _T("tosearch")).IsEmpty() || bSessionAdmin);
-		Out.Replace(_T("[Message]"), _GetPlainResString(b ? _T("SW_REFETCHRES") : _T("ACCESSDENIED")));
+		Out.Replace(_T("[Message]"), _GetPlainResString(b ? _T("SW_REFETCHRES") : _T("SFS_ACCESS_DENIED")));
 	}
 
 	CString sSort(_ParseURL(Data.sURL, _T("sort")));
@@ -4685,17 +4685,17 @@ CString CWebServer::_GetSearch(const ThreadData &Data)
 	Out.Replace(_T("[Name]"), _GetPlainResString(_T("SW_NAME")));
 	Out.Replace(_T("[Type]"), _GetPlainResString(_T("TYPE")));
 	Out.Replace(_T("[Any]"), _GetPlainResString(_T("SEARCH_ANY")));
-	Out.Replace(_T("[Audio]"), _GetPlainResString(_T("SEARCH_AUDIO")));
+	Out.Replace(_T("[Audio]"), _GetPlainResString(_T("AUDIO")));
 	Out.Replace(_T("[Image]"), _GetPlainResString(_T("SEARCH_PICS")));
-	Out.Replace(_T("[Video]"), _GetPlainResString(_T("SEARCH_VIDEO")));
+	Out.Replace(_T("[Video]"), _GetPlainResString(_T("VIDEO")));
 	Out.Replace(_T("[Document]"), _GetPlainResString(_T("SEARCH_DOC")));
 	Out.Replace(_T("[CDImage]"), _GetPlainResString(_T("SEARCH_CDIMG")));
 	Out.Replace(_T("[Program]"), _GetPlainResString(_T("SEARCH_PRG")));
 	Out.Replace(_T("[Archive]"), _GetPlainResString(_T("SEARCH_ARC")));
-	Out.Replace(_T("[eMuleCollection]"), _GetPlainResString(_T("SEARCH_EMULECOLLECTION")));
-	Out.Replace(_T("[Search]"), _GetPlainResString(_T("EM_SEARCH")));
+	Out.Replace(_T("[eMuleCollection]"), _GetPlainResString(_T("META_COLLECTION")));
+	Out.Replace(_T("[Search]"), _GetPlainResString(_T("SW_SEARCHBOX")));
 	Out.Replace(_T("[Size]"), _GetPlainResString(_T("DL_SIZE")));
-	Out.Replace(_T("[Start]"), _GetPlainResString(_T("START_VERB")));
+	Out.Replace(_T("[Start]"), _GetPlainResString(_T("START_NOUN")));
 
 	Out.Replace(_T("[USESSERVER]"), _GetPlainResString(_T("SERVER")));
 	Out.Replace(_T("[USEKADEMLIA]"), _GetPlainResString(_T("KADEMLIA")));
@@ -4845,7 +4845,7 @@ CString CWebServer::_GetSubCatLabel(int cat)
 		_T("ALLOTHERS"), _T("STATUS_NOTCOMPLETED"), _T("DL_TRANSFCOMPL"), _T("WAITING")
 		, _T("DOWNLOADING"), _T("ERRORLIKE"), _T("PAUSED"), _T("SEENCOMPL")
 		, _T("VIDEO"), _T("AUDIO"), _T("SEARCH_ARC"), _T("SEARCH_CDIMG")
-		, _T("SEARCH_DOC"), _T("SEARCH_PICS"), _T("SEARCH_PRG"), _T("SEARCH_EMULECOLLECTION")
+		, _T("SEARCH_DOC"), _T("SEARCH_PICS"), _T("SEARCH_PRG"), _T("META_COLLECTION")
 	};
 	return _GetPlainResString(uids[-cat - 1]);
 }
@@ -5003,7 +5003,7 @@ CString CWebServer::_GetWebImageNameForFileType(const CString &filename)
 
 CString CWebServer::_GetClientSummary(const CUpDownClient &client, const CString &strUploadFileName)
 {
-	CString buffer(GetResString(_T("CD_UNAME")));
+	CString buffer(GetResStringWithColon(_T("SW_NAME")));
 	// name
 	buffer.AppendFormat(_T(" %s\n"), client.GetUserName());
 	// client version
@@ -5018,7 +5018,7 @@ CString CWebServer::_GetClientSummary(const CUpDownClient &client, const CString
 	buffer.AppendFormat(_T("\n\n%s: %s\n"), (LPCTSTR)GetResString(_T("UPLOADTIME")), (LPCTSTR)CastSecondsToHM(client.GetUpStartTimeDelay() / SEC2MS(1)));
 
 	// transferred data (up, down, global, session)
-	buffer.AppendFormat(_T("%s (%s):\n"), (LPCTSTR)GetResString(_T("FD_TRANS")), (LPCTSTR)GetResString(_T("STATS_SESSION")));
+	buffer.AppendFormat(_T("%s (%s):\n"), (LPCTSTR)GetResStringWithColon(_T("DL_TRANSF")), (LPCTSTR)GetResString(_T("STATS_SESSION")));
 	buffer.AppendFormat(_T(".....%s: %s (%s )\n"), (LPCTSTR)GetResString(_T("PW_CON_UPLBL")), (LPCTSTR)CastItoXBytes(client.GetTransferredUp()), (LPCTSTR)CastItoXBytes(client.GetSessionUp()));
 	buffer.AppendFormat(_T(".....%s: %s (%s )\n"), (LPCTSTR)GetResString(_T("DOWNLOAD")), (LPCTSTR)CastItoXBytes(client.GetTransferredDown()), (LPCTSTR)CastItoXBytes(client.GetSessionDown()));
 

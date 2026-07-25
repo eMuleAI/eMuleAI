@@ -269,7 +269,7 @@ BOOL CMuleSystrayDlg::OnInitDialog()
 		ScreenToClient(r);
 		m_ctrlConnect.Create(NULL, NULL, WS_CHILD | WS_VISIBLE, r, this, IDC_CONNECT);
 		m_ctrlConnect.m_nBtnID = IDC_CONNECT;
-		m_ctrlConnect.m_strText = GetResNoAmp(_T("MAIN_BTN_CONNECT"));
+		m_ctrlConnect.m_strText = GetResString(_T("IRC_CONNECT"));
 
 		m_ctrlConnect.m_bUseIcon = true;
 		m_ctrlConnect.m_sIcon.cx = 16;
@@ -286,7 +286,7 @@ BOOL CMuleSystrayDlg::OnInitDialog()
 		ScreenToClient(r);
 		m_ctrlDisconnect.Create(NULL, NULL, WS_CHILD | WS_VISIBLE, r, this, IDC_DISCONNECT);
 		m_ctrlDisconnect.m_nBtnID = IDC_DISCONNECT;
-		m_ctrlDisconnect.m_strText = GetResNoAmp(_T("MAIN_BTN_DISCONNECT"));
+		m_ctrlDisconnect.m_strText = GetResString(_T("IRC_DISCONNECT"));
 
 		m_ctrlDisconnect.m_bUseIcon = true;
 		m_ctrlDisconnect.m_sIcon.cx = 16;
@@ -303,7 +303,7 @@ BOOL CMuleSystrayDlg::OnInitDialog()
 		ScreenToClient(r);
 		m_ctrlPreferences.Create(NULL, NULL, WS_CHILD | WS_VISIBLE, r, this, IDC_PREFERENCES);
 		m_ctrlPreferences.m_nBtnID = IDC_PREFERENCES;
-		m_ctrlPreferences.m_strText = GetResNoAmp(_T("EM_PREFS"));
+		m_ctrlPreferences.m_strText = GetResString(_T("OPTIONS"));
 
 		m_ctrlPreferences.m_bUseIcon = true;
 		m_ctrlPreferences.m_sIcon.cx = 16;
@@ -331,9 +331,9 @@ BOOL CMuleSystrayDlg::OnInitDialog()
 			m_ctrlExit.m_cfFont.CreateFontIndirect(&lfStaticFont);
 	}
 
-	SetDlgItemText(IDC_DOWNLBL, GetResString(_T("PW_CON_DOWNLBL")));
+	SetDlgItemText(IDC_DOWNLBL, GetResString(_T("DOWNLOAD")));
 	SetDlgItemText(IDC_UPLBL, GetResString(_T("PW_CON_UPLBL")));
-	const CString strSpeedUnit(GetResString(thePrefs.GetForceSpeedsToKB() ? _T("KBYTESPERSEC") : _T("MBITSSEC")));
+	const CString strSpeedUnit(GetResString(thePrefs.GetForceSpeedsToKB() ? _T("KBYTESSEC") : _T("MBITSSEC")));
 	SetDlgItemText(IDC_DOWNKB, strSpeedUnit);
 	SetDlgItemText(IDC_UPKB, strSpeedUnit);
 

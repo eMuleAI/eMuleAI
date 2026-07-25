@@ -21,7 +21,9 @@
 #include "QArray.h"
 #include "Mapkey.h"
 #include "SearchParams.h"
+#include <map>
 #include <set>
+#include <unordered_map>
 #include <vector>
 
 enum ESearchType : uint8;
@@ -69,6 +71,7 @@ typedef struct
 	CMap<CSKey, const CSKey&, CSearchFile*, CSearchFile*> m_mapParentsByHash;
 	CMapStringToPtr m_mapChildrenByParentAndName;
 	CMapPtrToPtr m_mapChildrenByParent;
+	LONG m_lDestructiveSequence;
 } SearchListsStruct;
 
 typedef struct
@@ -125,6 +128,13 @@ public:
 	LONG	GetSearchModelSequence() const;
 	void	ProcessChunkedSearchIngestJobs();
 	void	ProcessNetworkParseCpuWorkerJobs();
+	bool	ProcessDownloadValidatorWorkerJobs();
+	void	RequestDownloadValidatorRecheckForAllSearches();
+	void	RequestDownloadValidatorRecheckIfDirty(uint32 nSearchID);
+	void	SetDownloadValidatorPrioritySearch(uint32 nSearchID);
+	bool	GetDownloadValidatorSearchProgress(uint32 nSearchID, UINT& uProcessed, UINT& uTotal);
+	bool	QueuePossibleKnownQuery(UINT_PTR uParentToken, uint32 nSearchID, const uchar* pHash, const CString& strFileName, const std::vector<CString>& astrFileNames, EMFileSize uFileSize, uint32 uMediaLengthSec, uint32 uAliasFingerprint, bool bLoadRows, uint32 uRevision, uint32 uCandidateDataRevision, bool bReplaceRows, const SDownloadValidatorFuzzyQueryData* pQueryData = NULL);
+	bool	BuildPossibleKnownAliasNames(const CSearchFile* pParent, std::vector<CString>& astrFileNames, uint32& uAliasFingerprint);
 	void	ClearChunkedSearchIngestJobs();
 	void	ShutdownSearchProcessingForLifecycle();
 	void	UpdateSearchIngestOutputWndFromUiThread(uint32 nSearchID, const CString &strClientHash, bool bUseKadReloadThrottle);
@@ -142,6 +152,9 @@ public:
 		SSearchIngestRecord();
 
 		std::vector<BYTE> m_data;
+		SSearchResultId m_resultId;
+		EMFileSize m_uFileSize;
+		uint32 m_uMediaLengthSec;
 		uint32 m_nSearchID;
 		uint32 m_nServerIP;
 		uint16 m_nServerPort;
@@ -153,6 +166,9 @@ public:
 		bool m_bMultipleAICHFound;
 		bool m_bAutomaticBlacklistEvaluated;
 		bool m_bAutomaticBlacklisted;
+		bool m_bDownloadValidatorEvaluated;
+		bool m_bDownloadValidatorSimilar;
+		uint32 m_uDownloadValidatorRevision;
 	};
 
 	struct SStartupStoredSearchTab
@@ -197,6 +213,7 @@ public:
 	void	PublishStartupLoadWorkerProgress(UINT uLoadedSearches, UINT uTotalSearches, UINT uLoadedFiles);
 	bool	HasPendingSearchProcessing(uint32 nSearchID);
 	bool	HasPendingSearchProcessing() const;
+	bool	HasPendingPossibleKnownPreparation(uint32 nSearchID);
 
 	enum EActionType
 	{
@@ -292,6 +309,7 @@ private:
 		uint32 m_dwFromUDPServerIP;
 		bool m_bDoSpamRating;
 		bool m_bUseKadReloadThrottle;
+		bool m_bStartupStoredSearch;
 		bool m_bNotifyUiOnCompletion;
 		bool m_bNotifyLocalEd2kSearchEnd;
 		bool m_bMoreResultsAvailable;
@@ -346,6 +364,7 @@ private:
 		uint32 m_dwFromUDPServerIP;
 		bool m_bDoSpamRating;
 		bool m_bUseKadReloadThrottle;
+		bool m_bStartupStoredSearch;
 		bool m_bNotifyUiOnCompletion;
 		UINT m_uProcessed;
 		UINT m_uFailed;
@@ -362,6 +381,7 @@ private:
 
 		enum EPhase
 		{
+			PhaseCapture,
 			PhaseReset,
 			PhaseParents,
 			PhaseChildren
@@ -369,15 +389,43 @@ private:
 
 		std::vector<SSearchResultId> m_ids;
 		std::vector<CString> m_astrFileNames;
+		std::vector<EMFileSize> m_auFileSizes;
+		std::vector<uint32> m_auMediaLengthSecs;
 		SFilenameAutoBlacklistSnapshot* m_pAutomaticBlacklistSnapshot;
 		std::vector<BYTE> m_abAutomaticBlacklistEvaluated;
 		std::vector<BYTE> m_abAutomaticBlacklisted;
+		std::vector<BYTE> m_abDownloadValidatorEvaluated;
+		std::vector<BYTE> m_abDownloadValidatorSimilar;
+		std::vector<uint32> m_auDownloadValidatorRevisions;
+		std::vector<SDownloadValidatorFuzzyQueryData> m_aDownloadValidatorQueryData;
+		std::vector<size_t> m_aiDownloadValidatorSourceIndices;
+		std::vector<size_t> m_aiDownloadValidatorRootIndices;
+		std::map<CString, size_t> m_downloadValidatorEvaluationSources;
+		std::vector<INT_PTR> m_aiPossibleKnownCacheIndices;
+		std::vector<INT_PTR> m_aiPossibleKnownAliasCacheIndices;
+		std::vector<size_t> m_aiPossibleKnownSourceIndices;
+		std::vector<uint32> m_auPossibleKnownAliasFingerprints;
+		std::vector<SSearchFilePossibleKnownCache> m_aPossibleKnownCaches;
+		std::vector<std::unordered_multimap<uint64, size_t> > m_aPossibleKnownRowIdentityIndices;
 		INT_PTR m_iNextItem;
 		INT_PTR m_iNextPrepareItem;
+		INT_PTR m_iNextPossibleKnownItem;
+		size_t m_uPossibleKnownAliasCount;
+		size_t m_uProcessedPossibleKnownAliases;
+		POSITION m_posCapture;
+		INT_PTR m_iCaptureIndex;
+		LONG m_lCaptureDestructiveSequence;
 		uint32 m_nSearchID;
 		bool m_bExpectHigher;
 		bool m_bExpectLower;
 		bool m_bRecalculateAll;
+		bool m_bPrepareAutomaticBlacklist;
+		bool m_bPrepareDownloadValidator;
+		bool m_bPreparePossibleKnown;
+		bool m_bDownloadValidatorGroupsAggregated;
+		bool m_bShowDownloadValidatorOverlay;
+		uint32 m_uPossibleKnownRevision;
+		uint32 m_uPossibleKnownCandidateDataRevision;
 		EPhase m_ePhase;
 		UINT m_uProcessed;
 		DWORD m_dwStartedTick;
@@ -418,6 +466,7 @@ private:
 		uint32 m_dwFromUDPServerIP;
 		bool m_bDoSpamRating;
 		bool m_bUseKadReloadThrottle;
+		bool m_bStartupStoredSearch;
 		bool m_bNotifyUiOnCompletion;
 		bool m_bNotifyLocalEd2kSearchEnd;
 		bool m_bMoreResultsAvailable;
@@ -425,29 +474,40 @@ private:
 		LONG m_lSearchGeneration;
 	};
 
+	struct SPossibleKnownQueryJob;
+	struct SPossibleKnownQueryResult;
+	void ProcessPossibleKnownQueryJobsOnDownloadValidatorThread();
+	void DrainPossibleKnownQueryResults();
+	void ClearPossibleKnownQueryJobs(uint32 nSearchID = 0);
 	static bool BuildSearchIngestRecord(const CSearchFile *pFile, SSearchIngestRecord &record, bool bPrecomputeAutoBlacklist = false);
 	static CSearchFile* CreateSearchFileFromIngestRecord(const SSearchIngestRecord &record);
 	bool QueueSearchFileForIngest(CSearchFile *pFile, const CString &strClientHash, bool bClientResponse, uint32 dwFromUDPServerIP, bool bDoSpamRating, bool bUseKadReloadThrottle);
 	void QueueChunkedSearchIngestJob(std::vector<SSearchIngestRecord> &records, uint32 nSearchID, const CString &strClientHash, bool bClientResponse, uint32 dwFromUDPServerIP, bool bDoSpamRating, bool bUseKadReloadThrottle);
 	void QueueChunkedSearchAnswerParseJob(SChunkedSearchAnswerParseJob *pJob);
-	void QueueChunkedSpamRatingJob(uint32 nSearchID, bool bExpectHigher, bool bExpectLower, bool bRecalculateAll);
+	bool QueueChunkedSpamRatingJob(uint32 nSearchID, bool bExpectHigher, bool bExpectLower, bool bRecalculateAll, bool bShowDownloadValidatorOverlay = false);
 	void CancelChunkedSpamRatingJobs(uint32 nSearchID);
 	void ProcessChunkedSpamRatingJobs(const DWORD dwSliceStartTick, UINT& uProcessedInSlice);
-	void ProcessChunkedSpamRatingPrepareJobsOnParserThread();
+	void ProcessChunkedSpamRatingPrepareJobsOnDownloadValidatorThread();
+	void RequestDownloadValidatorRecheck(uint32 nSearchID, DWORD dwDelayMs = 500);
+	void RequestStartupDownloadValidatorCheck(uint32 nSearchID);
+	bool QueueIncrementalDownloadValidatorJob(const std::vector<SSearchIngestRecord>& records, uint32 nSearchID, LONG lGeneration, LONG lSearchGeneration, bool bShowOverlay);
+	void ProcessPendingDownloadValidatorRechecks();
 	void SetSpamRatingPrepareJobActive(uint32 nSearchID, bool bActive);
 	bool HasActiveSpamRatingPrepareJob(uint32 nSearchID);
 	void QueuePreparedChunkedSpamRatingJob(SChunkedSpamRatingJob *pJob);
 	void DrainPreparedChunkedSpamRatingJobs();
 	bool IsChunkedSpamRatingJobStale(const SChunkedSpamRatingJob *pJob);
-	void ApplyPreparedAutomaticBlacklistResult(const SChunkedSpamRatingJob &job, size_t uIndex, CSearchFile *pFile);
-	bool QueueStoredSearchIngestPrepareJob(std::vector<SSearchIngestRecord> &records, uint32 nSearchID, const CString &strClientHash, bool bClientResponse, uint32 dwFromUDPServerIP, bool bDoSpamRating, bool bUseKadReloadThrottle);
+	void ApplyPreparedSearchFilterResults(const SChunkedSpamRatingJob &job, size_t uIndex, CSearchFile *pFile);
+	bool AggregatePreparedDownloadValidatorResults(SChunkedSpamRatingJob &job);
+	bool QueueStoredSearchIngestPrepareJob(std::vector<SSearchIngestRecord> &records, uint32 nSearchID, const CString &strClientHash,
+		bool bClientResponse, uint32 dwFromUDPServerIP, bool bDoSpamRating, bool bUseKadReloadThrottle, bool bStartupStoredSearch);
 	void DrainParsedSearchIngestBatches();
 	void EnforceSearchIngestQueueLimit(uint32 nSearchID);
 	void EnforceSearchAnswerParseQueueLimitLocked(uint32 nSearchID);
 	void EnforceStoredSearchPrepareQueueLimitLocked(uint32 nSearchID);
 	void EnforceParsedSearchIngestBatchLimitLocked(uint32 nSearchID);
 	void EnforceSpamRatingPrepareQueueLimitLocked(uint32 nSearchID);
-	void EnforcePreparedSpamRatingQueueLimitLocked(uint32 nSearchID);
+	void EnforcePreparedSpamRatingQueueLimitLocked(uint32 nSearchID, std::vector<uint32>* pDroppedSearchIDs = NULL);
 	void EnforceChunkedSpamRatingQueueLimit(uint32 nSearchID);
 	void ProcessSearchAnswerParseJobsOnParserThread();
 	void ProcessStoredSearchIngestPrepareJobsOnParserThread();
@@ -466,6 +526,7 @@ private:
 	bool QueueStartupStoredSearchesLoadWorker();
 	bool StartStartupStoredSearchApplyTab(SStartupStoredSearchesLoadResult &result, SStartupStoredSearchTab &tab);
 	bool QueueStartupStoredSearchTabIngest(SStartupStoredSearchTab &tab);
+	bool HasPendingStartupStoredSearchIngest(uint32 nSearchID);
 	void CompleteStartupStoredSearchApplyTab(SStartupStoredSearchTab &tab);
 	bool StartSearchAnswerParseThread();
 	void StopSearchAnswerParseThread();
@@ -479,10 +540,20 @@ private:
 	CTypedPtrList<CPtrList, SChunkedSpamRatingJob*> m_chunkedSpamRatingPrepareJobs;
 	CTypedPtrList<CPtrList, SChunkedSpamRatingJob*> m_preparedSpamRatingJobs;
 	CMap<uint32, uint32, UINT, UINT> m_activeSpamRatingPrepareCounts;
+	CMap<uint32, uint32, UINT, UINT> m_downloadValidatorProgressProcessed;
+	CMap<uint32, uint32, UINT, UINT> m_downloadValidatorProgressTotal;
+	CMap<uint32, uint32, BYTE, BYTE> m_downloadValidatorOverlayProgress;
+	CMap<uint32, uint32, DWORD, DWORD> m_downloadValidatorRecheckDue;
+	CMap<uint32, uint32, BYTE, BYTE> m_downloadValidatorDirtySearches;
+	CMap<uint32, uint32, BYTE, BYTE> m_downloadValidatorStartupOverlaySearches;
+	bool m_bDownloadValidatorRecheckAllPending;
 	CTypedPtrList<CPtrList, SParsedSearchIngestBatch*> m_parsedSearchIngestBatches;
+	CTypedPtrList<CPtrList, SPossibleKnownQueryJob*> m_possibleKnownQueryJobs;
+	CTypedPtrList<CPtrList, SPossibleKnownQueryResult*> m_possibleKnownQueryResults;
 	mutable CCriticalSection m_searchModelLock;
 	CCriticalSection m_searchAnswerParseQueueLock;
 	CCriticalSection m_parsedSearchIngestBatchLock;
+	CCriticalSection m_possibleKnownQueryResultLock;
 	CMap<uint32, uint32, bool, bool> m_cancelledSearchAnswerParseIds;
 	CMap<uint32, uint32, LONG, LONG> m_searchAnswerParseGenerations;
 	CWinThread *m_pSearchAnswerParseThread;
@@ -495,6 +566,7 @@ private:
 	uint64 m_uStoredSearchStartupLoadCancellationToken;
 	mutable CCriticalSection m_storedSearchStartupProgressLock;
 	LONG m_lSearchModelSequence;
+	volatile LONG m_lDownloadValidatorPrioritySearchID;
 	bool m_bChunkedSearchIngestPending;
 	DWORD m_dwChunkedSearchIngestLastProgressTick;
 

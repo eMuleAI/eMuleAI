@@ -50,16 +50,12 @@ class CtrlItem_Struct : public CObject
 	DECLARE_DYNAMIC(CtrlItem_Struct)
 
 public:
-	~CtrlItem_Struct()							{ status.DeleteObject(); }
-
 	ItemType		type;
 	CPartFile		*owner;
 	void			*value; // could be either CPartFile or CUpDownClient
 	CtrlItem_Struct	*parent;
 	CString			strOwnerHash;
-	DWORD			dwUpdated;
 	bool			m_bDeletedGhost;
-	CBitmap			status;
 };
 
 
@@ -232,9 +228,9 @@ protected:
 	void BuildSortedSourceItemsForFile(CPartFile *pOwner, std::vector<CtrlItem_Struct*> &sourceItems);
 	void InsertSortedVisibleSourcesForFile(CPartFile *pOwner, int iParentIndex);
 	void DrawFileItem(CDC *dc, int iItem, int nColumn, LPCRECT lpRect, UINT uDrawTextAlignment, CtrlItem_Struct *pCtrlItem);
-	void DrawSourceItem(CDC *dc, int iItem, int nColumn, LPCRECT lpRect, UINT uDrawTextAlignment, CtrlItem_Struct *pCtrlItem);
+	void DrawSourceItem(CDC *dc, int nColumn, LPCRECT lpRect, UINT uDrawTextAlignment, CtrlItem_Struct *pCtrlItem, const CUpDownClient *pClient);
 	CString GetFileItemDisplayText(const CPartFile *lpPartFile, int iSubItem) const;
-	CString GetSourceItemDisplayText(const CtrlItem_Struct *pCtrlItem, int iSubItem) const;
+	CString GetSourceItemDisplayText(const CtrlItem_Struct *pCtrlItem, const CUpDownClient *pClient, int iSubItem) const;
 	ItemType GetListedItemType(int iItem) const;
 	bool TryGetListedDownloadItemId(int iItem, SDownloadItemId& id) const;
 	CPartFile* ResolveListedDownloadFile(int iItem) const;
@@ -373,8 +369,8 @@ protected:
 	virtual BOOL OnCommand(WPARAM wParam, LPARAM);
 	virtual void DrawItem(LPDRAWITEMSTRUCT lpDrawItemStruct);
 	
-	// Live row updates must keep the active sort order without forcing a full reload.
-	virtual bool ShouldMaintainSortOrderOnUpdate() const override { return IsLiveUpdateSortOrderAffected(); }
+	// Download model updates commit sorting synchronously before deferred redraws.
+	virtual bool ShouldMaintainSortOrderOnUpdate() const override { return false; }
 	virtual void MaintainSortOrderAfterUpdate() override;
 	virtual void RefreshThemeColors() override;
 

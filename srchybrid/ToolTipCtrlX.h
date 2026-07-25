@@ -33,6 +33,7 @@ public:
 	void SetCol1DrawTextFlags(DWORD dwFlags);
 	void SetCol2DrawTextFlags(DWORD dwFlags);
 	void SetFileIconToolTip(bool bEnable)		{ m_bShowFileIcon = bEnable; }
+	void SetAutoTabHeaderIcon(bool bEnable)	{ m_bAutoTabHeaderIcon = bEnable; }
 	void SetHeaderIcon(CImageList *pImageList, int iImage);
 	void ClearHeaderIcon();
 	void SetDeferVisibleUpdates(bool bEnable)	{ m_bDeferVisibleUpdates = bEnable; }
@@ -55,6 +56,7 @@ protected:
 	bool m_bHasDeferredTextUpdate;
 	bool m_bDeferredTextUsesCallback;
 	bool m_bShowFileIcon;
+	bool m_bAutoTabHeaderIcon;
 	bool m_bOwnsWindow;
 	bool m_bProcessingDeferredMessage;
 	UINT m_uDeferredHideMessage;

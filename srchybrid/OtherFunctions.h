@@ -307,6 +307,17 @@ CString GetResString(LPCTSTR key);
 void ClearTranslationKeyIndex();
 int LocMessageBox(LPCTSTR key, UINT nType = MB_OK, UINT nIDHelp = 0);
 CString GetResNoAmp(LPCTSTR key);
+CString GetResStringWithAccel(LPCTSTR key, TCHAR cAccel = 0);
+CString GetResStringWithEllipsis(LPCTSTR key);
+CString GetResStringWithColon(LPCTSTR key);
+CString GetResStringWithExclamation(LPCTSTR key);
+CString GetResStringWithParens(LPCTSTR key);
+CString AddColon(const CString& strText);
+CString AddExclamation(const CString& strText);
+CString AddParens(const CString& strText);
+CString GetResStringWithAccelAndEllipsis(LPCTSTR key, TCHAR cAccel = 0);
+CString AddEllipsis(const CString& strText);
+CString AddAcceleratorKey(const CString& strText, TCHAR cAccel = 0);
 // Check if LPCTSTR string is null or empty
 inline bool IsEmpty(LPCTSTR s) {
 	return (s == NULL || *s == _T('\0'));

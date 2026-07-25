@@ -60,6 +60,7 @@ BOOL CPPgProxy::OnInitDialog()
 	InitWindowStyles(this);
 	static_cast<CEdit*>(GetDlgItem(IDC_PROXYPORT))->SetLimitText(5);
 
+	proxy = thePrefs.GetProxySettings();
 	FillComboBox();
 	LoadSettings();
 	Localize();
@@ -77,6 +78,19 @@ void CPPgProxy::FillComboBox() {
 	m_ctlProxyType.AddItem(GetResString(_T("PROXY_HTTP10")), 4);
 	m_ctlProxyType.AddItem(GetResString(_T("PROXY_HTTP11")), 5);
 	m_ctlProxyType.SetCurSel(0);
+}
+
+void CPPgProxy::ResetToDefaults()
+{
+	proxy.bEnablePassword = false;
+	proxy.bUseProxy = false;
+	proxy.host.Empty();
+	proxy.user.Empty();
+	proxy.password.Empty();
+	proxy.port = 1080;
+	proxy.type = PROXYTYPE_NOPROXY;
+	LoadSettings();
+	SetModified(TRUE);
 }
 
 BOOL CPPgProxy::OnApply()
@@ -179,10 +193,10 @@ void CPPgProxy::Localize()
 		SetDlgItemText(IDC_PROXYNAME_LBL, GetResString(_T("PROXY_HOST")));
 		SetDlgItemText(IDC_PROXYPORT_LBL, GetResString(_T("PROXY_PORT")));
 		SetDlgItemText(IDC_ENABLEAUTH, GetResString(_T("PROXY_AUTH")));
-		SetDlgItemText(IDC_USERNAME_LBL, GetResString(_T("CD_UNAME")));
+		SetDlgItemText(IDC_USERNAME_LBL, GetResStringWithColon(_T("SW_NAME")));
 		SetDlgItemText(IDC_PASSWORD_LBL, GetResString(_T("WS_PASS")) + _T(':'));
 		SetDlgItemText(IDC_AUTH_LBL, GetResString(_T("AUTH")));
-		SetDlgItemText(IDC_AUTH_LBL2, GetResString(_T("PW_GENERAL")));
+		SetDlgItemText(IDC_AUTH_LBL2, GetResString(_T("CD_GENERAL")));
 	}
 }
 

@@ -17,6 +17,8 @@ public:
 	UINT GetLastMovementDestionation() const { return m_nDstTab; }
 	BOOL ReorderTab(unsigned int nSrcTab, unsigned int nDstTab);
 	void SetTabTextColor(int index, DWORD color);
+	BOOL SetVisualScalePercent(int nPercent);
+	bool m_bAllowTabReordering;
 	bool m_bDragging;     // Specifies that whether drag 'n drop is in progress.
 
 	int GetTabUnderContextMenu() const;
@@ -38,6 +40,7 @@ protected:
 
 	void InternalInit();
 	void SetAllIcons();
+	int ScaleVisualMetric(int iValue) const;
 	void GetCloseButtonRect(int iItem, const CRect &rcItem, CRect &rcCloseButton, bool bItemSelected, bool bVistaThemeActive);
 	int GetTabUnderPoint(const CPoint &point) const;
 	bool SetDefaultContextMenuPos();
@@ -49,6 +52,7 @@ protected:
 	UINT m_nSrcTab;       // Specifies the source tab that is going to be moved.
 	UINT m_nDstTab;       // Specifies the destination tab (drop position).
 	bool m_bHotTracking;  // Specifies the state of whether the tab control has hot tracking enabled.
+	int m_nVisualScalePercent;
 	CRect m_InsertPosRect;
 	CPoint m_lclickPoint;
 

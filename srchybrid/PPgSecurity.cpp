@@ -41,7 +41,7 @@ static char THIS_FILE[] = __FILE__;
 
 bool GetMimeType(LPCTSTR pszFilePath, CString &rstrMimeType);
 
-#define	IPFILTERUPDATEURL_STRINGS_PROFILE	_T("AC_IPFilterUpdateURLs.dat")
+#define	IPFILTERUPDATEURL_STRINGS_PROFILE	AC_IPFILTER_UPDATE_URLS_FILENAME
 
 static bool ApplyDownloadedIPFilterFile(const CString &url, const CString &strTempFilePath, bool bInteractive);
 
@@ -582,6 +582,27 @@ void CPPgSecurity::LoadSettings()
 	CheckRadioButton(IDC_SEESHARE1, IDC_SEESHARE3, IDC_SEESHARE1 + thePrefs.m_iSeeShares);
 }
 
+void CPPgSecurity::ResetToDefaults()
+{
+	SetDlgItemInt(IDC_FILTERLEVEL, 127, FALSE);
+	CheckDlgButton(IDC_FILTER_SERVER_BY_IPFILTER, BST_UNCHECKED);
+	CheckDlgButton(IDC_DONTFILTERPRIVATEIPS, BST_CHECKED);
+	CheckDlgButton(IDC_USESECIDENT, BST_CHECKED);
+	CheckDlgButton(IDC_RUNASUSER, BST_UNCHECKED);
+	CheckDlgButton(IDC_DISABLEOBFUSCATION, BST_UNCHECKED);
+	CheckDlgButton(IDC_ENABLEOBFUSCATION, BST_CHECKED);
+	CheckDlgButton(IDC_ONLYOBFUSCATED, BST_UNCHECKED);
+	GetDlgItem(IDC_ENABLEOBFUSCATION)->EnableWindow(TRUE);
+	GetDlgItem(IDC_ONLYOBFUSCATED)->EnableWindow(TRUE);
+	CheckDlgButton(IDC_SEARCHSPAMFILTER, BST_CHECKED);
+	CheckDlgButton(IDC_CHECK_FILE_OPEN, BST_CHECKED);
+	m_bAutoUpdate = false;
+	m_nPeriodDays = 7;
+	UpdateData(FALSE);
+	CheckRadioButton(IDC_SEESHARE1, IDC_SEESHARE3, IDC_SEESHARE3);
+	SetModified(TRUE);
+}
+
 	BOOL CPPgSecurity::OnInitDialog()
 {
 	CPropertyPage::OnInitDialog();
@@ -717,7 +738,7 @@ static bool ApplyDownloadedIPFilterFile(const CString &url, const CString &strTe
 	if (zip.Open(strTempFilePath)) {
 		bIsArchiveFile = true;
 
-		CZIPFile::File *zfile = zip.GetFile(_T("ipfilter.dat"));
+		CZIPFile::File *zfile = zip.GetFile(DFLT_IPFILTER_FILENAME);
 		if (zfile == NULL) {
 			zfile = zip.GetFile(_T("guarding.p2p"));
 			if (zfile == NULL)
@@ -751,7 +772,7 @@ static bool ApplyDownloadedIPFilterFile(const CString &url, const CString &strTe
 		if (rar.Open(strTempFilePath)) {
 			CString strFile;
 			if (rar.GetNextFile(strFile)
-				&& (strFile.CompareNoCase(_T("ipfilter.dat")) == 0
+				&& (strFile.CompareNoCase(DFLT_IPFILTER_FILENAME) == 0
 					|| strFile.CompareNoCase(_T("guarding.p2p")) == 0
 					|| strFile.CompareNoCase(_T("guardian.p2p")) == 0))
 			{

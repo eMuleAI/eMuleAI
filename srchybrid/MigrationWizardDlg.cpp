@@ -346,7 +346,7 @@ void CMigrationWizardDlg::UpdateDialogState()
 		bShowDetails = !detailsMessage.IsEmpty();
 		bHighlightDetailsAsError = m_bRestoreHadErrors;
 		bShowOk = true;
-		okText = GetResString(_T("EMULE_AI_MIGRATION_WIZARD_DONE"));
+		okText = GetResString(_T("MB_OK"));
 		nDefaultButton = IDOK;
 	}
 	else {

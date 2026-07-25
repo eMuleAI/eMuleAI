@@ -198,6 +198,38 @@ void CPPgIRC::LoadSettings()
 	SetDlgItemInt(IDC_IRC_MINUSER_BOX, thePrefs.m_uIRCChannelUserFilter);
 }
 
+void CPPgIRC::ResetToDefaults()
+{
+	m_ctrlTreeOptions.HandleChildControlLosingFocus();
+	m_bTimeStamp = true;
+	m_bSoundEvents = false;
+	m_bMiscMessage = false;
+	m_bJoinMessage = true;
+	m_bPartMessage = true;
+	m_bQuitMessage = true;
+	m_bPingPongMessage = false;
+	m_bEmuleAddFriend = false;
+	m_bEmuleAllowAddFriend = true;
+	m_bEmuleSendLink = false;
+	m_bAcceptLinks = true;
+	m_bIRCAcceptLinksFriendsOnly = true;
+	m_bHelpChannel = true;
+	m_bChannelsOnConnect = true;
+	m_bIRCEnableSmileys = true;
+	m_bIRCEnableUTF8 = true;
+	UpdateData(FALSE);
+
+	CheckDlgButton(IDC_IRC_USECHANFILTER, BST_UNCHECKED);
+	CheckDlgButton(IDC_IRC_USEPERFORM, BST_UNCHECKED);
+	SetDlgItemText(IDC_IRC_SERVER_BOX, _T("ircchat.emule-project.net"));
+	SetDlgItemText(IDC_IRC_NICK_BOX, _T(""));
+	SetDlgItemText(IDC_IRC_NAME_BOX, _T(""));
+	SetDlgItemText(IDC_IRC_PERFORM_BOX, _T(""));
+	SetDlgItemInt(IDC_IRC_MINUSER_BOX, 0, FALSE);
+	UpdateControls();
+	SetModified(TRUE);
+}
+
 BOOL CPPgIRC::OnApply()
 {
 	// if prop page is closed by pressing ENTER we have to explicitly commit any possibly pending
@@ -263,15 +295,21 @@ void CPPgIRC::LocalizeItemText(HTREEITEM item, LPCTSTR strid)
 		m_ctrlTreeOptions.SetItemText(item, GetResString(strid));
 }
 
+void CPPgIRC::LocalizeItemInfoText(HTREEITEM item, LPCTSTR strid)
+{
+	if (item)
+		m_ctrlTreeOptions.SetItemInfo(item, GetResString(strid));
+}
+
 void CPPgIRC::Localize()
 {
 	if (m_hWnd) {
-		SetDlgItemText(IDC_IRC_SERVER_FRM, GetResString(_T("PW_SERVER")));
+		SetDlgItemText(IDC_IRC_SERVER_FRM, GetResString(_T("SERVER")));
 		SetDlgItemText(IDC_IRC_MISC_FRM, GetResString(_T("PW_MISC")));
 		SetDlgItemText(IDC_IRC_NICK_FRM, GetResString(_T("PW_NICK")));
-		SetDlgItemText(IDC_IRC_NAME_TEXT, GetResString(_T("IRC_NAME")));
+		SetDlgItemText(IDC_IRC_NAME_TEXT, GetResString(_T("SW_NAME")));
 		SetDlgItemText(IDC_IRC_MINUSER_TEXT, GetResString(_T("UUSERS")));
-		SetDlgItemText(IDC_IRC_FILTER_FRM, GetResString(_T("IRC_CHANNELLIST")));
+		SetDlgItemText(IDC_IRC_FILTER_FRM, GetResString(_T("CHANNELS")));
 		SetDlgItemText(IDC_IRC_USECHANFILTER, GetResString(_T("IRC_USEFILTER")));
 		SetDlgItemText(IDC_IRC_PERFORM_FRM, GetResString(_T("IRC_PERFORM")));
 		SetDlgItemText(IDC_IRC_USEPERFORM, GetResString(_T("IRC_USEPERFORM")));
@@ -293,6 +331,25 @@ void CPPgIRC::Localize()
 		LocalizeItemText(m_htiHelpChannel, _T("IRC_HELPCHANNEL"));
 		LocalizeItemText(m_htiChannelsOnConnect, _T("IRC_LOADCHANNELLISTONCON"));
 		LocalizeItemText(m_htiSmileys, _T("SHOWSMILEYS"));
+		LocalizeItemText(m_htiUTF8, _T("IRC_ENABLEUTF8"));
+		LocalizeItemInfoText(m_htiHelpChannel, _T("OPTIONS_TIP_IRC_HELP_CHANNEL"));
+		LocalizeItemInfoText(m_htiChannelsOnConnect, _T("OPTIONS_TIP_IRC_LOAD_CHANNELS"));
+		LocalizeItemInfoText(m_htiTimeStamp, _T("OPTIONS_TIP_IRC_TIMESTAMPS"));
+		LocalizeItemInfoText(m_htiInfoMessage, _T("OPTIONS_TIP_IRC_IGNORE_INFO_GROUP"));
+		LocalizeItemInfoText(m_htiMiscMessage, _T("OPTIONS_TIP_IRC_IGNORE_MISC"));
+		LocalizeItemInfoText(m_htiJoinMessage, _T("OPTIONS_TIP_IRC_IGNORE_JOIN"));
+		LocalizeItemInfoText(m_htiPartMessage, _T("OPTIONS_TIP_IRC_IGNORE_PART"));
+		LocalizeItemInfoText(m_htiQuitMessage, _T("OPTIONS_TIP_IRC_IGNORE_QUIT"));
+		LocalizeItemInfoText(m_htiPingPongMessage, _T("OPTIONS_TIP_IRC_IGNORE_PING"));
+		LocalizeItemInfoText(m_htiEmuleProto, _T("OPTIONS_TIP_IRC_EMULE_MESSAGES_GROUP"));
+		LocalizeItemInfoText(m_htiEmuleAddFriend, _T("OPTIONS_TIP_IRC_IGNORE_FRIEND_REQUEST"));
+		LocalizeItemInfoText(m_htiEmuleSendLink, _T("OPTIONS_TIP_IRC_IGNORE_FILE_LINK"));
+		LocalizeItemInfoText(m_htiEmuleAllowAddFriend, _T("OPTIONS_TIP_IRC_ALLOW_FRIENDS"));
+		LocalizeItemInfoText(m_htiAcceptLinks, _T("OPTIONS_TIP_IRC_ACCEPT_LINKS"));
+		LocalizeItemInfoText(m_htiAcceptLinksFriends, _T("OPTIONS_TIP_IRC_LINKS_FRIENDS_ONLY"));
+		LocalizeItemInfoText(m_htiSmileys, _T("OPTIONS_TIP_IRC_SMILEYS"));
+		LocalizeItemInfoText(m_htiSoundEvents, _T("OPTIONS_TIP_IRC_SOUND_EVENTS"));
+		LocalizeItemInfoText(m_htiUTF8, _T("OPTIONS_TIP_IRC_UTF8"));
 	}
 }
 

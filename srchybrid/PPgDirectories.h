@@ -14,6 +14,7 @@ public:
 	CPPgDirectories();									// standard constructor
 
 	void Localize();
+	void ResetToDefaults();
 
 protected:
 	CDirectoryTreeCtrl m_ShareSelector;

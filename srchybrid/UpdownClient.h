@@ -722,6 +722,7 @@ public:
 	void			SetLastTriedToConnectTime()						{ m_dwLastTriedToConnect = ::GetTickCount(); }
 
 	const CString	GetGeolocationData(const bool bForceCountryCity = false) const;
+	const CString	GetGeolocationCity() const;
 	int				GetCountryFlagIndex() const;
 	void			ResetIPGeolocation();
 	void			ResetIPGeolocation(const CAddress& dwIP);

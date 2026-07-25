@@ -23,6 +23,7 @@ public:
 	static LRESULT OnIPFilterDownloadFinished(LPARAM lParam);
 
 	void Localize();
+	void ResetToDefaults();
 	void DeleteDDB();
 
 protected:

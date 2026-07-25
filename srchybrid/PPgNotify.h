@@ -27,6 +27,7 @@ public:
 	CPPgNotify();
 
 	void Localize();
+	void ResetToDefaults();
 
 protected:
 	EmailSettings m_mail;

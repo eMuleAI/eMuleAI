@@ -10,6 +10,7 @@ class CPPgTweaks : public CPropertyPage
 		IDD = IDD_PPG_TWEAKS
 	};
 	void LocalizeItemText(HTREEITEM item, LPCTSTR strid);
+	void LocalizeItemInfoText(HTREEITEM item, LPCTSTR strid);
 	void LocalizeEditLabel(HTREEITEM item, LPCTSTR strid);
 	void UpdateLayout();
 
@@ -17,6 +18,7 @@ public:
 	CPPgTweaks();
 
 	void Localize();
+	void ResetToDefaults();
 
 protected:
 	CSliderCtrl m_ctlFileBufferTimeLimit;

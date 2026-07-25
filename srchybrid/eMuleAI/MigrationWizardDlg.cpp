@@ -6,6 +6,8 @@
 #include "MigrationWizardDlg.h"
 #include "OtherFunctions.h"
 #include "Preferences.h"
+#include "IPFilter.h"
+#include "SHAHashSet.h"
 #include "Ini2.h"
 #include "eMuleAI/DarkMode.h"
 
@@ -46,45 +48,46 @@ namespace
 	};
 
 	static const MigrationFileDef s_akMigrationFiles[] = {
-		{ _T("downloads.txt"), true },
-		{ _T("download_inspector.txt"), true },
-		{ _T("AC_BootstrapIPs.dat"), false },
-		{ _T("AC_BootstrapURLs.dat"), false },
-		{ _T("AC_IPFilterUpdateURLs.dat"), false },
-		{ _T("AC_SearchStrings.dat"), false },
-		{ _T("AC_ServerMetURLs.dat"), false },
-		{ _T("AC_VF_RegExpr.dat"), false },
-		{ _T("addresses.dat"), false },
-		{ _T("blacklist.conf"), false },
-		{ _T("cancelled.met"), false },
-		{ _T("Category.ini"), false },
-		{ _T("clienthistory.met"), false },
-		{ _T("clients.met"), false },
-		{ _T("cryptkey.dat"), false },
-		{ _T("emfriends.met"), false },
-		{ _T("dbip-city-lite.mmdb"), false },
-		{ _T("ipfilter.dat"), false },
-		{ _T("ipfilter_static.dat"), false },
-		{ _T("ipfilter_white.dat"), false },
-		{ _T("key_index.dat"), false },
-		{ _T("known.met"), false },
-		{ _T("known2_64.met"), false },
-		{ _T("load_index.dat"), false },
-		{ _T("nodes.dat"), false },
-		{ _T("Notifier.ini"), false },
-		{ _T("preferences.dat"), false },
-		{ _T("preferencesKad.dat"), false },
-		{ _T("PreviewApps.dat"), false },
-		{ _T("SearchSpam.met"), false },
-		{ _T("server.met"), false },
-		{ _T("shareddir.dat"), false },
-		{ _T("sharedfiles.dat"), false },
-		{ _T("sharedcache.dat"), false },
-		{ _T("sharedsubdir.ini"), false },
-		{ _T("src_index.dat"), false },
-		{ _T("staticservers.dat"), false },
-		{ _T("statistics.ini"), false },
-		{ _T("StoredSearches.met"), false }
+		{ DOWNLOADS_TXT_FILENAME, true },
+		{ DOWNLOAD_INSPECTOR_FILENAME, true },
+		{ DOWNLOADVALIDATORFILE, false },
+		{ AC_BOOTSTRAP_IPS_FILENAME, false },
+		{ AC_BOOTSTRAP_URLS_FILENAME, false },
+		{ AC_IPFILTER_UPDATE_URLS_FILENAME, false },
+		{ AC_SEARCH_STRINGS_FILENAME, false },
+		{ AC_SERVER_MET_URLS_FILENAME, false },
+		{ AC_VF_REGEXP_FILENAME, false },
+		{ ADDRESSES_DAT_FILENAME, false },
+		{ BLACKLISTFILE, false },
+		{ CANCELLED_MET_FILENAME, false },
+		{ CATEGORY_INI_FILENAME, false },
+		{ CLIENT_HISTORY_MET_FILENAME, false },
+		{ CLIENTS_MET_FILENAME, false },
+		{ CRYPTKEY_DAT_FILENAME, false },
+		{ EMFRIENDS_MET_FILENAME, false },
+		{ IPGEOLOCATION_DB_FILENAME, false },
+		{ DFLT_IPFILTER_FILENAME, false },
+		{ DFLT_STATIC_IPFILTER_FILENAME, false },
+		{ DFLT_WHITE_IPFILTER_FILENAME, false },
+		{ KAD_KEY_INDEX_FILENAME, false },
+		{ KNOWN_MET_FILENAME, false },
+		{ KNOWN2_MET_FILENAME, false },
+		{ KAD_LOAD_INDEX_FILENAME, false },
+		{ NODES_DAT_FILENAME, false },
+		{ NOTIFIER_INI_FILENAME, false },
+		{ PREFERENCES_DAT_FILENAME, false },
+		{ KAD_PREFERENCES_DAT_FILENAME, false },
+		{ PREVIEW_APPS_FILENAME, false },
+		{ SPAMFILTER_FILENAME, false },
+		{ SERVER_MET_FILENAME, false },
+		{ SHAREDDIRS, false },
+		{ SHARED_FILES_FILENAME, false },
+		{ SHARED_CACHE_FILENAME, false },
+		{ SHARED_SUBDIR_FILENAME, false },
+		{ KAD_SRC_INDEX_FILENAME, false },
+		{ STATIC_SERVERS_FILENAME, false },
+		{ STATISTICS_INI_FILENAME, false },
+		{ STOREDSEARCHES_FILENAME, false }
 	};
 
 	CString BuildFailedFileList(const CStringArray &failedFiles)
@@ -342,7 +345,7 @@ void CMigrationWizardDlg::UpdateDialogState()
 		bShowDetails = !detailsMessage.IsEmpty();
 		bHighlightDetailsAsError = m_bRestoreHadErrors;
 		bShowOk = true;
-		okText = GetResString(_T("EMULE_AI_MIGRATION_WIZARD_DONE"));
+		okText = GetResString(_T("MB_OK"));
 		nDefaultButton = IDOK;
 	}
 	else {

@@ -473,6 +473,7 @@ void CPartFile::Init()
 	m_tActivated = 0;
 	m_nDlActiveTime = 0;
 	m_tLastModified = (time_t)-1;
+	m_tLastReception = (time_t)-1;
 	m_tCreated = 0;
 	m_uFileOpProgress = 0;
 	lastSwapForSourceExchangeTick = m_lastpurgetime = ::GetTickCount();
@@ -537,9 +538,11 @@ CPartFile::~CPartFile()
 {
 	CancelImportPartsOperation(false);
 	if (theApp.m_pPartFileWriteThread != NULL) {
-		CSingleLock sDeletedFilesListLock(&theApp.m_pPartFileWriteThread->m_DeletedFilesListLock, TRUE);
-		if (!theApp.m_pPartFileWriteThread->m_DeletedFilesList.Find(this))
-			theApp.m_pPartFileWriteThread->m_DeletedFilesList.AddTail(this);
+		CPartFileWriteThread* pThread = theApp.m_pPartFileWriteThread;
+		CSingleLock sDeletedFilesListLock(&pThread->m_DeletedFilesListLock, TRUE);
+		CSingleLock sPartFileDeleteLock(&m_PartFileDeleteLock, TRUE);
+		if (!pThread->IsDeletedPartFile(this, m_uRuntimeID))
+			pThread->m_DeletedFilesList.AddTail(DeletedPartFile{ this, m_uRuntimeID });
 	}
 
 	// Barry - Ensure all buffered data is written unless shutdown already stopped the writer thread.
@@ -1369,6 +1372,7 @@ EPartFileLoadResult CPartFile::LoadPartFile(LPCTSTR in_directory, LPCTSTR in_fil
 	typedef CMap<UINT, UINT, Gap_Struct, Gap_Struct&> CGapMap;
 	CGapMap gap_map; // Slugfiller
 	m_uTransferred = 0;
+	m_tLastReception = (time_t)-1;
 	m_partmetfilename = in_filename;
 	SetPath(in_directory);
 	ASSERT(GetPath().Right(1) == _T("\\"));
@@ -2371,7 +2375,7 @@ bool CPartFile::SavePartFileThreaded(bool bDontOverrideBak, bool bDeferredInitia
 		m_bFlushPartMetInQueue = true;
 		if (bDeferredInitialPartMetSave)
 			InterlockedExchange(&m_lDeferredInitialPartMetSaveWritePending, 1);
-		pThread->m_FlushList.AddTail(ToWrite{ this, NULL, pFlushData, NULL, NULL, NULL, NULL });
+		pThread->m_FlushList.AddTail(ToWrite{ this, m_uRuntimeID, NULL, pFlushData, NULL, NULL, NULL, NULL, false });
 		pFlushData = NULL;
 		bQueuedSnapshot = true;
 
@@ -4241,7 +4245,7 @@ void CPartFile::PerformFileCompleteEnd(DWORD dwResult)
 
 		// give visual response
 		Log(LOG_SUCCESS | LOG_STATUSBAR, GetResString(_T("DOWNLOADDONE")), (LPCTSTR)GetFileName());
-		theApp.emuledlg->ShowNotifier(GetResString(_T("TBN_DOWNLOADDONE")) + _T('\n') + GetFileName(), TBN_DOWNLOADFINISHED, GetFilePath());
+		theApp.emuledlg->ShowNotifier(GetResStringWithColon(_T("DOWNLOADED")) + _T('\n') + GetFileName(), TBN_DOWNLOADFINISHED, GetFilePath());
 		if (dwResult & FILE_COMPLETION_THREAD_RENAMED) {
 			CString strFilePath(GetFullName());
 			PathStripPath(strFilePath.GetBuffer());
@@ -4335,7 +4339,8 @@ bool CPartFile::DeletePartFile(bool bAddToCanceledMet, uint64 uDownloadRemoveSeq
 	if (pThread && pThread->IsRunning()) {
 		CSingleLock sDeletedFilesListLock(&pThread->m_DeletedFilesListLock, TRUE);
 		CSingleLock sPartFileDeleteLock(&m_PartFileDeleteLock, TRUE); // Lock part file until adding it to m_DeletedFilesList
-		pThread->m_DeletedFilesList.AddTail(this);
+		if (!pThread->IsDeletedPartFile(this, m_uRuntimeID))
+			pThread->m_DeletedFilesList.AddTail(DeletedPartFile{ this, m_uRuntimeID });
 	}
 
 	PartFileDeleteData* pDeleteData = new PartFileDeleteData;
@@ -5618,6 +5623,9 @@ uint32 CPartFile::WriteToBuffer(uint64 transize, const BYTE *data, uint64 start,
 	// Mark this small section of the file as filled
 	FillGap(newitem->start, newitem->end);
 
+	if (client)
+		m_tLastReception = time(NULL);
+
 	// If client is known, the caller updates the flush mark on the requested block
 	// Otherwise, update here (for imported parts)
 	if (!client && requestedblocks_list.Find(block) != NULL)
@@ -5714,12 +5722,12 @@ void CPartFile::FlushBuffer(bool bForceICH, bool bNoAICH)
 						bLocked = true;
 						pThread->m_lockFlushList.Lock();
 						if (uAllocate == 1) //an extra byte to allocate
-							pThread->m_FlushList.AddHead(ToWrite{ this, new PartFileBufferedData{ (uint64)m_nFileSize, (uint64)m_nFileSize, NULL, NULL }, NULL, NULL, NULL, NULL, NULL });
+							pThread->m_FlushList.AddHead(ToWrite{ this, m_uRuntimeID, new PartFileBufferedData{ (uint64)m_nFileSize, (uint64)m_nFileSize, NULL, NULL }, NULL, NULL, NULL, NULL, NULL, true });
 					}
 					if (uAllocate == 2 && pos == NULL) //using the last item for allocation
-						pThread->m_FlushList.AddHead(ToWrite{ this,  item, NULL, NULL, NULL, NULL, NULL });
+						pThread->m_FlushList.AddHead(ToWrite{ this, m_uRuntimeID, item, NULL, NULL, NULL, NULL, NULL, false });
 					else
-						pThread->m_FlushList.AddTail(ToWrite{ this,  item, NULL, NULL, NULL, NULL, NULL });
+						pThread->m_FlushList.AddTail(ToWrite{ this, m_uRuntimeID, item, NULL, NULL, NULL, NULL, NULL, false });
 					item->dwError = 0; //reset error (this could be a retry)
 					item->flushed = PB_PENDING;
 				}
@@ -6169,6 +6177,7 @@ void CPartFile::DeleteWrittenItem(const POSITION pos)
 {
 	const PartFileBufferedData *item = m_BufferedData_list.GetAt(pos);
 	ASSERT(!item->dwError);
+	m_tLastModified = time(NULL);
 	m_nTotalBufferData -= item->end - item->start + 1;
 	// SLUGFILLER: SafeHash - could be more than one part
 	for (INT_PTR i = (INT_PTR)(item->start / PARTSIZE); i <= (INT_PTR)(item->end / PARTSIZE); ++i)
@@ -6763,8 +6772,8 @@ CString CPartFile::GetInfoSummary(bool bNoFormatCommands) const
 		_T("%s%s")
 		_T("%s %s\n")
 		_T("%s %s")
-		, (LPCTSTR)GetResString(_T("FD_HASH")), (LPCTSTR)md4str(GetFileHash())
-		, (LPCTSTR)GetResString(_T("FD_SIZE")), (LPCTSTR)CastItoXBytes((uint64)m_nFileSize), (LPCTSTR)sOnDisk
+		, (LPCTSTR)GetResStringWithColon(_T("CD_UHASH2")), (LPCTSTR)md4str(GetFileHash())
+		, (LPCTSTR)GetResStringWithColon(_T("DL_SIZE")), (LPCTSTR)CastItoXBytes((uint64)m_nFileSize), (LPCTSTR)sOnDisk
 		, bNoFormatCommands ? (LPCTSTR)EMPTY : (LPCTSTR)_T("<br_head>")
 		, (LPCTSTR)GetResString(_T("FD_MET")), (LPCTSTR)GetPartMetFileName()
 		, (LPCTSTR)GetResString(_T("STATUS")), (LPCTSTR)sStatus

@@ -36,8 +36,7 @@ static char THIS_FILE[] = __FILE__;
 #endif
 
 
-#define EMFRIENDS_MET_FILENAME	_T("emfriends.met")
-#define EMFRIENDS_MET_FILENAME_TMP	_T("emfriends.met.tmp")
+#define EMFRIENDS_MET_FILENAME_TMP	EMFRIENDS_MET_FILENAME _T(".tmp")
 
 CFriendList::CFriendList()
 	: m_wndOutput()

@@ -432,7 +432,7 @@ void CDirectoryTreeCtrl::OnContextMenu(CWnd*, CPoint point)
 			SharedMenu.AppendMenu(MF_STRING, MP_UNSHAREDIRSUB, GetResString(_T("UNSHAREDIRSUB")));
 		if (PathIsUNC(sItem) && !GetParentItem(hItem)) {
 	CString sViewPath;
-			sViewPath.Format(_T("%s %s"), (LPCTSTR)GetResString(_T("REMOVETHIS")), (LPCTSTR)sItem);
+			sViewPath.Format(_T("%s %s"), (LPCTSTR)GetResString(_T("REMOVE")), (LPCTSTR)sItem);
 
 			SharedMenu.AppendMenu(MF_STRING | MF_SEPARATOR);
 			SharedMenu.AppendMenu(MF_STRING, MP_REMOVESHARE, sViewPath);

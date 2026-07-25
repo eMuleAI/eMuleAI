@@ -345,7 +345,7 @@ void CMiniMule::Localize()
 {
 	SetElementHtml(_T("connectedLabel"), CComBSTR(GetResString(_T("CONNECTED"))));
 	SetElementHtml(_T("upRateLabel"), CComBSTR(GetResString(_T("PW_CON_UPLBL"))));
-	SetElementHtml(_T("downRateLabel"), CComBSTR(GetResString(_T("PW_CON_DOWNLBL"))));
+	SetElementHtml(_T("downRateLabel"), CComBSTR(GetResString(_T("DOWNLOAD"))));
 	SetElementHtml(_T("completedLabel"), CComBSTR(GetResString(_T("DL_TRANSFCOMPL"))));
 	SetElementHtml(_T("freeSpaceLabel"), CComBSTR(GetResString(_T("STATS_FREESPACE"))));
 
@@ -357,7 +357,7 @@ void CMiniMule::Localize()
 	}
 	GetElementInterface(_T("optionsLink"), &a);
 	if (a) {
-		a->put_title(CComBSTR(GetResNoAmp(_T("EM_PREFS"))));
+		a->put_title(CComBSTR(GetResString(_T("OPTIONS"))));
 		a.Release();
 	}
 	GetElementInterface(_T("restoreWndLink"), &a);
@@ -374,7 +374,7 @@ void CMiniMule::Localize()
 	}
 	GetElementInterface(_T("optionsImg"), &img);
 	if (img) {
-		img->put_alt(CComBSTR(GetResNoAmp(_T("EM_PREFS"))));
+		img->put_alt(CComBSTR(GetResString(_T("OPTIONS"))));
 		img.Release();
 	}
 	GetElementInterface(_T("restoreWndImg"), &img);

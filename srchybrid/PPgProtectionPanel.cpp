@@ -1,4 +1,4 @@
-﻿//This file is part of eMule AI
+//This file is part of eMule AI
 //Copyright (C)2026 eMule AI
 
 #include "stdafx.h"
@@ -1323,7 +1323,7 @@ void CPPgProtectionPanel::Localize(void)
 		LocalizeItemInfoText(m_htiDetectEmptyUserNameEmule,_T("DETECT_EMPTY_USERNAME_EMULE_INFO"));
 
 		LocalizeItemText(m_htiEmptyUserNameEmulePunishment, _T("PUNISHMENT"));
-		LocalizeItemInfoText(m_htiEmptyUserNameEmulePunishment,_T("IDS_GENERAL_PUNISHMENT_INFO"));
+		LocalizeItemInfoText(m_htiEmptyUserNameEmulePunishment,_T("GENERAL_PUNISHMENT_INFO"));
 
 		LocalizeItemText(m_htiDetectCommunity, _T("DETECT_COMMUNITY"));
 		LocalizeItemInfoText(m_htiDetectCommunity,_T("DETECT_COMMUNITY_INFO"));

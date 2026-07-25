@@ -123,20 +123,37 @@ void CPropPageFrameDefault::DrawCaption(CDC *pDc, CRect rect, LPCTSTR lpszCaptio
 	FillGradientRectH(pDc, rect, clrLeft, clrRight);
 
 	// draw icon
+	int nTextPadding = 2;
 	if (hIcon && m_Images.GetSafeHandle() && m_Images.GetImageCount() == 1) {
 		IMAGEINFO ii;
 		m_Images.GetImageInfo(0, &ii);
-		CPoint		pt(rect.left + 3, rect.CenterPoint().y - (ii.rcImage.bottom - ii.rcImage.top) / 2);
+		const int nIconWidth = ii.rcImage.right - ii.rcImage.left;
+		const int nIconHeight = ii.rcImage.bottom - ii.rcImage.top;
+		const int nIconPadding = max(1, ::MulDiv(nIconWidth, 3, 16));
+		nTextPadding = max(1, ::MulDiv(nIconWidth, 2, 16));
+		CPoint pt(rect.left + nIconPadding, rect.CenterPoint().y - nIconHeight / 2);
 		m_Images.Draw(pDc, 0, pt, ILD_NORMAL);
-		rect.left += (ii.rcImage.right - ii.rcImage.left) + 3;
+		rect.left += nIconWidth + nIconPadding;
 	}
 
 	// draw text
-	rect.left += 2;
+	rect.left += nTextPadding;
 
 	COLORREF clrPrev = pDc->SetTextColor(GetCustomSysColor(COLOR_CAPTIONTEXT));
 	int nBkStyle = pDc->SetBkMode(TRANSPARENT);
-	CFont *pFont = pDc->SelectObject(&theApp.m_fontDefaultBold);
+	CFont captionFont;
+	CFont* pCaptionFont = GetFont();
+	if (pCaptionFont != NULL) {
+		LOGFONT lf = {};
+		if (pCaptionFont->GetLogFont(&lf) != 0) {
+			lf.lfWeight = FW_BOLD;
+			if (captionFont.CreateFontIndirect(&lf))
+				pCaptionFont = &captionFont;
+		}
+	}
+	if (pCaptionFont == NULL)
+		pCaptionFont = &theApp.m_fontDefaultBold;
+	CFont *pFont = pDc->SelectObject(pCaptionFont);
 
 	pDc->DrawText(lpszCaption, rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 

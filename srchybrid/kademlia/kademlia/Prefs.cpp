@@ -59,7 +59,7 @@ static volatile LONG s_lKadPrefsSaveGeneration = 0;
 
 CPrefs::CPrefs()
 {
-	Init(thePrefs.GetMuleDirectory(EMULE_CONFIGDIR) + _T("preferencesKad.dat"));
+	Init(thePrefs.GetMuleDirectory(EMULE_CONFIGDIR) + KAD_PREFERENCES_DAT_FILENAME);
 }
 
 CPrefs::~CPrefs()
@@ -136,7 +136,7 @@ void CPrefs::WriteFile()
 		pData->plGeneration = &s_lKadPrefsSaveGeneration;
 		pData->strTempPath = m_sFilename + _T(".tmp");
 		pData->strFinalPath = m_sFilename;
-		pData->strLogName = _T("preferencesKad.dat");
+		pData->strLogName = KAD_PREFERENCES_DAT_FILENAME;
 		pData->strPayloadName = _T("kad-prefs");
 		pData->eConflictPolicy = AsyncDiskWriteConflictLastSnapshotWins;
 		const ULONGLONG uLength = file.GetLength();

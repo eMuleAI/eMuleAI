@@ -51,6 +51,7 @@
 #include "MuleStatusBarCtrl.h"
 #include "OtherFunctions.h"
 #include "PartFileWriteThread.h"
+#include "eMuleAI/DownloadValidator.h"
 
 struct SharedFileMetaDataTask_Struct
 {
@@ -130,7 +131,6 @@ static char THIS_FILE[] = __FILE__;
 #endif
 
 typedef CSimpleArray<CKnownFile*> CSimpleKnownFileArray;
-#define	SHAREDFILES_FILE	_T("sharedfiles.dat")
 
 enum { LONGPATH_WILDCARD_SLACK = 12 }; // Named slack for wildcard-based directory searches (accounts for "\*", extra separators, etc.). 
 
@@ -1900,6 +1900,7 @@ bool CSharedFileList::ApplySharedFilesCompletionChunk(UINT& uProcessed, INT_PTR&
 				iRemaining = iStepRemaining;
 				if (iStepRemaining > 0)
 					return true;
+				HashNextFile();
 				m_uSharedFilesCompletionStep = SharedFilesCompletionFinish;
 				break;
 			}
@@ -2381,6 +2382,8 @@ void CSharedFileList::FileHashingFinished(CKnownFile *file, LPCTSTR pszPathKey)
 	}
 
 	theApp.knownfiles->SafeAddKFile(file); // First, register with KnownFiles; it deduplicates and may already contain an instance
+	if (theApp.DownloadValidator != NULL)
+		theApp.DownloadValidator->AddToMap(file->GetFileHash(), file->GetFileName(), file->GetFileSize());
 
 	// If already in the shared list, we are done (drop temp instance if not owned anywhere)
 	CKnownFile* pLiveFile = GetLiveFileByID(file->GetFileHash());
@@ -3645,14 +3648,6 @@ CSharedFileList::EMetaDataQueueResult CSharedFileList::QueueMetaDataUpdate(const
 	return MetaDataQueueFailed;
 }
 
-bool CSharedFileList::QueueMetaDataUpdateForFile(const CKnownFile* pFile)
-{
-	const EMetaDataQueueResult eResult = QueueMetaDataUpdate(pFile, false, true);
-	if (eResult == MetaDataQueueQueued)
-		NotifyShowFilesCount();
-	return eResult != MetaDataQueueFailed;
-}
-
 UINT CSharedFileList::GetMetaDataUpdateCount() const
 {
 	SharedFileMetaDataThreadContext* pContext = m_pMetaDataThreadContext;
@@ -3916,6 +3911,8 @@ void CSharedFileList::ProcessDeferredMetaDataUpdates()
 						bReloadSharedFiles = true;
 				} else if (pTarget != NULL) {
 					pTarget->ApplyMetaDataTags(thePrefs.GetExtractMetaData() != 0 ? pTask->pMetaData : NULL);
+					if (theApp.DownloadValidator != NULL)
+						theApp.DownloadValidator->AddToMap(pTarget->GetFileHash(), pTarget->GetFileName(), pTarget->GetFileSize());
 					if (GetLiveFileByID(pTask->aucFileHash) == pTarget) {
 						RemoveKeywords(pTarget);
 						AddKeywords(pTarget);
@@ -4657,7 +4654,7 @@ void CSharedFileList::Save() const
 		return;
 	}
 
-	const CString &strFullPath(thePrefs.GetMuleDirectory(EMULE_CONFIGDIR) + SHAREDFILES_FILE);
+	const CString &strFullPath(thePrefs.GetMuleDirectory(EMULE_CONFIGDIR) + SHARED_FILES_FILENAME);
 	CStringList liSingleSharedFiles;
 	CStringList liSingleExcludedFiles;
 	CStringList liExcludedSharedDirs;
@@ -4685,7 +4682,7 @@ void CSharedFileList::Save() const
 		pData->plGeneration = const_cast<volatile LONG*>(&m_lSharedFilesSaveGeneration);
 		pData->strTempPath = strFullPath + _T(".tmp");
 		pData->strFinalPath = strFullPath;
-		pData->strLogName = SHAREDFILES_FILE;
+		pData->strLogName = SHARED_FILES_FILENAME;
 		pData->strPayloadName = _T("shared-files-rules");
 		pData->eConflictPolicy = AsyncDiskWriteConflictLastSnapshotWins;
 		pData->eReplacePolicy = AsyncDiskWriteReplaceFinal;
@@ -4706,7 +4703,7 @@ void CSharedFileList::LoadSingleSharedFilesList()
 {
 	SetExplicitShareRulesLoaded(false);
 
-	const CString &strFullPath(thePrefs.GetMuleDirectory(EMULE_CONFIGDIR) + SHAREDFILES_FILE);
+	const CString &strFullPath(thePrefs.GetMuleDirectory(EMULE_CONFIGDIR) + SHARED_FILES_FILENAME);
 	const DWORD dwAttributes = ::GetFileAttributes(strFullPath);
 	if (dwAttributes == INVALID_FILE_ATTRIBUTES) {
 		const DWORD dwError = ::GetLastError();

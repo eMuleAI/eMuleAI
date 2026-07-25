@@ -518,7 +518,7 @@ void CKadLookupGraph::UpdateToolTip()
 		if (sEntry->m_dwAskedSearchItemTime > 0) {
 			if (sEntry->m_uRespondedSearchItem == 0) {
 				if (::GetTickCount() >= sEntry->m_dwAskedSearchItemTime + SEC2MS(5))
-					strFoundResults = GetResString(_T("SERVING_BUDDYNONE"));
+					strFoundResults = GetResString(_T("NONE"));
 				else
 					strFoundResults = GetResString(_T("ASKING"));
 			} else

@@ -33,6 +33,7 @@
 #define COLOR_IRC_STATUS_MSG				1023
 #define COLOR_IRC_EVENT_MSG					1024
 #define COLOR_IRC_ACTION_MSG				1025
+#define COLOR_SEARCH_POSSIBLE_KNOWN_HEADER	1026
 
 struct TooltipThemeColors
 {

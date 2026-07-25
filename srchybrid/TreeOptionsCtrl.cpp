@@ -215,6 +215,7 @@ CTreeOptionsCtrl::CTreeOptionsCtrl()
 	, m_bToggleOverIconOnly()
 	, m_bAutoSelect()
 	, m_bBeingCleared()
+	, m_nVisualScalePercent(100)
 {
 }
 
@@ -229,6 +230,22 @@ CTreeOptionsCtrl::~CTreeOptionsCtrl()
 	ASSERT(m_pDateTime == NULL);
 	ASSERT(m_pIPAddress == NULL);
 	(void)TREE_OPTIONS_STATIC_ID; //suppress warning C5264
+}
+
+BOOL CTreeOptionsCtrl::SetVisualScalePercent(int nPercent)
+{
+	if (::IsWindow(m_hWnd) || nPercent <= 0) {
+		ASSERT(0);
+		return FALSE;
+	}
+
+	m_nVisualScalePercent = nPercent;
+	return TRUE;
+}
+
+int CTreeOptionsCtrl::ScaleVisualMetric(int iValue) const
+{
+	return ::MulDiv(iValue, m_nVisualScalePercent, 100);
 }
 
 void CTreeOptionsCtrl::SetItemInfo(HTREEITEM hItem, LPCTSTR sInfo)
@@ -455,15 +472,19 @@ void CTreeOptionsCtrl::HandleCheckBox(HTREEITEM hItem, BOOL bCheck)
 	//Toggle the state
 	VERIFY(SetCheckBox(hItem, !bCheck));
 
-	//If the item has children, then iterate through them and for all items
-	//which are check boxes set their state to be the same as the parent
-	HTREEITEM hChild = GetNextItem(hItem, TVGN_CHILD);
-	while (hChild) {
-		if (IsCheckBox(hChild))
-			SetCheckBox(hChild, !bCheck);
+	const BOOL bIndependentCheckBox = IsIndependentCheckBox(hItem);
+	HTREEITEM hChild = NULL;
+	if (!bIndependentCheckBox) {
+		//If the item has children, then iterate through them and for all items
+		//which are check boxes set their state to be the same as the parent
+		hChild = GetNextItem(hItem, TVGN_CHILD);
+		while (hChild) {
+			if (IsCheckBox(hChild))
+				SetCheckBox(hChild, !bCheck);
 
-		//Move on to the next item
-		hChild = GetNextItem(hChild, TVGN_NEXT);
+			//Move on to the next item
+			hChild = GetNextItem(hChild, TVGN_NEXT);
+		}
 	}
 
 	//Get the parent item and if it is a checkbox, then iterate through
@@ -471,7 +492,7 @@ void CTreeOptionsCtrl::HandleCheckBox(HTREEITEM hItem, BOOL bCheck)
 	//automatically check the parent. If no checkboxes are checked, then
 	//also automatically uncheck the parent.
 	HTREEITEM hParent = GetNextItem(hItem, TVGN_PARENT);
-	if (hParent && IsCheckBox(hParent)) {
+	if (hParent && IsCheckBox(hParent) && !IsIndependentCheckBox(hParent)) {
 		BOOL bNoCheckBoxesChecked = TRUE;
 		BOOL bAllCheckBoxesChecked = TRUE;
 		hChild = GetNextItem(hParent, TVGN_CHILD);
@@ -626,7 +647,7 @@ HTREEITEM CTreeOptionsCtrl::InsertCheckBox(LPCTSTR lpszItem, HTREEITEM hParent, 
 
 HTREEITEM CTreeOptionsCtrl::InsertRadioButton(LPCTSTR lpszItem, HTREEITEM hParent, BOOL bCheck, HTREEITEM hAfter, DWORD dwItemData)
 {
-	ASSERT(IsGroup(hParent)); //The parent of a radio item must be a group item
+	ASSERT(hParent == TVI_ROOT || IsGroup(hParent)); //The parent of a radio item must be a group item or the root level
 
 	HTREEITEM hItem = InsertItem(lpszItem, 2, 2, hParent, hAfter);
 	CTreeOptionsItemData *pItemData = new CTreeOptionsItemData;
@@ -654,6 +675,12 @@ BOOL CTreeOptionsCtrl::IsCheckBox(HTREEITEM hItem) const
 {
 	CTreeOptionsItemData *pItemData = reinterpret_cast<CTreeOptionsItemData*>(GetItemData(hItem));
 	return pItemData && pItemData->m_Type == CTreeOptionsItemData::CheckBox;
+}
+
+BOOL CTreeOptionsCtrl::IsIndependentCheckBox(HTREEITEM hItem) const
+{
+	CTreeOptionsItemData *pItemData = reinterpret_cast<CTreeOptionsItemData*>(GetItemData(hItem));
+	return pItemData != NULL && pItemData->m_Type == CTreeOptionsItemData::CheckBox && pItemData->m_bIndependentCheckBox;
 }
 
 BOOL CTreeOptionsCtrl::IsRadioButton(HTREEITEM hItem) const
@@ -755,6 +782,16 @@ BOOL CTreeOptionsCtrl::GetCheckBox(HTREEITEM hItem, BOOL &bCheck) const
 	return bSuccess;
 }
 
+BOOL CTreeOptionsCtrl::SetCheckBoxIndependent(HTREEITEM hItem, BOOL bIndependent)
+{
+	ASSERT(IsCheckBox(hItem));
+	CTreeOptionsItemData *pItemData = reinterpret_cast<CTreeOptionsItemData*>(GetItemData(hItem));
+	if (pItemData == NULL || pItemData->m_Type != CTreeOptionsItemData::CheckBox)
+		return FALSE;
+	pItemData->m_bIndependentCheckBox = bIndependent;
+	return TRUE;
+}
+
 BOOL CTreeOptionsCtrl::SetRadioButton(HTREEITEM hParent, int nIndex)
 {
 	//Validate our parameters
@@ -807,10 +844,11 @@ BOOL CTreeOptionsCtrl::SetRadioButton(HTREEITEM hItem)
 
 	//Iterate through the sibling items and turn them all off except this one
 	HTREEITEM hParent = GetNextItem(hItem, TVGN_PARENT);
-	ASSERT(IsGroup(hParent)); //Parent item must be a group item
+	const bool bUseRootLevel = (hParent == NULL);
+	ASSERT(bUseRootLevel || IsGroup(hParent)); //Parent item must be a group item or the root level
 
 	//Iterate through the child items and turn on the specified one and turn off all the other ones
-	HTREEITEM hChild = GetNextItem(hParent, TVGN_CHILD);
+	HTREEITEM hChild = bUseRootLevel ? GetRootItem() : GetNextItem(hParent, TVGN_CHILD);
 
 	//Turn of redraw to Q all the changes we're going to make here
 	SetRedraw(FALSE);
@@ -1253,7 +1291,7 @@ void CTreeOptionsCtrl::CreateNewChildControl(HTREEITEM hItem)
 	GetItemRect(hItem, &rLine, FALSE);
 
 	RECT r;
-	r.left = rText.right + 2;
+	r.left = rText.right + ScaleVisualMetric(2);
 	r.top = rText.top;
 
 	//Now create the main control
@@ -1850,7 +1888,7 @@ BOOL CTreeOptionsCtrl::OnCustomDraw(LPNMHDR pNMHDR, LRESULT *pResult)
 				//Allow for the indent
 				r.left += GetIndentPostion(hItem);
 
-				r.right = r.left + 16;
+				r.right = r.left + ScaleVisualMetric(16);
 				dc.FillSolidRect(&r, GetColor(hItem));
 				dc.Detach();
 			}
@@ -2009,7 +2047,7 @@ DWORD CTreeOptionsCombo::GetWindowStyle()
 
 int CTreeOptionsCombo::GetDropDownHeight()
 {
-	return 100;
+	return m_pTreeCtrl != NULL ? m_pTreeCtrl->ScaleVisualMetric(100) : 100;
 }
 
 BOOL CTreeOptionsCombo::IsRelatedWnd(CWnd *pChild)
@@ -2355,7 +2393,7 @@ DWORD CTreeOptionsEdit::GetWindowStyle()
 
 int CTreeOptionsEdit::GetHeight(int nItemHeight)
 {
-	return max(nItemHeight, 20);
+	return max(nItemHeight, m_pTreeCtrl != NULL ? m_pTreeCtrl->ScaleVisualMetric(20) : 20);
 }
 
 void CTreeOptionsEdit::OnKillFocus(CWnd *pNewWnd)
@@ -2558,7 +2596,7 @@ int CTreeOptionsBrowseButton::GetWidth()
 
 		m_pTreeCtrl->ReleaseDC(pDC);
 	} else
-		nButtonWidth = 20;
+		nButtonWidth = m_pTreeCtrl != NULL ? m_pTreeCtrl->ScaleVisualMetric(20) : 20;
 
 	return nButtonWidth;
 }
@@ -2702,7 +2740,7 @@ END_MESSAGE_MAP()
 
 void CTreeOptionsFileDialog::OnInitDone()
 {
-	CString sLabel = GetResString(_T("TREEOPTIONS_OK"));
+	CString sLabel = GetResString(_T("MB_OK"));
 	if (sLabel.IsEmpty())
 		ASSERT(0);
 	CStringA sText(sLabel);

@@ -22,6 +22,7 @@
 #include "emule.h"
 #include "UpDownClient.h"
 #include "DownloadQueue.h"
+#include "Preferences.h"
 #include "PartFile.h"
 #include "PartFileWriteThread.h"
 #include "ed2kLink.h"
@@ -454,7 +455,7 @@ namespace
 			task.lGeneration, pszResult != NULL ? pszResult : _T(""), pszReason != NULL ? pszReason : _T(""), dwLastError, task.bShutdownFallback ? 1U : 0U,
 			(LPCTSTR)strTmpFileListPath, (LPCTSTR)task.strFileListPath);
 		if (pszResult != NULL && (_tcsicmp(pszResult, _T("failed")) == 0 || _tcsicmp(pszResult, _T("warning")) == 0))
-			theApp.QueueAsyncDiskWriteResultEvent(_T("downloads.txt"), task.lGeneration, pszResult, pszReason, strTmpFileListPath, task.strFileListPath, task.bShutdownFallback, dwLastError);
+			theApp.QueueAsyncDiskWriteResultEvent(DOWNLOADS_TXT_FILENAME, task.lGeneration, pszResult, pszReason, strTmpFileListPath, task.strFileListPath, task.bShutdownFallback, dwLastError);
 	}
 
 
@@ -2353,7 +2354,7 @@ bool CDownloadQueue::ProcessDeferredDownloadValidatorAdds(bool bDrainAll)
 			m_deferredDownloadValidatorAddPositions.erase(pAdd->pFile);
 			CPartFile *pQueuedFile = NULL;
 			if (theApp.DownloadValidator != NULL && m_mapFilesByHash.Lookup(CCKey(pAdd->abyFileHash), pQueuedFile) && pQueuedFile == pAdd->pFile)
-				theApp.DownloadValidator->AddToMap(pAdd->abyFileHash, pAdd->strFileName, pAdd->uFileSize);
+				theApp.DownloadValidator->AddDownloadingFileToMap(pAdd->abyFileHash, pAdd->strFileName, pAdd->uFileSize);
 			delete pAdd;
 		}
 		++uProcessed;
@@ -3010,7 +3011,7 @@ void CDownloadQueue::AddDownload(CPartFile *newfile, bool paused)
 	if (IsBulkAddingDownloads() && m_bBulkAddDeferDownloadValidatorAdds)
 		QueueDeferredDownloadValidatorAdd(newfile);
 	else if (theApp.DownloadValidator != NULL)
-		theApp.DownloadValidator->AddToMap(newfile->GetFileHash(), newfile->GetFileName(), newfile->GetFileSize());
+		theApp.DownloadValidator->AddDownloadingFileToMap(newfile->GetFileHash(), newfile->GetFileName(), newfile->GetFileSize());
 	QueueDeferredInitialPartMetSave(newfile);
 	if (theApp.searchlist != NULL)
 		theApp.searchlist->QueueKnownTypeRefreshForHash(newfile->GetFileHash());
@@ -5030,7 +5031,7 @@ void CDownloadQueue::ExportPartMetFilesOverview()
 	pTask->bSingleTempDir = thePrefs.GetTempDirCount() == 1;
 	pTask->bShutdownFallback = false;
 	pTask->bStartupLoadCompleted = m_bStartupLoadCompleted;
-	pTask->strFileListPath = thePrefs.GetMuleDirectory(EMULE_CONFIGDIR) + _T("downloads.txt");
+	pTask->strFileListPath = thePrefs.GetMuleDirectory(EMULE_CONFIGDIR) + DOWNLOADS_TXT_FILENAME;
 	pTask->strFormattedTime = CTime::GetCurrentTime().Format(_T("%c"));
 	if (pTask->bSingleTempDir)
 		pTask->strTempDir = thePrefs.GetTempDir();

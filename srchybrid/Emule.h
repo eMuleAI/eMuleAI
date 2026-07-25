@@ -387,6 +387,7 @@ public:
 	{
 		WorkerTopologyBackendCommand,
 		WorkerTopologyNetworkParseCpu,
+		WorkerTopologyDownloadValidatorCpu,
 		WorkerTopologyNetworkUtility,
 		WorkerTopologyPartFileDiskIo,
 		WorkerTopologyUploadDiskIo,
@@ -419,6 +420,7 @@ public:
 		WorkerTopologyItemPersistenceSave,
 		WorkerTopologyItemNetworkUtility,
 		WorkerTopologyItemNetworkParseCpu,
+		WorkerTopologyItemDownloadValidatorCpu,
 		WorkerTopologyItemStartupMetadataLoad,
 		WorkerTopologyItemFileSystemReload
 	};
@@ -1058,6 +1060,9 @@ public:
 	bool		DrainNetworkParseCpuWorker(DWORD dwTimeoutMs);
 	void		CancelNetworkParseCpuWorker();
 	bool		QueueNetworkParseCpuWorkerItem(const SWorkerTopologyItem &item);
+	bool		StartDownloadValidatorCpuWorker();
+	bool		QueueDownloadValidatorCpuWorkerItem(const SWorkerTopologyItem &item);
+	bool		QueueDownloadValidatorCpuWork();
 	bool		QueueCollectionImportWorkerJob(HWND hNotifyWnd, const CString &strPath);
 	bool		QueueCollectionImportResult(HWND hNotifyWnd, SCollectionImportResult *pResult);
 	SCollectionImportResult* PopCollectionImportResult(HWND hNotifyWnd);
@@ -1402,6 +1407,7 @@ private:
 	bool		WaitWorkerTopologyItemDueTime(EWorkerTopologyRole eRole, DWORD dwDueTick);
 	bool		ProcessNetworkUtilityWorkerItem(const SWorkerTopologyItem &item);
 	bool		ProcessNetworkParseCpuWorkerItem(const SWorkerTopologyItem &item);
+	bool		ProcessDownloadValidatorCpuWorkerItem(const SWorkerTopologyItem &item);
 	bool		ProcessCollectionImportWorkerItem(const SWorkerTopologyItem &item);
 	bool		ProcessPersistenceWorkerItem(const SWorkerTopologyItem &item);
 	bool		ProcessStartupLoadWorkerItem(const SWorkerTopologyItem &item);

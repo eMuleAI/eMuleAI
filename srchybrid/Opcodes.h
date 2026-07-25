@@ -19,14 +19,16 @@
 
 // Update only this definition for eMule AI releases: major, minor, patch, build, suffix.
 // Example prerelease suffix: APPLY(1,6,0,0,"-beta1").
-#define EMULEAI_VERSION(APPLY)		APPLY(1,5,2,0,"")
+#define EMULEAI_VERSION(APPLY)		APPLY(1,6,0,0,"")
 #define EMULEAI_STRINGIZE_I(value)	#value
 #define EMULEAI_STRINGIZE(value)	EMULEAI_STRINGIZE_I(value)
 #define EMULEAI_MOD_VERSION_I(major, minor, patch, build, suffix)	_T("AI v") _T(EMULEAI_STRINGIZE(major)) _T(".") _T(EMULEAI_STRINGIZE(minor)) _T(".") _T(EMULEAI_STRINGIZE(patch)) _T(suffix)
 #define MOD_NAME					_T("AI")
 #define MOD_VERSION					EMULEAI_VERSION(EMULEAI_MOD_VERSION_I)
-#define MOD_REPO_BASE_URL			_T("https://github.com/eMuleAI/eMuleAI")
 #define MOD_PAGES_BASE_URL			_T("https://eMuleAI.github.io")
+#define MOD_REPO_BASE_URL			_T("https://github.com/eMuleAI/eMuleAI")
+#define MOD_ISSUES_URL				MOD_REPO_BASE_URL _T("/issues")
+#define MOD_DISCUSSIONS_URL			MOD_REPO_BASE_URL _T("/discussions")
 
 // eMule core and protocol version. Keep independent from the eMule AI release version.
 #define VERSION_MJR		0

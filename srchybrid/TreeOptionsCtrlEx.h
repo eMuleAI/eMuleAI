@@ -41,6 +41,7 @@ protected:
 	HTREEITEM m_hPressedCommandButton;
 	BOOL m_bTrackingCommandButtonMouse;
 
+	virtual void PreSubclassWindow();
 	virtual void HandleCheckBox(HTREEITEM hItem, BOOL bCheck);
 	HTREEITEM HitTestCommandButton(CPoint point);
 	void InvalidateCommandButton(HTREEITEM hItem);

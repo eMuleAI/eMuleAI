@@ -70,7 +70,7 @@ BOOL CPPgScheduler::OnInitDialog()
 	ASSERT((m_list.GetStyle() & LVS_SINGLESEL) == 0);
 	// Alignment rule: left for text, dates, and status labels; right for sizes, rates, counts, durations, and percentages.
 	m_list.InsertColumn(0, GetResString(_T("TITLE")), LVCFMT_LEFT, 150);
-	m_list.InsertColumn(1, GetResString(_T("S_DAYS")), LVCFMT_LEFT, 80);
+	m_list.InsertColumn(1, GetResString(_T("DAYS2")), LVCFMT_LEFT, 80);
 	m_list.InsertColumn(2, GetResString(_T("STARTTIME")), LVCFMT_LEFT, 80);
 	m_time.SetFormat(_T("H:mm"));
 	m_timeTo.SetFormat(_T("H:mm"));
@@ -241,8 +241,22 @@ void CPPgScheduler::OnBnClickedRemove()
 	RecheckSchedules();
 }
 
+void CPPgScheduler::ResetToDefaults()
+{
+	CheckDlgButton(IDC_ENABLE, BST_UNCHECKED);
+	SetModified(TRUE);
+}
+
 BOOL CPPgScheduler::OnApply()
 {
+	const bool bSchedulerEnabled = IsDlgButtonChecked(IDC_ENABLE) != 0;
+	if (thePrefs.scheduler != bSchedulerEnabled) {
+		thePrefs.scheduler = bSchedulerEnabled;
+		if (!thePrefs.scheduler)
+			theApp.scheduler->RestoreOriginals();
+		RecheckSchedules();
+		theApp.emuledlg->preferenceswnd->m_wndConnection.LoadSettings();
+	}
 	SetModified(FALSE);
 	return CPropertyPage::OnApply();
 }
@@ -412,7 +426,7 @@ BOOL CPPgScheduler::OnCommand(WPARAM wParam, LPARAM lParam)
 			CString prompt;
 			int action = (int)m_actions.GetItemData(iSel);
 			if (action == ACTION_SETUPL || action == ACTION_SETDOWNL)
-				prompt.Format(_T("%s (%s, %s)"), (LPCTSTR)GetResString(_T("SCHED_ENTERDATARATELIMIT")), (LPCTSTR)GetActionLabel(action), (LPCTSTR)GetResString(_T("KBYTESPERSEC")));
+				prompt.Format(_T("%s (%s, %s)"), (LPCTSTR)GetResString(_T("SCHED_ENTERDATARATELIMIT")), (LPCTSTR)GetActionLabel(action), (LPCTSTR)GetResString(_T("KBYTESSEC")));
 			else
 				prompt.Format(_T("%s (%s)"), (LPCTSTR)GetResString(_T("SCHED_ENTERVAL")), (LPCTSTR)GetActionLabel(action));
 			inputbox.SetLabels(GetResString(_T("SCHED_ACTCONFIG")), prompt, m_actions.GetItemText(iSel, 1));
@@ -435,11 +449,6 @@ void CPPgScheduler::RecheckSchedules()
 
 void CPPgScheduler::OnEnableChange()
 {
-	thePrefs.scheduler = IsDlgButtonChecked(IDC_ENABLE) != 0;
-	if (!thePrefs.scheduler)
-		theApp.scheduler->RestoreOriginals();
-	RecheckSchedules();
-	theApp.emuledlg->preferenceswnd->m_wndConnection.LoadSettings();
 	SetModified();
 }
 

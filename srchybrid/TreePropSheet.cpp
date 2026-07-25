@@ -23,6 +23,34 @@
 #include "HighColorTab.hpp"
 #include "eMuleAI/DarkMode.h"
 
+namespace
+{
+	void EnsureVisualTreeItemHeight(HWND hWnd, HFONT hFont, int nScalePercent)
+	{
+		TCHAR szClassName[MAX_PATH];
+		if (hWnd == NULL || hFont == NULL || !::GetClassName(hWnd, szClassName, _countof(szClassName)) || _tcsicmp(szClassName, WC_TREEVIEW) != 0)
+			return;
+
+		HDC hDC = ::GetDC(hWnd);
+		if (hDC == NULL)
+			return;
+
+		HGDIOBJ hOldFont = ::SelectObject(hDC, hFont);
+		TEXTMETRIC tm = {};
+		const BOOL bMetricsAvailable = ::GetTextMetrics(hDC, &tm);
+		if (hOldFont != NULL && hOldFont != HGDI_ERROR)
+			::SelectObject(hDC, hOldFont);
+		::ReleaseDC(hWnd, hDC);
+		if (!bMetricsAvailable)
+			return;
+
+		const int nMinimumHeight = static_cast<int>(tm.tmHeight + tm.tmExternalLeading) + ::MulDiv(2, nScalePercent, 100);
+		const int nCurrentHeight = static_cast<int>(::SendMessage(hWnd, TVM_GETITEMHEIGHT, 0, 0));
+		if (nCurrentHeight < nMinimumHeight)
+			::SendMessage(hWnd, TVM_SETITEMHEIGHT, nMinimumHeight, 0);
+	}
+}
+
 #ifdef _DEBUG
 #define new DEBUG_NEW
 #undef THIS_FILE
@@ -62,6 +90,7 @@ void CTreePropSheet::init()
 	m_bPageCaption = FALSE;
 	m_bTreeImages = FALSE;
 	m_nPageTreeWidth = 150;
+	m_nVisualScalePercent = 100;
 }
 
 CTreePropSheet::CTreePropSheet()
@@ -113,6 +142,82 @@ BOOL CTreePropSheet::SetTreeWidth(int nWidth)
 	m_nPageTreeWidth = nWidth;
 
 	return TRUE;
+}
+
+BOOL CTreePropSheet::SetVisualScalePercent(int nPercent)
+{
+	if (::IsWindow(m_hWnd) || nPercent <= 0) {
+		ASSERT(0);
+		return FALSE;
+	}
+
+	if (m_fontVisual.GetSafeHandle() != NULL && !m_fontVisual.DeleteObject())
+		return FALSE;
+	m_nVisualScalePercent = nPercent;
+	return TRUE;
+}
+
+int CTreePropSheet::ScaleVisualMetric(int nValue) const
+{
+	return ::MulDiv(nValue, m_nVisualScalePercent, 100);
+}
+
+BOOL CTreePropSheet::CreateVisualFont()
+{
+	if (m_nVisualScalePercent == 100) {
+		if (m_fontVisual.GetSafeHandle() != NULL)
+			m_fontVisual.DeleteObject();
+		return TRUE;
+	}
+
+	CFont* pBaseFont = GetFont();
+	if (pBaseFont == NULL && AfxGetMainWnd() != NULL)
+		pBaseFont = AfxGetMainWnd()->GetFont();
+	if (pBaseFont == NULL)
+		return FALSE;
+
+	LOGFONT lf = {};
+	if (pBaseFont->GetLogFont(&lf) == 0)
+		return FALSE;
+	lf.lfHeight = ScaleVisualMetric(lf.lfHeight);
+
+	if (m_fontVisual.GetSafeHandle() != NULL)
+		m_fontVisual.DeleteObject();
+	return m_fontVisual.CreateFontIndirect(&lf);
+}
+
+CFont* CTreePropSheet::GetVisualFont()
+{
+	return m_fontVisual.GetSafeHandle() != NULL ? &m_fontVisual : GetFont();
+}
+
+void CTreePropSheet::ApplyVisualFontToWindow(CWnd* pWnd)
+{
+	CFont* pVisualFont = GetVisualFont();
+	if (pWnd == NULL || !::IsWindow(pWnd->GetSafeHwnd()) || pVisualFont == NULL || pVisualFont->GetSafeHandle() == NULL)
+		return;
+
+	const HFONT hOriginalFont = reinterpret_cast<HFONT>(pWnd->SendMessage(WM_GETFONT));
+	for (HWND hChild = ::GetWindow(pWnd->GetSafeHwnd(), GW_CHILD); hChild != NULL; hChild = ::GetWindow(hChild, GW_HWNDNEXT)) {
+		HFONT hChildFont = reinterpret_cast<HFONT>(::SendMessage(hChild, WM_GETFONT, 0, 0));
+		if (hChildFont == NULL || hChildFont == hOriginalFont) {
+			hChildFont = reinterpret_cast<HFONT>(pVisualFont->GetSafeHandle());
+			::SendMessage(hChild, WM_SETFONT, reinterpret_cast<WPARAM>(hChildFont), TRUE);
+		}
+		EnsureVisualTreeItemHeight(hChild, hChildFont, m_nVisualScalePercent);
+	}
+	pWnd->SendMessage(WM_SETFONT, reinterpret_cast<WPARAM>(pVisualFont->GetSafeHandle()), TRUE);
+}
+
+void CTreePropSheet::ApplyVisualFontToPage(CPropertyPage* pPage)
+{
+	if (m_nVisualScalePercent == 100 || pPage == NULL || !::IsWindow(pPage->GetSafeHwnd()))
+		return;
+
+	ApplyVisualFontToWindow(pPage);
+	CRect rectClient;
+	pPage->GetClientRect(&rectClient);
+	pPage->SendMessage(WM_SIZE, SIZE_RESTORED, MAKELPARAM(rectClient.Width(), rectClient.Height()));
 }
 
 DWORD CTreePropSheet::SetEmptyPageTextFormat(DWORD dwFormat)
@@ -600,6 +705,9 @@ BOOL CTreePropSheet::OnInitDialog()
 
 	// perform default implementation
 	BOOL bResult = CPropertySheet::OnInitDialog();
+	CreateVisualFont();
+	ApplyVisualFontToPage(GetActivePage());
+	ApplyVisualFontToWindow(this);
 
 	if (!m_bTreeViewMode)
 		// stop here, if we would like to use tabs
@@ -629,11 +737,13 @@ BOOL CTreePropSheet::OnInitDialog()
 		AfxThrowMemoryException();
 	}
 	m_pFrame->Create(WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS, rectFrame, this, 0xffff);
+	if (GetVisualFont() != NULL)
+		m_pFrame->GetWnd()->SetFont(GetVisualFont());
 	m_pFrame->ShowCaption(m_bPageCaption);
 
 	// Lets make place for the tree ctrl
-	const int nTreeWidth = m_nPageTreeWidth;
-	const int nTreeSpace = 5;
+	const int nTreeWidth = ScaleVisualMetric(m_nPageTreeWidth);
+	const int nTreeSpace = ScaleVisualMetric(5);
 
 	CRect rectSheet;
 	GetWindowRect(rectSheet);
@@ -650,6 +760,8 @@ BOOL CTreePropSheet::OnInitDialog()
 	// calculate caption height
 	CTabCtrl wndTabCtrl;
 	wndTabCtrl.Create(WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS, rectFrame, this, 0x1234);
+	if (GetVisualFont() != NULL)
+		wndTabCtrl.SetFont(GetVisualFont());
 	wndTabCtrl.InsertItem(0, EMPTY);
 	CRect	rectFrameCaption;
 	wndTabCtrl.GetItemRect(0, rectFrameCaption);
@@ -684,9 +796,7 @@ BOOL CTreePropSheet::OnInitDialog()
 	}
 
 	// finally create the tree control
-	//const DWORD dwTreeStyle = TVS_SHOWSELALWAYS/*|TVS_TRACKSELECT*/|TVS_HASLINES/*|TVS_LINESATROOT*/|TVS_HASBUTTONS;
-	// As long as we don't use sub pages we apply the 'TVS_FULLROWSELECT' style for a little more user convenience.
-	const DWORD	dwTreeStyle = TVS_SHOWSELALWAYS | TVS_FULLROWSELECT;
+	const DWORD	dwTreeStyle = TVS_SHOWSELALWAYS | TVS_HASLINES | TVS_LINESATROOT | TVS_HASBUTTONS;
 	m_pwndPageTree = CreatePageTreeObject();
 	if (!m_pwndPageTree) {
 		ASSERT(0);
@@ -719,12 +829,16 @@ BOOL CTreePropSheet::OnInitDialog()
 // This treeview control was created dynamically, thus it does not derive the font
 // settings from the parent dialog. Need to set the font explicitly so that it fits
 // to the font which is used for the property pages.
-	m_pwndPageTree->SendMessage(WM_SETFONT, (WPARAM)AfxGetMainWnd()->GetFont()->m_hObject, TRUE);
+	CFont* pTreeFont = GetVisualFont();
+	if (pTreeFont == NULL && AfxGetMainWnd() != NULL)
+		pTreeFont = AfxGetMainWnd()->GetFont();
+	if (pTreeFont != NULL)
+		m_pwndPageTree->SendMessage(WM_SETFONT, reinterpret_cast<WPARAM>(pTreeFont->GetSafeHandle()), TRUE);
 
 	// Win98: Explicitly set to Unicode to receive Unicode notifications.
 	m_pwndPageTree->SendMessage(CCM_SETUNICODEFORMAT, TRUE);
 
-	m_pwndPageTree->SetItemHeight(m_pwndPageTree->GetItemHeight() + 6);
+	m_pwndPageTree->SetItemHeight(m_pwndPageTree->GetItemHeight() + ScaleVisualMetric(6));
 
 	if (m_bTreeImages) {
 		m_pwndPageTree->SetImageList(&m_Images, TVSIL_NORMAL);
@@ -784,6 +898,7 @@ LRESULT CTreePropSheet::OnRemovePage(WPARAM wParam, LPARAM lParam)
 LRESULT CTreePropSheet::OnSetCurSel(WPARAM wParam, LPARAM lParam)
 {
 	LRESULT	lResult = DefWindowProc(PSM_SETCURSEL, wParam, lParam);
+	ApplyVisualFontToPage(GetActivePage());
 	if (m_bTreeViewMode) {
 		SelectCurrentPageTreeItem();
 		UpdateCaption();
@@ -794,6 +909,7 @@ LRESULT CTreePropSheet::OnSetCurSel(WPARAM wParam, LPARAM lParam)
 LRESULT CTreePropSheet::OnSetCurSelId(WPARAM wParam, LPARAM lParam)
 {
 	LRESULT	lResult = DefWindowProc(PSM_SETCURSEL, wParam, lParam);
+	ApplyVisualFontToPage(GetActivePage());
 	if (m_bTreeViewMode) {
 		SelectCurrentPageTreeItem();
 		UpdateCaption();

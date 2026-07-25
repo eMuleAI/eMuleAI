@@ -22,6 +22,10 @@ import argparse
 import shutil
 import concurrent.futures
 import gettext
+import threading
+import difflib
+import struct
+import zlib
 
 try:
     import pycountry
@@ -42,6 +46,10 @@ ORIGINAL_PRINT = builtins.print
 ORIGINAL_INPUT = builtins.input
 CONSOLE_LOGGING_ACTIVE = True
 SCRIPT_START_TIME = None
+MODEL_SPEED_TOTAL_COMPLETION_TOKENS = 0
+MODEL_SPEED_TOTAL_GENERATION_SECONDS = 0.0
+MODEL_SPEED_MEASURED_CALL_COUNT = 0
+MODEL_SPEED_STATS_LOCK = threading.Lock()
 SHARED_API_SYSTEM_PROMPT = (
     "You are a professional translation engine for software UI text. "
     "Follow the user's format requirements exactly. "
@@ -77,6 +85,11 @@ def print(*args, **kwargs):
     write_log_line(message)
 
 
+def print_language_success(lang_code, detail=""):
+    detail_suffix = f" {detail}" if detail else ""
+    print(f"  -> [{lang_code}] Successful{detail_suffix}")
+
+
 def input(prompt=""):
     if prompt:
         ORIGINAL_PRINT(prompt, end="")
@@ -103,6 +116,70 @@ def format_elapsed_time(seconds_value):
     return f"{seconds}s"
 
 
+def normalize_completion_token_count(value):
+    if isinstance(value, bool):
+        return None
+    try:
+        token_count = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return token_count if token_count > 0 else None
+
+
+def print_model_speed_statistics(api_label, completion_tokens, generation_seconds):
+    global MODEL_SPEED_TOTAL_COMPLETION_TOKENS
+    global MODEL_SPEED_TOTAL_GENERATION_SECONDS
+    global MODEL_SPEED_MEASURED_CALL_COUNT
+
+    completion_tokens = normalize_completion_token_count(completion_tokens)
+    try:
+        generation_seconds = float(generation_seconds)
+    except (TypeError, ValueError, OverflowError):
+        generation_seconds = 0.0
+
+    with MODEL_SPEED_STATS_LOCK:
+        if completion_tokens is None or generation_seconds <= 0.0:
+            if MODEL_SPEED_MEASURED_CALL_COUNT > 0:
+                average_speed = (
+                    MODEL_SPEED_TOTAL_COMPLETION_TOKENS
+                    / MODEL_SPEED_TOTAL_GENERATION_SECONDS
+                )
+                average_text = (
+                    f"script average {average_speed:.1f} tok/s "
+                    f"({MODEL_SPEED_MEASURED_CALL_COUNT} "
+                    f"{'call' if MODEL_SPEED_MEASURED_CALL_COUNT == 1 else 'calls'})"
+                )
+            else:
+                average_text = "script average unavailable (no measured calls)"
+            unavailable_reason = (
+                "completion token usage missing"
+                if completion_tokens is None
+                else "generation duration unavailable"
+            )
+            print(
+                f"Model speed [{api_label}]: last unavailable ({unavailable_reason}), {average_text}."
+            )
+            return
+
+        last_speed = completion_tokens / generation_seconds
+        MODEL_SPEED_TOTAL_COMPLETION_TOKENS += completion_tokens
+        MODEL_SPEED_TOTAL_GENERATION_SECONDS += generation_seconds
+        MODEL_SPEED_MEASURED_CALL_COUNT += 1
+        average_speed = (
+            MODEL_SPEED_TOTAL_COMPLETION_TOKENS
+            / MODEL_SPEED_TOTAL_GENERATION_SECONDS
+        )
+        call_count_text = (
+            f"{MODEL_SPEED_MEASURED_CALL_COUNT} "
+            f"{'call' if MODEL_SPEED_MEASURED_CALL_COUNT == 1 else 'calls'}"
+        )
+        print(
+            f"Model speed [{api_label}]: last {last_speed:.1f} tok/s "
+            f"({completion_tokens} tokens / {generation_seconds:.2f}s), "
+            f"script average {average_speed:.1f} tok/s ({call_count_text})."
+        )
+
+
 # ==============================================================================
 # USER SETTINGS
 # ==============================================================================
@@ -111,9 +188,13 @@ API_TYPE = "ask"  # Valid values: ask, local, gemini, deepseek.
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_MODEL_NAME = os.environ.get("GEMINI_MODEL_NAME", "gemini-3.1-flash-lite")
 GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
+GEMINI_API_STREAM_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model_name}:streamGenerateContent?alt=sse&key={api_key}"
 GEMINI_API_REQUEST_TIMEOUT_SEC = 120
 GEMINI_API_MAX_RETRY_COUNT = 0  # 0 means retry indefinitely for transient Gemini API availability errors.
 GEMINI_API_RETRY_DELAY_SEC = 30
+GEMINI_API_MAX_COMPLETION_TOKENS = 8192
+GEMINI_API_MAX_TOKEN_LIMIT = 32768
+GEMINI_API_STREAM_RESPONSE = True
 GEMINI_API_MAX_LANGUAGES_PER_BATCH = 24
 GEMINI_API_SOURCE_CHARS_PER_LANGUAGE_BATCH = 10000
 GEMINI_API_COMPLEX_SOURCE_CHAR_THRESHOLD = 1400
@@ -125,6 +206,7 @@ GEMINI_API_INTER_CALL_DELAY_SEC = 3.0
 GEMINI_API_PIPELINE_CHUNKS = True
 API_REPAIR_REQUEST_TIMEOUT_SEC = 45
 API_REPAIR_TIMEOUT_RETRY_COUNT = 1
+OPENAI_COMPATIBLE_EMPTY_UNKNOWN_STREAM_RETRY_COUNT = 2
 COUNTRY_NAME_REPAIR_MAX_COMPLETION_TOKENS = 512
 LOCAL_COUNTRY_NAME_REPAIR_INITIAL_COMPLETION_TOKENS = 1024
 LOCAL_COUNTRY_NAME_REPAIR_MAX_COMPLETION_TOKENS = 2048
@@ -139,6 +221,7 @@ DEEPSEEK_API_MAX_LANGUAGES_PER_BATCH = GEMINI_API_MAX_LANGUAGES_PER_BATCH
 DEEPSEEK_API_SOURCE_CHARS_PER_LANGUAGE_BATCH = GEMINI_API_SOURCE_CHARS_PER_LANGUAGE_BATCH
 DEEPSEEK_API_MAX_COMPLETION_TOKENS = 8192
 DEEPSEEK_API_MAX_TOKEN_LIMIT = 32768
+DEEPSEEK_API_STREAM_RESPONSE = True
 DEEPSEEK_API_COMPLEX_SOURCE_CHAR_THRESHOLD = GEMINI_API_COMPLEX_SOURCE_CHAR_THRESHOLD
 DEEPSEEK_API_VERY_COMPLEX_SOURCE_CHAR_THRESHOLD = GEMINI_API_VERY_COMPLEX_SOURCE_CHAR_THRESHOLD
 DEEPSEEK_API_COMPLEX_SOURCE_PLACEHOLDER_THRESHOLD = GEMINI_API_COMPLEX_SOURCE_PLACEHOLDER_THRESHOLD
@@ -158,11 +241,15 @@ LOCAL_API_RETRY_DELAY_SEC = 1
 LOCAL_API_MAX_LANGUAGES_PER_BATCH = DEEPSEEK_API_MAX_LANGUAGES_PER_BATCH
 LOCAL_API_COUNTRY_NAME_MAX_LANGUAGES_PER_BATCH = 12
 LOCAL_API_SOURCE_CHARS_PER_LANGUAGE_BATCH = 6000
-LOCAL_API_MAX_COMPLETION_TOKENS = 32768
+LOCAL_API_MAX_COMPLETION_TOKENS = 8192
 LOCAL_API_MAX_TOKEN_LIMIT = 32768
 LOCAL_API_STREAM_RESPONSE = True
 LOCAL_API_INTER_CALL_DELAY_SEC = 0.0
 LOCAL_API_PIPELINE_CHUNKS = True
+COMPLETION_TOKEN_ESTIMATE_NUMERATOR = 5
+COMPLETION_TOKEN_ESTIMATE_DENOMINATOR = 4
+COMPLETION_TOKEN_COMPLEX_PLACEHOLDER_THRESHOLD = 6
+COMPLETION_TOKEN_COMPLEX_LINE_THRESHOLD = 4
 LOCAL_MODEL_DISCOVERY_TIMEOUT_SEC = 3
 LOCAL_MODEL_DISCOVERY_CACHE_TTL_SEC = 30
 LOCAL_MODEL_FAMILY_GENERIC = "generic"
@@ -191,6 +278,9 @@ DEFAULT_TRANSLATIONS_DATA_HEADER_PATH = os.path.join(
 )
 DEFAULT_LANGUAGE_REGISTRY_HEADER_PATH = os.path.join(
     SCRIPT_DIR, "lang_registry.gen.h"
+)
+DEFAULT_TRANSLATIONS_DATA_BINARY_PATH = os.path.join(
+    SCRIPT_DIR, "translations_data.gen.bin"
 )
 RESUME_POINT_FILE = os.path.join(SCRIPT_DIR, "ai_translator_resume.txt")
 
@@ -334,6 +424,8 @@ def append_ai_log(title, prompt=None, response=None):
 
 
 PROTECTED_TOKENS = {
+    "Buddy",
+    "Buddies",
     "eMule",
     "Powershare",
     "eServer Buddy",
@@ -523,12 +615,19 @@ ESCAPED_LINE_SPLIT_PATTERN = re.compile(r"(\\r\\n|\\n|\\r|\r\n|\n|\r)")
 PROTECTED_TOKEN_LEADING_TRIM_CHARS = "\"'([{"
 PROTECTED_TOKEN_TRAILING_TRIM_CHARS = "\"')]}:;,.!?؟。！？።။"
 EXACT_KNOWN_PHRASE_MIN_WORDS = 2
+KNOWN_PHRASE_INFLECTION_MIN_CHAR_COUNT = 12
+KNOWN_PHRASE_INFLECTION_MIN_SIMILARITY = 0.84
+KNOWN_PHRASE_SINGLE_WORD_INFLECTION_MIN_SIMILARITY = 0.90
+KNOWN_PHRASE_INFLECTION_MIN_WORD_SIMILARITY = 0.70
+KNOWN_PHRASE_INFLECTION_MIN_WORD_PREFIX_CHARS = 4
+KNOWN_PHRASE_INFLECTION_MIN_WORD_PREFIX_RATIO = 0.60
 PROMPT_SOURCE_PHRASE_MIN_WORDS = 2
 PROMPT_SOURCE_PHRASE_MAX_COUNT = 8
 ENGLISH_LEAK_WORD_MIN_LEN = 6
 LOCAL_FORBIDDEN_SOURCE_WORD_MIN_LEN = 4
 SHORT_PROTECTED_LABEL_SOURCE_WORD_MAX_COUNT = 5
 SHORT_PROTECTED_LABEL_LEAK_WORD_MIN_LEN = 4
+PROTECTED_CONTEXT_LEAK_WORD_MIN_LEN = 2
 REPETITIVE_TOKEN_FLOOD_THRESHOLD = 8
 LANGUAGE_CODE_PATTERN = re.compile(r"[A-Za-z]{2,3}(?:-[A-Za-z0-9]+)*")
 MAP_TOOL_LANGUAGE_CODE_PATTERN = re.compile(r"[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*")
@@ -1667,6 +1766,57 @@ def get_source_words_covered_by_leading_ui_label(en_text):
     return covered
 
 
+def extract_short_protected_segment_leading_source_words(en_text):
+    if not isinstance(en_text, str) or not en_text:
+        return []
+
+    visible_text = build_visible_prompt_text(en_text)
+    protected_spans = []
+    for term in extract_protected_terms(en_text):
+        protected_spans.extend(find_protected_term_spans(visible_text, term))
+    if not protected_spans:
+        return []
+
+    candidates = []
+    seen = set()
+
+    def add_segment_candidate(segment_start, segment_end):
+        if not any(
+            segment_start <= protected_start < segment_end
+            for protected_start, _ in protected_spans
+        ):
+            return
+
+        match = SOURCE_ENGLISH_WORD_PATTERN.search(
+            visible_text, segment_start, segment_end
+        )
+        if not match or span_is_inside_any(match.start(), match.end(), protected_spans):
+            return
+
+        normalized = normalize_candidate_source_phrase(match.group(0))
+        if not normalized:
+            return
+        lowered = normalized.casefold()
+        if (
+            len(normalized) < PROTECTED_CONTEXT_LEAK_WORD_MIN_LEN
+            or len(normalized) >= ENGLISH_LEAK_WORD_MIN_LEN
+            or is_preserved_source_literal_word(normalized)
+            or should_protect_token(normalized)
+            or lowered in seen
+        ):
+            return
+
+        candidates.append(normalized)
+        seen.add(lowered)
+
+    segment_start = 0
+    for boundary in re.finditer(r"\n+|[.!?]+(?:[\"')\]]*)\s+", visible_text):
+        add_segment_candidate(segment_start, boundary.start())
+        segment_start = boundary.end()
+    add_segment_candidate(segment_start, len(visible_text))
+    return candidates
+
+
 def extract_placeholder_adjacent_translatable_source_words(en_text):
     if not isinstance(en_text, str) or not en_text:
         return []
@@ -1679,7 +1829,11 @@ def extract_placeholder_adjacent_translatable_source_words(en_text):
     candidates = []
     seen = set()
 
-    def add_candidate(raw_word):
+    def add_candidate(
+        raw_word,
+        min_length=SHORT_PROTECTED_LABEL_LEAK_WORD_MIN_LEN,
+        allow_stopword=False,
+    ):
         normalized = normalize_candidate_source_phrase(raw_word)
         if not normalized:
             return
@@ -1690,11 +1844,11 @@ def extract_placeholder_adjacent_translatable_source_words(en_text):
             return
         if is_preserved_source_literal_word(normalized):
             return
-        if lowered in ENGLISH_LEAK_STOPWORDS:
+        if lowered in ENGLISH_LEAK_STOPWORDS and not allow_stopword:
             return
         if should_protect_token(normalized):
             return
-        if len(normalized) < SHORT_PROTECTED_LABEL_LEAK_WORD_MIN_LEN:
+        if len(normalized) < min_length:
             return
         candidates.append(normalized)
         seen.add(lowered)
@@ -1703,7 +1857,18 @@ def extract_placeholder_adjacent_translatable_source_words(en_text):
     for term in sorted(protected_terms, key=lambda item: (-len(item), item.casefold())):
         protected_spans.extend(find_protected_term_spans(visible_text, term))
 
-    for _, end in sorted(protected_spans):
+    for start, end in sorted(protected_spans):
+        before_match = re.search(
+            r"([A-Za-z]+(?:['-][A-Za-z]+)*)[\s:/,_-]+$",
+            visible_text[:start],
+        )
+        if before_match:
+            add_candidate(
+                before_match.group(1),
+                min_length=PROTECTED_CONTEXT_LEAK_WORD_MIN_LEN,
+                allow_stopword=True,
+            )
+
         after_match = re.match(
             r"[\s:/,_-]+([A-Za-z]+(?:['-][A-Za-z]+)*)",
             visible_text[end:],
@@ -1772,6 +1937,8 @@ def build_dynamic_source_leak_word_candidates(en_text):
     candidate_map = {}
     for word in extract_placeholder_adjacent_translatable_source_words(en_text):
         candidate_map.setdefault(word.casefold(), word)
+    for word in extract_short_protected_segment_leading_source_words(en_text):
+        candidate_map.setdefault(word.casefold(), word)
 
     min_len = get_source_leak_word_min_len(en_text)
     for match in iter_unprotected_source_word_matches(en_text):
@@ -1803,6 +1970,8 @@ def build_local_forbidden_source_word_candidates(en_text):
 
     candidate_map = {}
     for word in extract_placeholder_adjacent_translatable_source_words(en_text):
+        candidate_map.setdefault(word.casefold(), word)
+    for word in extract_short_protected_segment_leading_source_words(en_text):
         candidate_map.setdefault(word.casefold(), word)
 
     for match in iter_unprotected_source_word_matches(en_text):
@@ -2043,15 +2212,69 @@ def span_is_inside_any(start, end, spans):
     return any(span_start <= start and end <= span_end for span_start, span_end in spans)
 
 
-def find_protected_term_spans(text, term):
+def get_protected_term_edge_script_family(term, from_end=False):
+    characters = reversed(term) if from_end else term
+    for char in characters:
+        family = get_unicode_script_family(char)
+        if family:
+            return family
+    return ""
+
+
+def is_protected_term_word_continuation(char, term_script_family):
+    if (
+        char == "_"
+        or char.isdigit()
+        or unicodedata.category(char).startswith("M")
+    ):
+        return True
+    if not char.isalpha():
+        return False
+
+    char_script_family = get_unicode_script_family(char)
+    return (
+        not term_script_family
+        or not char_script_family
+        or char_script_family == term_script_family
+    )
+
+
+def protected_term_match_has_valid_boundaries(text, match, term):
+    match_start, match_end = match.span()
+    if (
+        match_start > 0
+        and not text.endswith(("\\n", "\\r"), 0, match_start)
+        and is_protected_term_word_continuation(
+            text[match_start - 1],
+            get_protected_term_edge_script_family(term),
+        )
+    ):
+        return False
+    if match_end < len(text) and is_protected_term_word_continuation(
+        text[match_end],
+        get_protected_term_edge_script_family(term, from_end=True),
+    ):
+        return False
+    return True
+
+
+def compile_protected_term_pattern(term, case_sensitive=False):
+    return re.compile(
+        re.escape(term),
+        0 if case_sensitive else re.IGNORECASE,
+    )
+
+
+def find_protected_term_spans(text, term, case_sensitive=False):
     if not isinstance(text, str) or not text or not isinstance(term, str) or not term:
         return []
 
-    pattern = re.compile(
-        rf"(?:(?<!{NON_WORD_BOUNDARY_PATTERN})|(?<=\\n)|(?<=\\r)|(?<=\\r\\n)){re.escape(term)}(?!{NON_WORD_BOUNDARY_PATTERN})",
-        re.IGNORECASE,
-    )
-    return [(match.start(), match.end()) for match in pattern.finditer(text)]
+    pattern = compile_protected_term_pattern(term, case_sensitive=case_sensitive)
+    return [
+        (match.start(), match.end())
+        for match in pattern.finditer(text)
+        if protected_term_match_has_valid_boundaries(text, match, term)
+    ]
 
 
 def filter_covered_protected_terms(terms, source_text):
@@ -2764,7 +2987,7 @@ def review_repeated_source_word_correction_with_ai(
     )
     prompt_en_text = apply_protected_placeholders(en_text, placeholder_pairs)
     prompt_translated_text = apply_protected_placeholders(
-        translated_text, placeholder_pairs
+        translated_text, placeholder_pairs, case_sensitive=True
     )
     prompt_en_text_block = build_prompt_text_block(
         "Original English Text", en_text, prompt_en_text
@@ -2841,7 +3064,7 @@ def review_source_word_leak_with_ai(
     )
     prompt_en_text = apply_protected_placeholders(en_text, placeholder_pairs)
     prompt_translated_text = apply_protected_placeholders(
-        translated_text, placeholder_pairs
+        translated_text, placeholder_pairs, case_sensitive=True
     )
     prompt_en_text_block = build_prompt_text_block(
         "Original English Text", en_text, prompt_en_text
@@ -2896,6 +3119,7 @@ LOCKED PLACEHOLDERS JSON:
             plain_text=True,
             request_timeout_sec=API_REPAIR_REQUEST_TIMEOUT_SEC,
             timeout_retry_count=API_REPAIR_TIMEOUT_RETRY_COUNT,
+            completion_source_text=en_text,
         )
         if not result_text:
             last_error = "source-word leak review returned empty response"
@@ -3339,6 +3563,131 @@ def get_known_leading_phrase_requirement(en_text, lang_code):
     return None
 
 
+def extract_unicode_phrase_words(text):
+    if not isinstance(text, str) or not text:
+        return []
+
+    words = []
+    current_word = []
+    for char in unicodedata.normalize("NFC", text).casefold():
+        if unicodedata.category(char).startswith(("L", "M")):
+            current_word.append(char)
+            continue
+        if current_word:
+            words.append("".join(current_word))
+            current_word = []
+    if current_word:
+        words.append("".join(current_word))
+    return words
+
+
+def get_common_prefix_char_count(left_text, right_text):
+    prefix_count = 0
+    for left_char, right_char in zip(left_text, right_text):
+        if left_char != right_char:
+            break
+        prefix_count += 1
+    return prefix_count
+
+
+def known_phrase_words_have_inflection_shape(known_word, candidate_word):
+    if known_word == candidate_word:
+        return True
+    if len(known_word) <= 2 and len(candidate_word) <= 2:
+        return True
+
+    word_similarity = difflib.SequenceMatcher(
+        None,
+        known_word,
+        candidate_word,
+        autojunk=False,
+    ).ratio()
+    if word_similarity < KNOWN_PHRASE_INFLECTION_MIN_WORD_SIMILARITY:
+        return False
+
+    prefix_pairs = [(known_word, candidate_word)]
+    if known_word and candidate_word and known_word[0] == candidate_word[0]:
+        if len(known_word) > 1:
+            prefix_pairs.append(
+                (known_word[0] + known_word[2:], candidate_word)
+            )
+        if len(candidate_word) > 1:
+            prefix_pairs.append(
+                (known_word, candidate_word[0] + candidate_word[2:])
+            )
+
+    for left_word, right_word in prefix_pairs:
+        shorter_length = min(len(left_word), len(right_word))
+        if shorter_length <= 0:
+            continue
+        required_prefix_chars = min(
+            KNOWN_PHRASE_INFLECTION_MIN_WORD_PREFIX_CHARS,
+            shorter_length,
+        )
+        common_prefix_chars = get_common_prefix_char_count(left_word, right_word)
+        if (
+            common_prefix_chars >= required_prefix_chars
+            and common_prefix_chars / shorter_length
+            >= KNOWN_PHRASE_INFLECTION_MIN_WORD_PREFIX_RATIO
+        ):
+            return True
+
+    return False
+
+
+def contains_known_phrase_or_inflection(translated_text, known_translation):
+    if not isinstance(translated_text, str) or not isinstance(known_translation, str):
+        return False
+
+    normalized_translation = unicodedata.normalize("NFC", translated_text).casefold()
+    normalized_known_translation = unicodedata.normalize(
+        "NFC", known_translation
+    ).casefold()
+    if not normalized_known_translation:
+        return False
+    if phrase_is_contained_with_boundaries(
+        normalized_known_translation, normalized_translation
+    ):
+        return True
+
+    known_words = extract_unicode_phrase_words(normalized_known_translation)
+    translated_words = extract_unicode_phrase_words(normalized_translation)
+    if not known_words or len(translated_words) < len(known_words):
+        return False
+
+    known_char_count = sum(len(word) for word in known_words)
+    if known_char_count < KNOWN_PHRASE_INFLECTION_MIN_CHAR_COUNT:
+        return False
+
+    similarity_threshold = (
+        KNOWN_PHRASE_SINGLE_WORD_INFLECTION_MIN_SIMILARITY
+        if len(known_words) == 1
+        else KNOWN_PHRASE_INFLECTION_MIN_SIMILARITY
+    )
+    normalized_known_words = " ".join(known_words)
+    window_word_count = len(known_words)
+    for start_index in range(len(translated_words) - window_word_count + 1):
+        candidate_words = translated_words[
+            start_index : start_index + window_word_count
+        ]
+        if not all(
+            known_phrase_words_have_inflection_shape(known_word, candidate_word)
+            for known_word, candidate_word in zip(known_words, candidate_words)
+        ):
+            continue
+        candidate = " ".join(candidate_words)
+        similarity = difflib.SequenceMatcher(
+            None,
+            normalized_known_words,
+            candidate,
+            autojunk=False,
+        ).ratio()
+        if similarity >= similarity_threshold:
+            return True
+
+    return False
+
+
 def get_missing_known_phrase_requirements(en_text, translated_text, lang_code):
     if (
         not isinstance(en_text, str)
@@ -3354,7 +3703,6 @@ def get_missing_known_phrase_requirements(en_text, translated_text, lang_code):
 
     visible_translation = build_visible_prompt_text(translated_text)
     stripped_visible_translation = visible_translation.lstrip()
-    visible_translation_cf = visible_translation.casefold()
     missing = []
 
     for requirement in requirements:
@@ -3369,7 +3717,9 @@ def get_missing_known_phrase_requirements(en_text, translated_text, lang_code):
                 missing.append(requirement)
             continue
 
-        if known_translation.casefold() not in visible_translation_cf:
+        if not contains_known_phrase_or_inflection(
+            visible_translation, known_translation
+        ):
             missing.append(requirement)
 
     return missing
@@ -4736,10 +5086,7 @@ def apply_standard_country_translations(key_name, en_text, target_langs):
                 updated_langs[lang_code] = target_langs.get(lang_code, "")
         else:
             for lang_code in sorted(catalog_updates):
-                message = messages.get(lang_code, "")
-                print(
-                    f"  -> [{lang_code}] Successfully added/updated from country catalog: {message}"
-                )
+                print_language_success(lang_code, "from country catalog")
             made_any_change = any(
                 message.startswith("OK:") for message in messages.values()
             )
@@ -5391,7 +5738,12 @@ def detect_unexpected_script_mixture(
     cleaned_text = PLACEHOLDER_TOKEN_PATTERN.sub(" ", cleaned_text)
     cleaned_text = PERCENT_TEMPLATE_TOKEN_PATTERN.sub(" ", cleaned_text)
     cleaned_text = re.sub(r"__LOCKED_TERM_\d+__", " ", cleaned_text)
+    cleaned_text = build_visible_prompt_text(cleaned_text)
 
+    for literal in extract_source_ascii_literals_to_ignore_for_script_detection(en_text):
+        cleaned_text = re.sub(
+            re.escape(literal), " ", cleaned_text, flags=re.IGNORECASE
+        )
     if placeholder_pairs:
         for _, term in placeholder_pairs:
             cleaned_text = re.sub(
@@ -5400,11 +5752,6 @@ def detect_unexpected_script_mixture(
                 cleaned_text,
                 flags=re.IGNORECASE,
             )
-
-    for literal in extract_source_ascii_literals_to_ignore_for_script_detection(en_text):
-        cleaned_text = re.sub(
-            re.escape(literal), " ", cleaned_text, flags=re.IGNORECASE
-        )
     cleaned_text = remove_preserved_source_literals_for_detection(
         cleaned_text, en_text
     )
@@ -5412,7 +5759,6 @@ def detect_unexpected_script_mixture(
         cleaned_text, en_text
     )
 
-    cleaned_text = build_visible_prompt_text(cleaned_text)
     actual_scripts = extract_script_families(cleaned_text, allowed_scripts)
     unexpected_scripts = sorted(
         script for script in actual_scripts if script not in allowed_scripts
@@ -5437,17 +5783,33 @@ def strip_small_unexpected_script_artifacts(
     if not allowed_scripts:
         return translated_text
 
-    protected_tokens = {
-        term.casefold()
+    protected_literals = {
+        term
         for _, term in (placeholder_pairs or [])
         if isinstance(term, str) and term
     }
-    protected_tokens.update(
-        literal.casefold()
+    protected_literals.update(
+        literal
         for literal in extract_source_ascii_literals_to_ignore_for_script_detection(
             en_text
         )
     )
+    protected_tokens = {literal.casefold() for literal in protected_literals}
+    def collect_protected_literal_spans(text):
+        spans = []
+        for literal in sorted(
+            protected_literals, key=lambda item: (-len(item), item.casefold())
+        ):
+            literal_pattern = compile_source_literal_with_flexible_backslashes(
+                literal
+            )
+            spans.extend(
+                (match.start(), match.end())
+                for match in literal_pattern.finditer(text)
+            )
+        return spans
+
+    protected_spans = collect_protected_literal_spans(translated_text)
 
     repaired_parts = []
     index = 0
@@ -5468,7 +5830,9 @@ def strip_small_unexpected_script_artifacts(
             end += 1
 
         token = translated_text[index:end]
-        if token.casefold() in protected_tokens:
+        if token.casefold() in protected_tokens or span_is_inside_any(
+            index, end, protected_spans
+        ):
             repaired_parts.append(token)
             index = end
             continue
@@ -5515,8 +5879,26 @@ def strip_small_unexpected_script_artifacts(
         index = end
 
     repaired = "".join(repaired_parts)
-    repaired = re.sub(r"[ \t]{2,}", " ", repaired)
-    repaired = re.sub(r" +([,.;:!?])", r"\1", repaired)
+    repaired_spans = collect_protected_literal_spans(repaired)
+    repaired = re.sub(
+        r"[ \t]{2,}",
+        lambda match: (
+            match.group(0)
+            if span_is_inside_any(match.start(), match.end(), repaired_spans)
+            else " "
+        ),
+        repaired,
+    )
+    repaired_spans = collect_protected_literal_spans(repaired)
+    repaired = re.sub(
+        r" +([,.;:!?])",
+        lambda match: (
+            match.group(0)
+            if span_is_inside_any(match.start(), match.end(), repaired_spans)
+            else match.group(1)
+        ),
+        repaired,
+    )
     return repaired.strip()
 
 
@@ -6223,17 +6605,6 @@ def is_strong_product_anchor_token(token):
     )
 
 
-def is_translatable_title_prefix_token(token):
-    if not isinstance(token, str) or not token:
-        return False
-    lowered = token.casefold()
-    return (
-        lowered in TRANSLATABLE_PROTECTED_TITLE_PREFIX_WORDS
-        or lowered in GENERIC_SOURCE_PHRASE_EDGE_STOPWORDS
-        or lowered in ENGLISH_LEAK_STOPWORDS
-    )
-
-
 def extract_source_protected_title_terms(en_text):
     terms = set()
     if not isinstance(en_text, str) or not en_text:
@@ -6260,10 +6631,30 @@ def extract_source_protected_title_terms(en_text):
             -1,
         )
         if first_strong_anchor_index > 0:
-            leading_tokens = tokens[:first_strong_anchor_index]
-            if all(is_translatable_title_prefix_token(token) for token in leading_tokens):
-                matches = matches[first_strong_anchor_index:]
-                tokens = tokens[first_strong_anchor_index:]
+            protected_start_index = first_strong_anchor_index
+            while (
+                protected_start_index > 0
+                and should_protect_token(tokens[protected_start_index - 1])
+            ):
+                protected_start_index -= 1
+            matches = matches[protected_start_index:]
+            tokens = tokens[protected_start_index:]
+
+        last_unprotected_bridge_index = next(
+            (
+                idx
+                for idx in range(len(tokens) - 2, 0, -1)
+                if not should_protect_token(tokens[idx])
+                and any(should_protect_token(token) for token in tokens[idx + 1 :])
+                and any(
+                    is_strong_product_anchor_token(token) for token in tokens[:idx]
+                )
+            ),
+            -1,
+        )
+        if last_unprotected_bridge_index >= 0:
+            matches = matches[last_unprotected_bridge_index + 1 :]
+            tokens = tokens[last_unprotected_bridge_index + 1 :]
 
         while (
             len(matches) > 1
@@ -6334,6 +6725,30 @@ def extract_source_protected_title_terms(en_text):
     return sorted(terms, key=lambda item: (-len(item), item.casefold()))
 
 
+def extract_source_regex_line_literals(en_text):
+    if not isinstance(en_text, str) or not en_text:
+        return []
+
+    literals = set()
+    for source_text in (en_text, build_visible_prompt_text(en_text)):
+        for line in source_text.splitlines():
+            stripped_line = line.strip()
+            if (
+                stripped_line.startswith("^")
+                and stripped_line.endswith("$")
+                and re.search(r"[\\()[\]{}*+?|]", stripped_line)
+            ):
+                literals.add(stripped_line)
+    return sorted(literals, key=lambda item: (-len(item), item.casefold()))
+
+
+def compile_source_literal_with_flexible_backslashes(literal):
+    pattern = "".join(
+        r"\\+" if char == "\\" else re.escape(char) for char in literal
+    )
+    return re.compile(pattern, flags=re.IGNORECASE)
+
+
 def extract_source_ascii_literals_to_ignore_for_script_detection(en_text):
     literals = set()
     if not isinstance(en_text, str) or not en_text:
@@ -6350,6 +6765,20 @@ def extract_source_ascii_literals_to_ignore_for_script_detection(en_text):
         literals.add(variable)
     for term in extract_source_platform_version_terms(en_text):
         literals.add(term)
+    for escape_sequence in extract_source_escape_sequence_examples(en_text):
+        literals.add(escape_sequence)
+    for match in re.finditer(
+        r"(?<![A-Za-z0-9_])(?=[A-Za-z0-9_.:+-]*[A-Za-z])(?=[A-Za-z0-9_.:+-]*\d)[A-Za-z0-9]+(?:[-.:+_][A-Za-z0-9]+)*(?![A-Za-z0-9_])",
+        visible_text,
+    ):
+        literals.add(match.group(0))
+    for match in re.finditer(
+        r"(?<![A-Za-z0-9_])[A-Za-z][A-Za-z0-9]*(?::[A-Za-z][A-Za-z0-9]*)+(?![A-Za-z0-9_])",
+        visible_text,
+    ):
+        literals.add(match.group(0))
+    for literal in extract_source_regex_line_literals(en_text):
+        literals.add(literal)
     for start, end in collect_parenthesized_title_list_item_spans(visible_text):
         literal = normalize_candidate_source_phrase(visible_text[start:end])
         if literal:
@@ -6429,17 +6858,23 @@ def build_protected_placeholders(en_text, lang_dict):
     return placeholder_pairs
 
 
-def apply_protected_placeholders(text, placeholder_pairs):
+def apply_protected_placeholders(text, placeholder_pairs, case_sensitive=False):
     if not isinstance(text, str) or not placeholder_pairs:
         return text
 
     masked = text
     for placeholder, term in placeholder_pairs:
-        pattern = re.compile(
-            rf"(?<!{NON_WORD_BOUNDARY_PATTERN}){re.escape(term)}(?!{NON_WORD_BOUNDARY_PATTERN})",
-            re.IGNORECASE,
+        pattern = compile_protected_term_pattern(term, case_sensitive=case_sensitive)
+        masked = pattern.sub(
+            lambda match, replacement=placeholder, protected_term=term: (
+                replacement
+                if protected_term_match_has_valid_boundaries(
+                    masked, match, protected_term
+                )
+                else match.group(0)
+            ),
+            masked,
         )
-        masked = pattern.sub(placeholder, masked)
 
     return masked
 
@@ -6474,7 +6909,7 @@ def normalize_locked_placeholder_ascii_word_boundaries(text):
         return text
 
     normalized = re.sub(
-        r"(?<=[A-Za-z0-9_])(__LOCKED_TERM_\d+__)",
+        r"(?<!\\[nr])(?<=[A-Za-z0-9_])(__LOCKED_TERM_\d+__)",
         r" \1",
         text,
     )
@@ -6491,49 +6926,61 @@ def normalize_protected_term_ascii_word_boundaries(text, placeholder_pairs):
         return text
 
     normalized = text
-    protected_terms = [
-        term
-        for _, term in (placeholder_pairs or [])
-        if isinstance(term, str) and term and re.search(r"[A-Za-z0-9_]", term)
-    ]
-    protected_terms = sorted(set(protected_terms), key=lambda item: (-len(item), item))
+    protected_terms = sorted(
+        {
+            term
+            for _, term in (placeholder_pairs or [])
+            if isinstance(term, str) and term and re.search(r"[A-Za-z0-9_]", term)
+        },
+        key=lambda item: (-len(item), item),
+    )
     for term in protected_terms:
-        if not isinstance(term, str) or not term or not re.search(r"[A-Za-z0-9_]", term):
-            continue
         escaped_term = re.escape(term)
         longer_terms = [
             longer_term
             for longer_term in protected_terms
-            if len(longer_term) > len(term)
-            and longer_term.startswith(term)
+            if len(longer_term) > len(term) and term in longer_term
         ]
 
-        def is_inside_longer_term(start):
-            return any(
-                normalized.startswith(longer_term, start)
-                for longer_term in longer_terms
-            )
+        def collect_longer_term_spans():
+            spans = []
+            for longer_term in longer_terms:
+                spans.extend(
+                    (match.start(), match.end())
+                    for match in re.finditer(re.escape(longer_term), normalized)
+                )
+            return spans
+
+        longer_term_spans = collect_longer_term_spans()
 
         def split_before(match):
-            if is_inside_longer_term(match.start(1)):
+            if span_is_inside_any(
+                match.start(1), match.end(1), longer_term_spans
+            ):
                 return match.group(0)
             return " " + match.group(1)
 
-        def split_after(match):
-            if is_inside_longer_term(match.start(1)):
-                return match.group(0)
-            return match.group(1) + " "
-
         normalized = re.sub(
-            rf"(?<=[A-Za-z0-9_])({escaped_term})",
+            rf"(?<!\\[nr])(?<=[A-Za-z0-9_])({escaped_term})",
             split_before,
             normalized,
         )
+
+        longer_term_spans = collect_longer_term_spans()
+
+        def split_after(match):
+            if span_is_inside_any(
+                match.start(1), match.end(1), longer_term_spans
+            ):
+                return match.group(0)
+            return match.group(1) + " "
+
         normalized = re.sub(
             rf"({escaped_term})(?=[A-Za-z0-9_])",
             split_after,
             normalized,
         )
+
     return normalized
 
 
@@ -6586,7 +7033,9 @@ def get_protected_term_count_mismatches(en_text, text, placeholder_pairs):
         if not isinstance(term, str) or not term:
             continue
         expected_count = len(find_protected_term_spans(en_text, term))
-        actual_count = len(find_protected_term_spans(text, term))
+        actual_count = len(
+            find_protected_term_spans(text, term, case_sensitive=True)
+        )
         if expected_count != actual_count:
             mismatches.append((term, expected_count, actual_count))
 
@@ -6612,10 +7061,12 @@ def collapse_adjacent_duplicate_protected_terms(en_text, text, placeholder_pairs
         if expected_count <= 0:
             continue
 
-        while len(find_protected_term_spans(repaired, term)) > expected_count:
+        while (
+            len(find_protected_term_spans(repaired, term, case_sensitive=True))
+            > expected_count
+        ):
             pattern = re.compile(
                 rf"(?<!{NON_WORD_BOUNDARY_PATTERN})({re.escape(term)})([\s\\-_/]+){re.escape(term)}(?!{NON_WORD_BOUNDARY_PATTERN})",
-                re.IGNORECASE,
             )
             repaired_next, count = pattern.subn(r"\1", repaired, count=1)
             if count <= 0 or repaired_next == repaired:
@@ -6669,9 +7120,11 @@ def build_locked_placeholder_count_requirements(prompt_en_text, placeholder_pair
         return ""
 
     count_lines = []
+    placeholder_counts = {}
     for placeholder, _ in placeholder_pairs:
         count = prompt_en_text.count(placeholder)
         if count > 0:
+            placeholder_counts[placeholder] = count
             count_lines.append(
                 f"- `{placeholder}` must appear exactly {count} time(s) in each returned translation line."
             )
@@ -6679,10 +7132,17 @@ def build_locked_placeholder_count_requirements(prompt_en_text, placeholder_pair
     if not count_lines:
         return ""
 
+    count_requirements = "\n".join(count_lines)
+    if len(count_lines) > 12:
+        count_requirements = (
+            "LOCKED PLACEHOLDER COUNT JSON: "
+            + json.dumps(placeholder_counts, ensure_ascii=False)
+        )
+
     return (
         "16. LOCKED PLACEHOLDER COUNT RULE: Preserve each locked placeholder exactly the same number of times as it appears in the ORIGINAL ENGLISH TEXT. "
         "Do not omit locked placeholders and do not insert extra copies.\n"
-        + "\n".join(count_lines[:12])
+        + count_requirements
         + "\n"
         + build_locked_placeholder_occurrence_context_text(
             prompt_en_text, placeholder_pairs
@@ -7647,7 +8107,7 @@ def repair_candidate_text_with_script_rewrite(lang_code, candidate_text, en_text
     language_label = language_name if language_name else f"language code {lang_code}"
     prompt_en_text = apply_protected_placeholders(en_text, placeholder_pairs)
     prompt_candidate_text = apply_protected_placeholders(
-        candidate_text, placeholder_pairs
+        candidate_text, placeholder_pairs, case_sensitive=True
     )
     prompt_en_text_block = build_prompt_text_block(
         "Original English Text", en_text, prompt_en_text
@@ -7722,6 +8182,7 @@ LOCKED PLACEHOLDERS JSON:
         plain_text=True,
         request_timeout_sec=API_REPAIR_REQUEST_TIMEOUT_SEC,
         timeout_retry_count=API_REPAIR_TIMEOUT_RETRY_COUNT,
+        completion_source_text=en_text,
     )
     if not result_text:
         return False, candidate_text, "script rewrite repair returned empty response"
@@ -7856,6 +8317,129 @@ def normalize_doubled_map_escape_sequences(source_text, translated_text):
     return translated_text
 
 
+def build_source_format_literal_patterns(source_text):
+    line_break_escape_literals = {"\\r\\n", "\\n", "\\r", "\\t"}
+    literal_patterns = []
+    for literal in extract_source_ascii_literals_to_ignore_for_script_detection(
+        source_text
+    ):
+        if "\\" not in literal or literal in line_break_escape_literals:
+            continue
+        literal_pattern = compile_source_literal_with_flexible_backslashes(literal)
+        source_match = literal_pattern.search(source_text)
+        source_literal = source_match.group(0) if source_match else literal
+        literal_patterns.append((source_literal, literal_pattern))
+    return literal_patterns
+
+
+def collect_source_format_line_break_matches(source_text, text, literal_patterns=None):
+    if literal_patterns is None:
+        literal_patterns = build_source_format_literal_patterns(source_text)
+
+    protected_spans = []
+    for _, literal_pattern in literal_patterns:
+        protected_spans.extend(
+            (match.start(), match.end())
+            for match in literal_pattern.finditer(text)
+        )
+    return [
+        match
+        for match in re.finditer(r"\\+r\\+n|\\+[nr]|\r\n|\n|\r", text)
+        if not span_is_inside_any(match.start(), match.end(), protected_spans)
+    ]
+
+
+def get_horizontal_whitespace_after_match(text, match):
+    whitespace_match = re.match(r"[ \t]*", text[match.end() :])
+    return whitespace_match.group(0) if whitespace_match else ""
+
+
+def normalize_model_escaped_source_format(source_text, translated_text):
+    if not isinstance(source_text, str) or not isinstance(translated_text, str):
+        return translated_text
+    if not source_text or not translated_text:
+        return translated_text
+
+    literal_patterns = build_source_format_literal_patterns(source_text)
+    source_line_break_matches = collect_source_format_line_break_matches(
+        source_text, source_text, literal_patterns
+    )
+    candidate_line_break_matches = collect_source_format_line_break_matches(
+        source_text, translated_text, literal_patterns
+    )
+
+    candidate_line_break_entries = [
+        (candidate_match, False)
+        for candidate_match in candidate_line_break_matches
+    ]
+    if len(candidate_line_break_matches) < len(source_line_break_matches):
+        protected_spans = []
+        for _, literal_pattern in literal_patterns:
+            protected_spans.extend(
+                (match.start(), match.end())
+                for match in literal_pattern.finditer(translated_text)
+            )
+
+        incomplete_adjacent_line_break_pattern = re.compile(
+            r"\\+(?=[^\W\d_])(?![nr])"
+        )
+        candidate_line_break_entries = []
+        for candidate_match in candidate_line_break_matches:
+            candidate_line_break_entries.append((candidate_match, False))
+            incomplete_match = incomplete_adjacent_line_break_pattern.match(
+                translated_text, candidate_match.end()
+            )
+            if incomplete_match and not span_is_inside_any(
+                incomplete_match.start(), incomplete_match.end(), protected_spans
+            ):
+                candidate_line_break_entries.append((incomplete_match, True))
+
+    can_normalize_line_breaks = source_line_break_matches and len(
+        candidate_line_break_entries
+    ) == len(source_line_break_matches)
+    if can_normalize_line_breaks:
+        for entry_index, (_, is_incomplete_adjacent_line_break) in enumerate(
+            candidate_line_break_entries
+        ):
+            if not is_incomplete_adjacent_line_break:
+                continue
+            source_match = source_line_break_matches[entry_index]
+            if (
+                entry_index == 0
+                or source_match.start()
+                != source_line_break_matches[entry_index - 1].end()
+                or source_text.startswith("\\", source_match.end())
+            ):
+                can_normalize_line_breaks = False
+                break
+
+    if can_normalize_line_breaks:
+        rebuilt_parts = []
+        cursor = 0
+        for (candidate_match, _), source_match in zip(
+            candidate_line_break_entries, source_line_break_matches
+        ):
+            rebuilt_parts.append(translated_text[cursor : candidate_match.start()])
+            rebuilt_parts.append(source_match.group(0))
+            source_whitespace = get_horizontal_whitespace_after_match(
+                source_text, source_match
+            )
+            candidate_whitespace = get_horizontal_whitespace_after_match(
+                translated_text, candidate_match
+            )
+            rebuilt_parts.append(source_whitespace)
+            cursor = candidate_match.end() + len(candidate_whitespace)
+        rebuilt_parts.append(translated_text[cursor:])
+        translated_text = "".join(rebuilt_parts)
+
+    for source_literal, literal_pattern in literal_patterns:
+        translated_text = literal_pattern.sub(
+            lambda _match, replacement=source_literal: replacement,
+            translated_text,
+        )
+    return translated_text
+
+
 def unwrap_single_quoted_container(value):
     if not isinstance(value, str):
         return ""
@@ -7876,6 +8460,7 @@ def cleanup_single_translation_candidate_value(source_text, value):
     if len(cleaned) >= 2 and cleaned[0] == cleaned[-1] and cleaned[0] in ('"', "'"):
         cleaned = cleaned[1:-1].strip()
     cleaned = cleaned.replace("\\t", "	").replace('\\"', '"')
+    cleaned = normalize_model_escaped_source_format(source_text, cleaned)
     cleaned = normalize_doubled_map_escape_sequences(source_text, cleaned)
     cleaned = normalize_placeholder_quote_style(source_text, cleaned)
     return cleaned.strip()
@@ -8337,7 +8922,12 @@ so\tP1\tTranslated phrase here
 sq\tP1\tTranslated phrase here
 so\tP2\tAnother translated phrase here
 """
-        result_text = call_active_api(prompt, plain_text=True)
+        result_text = call_active_api(
+            prompt,
+            plain_text=True,
+            completion_source_text="\n".join(attempt_phrase_id_map.values()),
+            completion_target_count=len(attempt_target_language_map),
+        )
         if not result_text:
             last_error = "multi-language phrase batch request returned empty response"
             continue
@@ -8485,7 +9075,11 @@ Response format example:
 P1\tTranslated phrase here
 P2\tTranslated phrase here
 """
-        result_text = call_active_api(prompt, plain_text=True)
+        result_text = call_active_api(
+            prompt,
+            plain_text=True,
+            completion_source_text="\n".join(phrase_id_map.values()),
+        )
         if not result_text:
             last_error = "phrase batch translation request returned empty response"
             continue
@@ -8595,7 +9189,11 @@ Rules:
 7. Do NOT append pronunciation, transliteration, romanization, or glosses in parentheses.
 {script_rule}{source_word_translation_rule}{retry_guidance}{example_block}{language_specific_requirements}
 """
-        result_text = call_active_api(prompt, plain_text=True)
+        result_text = call_active_api(
+            prompt,
+            plain_text=True,
+            completion_source_text=source_phrase,
+        )
         if not result_text:
             last_error = "phrase translation request returned empty response"
             continue
@@ -8658,17 +9256,46 @@ def repair_candidate_text_in_memory(lang_code, candidate_text, en_text):
             "no leaked source phrase or word found for phrase-only repair",
         )
 
-    repaired_text = candidate_text
+    placeholder_pairs = build_protected_placeholders(
+        en_text, {lang_code: candidate_text}
+    )
+    prompt_en_text = apply_protected_placeholders(en_text, placeholder_pairs)
+    repaired_text = apply_protected_placeholders(
+        candidate_text, placeholder_pairs, case_sensitive=True
+    )
     repaired_any = False
     protected_adjacent_phrases = {
         phrase.casefold()
         for phrase in extract_placeholder_adjacent_translatable_source_phrases(en_text)
     }
 
+    repair_phrases = [
+        phrase
+        for phrase in leaked_phrases
+        if phrase.casefold() not in protected_adjacent_phrases
+    ]
+    repair_phrases.extend(
+        word
+        for word in leaked_words
+        if not any(word.casefold() == phrase.casefold() for phrase in leaked_phrases)
+    )
+    batch_translations = translate_ui_phrases_for_language(
+        lang_code, repair_phrases
+    )
+    normalized_batch_translations = {
+        source_phrase.strip().casefold(): translated_phrase
+        for source_phrase, translated_phrase in batch_translations.items()
+        if isinstance(source_phrase, str)
+    }
+
     for phrase in leaked_phrases:
         if phrase.casefold() in protected_adjacent_phrases:
             continue
-        translated_phrase = translate_ui_phrase_for_language(lang_code, phrase)
+        translated_phrase = normalized_batch_translations.get(
+            phrase.strip().casefold()
+        )
+        if not translated_phrase:
+            translated_phrase = translate_ui_phrase_for_language(lang_code, phrase)
         if not translated_phrase:
             return (
                 False,
@@ -8686,7 +9313,9 @@ def repair_candidate_text_in_memory(lang_code, candidate_text, en_text):
     for word in leaked_words:
         if any(word.casefold() == phrase.casefold() for phrase in leaked_phrases):
             continue
-        translated_word = translate_ui_phrase_for_language(lang_code, word)
+        translated_word = normalized_batch_translations.get(word.strip().casefold())
+        if not translated_word:
+            translated_word = translate_ui_phrase_for_language(lang_code, word)
         if not translated_word:
             continue
         repaired_text, changed = replace_source_fragment_case_insensitive(
@@ -8694,16 +9323,17 @@ def repair_candidate_text_in_memory(lang_code, candidate_text, en_text):
         )
         repaired_any = repaired_any or changed
 
-    if not repaired_any or repaired_text == candidate_text:
+    if not repaired_any:
         return (
             False,
             candidate_text,
             "phrase-only repair could not safely replace leaked source fragments",
         )
 
-    placeholder_pairs = build_protected_placeholders(
-        en_text, {lang_code: repaired_text}
+    repaired_text = restore_protected_placeholders(
+        repaired_text, placeholder_pairs, prompt_en_text
     )
+    repaired_text = normalize_doubled_map_escape_sequences(en_text, repaired_text)
     cleaned_text = cleanup_translated_text(
         en_text, repaired_text, placeholder_pairs, lang_code
     )
@@ -8736,7 +9366,7 @@ def repair_candidate_text_with_known_phrase_rewrite(
     )
     prompt_en_text = apply_protected_placeholders(en_text, placeholder_pairs)
     prompt_candidate_text = apply_protected_placeholders(
-        candidate_text, placeholder_pairs
+        candidate_text, placeholder_pairs, case_sensitive=True
     )
     prompt_en_text_block = build_prompt_text_block(
         "Original English Text", en_text, prompt_en_text
@@ -8789,6 +9419,7 @@ LOCKED PLACEHOLDERS JSON:
         plain_text=True,
         request_timeout_sec=API_REPAIR_REQUEST_TIMEOUT_SEC,
         timeout_retry_count=API_REPAIR_TIMEOUT_RETRY_COUNT,
+        completion_source_text=en_text,
     )
     if not result_text:
         return False, candidate_text, "known-phrase rewrite repair returned empty response"
@@ -8851,7 +9482,7 @@ def repair_candidate_text_with_targeted_rewrite(lang_code, candidate_text, en_te
     )
     prompt_en_text = apply_protected_placeholders(en_text, placeholder_pairs)
     prompt_candidate_text = apply_protected_placeholders(
-        candidate_text, placeholder_pairs
+        candidate_text, placeholder_pairs, case_sensitive=True
     )
     prompt_en_text_block = build_prompt_text_block(
         "Original English Text", en_text, prompt_en_text
@@ -8927,6 +9558,7 @@ LOCKED PLACEHOLDERS JSON:
         plain_text=True,
         request_timeout_sec=API_REPAIR_REQUEST_TIMEOUT_SEC,
         timeout_retry_count=API_REPAIR_TIMEOUT_RETRY_COUNT,
+        completion_source_text=en_text,
     )
     if not result_text:
         return False, candidate_text, "targeted rewrite repair returned empty response"
@@ -9074,7 +9706,18 @@ def review_source_word_validation_failure(
         lang_code, en_text, cleaned_text, leaked_source_words
     )
     if leak_ok:
-        return True, reviewed_text, ""
+        reviewed_placeholders = build_protected_placeholders(
+            en_text, {lang_code: reviewed_text}
+        )
+        reviewed_cleaned = cleanup_translated_text(
+            en_text, reviewed_text, reviewed_placeholders, lang_code
+        )
+        reviewed_valid, reviewed_validation_error = validate_translation_text(
+            en_text, reviewed_cleaned, reviewed_placeholders, lang_code
+        )
+        if reviewed_valid:
+            return True, reviewed_cleaned, ""
+        return False, cleaned_text, reviewed_validation_error or validation_error
 
     if isinstance(reviewed_text, str) and reviewed_text.strip() and reviewed_text != cleaned_text:
         reviewed_placeholders = build_protected_placeholders(
@@ -9888,6 +10531,43 @@ def validate_source_numeric_literals(en_text, translated_text):
     return True, ""
 
 
+def validate_source_format_literals(en_text, translated_text):
+    if not isinstance(en_text, str) or not isinstance(translated_text, str):
+        return False, "translation is not a string"
+
+    literal_patterns = build_source_format_literal_patterns(en_text)
+    source_line_break_matches = collect_source_format_line_break_matches(
+        en_text, en_text, literal_patterns
+    )
+    translated_line_break_matches = collect_source_format_line_break_matches(
+        en_text, translated_text, literal_patterns
+    )
+    source_line_breaks = [match.group(0) for match in source_line_break_matches]
+    translated_line_breaks = [
+        match.group(0) for match in translated_line_break_matches
+    ]
+    if translated_line_breaks != source_line_breaks:
+        return False, "translation did not preserve source line break structure"
+    for source_match, translated_match in zip(
+        source_line_break_matches, translated_line_break_matches
+    ):
+        if get_horizontal_whitespace_after_match(
+            en_text, source_match
+        ) != get_horizontal_whitespace_after_match(
+            translated_text, translated_match
+        ):
+            return False, "translation did not preserve source line break indentation"
+
+    translated_visible_lines = set(translated_text.splitlines())
+    translated_visible_lines.update(
+        build_visible_prompt_text(translated_text).splitlines()
+    )
+    for literal in extract_source_regex_line_literals(en_text):
+        if literal not in translated_visible_lines:
+            return False, "translation did not preserve source regex literal exactly"
+    return True, ""
+
+
 def validate_translation_text(
     en_text,
     translated_text,
@@ -9982,6 +10662,12 @@ def validate_translation_text(
             False,
             f"placeholder sequence mismatch (expected {expected_placeholders}, got {actual_placeholders})",
         )
+
+    source_format_ok, source_format_message = validate_source_format_literals(
+        en_text, translated_text
+    )
+    if not source_format_ok:
+        return False, source_format_message
 
     if placeholder_pairs and not all_protected_terms_preserved(
         translated_text, placeholder_pairs
@@ -10773,18 +11459,6 @@ def has_meaningful_translation_text(raw_text):
     return not is_whitespace_only(decoded_text)
 
 
-def fill_missing_translations_with_english(entries, languages):
-    for entry in entries:
-        english_text = entry["translations"].get("en")
-        if english_text is None:
-            continue
-        for lang_code in languages:
-            if lang_code == "en":
-                continue
-            if lang_code not in entry["translations"] or is_whitespace_only(entry["translations"][lang_code]):
-                entry["translations"][lang_code] = english_text
-
-
 def validate_finalized_entries(entries, languages):
     for entry in entries:
         english_text = entry["translations"].get("en")
@@ -10809,74 +11483,174 @@ def validate_finalized_entries(entries, languages):
                 )
 
 
-def fnv1a_hash(value_text):
-    hash_value = 2166136261
-    for byte_value in value_text.encode("utf-8"):
-        hash_value ^= byte_value
-        hash_value = (hash_value * 16777619) & 0xFFFFFFFF
-    return hash_value
+TRANSLATION_PACKAGE_MAGIC = b"EMTR"
+TRANSLATION_PACKAGE_VERSION = 1
+TRANSLATION_PACKAGE_INVALID_OFFSET = 0xFFFFFFFF
+TRANSLATION_PACKAGE_HEADER_FORMAT = "<IHHIIIIIIIIII"
+TRANSLATION_PACKAGE_LANGUAGE_RECORD_FORMAT = "<IIII"
 
 
-def next_power_of_two(value):
-    if value <= 1:
-        return 1
-    result = 1
-    while result < value:
-        result <<= 1
-    return result
+def append_alignment_padding(buffer, alignment=4):
+    padding_size = (-len(buffer)) % alignment
+    if padding_size:
+        buffer.extend(b"\0" * padding_size)
 
 
-def build_generated_tables(entries, languages):
-    language_index = {
-        lang_code: index for index, lang_code in enumerate(languages)
-    }
-    values = []
-    first_indexes = {}
+def calculate_language_registry_crc32(languages):
+    registry_data = bytearray()
+    for lang_code in languages:
+        registry_data.extend(lang_code.encode("ascii"))
+        registry_data.append(0)
+    return zlib.crc32(registry_data) & 0xFFFFFFFF
+
+
+def utf16_sort_key(value_text):
+    encoded_value = value_text.encode("utf-16-le", errors="surrogatepass")
+    return tuple(
+        struct.unpack_from("<H", encoded_value, offset)[0]
+        for offset in range(0, len(encoded_value), 2)
+    )
+
+
+def normalize_cpp_string_literal_runtime_text(value_text):
+    output_parts = []
+    index = 0
+    while index < len(value_text):
+        current_char = value_text[index]
+        if current_char != "\0":
+            output_parts.append(current_char)
+            index += 1
+            continue
+
+        octal_digits = []
+        digit_index = index + 1
+        while digit_index < len(value_text) and len(octal_digits) < 2 and value_text[digit_index] in "01234567":
+            octal_digits.append(value_text[digit_index])
+            digit_index += 1
+        if octal_digits:
+            output_parts.append(chr(int("0" + "".join(octal_digits), 8)))
+            index = digit_index
+        else:
+            output_parts.append(current_char)
+            index += 1
+    return "".join(output_parts)
+
+
+def build_translation_language_block(entries, lang_code):
+    key_count = len(entries)
+    offsets_size = key_count * 4
+    string_pool = bytearray()
+    string_offsets = {}
+    offsets = []
 
     for entry in entries:
-        first_index = 0xFFFFFFFF
-        previous_index = 0xFFFFFFFF
-        for lang_code in languages:
-            if lang_code not in entry["translations"]:
+        english_source = entry["translations"]["en"]
+        english_text = normalize_cpp_string_literal_runtime_text(english_source)
+        if lang_code == "en":
+            translated_text = english_text
+        else:
+            translated_source = entry["translations"].get(lang_code)
+            if is_whitespace_only(translated_source):
+                offsets.append(TRANSLATION_PACKAGE_INVALID_OFFSET)
                 continue
-            value_index = len(values)
-            values.append(
-                {
-                    "language": language_index[lang_code],
-                    "next": 0xFFFFFFFF,
-                    "text": entry["translations"][lang_code],
-                }
+            translated_text = normalize_cpp_string_literal_runtime_text(translated_source)
+            if translated_text == english_text:
+                offsets.append(TRANSLATION_PACKAGE_INVALID_OFFSET)
+                continue
+
+        string_offset = string_offsets.get(translated_text)
+        if string_offset is None:
+            string_offset = offsets_size + len(string_pool)
+            string_offsets[translated_text] = string_offset
+            string_pool.extend(translated_text.encode("utf-8"))
+            string_pool.append(0)
+        offsets.append(string_offset)
+
+    block = bytearray()
+    for string_offset in offsets:
+        block.extend(struct.pack("<I", string_offset))
+    block.extend(string_pool)
+    return bytes(block)
+
+
+def build_translation_package(entries, languages):
+    sorted_entries = sorted(entries, key=lambda entry: utf16_sort_key(entry["key"]))
+    header_size = struct.calcsize(TRANSLATION_PACKAGE_HEADER_FORMAT)
+    language_record_size = struct.calcsize(TRANSLATION_PACKAGE_LANGUAGE_RECORD_FORMAT)
+
+    key_strings = bytearray()
+    key_offsets = []
+    for entry in sorted_entries:
+        key_offsets.append(len(key_strings))
+        key_strings.extend(entry["key"].encode("utf-16-le", errors="surrogatepass"))
+        key_strings.extend(b"\0\0")
+
+    compressed_blocks = []
+    for lang_code in languages:
+        uncompressed_block = build_translation_language_block(sorted_entries, lang_code)
+        compressed_blocks.append(
+            {
+                "compressed": zlib.compress(uncompressed_block, 9),
+                "uncompressed_size": len(uncompressed_block),
+                "crc32": zlib.crc32(uncompressed_block) & 0xFFFFFFFF,
+            }
+        )
+
+    package = bytearray(b"\0" * header_size)
+    key_offsets_offset = len(package)
+    for key_offset in key_offsets:
+        package.extend(struct.pack("<I", key_offset))
+
+    key_strings_offset = len(package)
+    package.extend(key_strings)
+    key_strings_size = len(key_strings)
+    append_alignment_padding(package)
+
+    language_records_offset = len(package)
+    package.extend(b"\0" * (len(languages) * language_record_size))
+
+    language_records = []
+    for block in compressed_blocks:
+        append_alignment_padding(package)
+        compressed_offset = len(package)
+        compressed_data = block["compressed"]
+        package.extend(compressed_data)
+        language_records.append(
+            (
+                compressed_offset,
+                len(compressed_data),
+                block["uncompressed_size"],
+                block["crc32"],
             )
-            if previous_index != 0xFFFFFFFF:
-                values[previous_index]["next"] = value_index
-            else:
-                first_index = value_index
-            previous_index = value_index
-        first_indexes[entry["key"]] = first_index
+        )
 
-    bucket_count = next_power_of_two(max(1, len(entries) * 2))
-    bucket_mask = bucket_count - 1
-    buckets = [
-        {"hash": 0, "key": None, "value": 0xFFFFFFFF}
-        for _ in range(bucket_count)
-    ]
+    for index, record in enumerate(language_records):
+        record_offset = language_records_offset + index * language_record_size
+        package[record_offset:record_offset + language_record_size] = struct.pack(
+            TRANSLATION_PACKAGE_LANGUAGE_RECORD_FORMAT, *record
+        )
 
-    for entry in entries:
-        hash_value = fnv1a_hash(entry["key"])
-        position = hash_value & bucket_mask
-        while buckets[position]["key"] is not None:
-            if buckets[position]["key"] == entry["key"]:
-                raise MapParseError(
-                    f"Duplicate key '{entry['key']}' in hash table build"
-                )
-            position = (position + 1) & bucket_mask
-        buckets[position] = {
-            "hash": hash_value,
-            "key": entry["key"],
-            "value": first_indexes[entry["key"]],
-        }
-
-    return {"values": values, "buckets": buckets, "bucket_mask": bucket_mask}
+    total_size = len(package)
+    metadata_end = language_records_offset + len(languages) * language_record_size
+    index_crc32 = zlib.crc32(package[header_size:metadata_end]) & 0xFFFFFFFF
+    magic_value = struct.unpack("<I", TRANSLATION_PACKAGE_MAGIC)[0]
+    package[:header_size] = struct.pack(
+        TRANSLATION_PACKAGE_HEADER_FORMAT,
+        magic_value,
+        TRANSLATION_PACKAGE_VERSION,
+        header_size,
+        total_size,
+        index_crc32,
+        len(sorted_entries),
+        len(languages),
+        0,
+        calculate_language_registry_crc32(languages),
+        key_offsets_offset,
+        key_strings_offset,
+        key_strings_size,
+        language_records_offset,
+    )
+    return bytes(package)
 
 
 def escape_for_cpp_string(value_text):
@@ -10907,91 +11681,63 @@ def escape_for_cpp_string(value_text):
     return "".join(escaped_parts)
 
 
-def build_language_fallback_indexes(languages):
-    fallback_indexes = []
-    for index, lang_code in enumerate(languages):
-        if "-" not in lang_code:
-            fallback_indexes.append(0)
-            continue
-        base_code = lang_code.split("-", 1)[0]
-        fallback_index = 0
-        for search_index, search_lang in enumerate(languages):
-            if search_lang == base_code:
-                fallback_index = search_index
-                break
-        if fallback_index == index:
-            fallback_index = 0
-        fallback_indexes.append(fallback_index)
-    return fallback_indexes
-
-
-def write_translation_data_header(path, tables):
+def write_translation_data_header(path):
+    magic_value = struct.unpack("<I", TRANSLATION_PACKAGE_MAGIC)[0]
+    header_size = struct.calcsize(TRANSLATION_PACKAGE_HEADER_FORMAT)
+    language_record_size = struct.calcsize(TRANSLATION_PACKAGE_LANGUAGE_RECORD_FORMAT)
     lines = [
         "// Auto-generated by ai_translator.py. Do not edit manually.",
         "#pragma once",
         "",
         "#include <cstdint>",
-        "#include <tchar.h>",
-        "#include \"lang_registry.gen.h\"",
         "",
         "namespace Translations",
         "{",
-        f"\tstatic constexpr uint32_t kInvalidIndex = 0xFFFFFFFFu;",
-        f"\tstatic constexpr uint32_t kBucketCount = {len(tables['buckets'])}u;",
-        f"\tstatic constexpr uint32_t kBucketMask = {tables['bucket_mask']}u;",
-        f"\tstatic constexpr uint32_t kValueCount = {len(tables['values'])}u;",
+        f"\tstatic constexpr uint32_t kPackageMagic = 0x{magic_value:08X}u;",
+        f"\tstatic constexpr uint16_t kPackageVersion = {TRANSLATION_PACKAGE_VERSION}u;",
+        f"\tstatic constexpr uint32_t kInvalidOffset = 0x{TRANSLATION_PACKAGE_INVALID_OFFSET:08X}u;",
         "",
-        "\tstruct TranslationValue",
+        "#pragma pack(push, 1)",
+        "\tstruct TranslationPackageHeader",
         "\t{",
-        "\t\tuint16_t language;",
-        "\t\tuint32_t next;",
-        "\t\tLPCTSTR text;",
+        "\t\tuint32_t magic;",
+        "\t\tuint16_t version;",
+        "\t\tuint16_t headerSize;",
+        "\t\tuint32_t totalSize;",
+        "\t\tuint32_t indexCrc32;",
+        "\t\tuint32_t keyCount;",
+        "\t\tuint32_t languageCount;",
+        "\t\tuint32_t defaultLanguage;",
+        "\t\tuint32_t languageRegistryCrc32;",
+        "\t\tuint32_t keyOffsetsOffset;",
+        "\t\tuint32_t keyStringsOffset;",
+        "\t\tuint32_t keyStringsSize;",
+        "\t\tuint32_t languageRecordsOffset;",
         "\t};",
         "",
-        "\tstruct TranslationBucket",
+        "\tstruct TranslationLanguageRecord",
         "\t{",
-        "\t\tuint32_t hash;",
-        "\t\tLPCTSTR key;",
-        "\t\tuint32_t value;",
+        "\t\tuint32_t compressedOffset;",
+        "\t\tuint32_t compressedSize;",
+        "\t\tuint32_t uncompressedSize;",
+        "\t\tuint32_t uncompressedCrc32;",
         "\t};",
+        "#pragma pack(pop)",
         "",
-        "\tstatic const TranslationValue kValues[kValueCount] = {",
+        f"\tstatic_assert(sizeof(TranslationPackageHeader) == {header_size}u, \"Unexpected translation package header size\");",
+        f"\tstatic_assert(sizeof(TranslationLanguageRecord) == {language_record_size}u, \"Unexpected translation language record size\");",
+        "}",
+        "",
     ]
-
-    for index, value in enumerate(tables["values"]):
-        next_value = (
-            "kInvalidIndex"
-            if value["next"] == 0xFFFFFFFF
-            else f"{value['next']}u"
-        )
-        suffix = "," if index + 1 != len(tables["values"]) else ""
-        lines.append(
-            f'\t\t{{ {value["language"]}u, {next_value}, _T("{escape_for_cpp_string(value["text"])}") }}{suffix}'
-        )
-
-    lines.extend(["\t};", "", "\tstatic const TranslationBucket kBuckets[kBucketCount] = {"])
-
-    for index, bucket in enumerate(tables["buckets"]):
-        suffix = "," if index + 1 != len(tables["buckets"]) else ""
-        if bucket["key"] is None:
-            lines.append(f"\t\t{{ 0u, nullptr, kInvalidIndex }}{suffix}")
-        else:
-            value_index = (
-                "kInvalidIndex"
-                if bucket["value"] == 0xFFFFFFFF
-                else f"{bucket['value']}u"
-            )
-            lines.append(
-                f'\t\t{{ {bucket["hash"]}u, _T("{escape_for_cpp_string(bucket["key"])}"), {value_index} }}{suffix}'
-            )
-
-    lines.extend(["\t};", "}", ""])
     payload = ("\r\n".join(lines)).encode("utf-8", errors="surrogateescape")
     write_binary_file_atomically(path, b"\xef\xbb\xbf" + payload)
 
 
+def write_translation_data_binary(path, entries, languages):
+    write_binary_file_atomically(path, build_translation_package(entries, languages))
+
+
 def write_language_registry_header(path, languages):
-    fallback_indexes = build_language_fallback_indexes(languages)
     lines = [
         "// Auto-generated by ai_translator.py. Do not edit manually.",
         "#pragma once",
@@ -11004,11 +11750,11 @@ def write_language_registry_header(path, languages):
         "\tstruct LanguageRecord",
         "\t{",
         "\t\tLPCTSTR code;",
-        "\t\tuint16_t fallback;",
         "\t};",
         "",
         f"\tstatic constexpr uint16_t kLanguageCount = {len(languages)}u;",
         "\tstatic constexpr uint16_t kDefaultLanguage = 0u;",
+        f"\tstatic constexpr uint32_t kLanguageRegistryCrc32 = 0x{calculate_language_registry_crc32(languages):08X}u;",
         "",
         "\tstatic const LanguageRecord kLanguages[kLanguageCount] = {",
     ]
@@ -11016,7 +11762,7 @@ def write_language_registry_header(path, languages):
     for index, lang_code in enumerate(languages):
         suffix = "," if index + 1 != len(languages) else ""
         lines.append(
-            f'\t\t{{ _T("{escape_for_cpp_string(lang_code)}"), {fallback_indexes[index]}u }}{suffix}'
+            f'\t\t{{ _T("{escape_for_cpp_string(lang_code)}") }}{suffix}'
         )
 
     lines.extend(["\t};", "}", ""])
@@ -11173,17 +11919,16 @@ def fix_map_file(map_path):
     write_fixed_map_file(map_path, parsed_map["entries"], languages)
 
 
-def compile_map_to_headers(map_path, data_header_path, registry_header_path):
+def compile_map_to_headers(map_path, data_header_path, registry_header_path, data_binary_path):
     parsed_map = parse_map_file(map_path)
     for entry in parsed_map["entries"]:
         normalize_entry_placeholder_wrappers_against_english(entry)
     languages = build_map_language_list(parsed_map["languages"])
     finalized_entries = finalize_parsed_map_entries(parsed_map)
-    fill_missing_translations_with_english(finalized_entries, languages)
     validate_finalized_entries(finalized_entries, languages)
-    generated_tables = build_generated_tables(finalized_entries, languages)
     write_language_registry_header(registry_header_path, languages)
-    write_translation_data_header(data_header_path, generated_tables)
+    write_translation_data_header(data_header_path)
+    write_translation_data_binary(data_binary_path, finalized_entries, languages)
 
 
 def check_map_file(map_path):
@@ -12008,7 +12753,7 @@ def parse_map_toolkit_arguments(argv):
     import_rc_parser.add_argument("--overwrite", action="store_true")
 
     compile_parser = subparsers.add_parser(
-        "compile", help="Generate C++ headers from translations.map."
+        "compile", help="Generate the embedded translation package from translations.map."
     )
     compile_parser.add_argument("--map", dest="map_path", default=MAP_FILE_PATH)
     compile_parser.add_argument(
@@ -12016,6 +12761,9 @@ def parse_map_toolkit_arguments(argv):
     )
     compile_parser.add_argument(
         "--registry-header", default=DEFAULT_LANGUAGE_REGISTRY_HEADER_PATH
+    )
+    compile_parser.add_argument(
+        "--data-binary", default=DEFAULT_TRANSLATIONS_DATA_BINARY_PATH
     )
 
     check_parser = subparsers.add_parser(
@@ -12412,9 +13160,10 @@ def execute_map_toolkit_action(map_args):
             map_args.map_path,
             map_args.data_header,
             map_args.registry_header,
+            map_args.data_binary,
         )
         print(
-            "OK: Generated translations_data.gen.h and lang_registry.gen.h compatible headers."
+            "OK: Generated translation package, data header, and language registry header."
         )
         return 0
 
@@ -13228,7 +13977,7 @@ def try_fix_language_until_valid(
             key_name, lang_code, latest_text, en_text
         )
         if success:
-            print(f"  -> [{lang_code}] Successfully completed via targeted fix: {msg}")
+            print_language_success(lang_code, "after targeted fix")
             return True, latest_text, msg
 
         print(f"  -> [{lang_code}] Targeted completion fix failed: {msg}")
@@ -13349,9 +14098,7 @@ def try_repair_skipped_candidate_immediately(
         pending_states[lang_code]["text"] = candidate_text
         return False
 
-    print(
-        f"  -> [{lang_code}] Successfully repaired skipped candidate and updated: {repaired_msg}"
-    )
+    print_language_success(lang_code, "after candidate repair")
     if lang_code in pending_states:
         del pending_states[lang_code]
     return True
@@ -13537,9 +14284,7 @@ def process_failed_languages_immediately(
                     key_name, lang_code, candidate_text, en_text
                 )
                 if success:
-                    print(
-                        f"  -> [{lang_code}] Successfully added/updated after immediate retry: {msg}"
-                    )
+                    print_language_success(lang_code, "after retry")
                     made_any_change = True
                     del pending_states[lang_code]
                     continue
@@ -13551,9 +14296,7 @@ def process_failed_languages_immediately(
                     key_name, lang_code, candidate_text, en_text, msg
                 )
                 if focused_success:
-                    print(
-                        f"  -> [{lang_code}] Successfully regenerated and updated: {focused_msg}"
-                    )
+                    print_language_success(lang_code, "after regeneration")
                     made_any_change = True
                     del pending_states[lang_code]
                     continue
@@ -13565,9 +14308,7 @@ def process_failed_languages_immediately(
                         )
                     )
                     if repaired_success:
-                        print(
-                            f"  -> [{lang_code}] Successfully repaired leaked UI phrase and updated: {repaired_msg}"
-                        )
+                        print_language_success(lang_code, "after phrase repair")
                         made_any_change = True
                         del pending_states[lang_code]
                         continue
@@ -13794,7 +14535,7 @@ def complete_key_translations(
                     key_name, lang_code, candidate_text, en_text
                 )
                 if success:
-                    print(f"  -> [{lang_code}] Successfully added/updated: {msg}")
+                    print_language_success(lang_code)
                     made_any_change = True
                     del pending_states[lang_code]
                     continue
@@ -13812,9 +14553,7 @@ def complete_key_translations(
                     key_name, lang_code, candidate_text, en_text, msg
                 )
                 if focused_success:
-                    print(
-                        f"  -> [{lang_code}] Successfully regenerated and updated: {focused_msg}"
-                    )
+                    print_language_success(lang_code, "after regeneration")
                     made_any_change = True
                     del pending_states[lang_code]
                     continue
@@ -13826,9 +14565,7 @@ def complete_key_translations(
                         )
                     )
                     if repaired_success:
-                        print(
-                            f"  -> [{lang_code}] Successfully repaired leaked UI phrase and updated: {repaired_msg}"
-                        )
+                        print_language_success(lang_code, "after phrase repair")
                         made_any_change = True
                         del pending_states[lang_code]
                         continue
@@ -14301,7 +15038,7 @@ def build_prompt_lang_dict(
                 prompt_lang_dict[lang] = ""
                 continue
             prompt_lang_dict[lang] = apply_protected_placeholders(
-                text, placeholder_pairs
+                text, placeholder_pairs, case_sensitive=True
             )
             continue
 
@@ -14315,7 +15052,7 @@ def build_prompt_lang_dict(
             continue
 
         prompt_lang_dict[lang] = apply_protected_placeholders(
-            cleaned_text, placeholder_pairs
+            cleaned_text, placeholder_pairs, case_sensitive=True
         )
 
     return prompt_lang_dict
@@ -14862,6 +15599,67 @@ def calculate_translation_batch_size(en_text):
     return max(1, batch_size)
 
 
+def calculate_adaptive_completion_tokens(
+    source_text, target_count, initial_tokens, max_token_limit, prompt_text=""
+):
+    initial_tokens = max(1, int(initial_tokens))
+    max_token_limit = max(1, int(max_token_limit))
+    current_tokens = min(initial_tokens, max_token_limit)
+    visible_text = (
+        build_visible_prompt_text(source_text)
+        if isinstance(source_text, str)
+        else ""
+    )
+    effective_target_count = max(1, int(target_count))
+    estimated_tokens = (
+        len(visible_text)
+        * effective_target_count
+        * COMPLETION_TOKEN_ESTIMATE_NUMERATOR
+        + COMPLETION_TOKEN_ESTIMATE_DENOMINATOR
+        - 1
+    ) // COMPLETION_TOKEN_ESTIMATE_DENOMINATOR
+
+    protected_term_count = len(extract_protected_terms(source_text))
+    line_count = max(1, len(visible_text.splitlines()))
+    is_complex_source = (
+        protected_term_count >= COMPLETION_TOKEN_COMPLEX_PLACEHOLDER_THRESHOLD
+        or line_count >= COMPLETION_TOKEN_COMPLEX_LINE_THRESHOLD
+    )
+    if is_complex_source:
+        estimated_tokens = (
+            estimated_tokens * COMPLETION_TOKEN_ESTIMATE_NUMERATOR
+            + COMPLETION_TOKEN_ESTIMATE_DENOMINATOR
+            - 1
+        ) // COMPLETION_TOKEN_ESTIMATE_DENOMINATOR
+
+    if isinstance(prompt_text, str) and prompt_text:
+        prompt_estimated_tokens = len(prompt_text)
+        if is_complex_source:
+            prompt_estimated_tokens = (
+                prompt_estimated_tokens * COMPLETION_TOKEN_ESTIMATE_NUMERATOR
+                + COMPLETION_TOKEN_ESTIMATE_DENOMINATOR
+                - 1
+            ) // COMPLETION_TOKEN_ESTIMATE_DENOMINATOR
+            prompt_estimated_tokens += estimated_tokens
+        estimated_tokens = max(estimated_tokens, prompt_estimated_tokens)
+
+    while current_tokens < estimated_tokens and current_tokens < max_token_limit:
+        current_tokens = min(current_tokens * 2, max_token_limit)
+    return current_tokens
+
+
+def get_active_completion_token_defaults(backend_key=None):
+    if backend_key is None:
+        backend_key = resolve_backend_selection()
+    if backend_key == API_BACKEND_LOCAL:
+        return LOCAL_API_MAX_COMPLETION_TOKENS, LOCAL_API_MAX_TOKEN_LIMIT
+    if backend_key == API_BACKEND_GEMINI:
+        return GEMINI_API_MAX_COMPLETION_TOKENS, GEMINI_API_MAX_TOKEN_LIMIT
+    if backend_key == API_BACKEND_DEEPSEEK:
+        return DEEPSEEK_API_MAX_COMPLETION_TOKENS, DEEPSEEK_API_MAX_TOKEN_LIMIT
+    raise RuntimeError(f"Unsupported API backend: {backend_key}")
+
+
 def format_api_retry_attempt(attempt_index, default_max_retry_count, max_retry_count=None):
     effective_max_retry_count = default_max_retry_count if max_retry_count is None else int(max_retry_count)
     if effective_max_retry_count > 0:
@@ -14901,6 +15699,123 @@ def format_deepseek_usage_summary(resp_json):
     return ", ".join(parts)
 
 
+def extract_openai_completion_tokens(resp_json):
+    if not isinstance(resp_json, dict):
+        return None
+    usage = resp_json.get("usage", {})
+    if not isinstance(usage, dict):
+        return None
+    return normalize_completion_token_count(usage.get("completion_tokens"))
+
+
+def extract_gemini_completion_tokens(resp_json):
+    if not isinstance(resp_json, dict):
+        return None
+    usage_metadata = resp_json.get("usageMetadata", {})
+    if not isinstance(usage_metadata, dict):
+        return None
+    return normalize_completion_token_count(
+        usage_metadata.get("candidatesTokenCount")
+    )
+
+
+def iter_sse_json_payloads(response):
+    for raw_line in response:
+        if isinstance(raw_line, bytes):
+            line = raw_line.decode("utf-8", errors="replace")
+        else:
+            line = str(raw_line)
+        line = line.strip()
+        if not line or not line.startswith("data:"):
+            continue
+
+        data_text = line[5:].strip()
+        if data_text == "[DONE]":
+            return
+        try:
+            payload = json.loads(data_text)
+        except Exception:
+            continue
+        if isinstance(payload, dict):
+            yield payload
+
+
+def read_gemini_stream_response(response):
+    content_parts = []
+    finish_reason = None
+    last_payload = {}
+    usage_metadata = None
+    prompt_feedback = None
+    had_candidates = False
+    had_content_parts = False
+    first_generation_time = None
+    last_generation_time = None
+
+    for chunk in iter_sse_json_payloads(response):
+        last_payload = chunk
+        chunk_usage_metadata = chunk.get("usageMetadata")
+        if isinstance(chunk_usage_metadata, dict):
+            usage_metadata = chunk_usage_metadata
+        chunk_prompt_feedback = chunk.get("promptFeedback")
+        if isinstance(chunk_prompt_feedback, dict):
+            prompt_feedback = chunk_prompt_feedback
+
+        candidates = chunk.get("candidates", [])
+        if not candidates or not isinstance(candidates[0], dict):
+            continue
+
+        had_candidates = True
+        candidate = candidates[0]
+        chunk_finish_reason = candidate.get("finishReason")
+        if chunk_finish_reason is not None:
+            finish_reason = chunk_finish_reason
+
+        parts = candidate.get("content", {}).get("parts", [])
+        generated_content = False
+        for part in parts:
+            if not isinstance(part, dict):
+                continue
+            part_text = part.get("text", "")
+            if isinstance(part_text, str):
+                had_content_parts = True
+                if part_text:
+                    content_parts.append(part_text)
+                    generated_content = True
+
+        if generated_content:
+            generation_time = time.perf_counter()
+            if first_generation_time is None:
+                first_generation_time = generation_time
+            last_generation_time = generation_time
+
+    response_payload = dict(last_payload)
+    if usage_metadata is not None:
+        response_payload["usageMetadata"] = usage_metadata
+    if prompt_feedback is not None:
+        response_payload["promptFeedback"] = prompt_feedback
+
+    content = "".join(content_parts)
+    if finish_reason is None:
+        finish_reason = "UNKNOWN"
+    diagnostics = {
+        "visible_content_chars": len(content),
+        "generation_seconds": (
+            last_generation_time - first_generation_time
+            if first_generation_time is not None
+            and last_generation_time is not None
+            else None
+        ),
+    }
+    return (
+        content,
+        finish_reason,
+        response_payload,
+        had_candidates,
+        had_content_parts,
+        diagnostics,
+    )
+
+
 def call_gemini_api(
     api_key,
     model_name,
@@ -14908,23 +15823,28 @@ def call_gemini_api(
     plain_text=False,
     request_timeout_sec=None,
     timeout_retry_count=None,
+    max_completion_tokens=None,
+    max_token_limit=None,
 ):
-    url = GEMINI_API_URL.format(model_name=model_name, api_key=api_key)
+    url_template = GEMINI_API_STREAM_URL if GEMINI_API_STREAM_RESPONSE else GEMINI_API_URL
+    url = url_template.format(model_name=model_name, api_key=api_key)
     headers = {"Content-Type": "application/json"}
 
-    data = {
-        "systemInstruction": {"parts": [{"text": SHARED_API_SYSTEM_PROMPT}]},
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0.1, "response_mime_type": "text/plain"},
-        "safetySettings": [
-            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
-            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
-            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
-            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
-        ],
-    }
-
-    req = urllib.request.Request(url, json.dumps(data).encode("utf-8"), headers)
+    current_max_tokens = (
+        GEMINI_API_MAX_COMPLETION_TOKENS
+        if max_completion_tokens is None
+        else max_completion_tokens
+    )
+    effective_max_token_limit = (
+        max_token_limit
+        if max_token_limit is not None
+        else (
+            GEMINI_API_MAX_TOKEN_LIMIT
+            if max_completion_tokens is None
+            else max_completion_tokens
+        )
+    )
+    current_max_tokens = min(current_max_tokens, effective_max_token_limit)
 
     attempt_index = 0
     while True:
@@ -14940,12 +15860,60 @@ def call_gemini_api(
             if request_timeout_sec is None
             else int(request_timeout_sec)
         )
+        data = {
+            "systemInstruction": {"parts": [{"text": SHARED_API_SYSTEM_PROMPT}]},
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {
+                "temperature": 0.1,
+                "response_mime_type": "text/plain",
+                "maxOutputTokens": current_max_tokens,
+            },
+            "safetySettings": [
+                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+            ],
+        }
+        req = urllib.request.Request(url, json.dumps(data).encode("utf-8"), headers)
         try:
+            call_started_at = time.perf_counter()
             with urllib.request.urlopen(req, timeout=effective_timeout_sec) as response:
-                response_data = response.read().decode("utf-8")
-                resp_json = json.loads(response_data)
-                candidates = resp_json.get("candidates", [])
-                if not candidates:
+                if GEMINI_API_STREAM_RESPONSE:
+                    content, finish_reason, resp_json, had_candidates, had_content_parts, response_diagnostics = read_gemini_stream_response(response)
+                    call_elapsed_seconds = time.perf_counter() - call_started_at
+                else:
+                    response_data = response.read().decode("utf-8")
+                    call_elapsed_seconds = time.perf_counter() - call_started_at
+                    resp_json = json.loads(response_data)
+                    candidates = resp_json.get("candidates", [])
+                    had_candidates = bool(candidates)
+                    if had_candidates:
+                        candidate = candidates[0]
+                        finish_reason = candidate.get("finishReason", "UNKNOWN")
+                        parts = candidate.get("content", {}).get("parts", [])
+                        had_content_parts = bool(parts)
+                        content = parts[0].get("text", "") if parts else ""
+                    else:
+                        finish_reason = "UNKNOWN"
+                        had_content_parts = False
+                        content = ""
+                    response_diagnostics = {
+                        "visible_content_chars": len(content)
+                        if isinstance(content, str)
+                        else 0,
+                        "generation_seconds": None,
+                    }
+
+                generation_seconds = response_diagnostics.get("generation_seconds")
+                if not isinstance(generation_seconds, (int, float)) or generation_seconds <= 0.0:
+                    generation_seconds = call_elapsed_seconds
+                if not had_candidates:
+                    print_model_speed_statistics(
+                        "Gemini API",
+                        extract_gemini_completion_tokens(resp_json),
+                        generation_seconds,
+                    )
                     feedback = resp_json.get("promptFeedback", {})
                     if feedback.get("blockReason") == "PROHIBITED_CONTENT":
                         print(
@@ -14955,18 +15923,42 @@ def call_gemini_api(
                     print(f"API Returned no candidates: {resp_json}")
                     return None
 
-                parts = candidates[0].get("content", {}).get("parts", [])
-                if not parts:
-                    print(
-                        f"API Blocked or Empty Content: finishReason={candidates[0].get('finishReason', 'UNKNOWN')} ({resp_json})"
-                    )
-                    return None
-                content = parts[0].get("text", "")
                 append_ai_log(
                     f"Gemini API | Model={model_name} | PlainText={plain_text}",
                     prompt=prompt,
                     response=content,
                 )
+                print_model_speed_statistics(
+                    "Gemini API",
+                    extract_gemini_completion_tokens(resp_json),
+                    generation_seconds,
+                )
+                if finish_reason == "MAX_TOKENS":
+                    if current_max_tokens < effective_max_token_limit:
+                        doubled = min(
+                            current_max_tokens * 2, effective_max_token_limit
+                        )
+                        print(
+                            f"API returned truncated content (finishReason=MAX_TOKENS, maxOutputTokens={current_max_tokens}). "
+                            f"Retrying with maxOutputTokens={doubled}..."
+                        )
+                        current_max_tokens = doubled
+                        time.sleep(1)
+                        continue
+                    print(
+                        f"API Returned truncated content: finishReason={finish_reason}, maxOutputTokens={current_max_tokens}"
+                    )
+                    return None
+                if GEMINI_API_STREAM_RESPONSE and finish_reason == "UNKNOWN":
+                    print(
+                        "API Returned non-final streamed content: finishReason=UNKNOWN"
+                    )
+                    return None
+                if not had_content_parts:
+                    print(
+                        f"API Blocked or Empty Content: finishReason={finish_reason} ({resp_json})"
+                    )
+                    return None
                 return content.strip() if plain_text else content
         except urllib.error.HTTPError as e:
             error_body = e.read().decode("utf-8", errors="replace")
@@ -15030,6 +16022,7 @@ def build_openai_compatible_chat_payload(
     strict_text_response_controls=False,
     qwen_template_kwargs=False,
     stream_response=False,
+    include_stream_usage=True,
 ):
     payload = {
         "messages": [
@@ -15043,6 +16036,8 @@ def build_openai_compatible_chat_payload(
         payload["model"] = model_name
     if max_tokens is not None:
         payload["max_tokens"] = max_tokens
+    if stream_response and include_stream_usage:
+        payload["stream_options"] = {"include_usage": True}
     if strict_text_response_controls:
         payload["thinking"] = {"type": "disabled"}
         payload["response_format"] = {"type": "text"}
@@ -15067,26 +16062,20 @@ def strip_local_reasoning_blocks(content):
     return cleaned.strip()
 
 
-def read_openai_compatible_stream_response(response, stream_stop_checker=None):
+def read_openai_compatible_stream_response(
+    response,
+    stream_stop_checker=None,
+    assume_complete_without_finish_reason=True,
+):
     content_parts = []
+    reasoning_content_chars = 0
     finish_reason = None
     last_payload = {}
     stopped_early = False
+    first_generation_time = None
+    last_generation_time = None
 
-    for raw_line in response:
-        line = raw_line.decode("utf-8", errors="replace").strip()
-        if not line or not line.startswith("data:"):
-            continue
-
-        data_line = line[5:].strip()
-        if data_line == "[DONE]":
-            break
-
-        try:
-            chunk = json.loads(data_line)
-        except Exception:
-            continue
-
+    for chunk in iter_sse_json_payloads(response):
         last_payload = chunk
         choices = chunk.get("choices", [])
         if not choices:
@@ -15095,11 +16084,23 @@ def read_openai_compatible_stream_response(response, stream_stop_checker=None):
         choice = choices[0]
         delta = choice.get("delta", {})
         appended_content = False
+        generated_content = False
         if isinstance(delta, dict):
             delta_content = delta.get("content", "")
             if isinstance(delta_content, str) and delta_content:
                 content_parts.append(delta_content)
                 appended_content = True
+                generated_content = True
+            delta_reasoning_content = delta.get("reasoning_content", "")
+            if isinstance(delta_reasoning_content, str) and delta_reasoning_content:
+                reasoning_content_chars += len(delta_reasoning_content)
+                generated_content = True
+
+        if generated_content:
+            generation_time = time.perf_counter()
+            if first_generation_time is None:
+                first_generation_time = generation_time
+            last_generation_time = generation_time
 
         chunk_finish_reason = choice.get("finish_reason")
         if chunk_finish_reason is not None:
@@ -15116,8 +16117,22 @@ def read_openai_compatible_stream_response(response, stream_stop_checker=None):
 
     content = "".join(content_parts)
     if finish_reason is None:
-        finish_reason = "stop" if content else "UNKNOWN"
-    return content, finish_reason, last_payload, stopped_early
+        finish_reason = (
+            "stop"
+            if content and assume_complete_without_finish_reason
+            else "UNKNOWN"
+        )
+    diagnostics = {
+        "visible_content_chars": len(content),
+        "reasoning_content_chars": reasoning_content_chars,
+        "generation_seconds": (
+            last_generation_time - first_generation_time
+            if first_generation_time is not None
+            and last_generation_time is not None
+            else None
+        ),
+    }
+    return content, finish_reason, last_payload, stopped_early, diagnostics
 
 
 def call_openai_compatible_chat_api(
@@ -15141,6 +16156,7 @@ def call_openai_compatible_chat_api(
     strict_finish_reason=True,
     stream_response=False,
     stream_stop_checker=None,
+    require_stream_finish_reason=False,
 ):
     url = f"{api_url.rstrip('/')}/chat/completions"
     headers = {"Content-Type": "application/json"}
@@ -15151,7 +16167,11 @@ def call_openai_compatible_chat_api(
     effective_max_token_limit = max_token_limit
     if effective_max_token_limit is None:
         effective_max_token_limit = max_completion_tokens
+    if current_max_tokens is not None and effective_max_token_limit is not None:
+        current_max_tokens = min(current_max_tokens, effective_max_token_limit)
     attempt_index = 0
+    empty_unknown_stream_retry_count = 0
+    include_stream_usage = bool(stream_response)
     while True:
         attempt_index += 1
         attempt_label = format_api_retry_attempt(attempt_index, max_retry_count)
@@ -15170,20 +16190,31 @@ def call_openai_compatible_chat_api(
             strict_text_response_controls=strict_text_response_controls,
             qwen_template_kwargs=qwen_template_kwargs,
             stream_response=stream_response,
+            include_stream_usage=include_stream_usage,
         )
         req = urllib.request.Request(url, json.dumps(data).encode("utf-8"), headers)
         try:
+            call_started_at = time.perf_counter()
             with urllib.request.urlopen(req, timeout=effective_timeout_sec) as response:
                 if stream_response:
-                    content, finish_reason, resp_json, stopped_early = read_openai_compatible_stream_response(
-                        response, stream_stop_checker=stream_stop_checker
+                    content, finish_reason, resp_json, stopped_early, response_diagnostics = read_openai_compatible_stream_response(
+                        response,
+                        stream_stop_checker=stream_stop_checker,
+                        assume_complete_without_finish_reason=not require_stream_finish_reason,
                     )
+                    call_elapsed_seconds = time.perf_counter() - call_started_at
                     message = {"content": content}
                 else:
                     response_data = response.read().decode("utf-8")
+                    call_elapsed_seconds = time.perf_counter() - call_started_at
                     resp_json = json.loads(response_data)
                     choices = resp_json.get("choices", [])
                     if not choices:
+                        print_model_speed_statistics(
+                            api_label,
+                            extract_openai_completion_tokens(resp_json),
+                            call_elapsed_seconds,
+                        )
                         print(f"API Returned no choices: {resp_json}")
                         return None
 
@@ -15191,9 +16222,26 @@ def call_openai_compatible_chat_api(
                     message = choice.get("message", {})
                     content = message.get("content", "")
                     finish_reason = choice.get("finish_reason", "UNKNOWN")
+                    reasoning_content = message.get("reasoning_content", "")
+                    response_diagnostics = {
+                        "visible_content_chars": len(content)
+                        if isinstance(content, str)
+                        else 0,
+                        "reasoning_content_chars": len(reasoning_content)
+                        if isinstance(reasoning_content, str)
+                        else 0,
+                    }
 
                 if strip_reasoning_blocks:
                     content = strip_local_reasoning_blocks(content)
+
+                response_diagnostics["visible_content_chars"] = (
+                    len(content) if isinstance(content, str) else 0
+                )
+                response_diagnostic_summary = (
+                    f"visible_chars={response_diagnostics['visible_content_chars']}, "
+                    f"reasoning_chars={response_diagnostics['reasoning_content_chars']}"
+                )
 
                 usage_summary = format_deepseek_usage_summary(resp_json)
                 append_ai_log(
@@ -15202,6 +16250,14 @@ def call_openai_compatible_chat_api(
                     response=content
                     if isinstance(content, str)
                     else json.dumps(content, ensure_ascii=False),
+                )
+                generation_seconds = response_diagnostics.get("generation_seconds")
+                if not isinstance(generation_seconds, (int, float)) or generation_seconds <= 0.0:
+                    generation_seconds = call_elapsed_seconds
+                print_model_speed_statistics(
+                    api_label,
+                    extract_openai_completion_tokens(resp_json),
+                    generation_seconds,
                 )
                 if strict_finish_reason:
                     if finish_reason == "length":
@@ -15212,7 +16268,7 @@ def call_openai_compatible_chat_api(
                         ):
                             doubled = min(current_max_tokens * 2, effective_max_token_limit)
                             print(
-                                f"API returned truncated content (finishReason=length, max_tokens={current_max_tokens}). "
+                                f"API returned truncated content (finishReason=length, max_tokens={current_max_tokens}, {response_diagnostic_summary}). "
                                 f"Retrying with max_tokens={doubled}..."
                                 + (f" ({usage_summary})" if usage_summary else "")
                             )
@@ -15220,21 +16276,37 @@ def call_openai_compatible_chat_api(
                             time.sleep(1)
                             continue
                         print(
-                            f"API Returned truncated content: finishReason={finish_reason}"
+                            f"API Returned truncated content: finishReason={finish_reason}, {response_diagnostic_summary}"
                             + (f" ({usage_summary})" if usage_summary else "")
                         )
                         return None
                     if finish_reason not in ("stop", None):
+                        if (
+                            stream_response
+                            and finish_reason == "UNKNOWN"
+                            and not content
+                            and empty_unknown_stream_retry_count
+                            < OPENAI_COMPATIBLE_EMPTY_UNKNOWN_STREAM_RETRY_COUNT
+                            and has_api_retry_attempts_remaining(
+                                attempt_index, max_retry_count
+                            )
+                        ):
+                            empty_unknown_stream_retry_count += 1
+                            print(
+                                f"API returned empty non-final content (finishReason=UNKNOWN, {response_diagnostic_summary}). "
+                                f"Retrying the same request in {retry_delay_sec} seconds "
+                                f"({empty_unknown_stream_retry_count}/{OPENAI_COMPATIBLE_EMPTY_UNKNOWN_STREAM_RETRY_COUNT})..."
+                            )
+                            time.sleep(retry_delay_sec)
+                            continue
                         print(
                             f"API Returned non-final content: finishReason={finish_reason}"
                             + (f" ({usage_summary})" if usage_summary else "")
                         )
                         return None
                 if not isinstance(content, str) or not content.strip():
-                    reasoning_content = message.get("reasoning_content", "")
-                    reasoning_note = "reasoning_content present" if reasoning_content else "no reasoning_content"
                     print(
-                        f"API Returned empty content: finishReason={finish_reason}, {reasoning_note}"
+                        f"API Returned empty content: finishReason={finish_reason}, {response_diagnostic_summary}"
                         + (f" ({usage_summary})" if usage_summary else "")
                     )
                     return None
@@ -15242,6 +16314,13 @@ def call_openai_compatible_chat_api(
                 return content.strip() if plain_text else content
         except urllib.error.HTTPError as e:
             error_body = e.read().decode("utf-8", errors="replace")
+            if e.code in {400, 422} and include_stream_usage:
+                print(
+                    f"API rejected optional stream usage reporting (HTTP {e.code}). Retrying once without stream_options..."
+                )
+                include_stream_usage = False
+                attempt_index -= 1
+                continue
             append_ai_log(
                 f"{api_label} HTTP Error | Model={model_name or '(default)'} | Status={e.code} | Attempt={attempt_label}",
                 prompt=prompt,
@@ -15399,6 +16478,8 @@ def call_deepseek_api(
         max_token_limit=effective_max_token_limit,
         strict_text_response_controls=True,
         require_auth_header=True,
+        stream_response=DEEPSEEK_API_STREAM_RESPONSE,
+        require_stream_finish_reason=True,
     )
 
 
@@ -15410,8 +16491,27 @@ def call_active_api(
     stream_stop_checker=None,
     max_completion_tokens=None,
     max_token_limit=None,
+    completion_source_text=None,
+    completion_target_count=1,
 ):
     backend_key = resolve_backend_selection()
+    if max_completion_tokens is None and completion_source_text is not None:
+        default_tokens, default_token_limit = get_active_completion_token_defaults(
+            backend_key
+        )
+        effective_token_limit = (
+            default_token_limit
+            if max_token_limit is None
+            else max_token_limit
+        )
+        max_completion_tokens = calculate_adaptive_completion_tokens(
+            completion_source_text,
+            completion_target_count,
+            default_tokens,
+            effective_token_limit,
+            prompt_text=prompt if backend_key == API_BACKEND_LOCAL else "",
+        )
+        max_token_limit = effective_token_limit
     if backend_key == API_BACKEND_LOCAL:
         return call_local_api(
             LOCAL_API_BASE_URL,
@@ -15433,6 +16533,8 @@ def call_active_api(
             plain_text=plain_text,
             request_timeout_sec=request_timeout_sec,
             timeout_retry_count=timeout_retry_count,
+            max_completion_tokens=max_completion_tokens,
+            max_token_limit=max_token_limit,
         )
     if backend_key == API_BACKEND_DEEPSEEK:
         return call_deepseek_api(
@@ -15609,14 +16711,7 @@ def parse_line_based_updates_response(
         return False
 
     def cleanup_parsed_translation(value):
-        if not isinstance(value, str):
-            return ""
-        cleaned = unwrap_single_quoted_container(value)
-        if len(cleaned) >= 2 and cleaned[0] == cleaned[-1] and cleaned[0] in ('"', "'"):
-            cleaned = cleaned[1:-1].strip()
-        cleaned = cleaned.replace("\\t", "	").replace('\\"', '"')
-        cleaned = normalize_placeholder_quote_style(en_text, cleaned)
-        return cleaned.strip()
+        return cleanup_single_translation_candidate_value(en_text, value)
 
     def looks_like_nested_language_line(value):
         if not isinstance(value, str):
@@ -16214,6 +17309,8 @@ def check_and_translate_with_active_api(
         stream_stop_checker=build_local_line_stream_stop_checker(
             key_name, en_text, set(lang_dict.keys())
         ),
+        completion_source_text=en_text,
+        completion_target_count=len(prompt_lang_dict),
     )
     if not result_text:
         LAST_BATCH_RESULT_STATUS = "call_failure"
@@ -16260,7 +17357,7 @@ def fix_translation_with_active_api(
     )
     prompt_en_text = apply_protected_placeholders(en_text, protected_placeholders)
     prompt_faulty_text = apply_protected_placeholders(
-        sanitized_faulty_text, protected_placeholders
+        sanitized_faulty_text, protected_placeholders, case_sensitive=True
     )
     prompt_en_text_block = build_prompt_text_block(
         "Original English Text", en_text, prompt_en_text
@@ -16376,6 +17473,7 @@ LOCKED PLACEHOLDERS JSON:
         plain_text=True,
         request_timeout_sec=API_REPAIR_REQUEST_TIMEOUT_SEC,
         timeout_retry_count=API_REPAIR_TIMEOUT_RETRY_COUNT,
+        completion_source_text=en_text,
     )
     if not result_text:
         return None
@@ -16944,6 +18042,7 @@ LOCKED PLACEHOLDERS JSON:
         plain_text=True,
         request_timeout_sec=request_timeout_sec,
         timeout_retry_count=timeout_retry_count,
+        completion_source_text=en_text,
     )
     if not result_text:
         return None

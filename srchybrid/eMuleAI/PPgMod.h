@@ -3,6 +3,7 @@
 
 #pragma once
 #include "TreeOptionsCtrlEx.h"
+#include "ToolTipCtrlX.h"
 
 class CPPgMod : public CPropertyPage
 {
@@ -14,15 +15,17 @@ class CPPgMod : public CPropertyPage
 	void LocalizeItemInfoText(HTREEITEM item, LPCTSTR strid);
 	void LocalizeEditLabel(HTREEITEM item, LPCTSTR strid);
 	void UpdateNatTraversalProtocolUi();
-	void UpdateDownloadValidatorDateTimeUi();
 
 public:
 	CPPgMod();
 	virtual	~CPPgMod() = default;
 	void Localize();
+	void ResetToDefaults();
 
 protected:
 	CTreeOptionsCtrlEx m_ctrlTreeOptions;
+	CToolTipCtrlX m_tooltipTreeOptions;
+	CString m_strTreeOptionsToolTip;
 	bool m_bInitializedTreeOpts;
 
 	virtual void DoDataExchange(CDataExchange *pDX);
@@ -30,6 +33,7 @@ protected:
 	virtual BOOL OnApply();
 	virtual BOOL OnKillActive();
 	virtual BOOL OnCommand(WPARAM wParam, LPARAM lParam);
+	virtual BOOL PreTranslateMessage(MSG* pMsg);
 
 	DECLARE_MESSAGE_MAP()
 	afx_msg void OnDestroy();
@@ -40,8 +44,10 @@ protected:
 	afx_msg BOOL OnHelpInfo(HELPINFO*);
 	afx_msg void OnSettingsChange() { SetModified(); }
 	afx_msg void OnSize(UINT nType, int cx, int cy);
-	afx_msg HBRUSH OnCtlColor(CDC* pDC, CWnd* pWnd, UINT nCtlColor);
 	void UpdateLayout();
+	void UpdateTreeOptionsToolTip();
+	afx_msg void OnTvnItemexpanded(NMHDR *pNMHDR, LRESULT *pResult);
+	void ExpandAllChildren(HTREEITEM hParent);
 
 	HTREEITEM m_htiUITweaks;
 	HTREEITEM m_htiUIDarkMode;
@@ -171,51 +177,6 @@ protected:
 
 	HTREEITEM m_htiReAskFileSrc;
 	int m_iReAskFileSrc;
-
-	HTREEITEM m_htiDownloadValidator;
-	HTREEITEM m_htiDownloadValidatorPassive;
-	HTREEITEM m_htiDownloadValidatorAlwaysAsk;
-	HTREEITEM m_htiDownloadValidatorReject;
-	HTREEITEM m_htiDownloadValidatorAccept;
-	HTREEITEM m_htiDownloadValidatorAcceptPercentage;
-	HTREEITEM m_htiDownloadValidatorRejectCanceled;
-	HTREEITEM m_htiDownloadValidatorRejectSameHash;
-	HTREEITEM m_htiDownloadValidatorRejectBlacklisted;
-	HTREEITEM m_htiDownloadValidatorCaseInsensitive;
-	HTREEITEM m_htiDownloadValidatorIgnoreExtension;
-	HTREEITEM m_htiDownloadValidatorIgnoreTags;
-	HTREEITEM m_htiDownloadValidatorDontIgnoreNumericTags;
-	HTREEITEM m_htiDownloadValidatorIgnoreNonAlphaNumeric;
-	HTREEITEM m_htiDownloadValidatorMinimumComparisonLength;
-	HTREEITEM m_htiDownloadValidatorSkipIncompleteFileConfirmation;
-	HTREEITEM m_htiDownloadValidatorMarkAsBlacklisted;
-	HTREEITEM m_htiDownloadValidatorAutoMarkAsBlacklisted;
-	HTREEITEM m_htiDownloadValidatorDateTimeMatching;
-	HTREEITEM m_htiDownloadValidatorDateTimeUseYearRange;
-	HTREEITEM m_htiDownloadValidatorDateTimeYearStart;
-	HTREEITEM m_htiDownloadValidatorDateTimeYearEnd;
-	HTREEITEM m_htiDownloadValidatorDateTimeCheckSeconds;
-	HTREEITEM m_htiDownloadValidatorDateTimeIncludeFollowingNumericValues;
-	int m_iDownloadValidator;
-	int m_iDownloadValidatorAcceptPercentage;
-	bool m_bDownloadValidatorRejectCanceled;
-	bool m_bDownloadValidatorRejectSameHash;
-	bool m_bDownloadValidatorRejectBlacklisted;
-	bool m_bDownloadValidatorCaseInsensitive;
-	bool m_bDownloadValidatorIgnoreExtension;
-	bool m_bDownloadValidatorIgnoreTags;
-	bool m_bDownloadValidatorDontIgnoreNumericTags;
-	bool m_bDownloadValidatorIgnoreNonAlphaNumeric;
-	int	 m_iDownloadValidatorMinimumComparisonLength;
-	bool m_bDownloadValidatorSkipIncompleteFileConfirmation;
-	bool m_bDownloadValidatorMarkAsBlacklisted;
-	bool m_bDownloadValidatorAutoMarkAsBlacklisted;
-	bool m_bDownloadValidatorDateTimeMatching;
-	bool m_bDownloadValidatorDateTimeUseYearRange;
-	int m_iDownloadValidatorDateTimeYearStart;
-	int m_iDownloadValidatorDateTimeYearEnd;
-	bool m_bDownloadValidatorDateTimeCheckSeconds;
-	bool m_bDownloadValidatorDateTimeIncludeFollowingNumericValues;
 
 	HTREEITEM m_htiDownloadInspector;
 	HTREEITEM m_htiDownloadInspectorDisable;

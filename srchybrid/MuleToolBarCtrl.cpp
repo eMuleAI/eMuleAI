@@ -61,20 +61,20 @@ static LPCTSTR const s_apszSkinFiles[] =
 
 static const LPCTSTR TBStringIDs[] =
 {
-	_T("EM_KADEMLIA"),
-	_T("EM_SERVER"),
+	_T("KADEMLIA"),
+	_T("FSTAT_SERVERS"),
 	_T("EM_TRANS"),
-	_T("EM_SEARCH"),
-	_T("EM_FILES2"),
-	_T("EM_MESSAGES"),
+	_T("SW_SEARCHBOX"),
+	_T("FILES"),
+	_T("CW_MESSAGES"),
 	_T("IRC"),
-	_T("EM_STATISTIC"),
-	_T("EM_PREFS"),
+	_T("SF_STATISTICS"),
+	_T("OPTIONS"),
 	_T("TOOLS"),
 	_T("SAVE_APP_STATE"),
 	_T("RELOAD_CONF"),
 	_T("BACKUP"),
-	_T("EMULE_AI_LABEL"),
+	_T("PW_MOD"),
 };
 
 #define	MAX_TOOLBAR_FILES	100
@@ -141,7 +141,7 @@ void CMuleToolbarCtrl::Init()
 	TCHAR cButtonStrings[2000];
 
 	size_t lLen = 0;
-	LPCTSTR uid = _T("MAIN_BTN_CONNECT");
+	LPCTSTR uid = _T("IRC_CONNECT");
 	for (int i = 0; ; ++i) {
 		const CString &str(GetResString(uid));
 		int iLen = str.GetLength() + 1;
@@ -243,11 +243,11 @@ void CMuleToolbarCtrl::SetAllButtonsStrings()
 
 	LPCTSTR uid;
 	if (theApp.serverconnect->IsConnected())
-		uid = _T("MAIN_BTN_DISCONNECT");
+		uid = _T("IRC_DISCONNECT");
 	else if (theApp.serverconnect->IsConnecting())
-		uid = _T("MAIN_BTN_CANCEL");
+		uid = _T("CANCEL");
 	else
-		uid = _T("MAIN_BTN_CONNECT");
+		uid = _T("IRC_CONNECT");
 
 	for (int i = 0; ; ++i) {
 		const CString &str(GetResString(uid));

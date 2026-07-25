@@ -285,6 +285,11 @@ void CSearchDlg::SearchRelatedFiles(CPtrList &listFiles)
 	m_pwndResults->SearchRelatedFiles(listFiles);
 }
 
+void CSearchDlg::SearchRelatedFiles(const std::vector<CString>& hashes, const std::vector<CString>& names)
+{
+	m_pwndResults->SearchRelatedFiles(hashes, names);
+}
+
 BOOL CSearchDlg::PreTranslateMessage(MSG *pMsg)
 {
 	if (pMsg->message == WM_KEYDOWN && GetKeyState(VK_CONTROL) < 0) {

@@ -337,11 +337,13 @@ int CEncryptedStreamSocket::Receive(void *lpBuf, int nBufLen, int nFlags)
 			// which will even ignore test connections
 			// Update: New server now support encrypted callbacks
 
-			SOCKADDR_IN sockAddr = {};
+			SOCKADDR_IN6 sockAddr = {};
 			int nSockAddrLen = sizeof sockAddr;
 			GetPeerName((LPSOCKADDR)&sockAddr, &nSockAddrLen);
-			if (thePrefs.IsCryptLayerRequiredStrict() || (!theApp.serverconnect->AwaitingTestFromIP(sockAddr.sin_addr.s_addr)
-				&& !theApp.clientlist->IsKadFirewallCheckIP(CAddress(sockAddr.sin_addr.s_addr, false))))
+			CAddress peerAddr;
+			peerAddr.FromSA((LPSOCKADDR)&sockAddr, nSockAddrLen);
+			if (thePrefs.IsCryptLayerRequiredStrict() || (!theApp.serverconnect->AwaitingTestFromIP(peerAddr.ToUInt32(false))
+				&& !theApp.clientlist->IsKadFirewallCheckIP(peerAddr)))
 			{
 #if defined(_DEBUG) || defined(_BETA) || defined(_DEVBUILD)
 				// TODO: Remove after testing
@@ -578,10 +580,12 @@ int CEncryptedStreamSocket::Negotiate(const uchar *pBuffer, int nLen)
 					const uint8 bySelectedEncryptionMethod = ENM_OBFUSCATION; // we do not support any further encryption in this version, so no need to look which the other client preferred
 					fileResponse.WriteUInt8(bySelectedEncryptionMethod);
 
-					SOCKADDR_IN sockAddr = {};
+					SOCKADDR_IN6 sockAddr = {};
 					int nSockAddrLen = sizeof sockAddr;
 					GetPeerName((LPSOCKADDR)&sockAddr, &nSockAddrLen);
-					const uint8 byPaddingLen = theApp.serverconnect->AwaitingTestFromIP(sockAddr.sin_addr.s_addr) ? 16 : (thePrefs.GetCryptTCPPaddingLength() + 1);
+					CAddress peerAddr;
+					peerAddr.FromSA((LPSOCKADDR)&sockAddr, nSockAddrLen);
+					const uint8 byPaddingLen = theApp.serverconnect->AwaitingTestFromIP(peerAddr.ToUInt32(false)) ? 16 : (thePrefs.GetCryptTCPPaddingLength() + 1);
 					uint8 byPadding = (uint8)(GetTcpCryptRandomGen().GenerateByte() % byPaddingLen);
 
 					fileResponse.WriteUInt8(byPadding);
@@ -773,10 +777,12 @@ int CEncryptedStreamSocket::SendNegotiatingData(const void *lpBuf, int nBufLen, 
 
 CString CEncryptedStreamSocket::DbgGetIPString()
 {
-	SOCKADDR_IN sockAddr = {};
+	SOCKADDR_IN6 sockAddr = {};
 	int nSockAddrLen = sizeof sockAddr;
 	GetPeerName((LPSOCKADDR)&sockAddr, &nSockAddrLen);
-	return ipstr(sockAddr.sin_addr.s_addr);
+	CAddress peerAddr;
+	peerAddr.FromSA((LPSOCKADDR)&sockAddr, nSockAddrLen);
+	return ipstr(peerAddr);
 }
 
 uint8 CEncryptedStreamSocket::GetSemiRandomNotProtocolMarker()

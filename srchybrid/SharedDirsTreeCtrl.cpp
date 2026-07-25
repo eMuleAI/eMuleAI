@@ -613,7 +613,7 @@ void CSharedDirsTreeCtrl::InitalizeStandardItems()
 	m_pRootDirectoryItem->liSubDirectories.AddTail(pAll);
 
 	CDirectoryItem *pIncoming = new CDirectoryItem(sEmpty, pAll->m_htItem, SDI_INCOMING);
-	pIncoming->m_htItem = InsertItem(TVIF_TEXT | TVIF_PARAM | TVIF_IMAGE | TVIF_SELECTEDIMAGE, GetResString(_T("INCOMING_FILES")), 2, 2, 0, 0, (LPARAM)pIncoming, pAll->m_htItem, TVI_LAST);
+	pIncoming->m_htItem = InsertItem(TVIF_TEXT | TVIF_PARAM | TVIF_IMAGE | TVIF_SELECTEDIMAGE, GetResString(_T("PW_INCOMING")), 2, 2, 0, 0, (LPARAM)pIncoming, pAll->m_htItem, TVI_LAST);
 	m_pRootDirectoryItem->liSubDirectories.AddTail(pIncoming);
 
 	CDirectoryItem *pTemp = new CDirectoryItem(sEmpty, pAll->m_htItem, SDI_TEMP);
@@ -656,14 +656,14 @@ struct SEd2kTypeView
 
 static const SEd2kTypeView _aEd2kTypeView[] =
 {
-	{ ED2KFT_AUDIO, _T("SEARCH_AUDIO") },
-	{ ED2KFT_VIDEO, _T("SEARCH_VIDEO") },
+	{ ED2KFT_AUDIO, _T("AUDIO") },
+	{ ED2KFT_VIDEO, _T("VIDEO") },
 	{ ED2KFT_IMAGE, _T("SEARCH_PICS") },
 	{ ED2KFT_PROGRAM, _T("SEARCH_PRG") },
 	{ ED2KFT_DOCUMENT, _T("SEARCH_DOC") },
 	{ ED2KFT_ARCHIVE, _T("SEARCH_ARC") },
 	{ ED2KFT_CDIMAGE, _T("SEARCH_CDIMG") },
-	{ ED2KFT_EMULECOLLECTION, _T("SEARCH_EMULECOLLECTION") }
+	{ ED2KFT_EMULECOLLECTION, _T("META_COLLECTION") }
 };
 
 static void FilterTreeAddIncomingSubdirectories(CSharedDirsTreeCtrl* pThis, CDirectoryItem* pParent, const CString& basePath, int nLevel, bool& rbShowWarning);
@@ -973,7 +973,7 @@ void CSharedDirsTreeCtrl::CreateMenus()
 	m_PrioMenu.AppendMenu(MF_STRING, MP_PRIOAUTO, GetResString(_T("PRIOAUTO")));//UAP
 
 	m_SharedFilesMenu.CreatePopupMenu();
-	m_SharedFilesMenu.AddMenuSidebar(GetResString(_T("SHAREDFILES")));
+	m_SharedFilesMenu.AddMenuSidebar(GetResString(_T("SF_FILES")));
 	m_SharedFilesMenu.AppendMenu(MF_STRING, MP_OPENFOLDER, GetResString(_T("OPENFOLDER")), _T("OPENFOLDER"));
 	m_SharedFilesMenu.AppendMenu(MF_STRING, MP_REMOVE, GetResString(_T("DELETE")), _T("DELETE"));
 	m_SharedFilesMenu.AppendMenu(MF_STRING | MF_SEPARATOR);
@@ -981,9 +981,9 @@ void CSharedDirsTreeCtrl::CreateMenus()
 	sPrio.AppendFormat(_T(" (%s)"), (LPCTSTR)GetResString(_T("PW_CON_UPLBL")));
 	m_SharedFilesMenu.AppendMenu(MF_STRING | MF_POPUP, (UINT_PTR)m_PrioMenu.m_hMenu, sPrio, _T("FILEPRIORITY"));
 	m_SharedFilesMenu.AppendMenu(MF_STRING | MF_SEPARATOR);
-	m_SharedFilesMenu.AppendMenu(MF_STRING, MP_DETAIL, GetResString(_T("SHOWDETAILS")), _T("FILEINFO"));
-	m_SharedFilesMenu.AppendMenu(MF_STRING, MP_CMT, GetResString(_T("CMT_ADD")), _T("FILECOMMENTS"));
-	m_SharedFilesMenu.AppendMenu(MF_STRING, MP_SHOWED2KLINK, GetResString(_T("DL_SHOWED2KLINK")), _T("ED2KLINK"));
+	m_SharedFilesMenu.AppendMenu(MF_STRING, MP_DETAIL, GetResString(_T("DL_INFO")), _T("FILEINFO"));
+	m_SharedFilesMenu.AppendMenu(MF_STRING, MP_CMT, GetResStringWithAccelAndEllipsis(_T("COMMENT"), _T('e')), _T("FILECOMMENTS"));
+	m_SharedFilesMenu.AppendMenu(MF_STRING, MP_SHOWED2KLINK, GetResStringWithEllipsis(_T("SW_LINK")), _T("ED2KLINK"));
 	m_SharedFilesMenu.AppendMenu(MF_STRING, MP_CUT, GetResString(_T("COPY_FILE_NAMES")), _T("FILERENAME"));
 	if (thePrefs.GetShowCopyEd2kLinkCmd())
 		m_SharedFilesMenu.AppendMenu(MF_STRING, MP_GETED2KLINK, GetResString(_T("DL_LINK1")), _T("ED2KLINK"));
@@ -993,7 +993,7 @@ void CSharedDirsTreeCtrl::CreateMenus()
 		m_SharedFilesMenu.AppendMenu(MF_STRING, MP_UNSHAREDIRSUB, GetResString(_T("UNSHAREDIRSUB")));
 
 	m_ShareDirsMenu.CreatePopupMenu();
-	m_ShareDirsMenu.AddMenuSidebar(GetResString(_T("SHAREDFILES")));
+	m_ShareDirsMenu.AddMenuSidebar(GetResString(_T("SF_FILES")));
 	m_ShareDirsMenu.AppendMenu(MF_STRING, MP_OPENFOLDER, GetResString(_T("OPENFOLDER")), _T("OPENFOLDER"));
 	m_ShareDirsMenu.AppendMenu(MF_STRING | MF_SEPARATOR);
 	m_ShareDirsMenu.AppendMenu(MF_STRING, MP_SHAREDIR, GetResString(_T("SHAREDIR")));

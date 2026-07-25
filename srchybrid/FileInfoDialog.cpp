@@ -126,7 +126,7 @@ namespace
 			mi->strInfo << _T("\n");
 		mi->OutputFileName();
 		mi->strInfo.SetSelectionCharFormat(mi->strInfo.m_cfBold);
-		mi->strInfo << GetResString(_T("FD_GENERAL")) << _T("\n");
+		mi->strInfo << GetResString(_T("CD_GENERAL")) << _T("\n");
 		AppendMediaInfoGeneralLine(mi->strInfo, GetResString(_T("TITLE")), strTitle);
 		AppendMediaInfoGeneralLine(mi->strInfo, GetResString(_T("AUTHOR")), strAuthor);
 		AppendMediaInfoGeneralLine(mi->strInfo, GetResString(_T("ALBUM")), strAlbum);
@@ -377,7 +377,7 @@ BOOL CFileInfoDialog::OnSetActive()
 		return FALSE;
 	AdjustSharedFilesDetailsHost(this);
 	if (m_bDataChanged) {
-		InitDisplay(GetResString(_T("FSTAT_WAITING")));
+		InitDisplay(GetResStringWithEllipsis(_T("WAITING")));
 		++m_uMediaInfoRequestId;
 		if (m_uMediaInfoRequestId == 0)
 			++m_uMediaInfoRequestId;
@@ -1445,7 +1445,7 @@ void CFileInfoDialog::Localize()
 		return;
 	SetTabTitle(_T("CONTENT_INFO"), this);
 
-	SetDlgItemText(IDC_GENERAL, GetResString(_T("FD_GENERAL")));
+	SetDlgItemText(IDC_GENERAL, GetResString(_T("CD_GENERAL")));
 	SetDlgItemText(IDC_FD_XI2, GetResString(_T("LENGTH")) + _T(':'));
 	SetDlgItemText(IDC_FD_XI3, GetResString(_T("VIDEO")));
 	SetDlgItemText(IDC_FD_XI4, GetResString(_T("AUDIO")));
@@ -1459,9 +1459,9 @@ void CFileInfoDialog::Localize()
 	SetDlgItemText(IDC_FD_XI13, GetResString(_T("FPS")) + _T(':'));
 	SetDlgItemText(IDC_FD_XI10, GetResString(_T("CHANNELS")) + _T(':'));
 	SetDlgItemText(IDC_FD_XI12, GetResString(_T("SAMPLERATE")) + _T(':'));
-	SetDlgItemText(IDC_STATICFI, GetResString(_T("FILEFORMAT")) + _T(':'));
+	SetDlgItemText(IDC_STATICFI, GetResString(_T("FORMAT")) + _T(':'));
 	SetDlgItemText(IDC_FD_XI14, GetResString(_T("ASPECTRATIO")) + _T(':'));
 	SetDlgItemText(IDC_STATIC_LANGUAGE, GetResString(_T("PW_LANG")) + _T(':'));
 	if (!m_bReducedDlg)
-		SetDlgItemText(IDC_FD_XI1, GetResString(_T("FD_SIZE")));
+		SetDlgItemText(IDC_FD_XI1, GetResStringWithColon(_T("DL_SIZE")));
 }

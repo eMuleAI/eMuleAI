@@ -74,6 +74,7 @@ BOOL CPPgNotify::OnInitDialog()
 	CPropertyPage::OnInitDialog();
 	InitWindowStyles(this);
 
+	m_mail = thePrefs.GetEmailSettings();
 	AddBuddyButton(GetDlgItem(IDC_EDIT_TBN_WAVFILE)->m_hWnd, ::GetDlgItem(m_hWnd, IDC_BTN_BROWSE_WAV));
 	InitAttachedBrowseButton(::GetDlgItem(m_hWnd, IDC_BTN_BROWSE_WAV), m_icoBrowse);
 
@@ -117,6 +118,45 @@ BOOL CPPgNotify::OnInitDialog()
 
 	return TRUE;  // return TRUE unless you set the focus to the control
 				  // EXCEPTION: OCX Property Pages should return FALSE
+}
+
+void CPPgNotify::ResetToDefaults()
+{
+	CheckRadioButton(IDC_CB_TBN_NOSOUND, IDC_CB_TBN_USESPEECH, IDC_CB_TBN_NOSOUND);
+	CheckDlgButton(IDC_CB_TBN_ONDOWNLOAD, BST_UNCHECKED);
+	CheckDlgButton(IDC_CB_TBN_ONNEWDOWNLOAD, BST_UNCHECKED);
+	CheckDlgButton(IDC_CB_TBN_ONCHAT, BST_UNCHECKED);
+	CheckDlgButton(IDC_CB_TBN_ONLOG, BST_UNCHECKED);
+	CheckDlgButton(IDC_CB_TBN_IMPORTATNT, BST_UNCHECKED);
+	CheckDlgButton(IDC_CB_TBN_POP_ALWAYS, BST_UNCHECKED);
+	GetDlgItem(IDC_CB_TBN_POP_ALWAYS)->EnableWindow(FALSE);
+	SetDlgItemText(IDC_EDIT_TBN_WAVFILE, _T(""));
+
+	CComboBox* pDisplayMode = static_cast<CComboBox*>(GetDlgItem(IDC_TBN_DISPLAYMODE));
+	if (pDisplayMode != NULL) {
+		for (int i = 0; i < pDisplayMode->GetCount(); ++i) {
+			if (pDisplayMode->GetItemData(i) == static_cast<DWORD_PTR>(ntfdmCustomPopup)) {
+				pDisplayMode->SetCurSel(i);
+				break;
+			}
+		}
+	}
+
+	m_mail.sServer.Empty();
+	m_mail.sFrom.Empty();
+	m_mail.sTo.Empty();
+	m_mail.sUser.Empty();
+	m_mail.sPass.Empty();
+	m_mail.sEncryptCertName.Empty();
+	m_mail.uPort = 0;
+	m_mail.uAuth = AUTH_NONE;
+	m_mail.uTLS = MODE_NONE;
+	m_mail.bSendMail = false;
+	CheckDlgButton(IDC_CB_ENABLENOTIFICATIONS, BST_UNCHECKED);
+	SetDlgItemText(IDC_EDIT_RECEIVER, _T(""));
+	SetDlgItemText(IDC_EDIT_SENDER, _T(""));
+	UpdateControls();
+	SetModified(TRUE);
 }
 
 void CPPgNotify::UpdateControls()

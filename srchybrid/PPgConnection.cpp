@@ -182,7 +182,7 @@ namespace
 			return FormatMbitPerSecValue(nKBytesPerSec);
 
 		CString strValue;
-		strValue.Format(_T("%u %s"), nKBytesPerSec, (LPCTSTR)GetResString(_T("KBYTESPERSEC")));
+		strValue.Format(_T("%u %s"), nKBytesPerSec, (LPCTSTR)GetResString(_T("KBYTESSEC")));
 		return strValue;
 	}
 
@@ -403,19 +403,24 @@ void CPPgNetworkInterface::UpdateNetworkInterfaceTooltips()
 		{ IDC_IP_GUARD_ENABLED, _T("IP_GUARD_TIP_ENABLE") },
 		{ IDC_IP_GUARD_RANGES_LABEL, _T("IP_GUARD_TIP_ALLOWED_PUBLIC_IP_RANGES") },
 		{ IDC_IP_GUARD_RANGES, _T("IP_GUARD_TIP_ALLOWED_PUBLIC_IP_RANGES") },
-		{ IDC_BIND_STATUS, _T("IP_GUARD_TIP_ACTIVE_BIND") }
+		{ IDC_BIND_STATUS, _T("IP_GUARD_TIP_ACTIVE_BIND") },
+		{ IDC_VPN_GUARD_FRM, _T("OPTIONS_TIP_VPN_GUARD_GROUP") },
+		{ IDC_VPN_GUARD_ENABLED, _T("OPTIONS_TIP_VPN_GUARD_ENABLE") },
+		{ IDC_VPN_GUARD_COUNTRY_LABEL, _T("OPTIONS_TIP_VPN_GUARD_COUNTRY") },
+		{ IDC_VPN_GUARD_COUNTRY, _T("OPTIONS_TIP_VPN_GUARD_COUNTRY") },
+		{ IDC_VPN_GUARD_BLOCK_UNKNOWN, _T("OPTIONS_TIP_VPN_GUARD_UNKNOWN") }
 	};
 
 	if (m_ToolTip.GetSafeHwnd() == NULL) {
 		if (!m_ToolTip.Create(this))
 			return;
-		m_ToolTip.SetMaxTipWidth(420);
+		m_ToolTip.SetMaxTipWidth(CPreferencesDlg::ScaleOptionsValue(420));
 		for (int i = 0; i < static_cast<int>(_countof(entries)); ++i) {
 			CWnd* pWnd = GetDlgItem(entries[i].nControlID);
 			if (pWnd != NULL)
 				m_ToolTip.AddTool(pWnd, GetResString(entries[i].pszKey));
 		}
-		m_ToolTip.Activate(TRUE);
+		m_ToolTip.Activate(AreOptionsToolTipsEnabled(this));
 	}
 	else {
 		for (int i = 0; i < static_cast<int>(_countof(entries)); ++i) {
@@ -423,6 +428,7 @@ void CPPgNetworkInterface::UpdateNetworkInterfaceTooltips()
 			if (pWnd != NULL)
 				m_ToolTip.UpdateTipText(GetResString(entries[i].pszKey), pWnd);
 		}
+		m_ToolTip.Activate(AreOptionsToolTipsEnabled(this));
 	}
 }
 
@@ -571,6 +577,26 @@ void CPPgNetworkInterface::LoadSettings()
 		UpdateBindStatus();
 		m_bUpdatingControls = false;
 	}
+}
+
+void CPPgNetworkInterface::ResetToDefaults()
+{
+	m_bUpdatingControls = true;
+	FillBindInterfaceCombo(false);
+	if (m_ctlBindInterface.GetCount() > 0)
+		m_ctlBindInterface.SetCurSel(0);
+	SetDlgItemText(IDC_BIND_ADDRESS, _T(""));
+	CheckDlgButton(IDC_IP_GUARD_ENABLED, BST_UNCHECKED);
+	SetDlgItemText(IDC_IP_GUARD_RANGES, _T(""));
+	FillVpnGuardCountryCombo(false);
+	SetVpnGuardCountrySelection(_T(""));
+	CheckDlgButton(IDC_VPN_GUARD_ENABLED, BST_UNCHECKED);
+	CheckDlgButton(IDC_VPN_GUARD_BLOCK_UNKNOWN, BST_UNCHECKED);
+	UpdateIpGuardControls();
+	UpdateVpnGuardControls();
+	UpdateBindStatus();
+	m_bUpdatingControls = false;
+	SetModified(TRUE);
 }
 
 BOOL CPPgNetworkInterface::OnApply()
@@ -769,7 +795,7 @@ void CPPgNetworkInterface::Localize()
 		SetDlgItemText(IDC_IP_GUARD_RANGES_LABEL, GetResString(_T("IP_GUARD_ALLOWED_PUBLIC_IP_RANGES")));
 		SetDlgItemText(IDC_VPN_GUARD_FRM, GetResString(_T("VPN_GUARD")));
 		SetDlgItemText(IDC_VPN_GUARD_ENABLED, GetResString(_T("VPN_GUARD_BLOCK_COUNTRY")));
-		SetDlgItemText(IDC_VPN_GUARD_COUNTRY_LABEL, GetResString(_T("VPN_GUARD_COUNTRY")));
+		SetDlgItemText(IDC_VPN_GUARD_COUNTRY_LABEL, GetResStringWithColon(_T("GEOLOCATION")));
 		FillVpnGuardCountryCombo(true);
 		SetDlgItemText(IDC_VPN_GUARD_BLOCK_UNKNOWN, GetResString(_T("VPN_GUARD_BLOCK_UNKNOWN")));
 		UpdateNetworkInterfaceTooltips();
@@ -988,6 +1014,54 @@ void CPPgConnection::LoadSettings()
 	}
 }
 
+void CPPgConnection::ResetToDefaults()
+{
+	m_bUpdatingControls = true;
+	m_nDisplayDownloadCapacityKBS = MbitPerSecToKBytesPerSec(200);
+	m_nDisplayUploadCapacityKBS = MbitPerSecToKBytesPerSec(50);
+	m_bDisplaySpeedsInKB = false;
+	CheckDlgButton(IDC_FORCE_SPEEDS_TO_KB, BST_UNCHECKED);
+	UpdateSpeedDisplayUnitControls();
+
+	m_ctlMaxDown.SetRange(1, m_nDisplayDownloadCapacityKBS);
+	SetRateSliderTicks(m_ctlMaxDown);
+	m_ctlMaxUp.SetRange(1, m_nDisplayUploadCapacityKBS);
+	SetRateSliderTicks(m_ctlMaxUp);
+	m_ctlMaxDown.SetPos(m_nDisplayDownloadCapacityKBS);
+	m_ctlMaxUp.SetPos(m_nDisplayUploadCapacityKBS);
+	CheckDlgButton(IDC_DLIMIT_LBL, BST_UNCHECKED);
+	CheckDlgButton(IDC_ULIMIT_LBL, BST_UNCHECKED);
+
+	const uint16 nTCPPort = CPreferences::GetRandomTCPPort();
+	uint16 nUDPPort = CPreferences::GetRandomUDPPort();
+	if (nUDPPort == nTCPPort)
+		nUDPPort = CPreferences::GetRandomUDPPort();
+	m_lastudp = nUDPPort;
+	CheckDlgButton(IDC_UDPDISABLE, BST_UNCHECKED);
+	SetDlgItemInt(IDC_PORT, nTCPPort, FALSE);
+	SetDlgItemInt(IDC_UDPPORT, nUDPPort, FALSE);
+	GetDlgItem(IDC_PORT)->EnableWindow(TRUE);
+	GetDlgItem(IDC_UDPPORT)->EnableWindow(TRUE);
+
+	SetDlgItemInt(IDC_MAXCON, CPreferences::GetRecommendedMaxConnections(), FALSE);
+	SetDlgItemInt(IDC_MAXSOURCEPERFILE, 400, FALSE);
+	CheckDlgButton(IDC_RECONN, BST_CHECKED);
+	CheckDlgButton(IDC_SHOWOVERHEAD, BST_UNCHECKED);
+	CheckDlgButton(IDC_AUTOCONNECT, BST_UNCHECKED);
+	CheckDlgButton(IDC_NETWORK_KADEMLIA, BST_CHECKED);
+	CheckDlgButton(IDC_NETWORK_ED2K, BST_CHECKED);
+	CheckDlgButton(IDC_PREF_UPNPONSTART, BST_UNCHECKED);
+	CheckDlgButton(IDC_RANDOMIZE_PORTS_ON_STARTUP, BST_UNCHECKED);
+	SetDlgItemInt(IDC_RANDOM_PORT_RANGE_START, CPreferences::GetDefaultRandomPortRangeStart(), FALSE);
+	SetDlgItemInt(IDC_RANDOM_PORT_RANGE_END, CPreferences::GetDefaultRandomPortRangeEnd(), FALSE);
+	CheckDlgButton(IDC_OPEN_PORTS_WINDOWS_FIREWALL, BST_UNCHECKED);
+	UpdateRandomPortRangeControls();
+	m_bUpdatingControls = false;
+	OnLimiterChange();
+	ChangePorts(2);
+	SetModified(TRUE);
+}
+
 BOOL CPPgConnection::OnApply()
 {
 	if (m_nDisplayDownloadCapacityKBS >= UNLIMITED) {
@@ -1184,7 +1258,7 @@ void CPPgConnection::Localize()
 	if (m_hWnd) {
 		SetWindowText(GetResString(_T("CONNECTION")));
 		SetDlgItemText(IDC_CAPACITIES_FRM, GetResString(_T("PW_CON_CAPFRM")));
-		SetDlgItemText(IDC_DCAP_LBL, GetResString(_T("PW_CON_DOWNLBL")));
+		SetDlgItemText(IDC_DCAP_LBL, GetResString(_T("DOWNLOAD")));
 		SetDlgItemText(IDC_UCAP_LBL, GetResString(_T("PW_CON_UPLBL")));
 		SetDlgItemText(IDC_LIMITS_FRM, GetResString(_T("PW_CON_LIMITFRM")));
 		SetDlgItemText(IDC_DLIMIT_LBL, GetResString(_T("PW_DOWNL")));
@@ -1322,7 +1396,7 @@ void CPPgConnection::UpdateSpeedDisplayUnitControls()
 	const bool bOldUpdatingControls = m_bUpdatingControls;
 	m_bUpdatingControls = true;
 
-	const CString strUnit(GetResString(m_bDisplaySpeedsInKB ? _T("KBYTESPERSEC") : _T("MBITSSEC")));
+	const CString strUnit(GetResString(m_bDisplaySpeedsInKB ? _T("KBYTESSEC") : _T("MBITSSEC")));
 	SetDlgItemText(IDC_KBS2, strUnit);
 	SetDlgItemText(IDC_KBS3, strUnit);
 	SetDlgItemText(IDC_DOWNLOAD_CAP, FormatSpeedCapacityValue(m_nDisplayDownloadCapacityKBS, m_bDisplaySpeedsInKB));
@@ -1346,6 +1420,9 @@ void CPPgConnection::OnForceSpeedsToKBChange()
 		return;
 	m_bDisplaySpeedsInKB = IsDlgButtonChecked(IDC_FORCE_SPEEDS_TO_KB) != 0;
 	UpdateSpeedDisplayUnitControls();
+	CPreferencesDlg* pPreferencesDlg = DYNAMIC_DOWNCAST(CPreferencesDlg, GetParent());
+	if (pPreferencesDlg != NULL)
+		pPreferencesDlg->RefreshActivePageToolTips();
 	SetModified();
 }
 
@@ -1381,8 +1458,12 @@ void CPPgConnection::OnHelp()
 
 BOOL CPPgNetworkInterface::PreTranslateMessage(MSG *pMsg)
 {
-	if (m_ToolTip.GetSafeHwnd() != NULL)
-		m_ToolTip.RelayEvent(pMsg);
+	if (m_ToolTip.GetSafeHwnd() != NULL) {
+		const bool bShowToolTips = AreOptionsToolTipsEnabled(this);
+		m_ToolTip.Activate(bShowToolTips);
+		if (bShowToolTips)
+			m_ToolTip.RelayEvent(pMsg);
+	}
 	return CPropertyPage::PreTranslateMessage(pMsg);
 }
 

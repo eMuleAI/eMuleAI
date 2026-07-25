@@ -18,6 +18,7 @@ public:
 	int GetGeneralMenuEntries(CMenuXP *pMenu)	{ return GetAllMenuEntries(pMenu, WEBSVC_GEN_URLS); }
 	int GetAllMenuEntries(CMenuXP *pMenu, DWORD dwFlags = WEBSVC_GEN_URLS | WEBSVC_FILE_URLS);
 	bool RunURL(const CAbstractFile *file, UINT uMenuID);
+	bool RunURL(const uchar* pFileHash, uint64 uFileSize, LPCTSTR pszFileName, UINT uMenuID);
 	void Edit();
 
 protected:

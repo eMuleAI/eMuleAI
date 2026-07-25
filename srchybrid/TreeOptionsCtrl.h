@@ -397,6 +397,7 @@ public:
 	SYSTEMTIME		m_DateTime;
 	DWORD			m_dwIPAddress;
 	BOOL			m_bDrawColorForIcon;
+	BOOL			m_bIndependentCheckBox;
 
 	CString        m_sInfo;
 
@@ -411,6 +412,7 @@ public:
 		, m_DateTime()
 		, m_dwIPAddress()
 		, m_bDrawColorForIcon(TRUE)
+		, m_bIndependentCheckBox(FALSE)
 	{
 	}
 };
@@ -448,6 +450,7 @@ public:
 	virtual BOOL DeleteAllItems();
 	virtual void SendHelpMessage(HTREEITEM hItem);
 	void    SetItemInfo(HTREEITEM hItem, LPCTSTR sInfo);
+	BOOL    SetVisualScalePercent(int nPercent);
 
 	//Inserting items into the control
 	HTREEITEM InsertGroup(LPCTSTR lpszItem, int nImage, HTREEITEM hParent = TVI_ROOT, HTREEITEM hAfter = TVI_LAST, DWORD dwItemData = _UI32_MAX);
@@ -472,6 +475,7 @@ public:
 	//Setting / Getting combo states
 	BOOL SetCheckBox(HTREEITEM hItem, BOOL bCheck);
 	BOOL GetCheckBox(HTREEITEM hItem, BOOL &bCheck) const;
+	BOOL SetCheckBoxIndependent(HTREEITEM hItem, BOOL bIndependent);
 
 	//Setting / Getting radio states
 	virtual BOOL SetRadioButton(HTREEITEM hParent, int nIndex);
@@ -551,8 +555,10 @@ protected:
 	BOOL						m_bToggleOverIconOnly;
 	BOOL						m_bAutoSelect;
 	BOOL						m_bBeingCleared;
+	int						m_nVisualScalePercent;
 
 	//Methods
+	int ScaleVisualMetric(int iValue) const;
 	virtual void DestroyOldChildControl();
 	virtual void RemoveChildControlText(HTREEITEM hItem);
 	virtual void CreateNewChildControl(HTREEITEM hItem);
@@ -563,6 +569,7 @@ protected:
 	virtual void HandleCheckBox(HTREEITEM hItem, BOOL bCheck);
 	virtual BOOL SetEnabledSemiCheckBox(HTREEITEM hItem, BOOL bSemi);
 	virtual BOOL GetSemiCheckBox(HTREEITEM hItem, BOOL &bSemi) const;
+	BOOL IsIndependentCheckBox(HTREEITEM hItem) const;
 	virtual int  GetIndentPostion(HTREEITEM hItem) const;
 	HTREEITEM InsertHeightSpacer(HTREEITEM hParent, HTREEITEM hAfter = TVI_LAST);
 	CRect GetItemReservedRect(HTREEITEM hItem);

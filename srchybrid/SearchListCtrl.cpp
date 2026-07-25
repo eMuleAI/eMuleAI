@@ -1,4 +1,4 @@
-﻿//This file is part of eMule AI
+//This file is part of eMule AI
 //Copyright (C)2002-2026 Merkur ( strEmail.Format("%s@%s", "devteam", "emule-project.net") / https://www.emule-project.net )
 //Copyright (C)2026 eMule AI
 //
@@ -16,6 +16,7 @@
 //along with this program; if not, write to the Free Software
 //Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 #include "stdafx.h"
+#include <unordered_map>
 #include "SearchListCtrl.h"
 #include "emule.h"
 #include "ResizableLib/ResizableSheet.h"
@@ -37,6 +38,8 @@
 #include "PartFile.h"
 #include "KnownFileList.h"
 #include "OtherFunctions.h"
+#include "Ini2.h"
+#include "StringConversion.h"
 #include "MenuCmds.h"
 #include "Opcodes.h"
 #include "Packets.h"
@@ -53,6 +56,7 @@
 #include "MuleStatusBarCtrl.h"
 #include "TransferDlg.h"
 #include "eMuleAI/DarkMode.h"
+#include "eMuleAI/DownloadValidator.h"
 #include "MuleListCtrl.h"
 #include "ListViewSearchDlg.h"
 
@@ -73,8 +77,200 @@ LPARAM CSearchListCtrl::m_pSortParam = NULL;
 
 namespace
 {
+	enum ESearchListColumn
+	{
+		colSearchFileName = 0,
+		colSearchSize,
+		colSearchType,
+		colSearchLength,
+		colSearchAvailability,
+		colSearchCompleteSources,
+		colSearchSimilarity,
+		colSearchKnown,
+		colSearchBitrate,
+		colSearchCodec,
+		colSearchFileId,
+		colSearchFolder,
+		colSearchAlbum,
+		colSearchTitle,
+		colSearchArtist,
+		colSearchAichHash,
+		colSearchSpamRating,
+		colSearchCount
+	};
+
 	const EListStateField kSearchListViewState = static_cast<EListStateField>(LSF_SELECTION | LSF_SCROLL);
 	const DWORD kSearchListSetItemCountFlags = LVSICF_NOSCROLL | LVSICF_NOINVALIDATEALL;
+	const int kSearchListColumnLayoutVersion = 1;
+	const int kOldToNewSearchListColumn[colSearchCount] =
+	{
+		colSearchFileName, colSearchSize, colSearchAvailability, colSearchCompleteSources, colSearchType, colSearchFileId,
+		colSearchArtist, colSearchAlbum, colSearchTitle, colSearchLength, colSearchBitrate, colSearchCodec, colSearchFolder,
+		colSearchKnown, colSearchAichHash, colSearchSpamRating, colSearchSimilarity
+	};
+	const int kOldSearchListColumnWidths[colSearchCount] = { 848, 84, 137, 104, 59, 228, 213, 100, 161, 66, 79, 114, 587, 116, 220, 65, 75 };
+	const int kOldSearchListColumnHidden[colSearchCount] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0 };
+	const int kOldSearchListColumnOrder[colSearchCount] = { 0, 1, 9, 2, 3, 10, 11, 13, 4, 5, 12, 7, 8, 6, 14, 15, 16 };
+	const uint8 kSearchBottomGroupManualBlacklist = 0x01;
+	const uint8 kSearchBottomGroupAutomaticBlacklist = 0x02;
+	const uint8 kSearchBottomGroupSpam = 0x04;
+	const uint8 kSearchBottomGroupDownloading = 0x08;
+
+	uint64 BuildPossibleKnownRowIdentityKey(const SSearchListRow& row)
+	{
+		uint64 uKey = 1469598103934665603ui64;
+		for (size_t i = 0; i < MDX_DIGEST_SIZE; ++i) {
+			uKey ^= row.ucHash[i];
+			uKey *= 1099511628211ui64;
+		}
+		const uint64 uFileSize = static_cast<uint64>(row.uSize);
+		for (size_t i = 0; i < sizeof(uFileSize); ++i) {
+			uKey ^= static_cast<uint8>((uFileSize >> (i * 8)) & 0xFF);
+			uKey *= 1099511628211ui64;
+		}
+		for (int i = 0; i < row.strName.GetLength(); ++i) {
+			uKey ^= static_cast<uint16>(row.strName[i]);
+			uKey *= 1099511628211ui64;
+		}
+		return uKey;
+	}
+
+	bool IsPossibleKnownRowBetter(const SSearchListRow& first, const SSearchListRow& second)
+	{
+		if (first.uSimilarityScore != second.uSimilarityScore)
+			return first.uSimilarityScore > second.uSimilarityScore;
+		if (first.uSourceFlags != second.uSourceFlags)
+			return first.uSourceFlags > second.uSourceFlags;
+		return !first.strFolder.IsEmpty() && second.strFolder.IsEmpty();
+	}
+
+	bool ParseSearchListIntegerList(const CString& strData, std::vector<int>& values)
+	{
+		values.clear();
+		int nOffset = 0;
+		while (nOffset < strData.GetLength()) {
+			CString strValue;
+			const int nNextOffset = CIni::Parse(strData, nOffset, strValue);
+			if (strValue.IsEmpty() || nNextOffset <= nOffset)
+				return false;
+			values.push_back(_tstoi(strValue));
+			nOffset = nNextOffset;
+		}
+		return !values.empty();
+	}
+
+	CString FormatSearchListIntegerList(const std::vector<int>& values)
+	{
+		CString strData;
+		for (size_t i = 0; i < values.size(); ++i) {
+			if (i != 0)
+				strData.AppendChar(_T(','));
+			strData.AppendFormat(_T("%d"), values[i]);
+		}
+		return strData;
+	}
+
+	int RemapSearchListSortValue(int iSortValue)
+	{
+		const UINT uColumn = LOWORD(iSortValue);
+		if (uColumn >= static_cast<UINT>(colSearchCount))
+			return iSortValue;
+		return MAKELONG(kOldToNewSearchListColumn[uColumn], HIWORD(iSortValue));
+	}
+
+	void MigrateSearchListIndexedSetting(CIni& ini, LPCTSTR pszKey, const int* piOldDefaults)
+	{
+		const CString strValue(ini.GetString(pszKey));
+		if (strValue.IsEmpty())
+			return;
+
+		std::vector<int> values;
+		if (!ParseSearchListIntegerList(strValue, values) || values.size() > static_cast<size_t>(colSearchCount)) {
+			ini.DeleteKey(pszKey);
+			return;
+		}
+
+		int aiOldValues[colSearchCount];
+		memcpy(aiOldValues, piOldDefaults, sizeof aiOldValues);
+		for (size_t i = 0; i < values.size(); ++i)
+			aiOldValues[i] = values[i];
+
+		std::vector<int> remappedValues(static_cast<size_t>(colSearchCount));
+		for (int i = 0; i < colSearchCount; ++i)
+			remappedValues[kOldToNewSearchListColumn[i]] = aiOldValues[i];
+		ini.WriteString(pszKey, FormatSearchListIntegerList(remappedValues));
+	}
+
+	void MigrateSearchListColumnOrder(CIni& ini)
+	{
+		const CString strValue(ini.GetString(_T("SearchListCtrlColumnOrders")));
+		if (strValue.IsEmpty())
+			return;
+
+		std::vector<int> oldOrder;
+		if (!ParseSearchListIntegerList(strValue, oldOrder) || oldOrder.size() > static_cast<size_t>(colSearchCount)) {
+			ini.DeleteKey(_T("SearchListCtrlColumnOrders"));
+			return;
+		}
+
+		const size_t uStoredCount = oldOrder.size();
+		bool abUsed[colSearchCount] = {};
+		for (size_t i = 0; i < oldOrder.size(); ++i) {
+			const int iColumn = oldOrder[i];
+			if (iColumn < 0 || iColumn >= colSearchCount || abUsed[iColumn]) {
+				ini.DeleteKey(_T("SearchListCtrlColumnOrders"));
+				return;
+			}
+			abUsed[iColumn] = true;
+		}
+		for (int i = 0; i < colSearchCount; ++i) {
+			if (!abUsed[i])
+				oldOrder.push_back(i);
+		}
+
+		bool bOldDefaultOrder = uStoredCount >= 16;
+		for (size_t i = 0; bOldDefaultOrder && i < uStoredCount; ++i)
+			bOldDefaultOrder = oldOrder[i] == kOldSearchListColumnOrder[i];
+
+		std::vector<int> newOrder(static_cast<size_t>(colSearchCount));
+		if (bOldDefaultOrder) {
+			for (int i = 0; i < colSearchCount; ++i)
+				newOrder[i] = i;
+		} else {
+			for (int i = 0; i < colSearchCount; ++i)
+				newOrder[i] = kOldToNewSearchListColumn[oldOrder[i]];
+		}
+		ini.WriteString(_T("SearchListCtrlColumnOrders"), FormatSearchListIntegerList(newOrder));
+	}
+
+	void MigrateSearchListColumnSettings()
+	{
+		CIni ini(thePrefs.GetConfigFile(), _T("ListControlSetup"));
+		if (ini.GetInt(_T("SearchListCtrlColumnLayoutVersion"), 0) >= kSearchListColumnLayoutVersion)
+			return;
+
+		MigrateSearchListIndexedSetting(ini, _T("SearchListCtrlColumnWidths"), kOldSearchListColumnWidths);
+		MigrateSearchListIndexedSetting(ini, _T("SearchListCtrlColumnHidden"), kOldSearchListColumnHidden);
+		MigrateSearchListColumnOrder(ini);
+
+		const CString strSortItem(ini.GetString(_T("SearchListCtrlTableSortItem")));
+		if (!strSortItem.IsEmpty())
+			ini.WriteInt(_T("SearchListCtrlTableSortItem"), RemapSearchListSortValue(_tstoi(strSortItem)));
+
+		const CString strSortHistory(ini.GetString(_T("SearchListCtrlSortHistory")));
+		if (!strSortHistory.IsEmpty()) {
+			std::vector<int> sortHistory;
+			if (ParseSearchListIntegerList(strSortHistory, sortHistory)) {
+				for (size_t i = 0; i < sortHistory.size(); ++i)
+					sortHistory[i] = RemapSearchListSortValue(sortHistory[i]);
+				ini.WriteString(_T("SearchListCtrlSortHistory"), FormatSearchListIntegerList(sortHistory));
+			} else
+				ini.DeleteKey(_T("SearchListCtrlSortHistory"));
+		}
+
+		ini.WriteInt(_T("SearchListCtrlColumnLayoutVersion"), kSearchListColumnLayoutVersion);
+	}
+
 	int GetSearchCompleteState(bool bKademlia, bool bHasDirectory, UINT uSources, UINT uCompleteSources)
 	{
 		if (bKademlia)
@@ -122,6 +318,23 @@ namespace
 	bool IsSearchFileSpamOrBlacklistedBottomGroup(const CSearchFile* item)
 	{
 		return item != NULL && ShouldApplySearchSpamOrBlacklistBottomGrouping() && item->IsConsideredSpam(true);
+	}
+
+	uint8 GetSearchFileBottomGroupStatusFlags(const CSearchFile* item)
+	{
+		if (item == NULL)
+			return 0;
+
+		uint8 uFlags = 0;
+		if (item->GetManualBlacklisted())
+			uFlags |= kSearchBottomGroupManualBlacklist;
+		if (item->GetAutomaticBlacklisted())
+			uFlags |= kSearchBottomGroupAutomaticBlacklist;
+		if (item->IsConsideredSpam(false))
+			uFlags |= kSearchBottomGroupSpam;
+		if (item->GetKnownType() == CSearchFile::Downloading)
+			uFlags |= kSearchBottomGroupDownloading;
+		return uFlags;
 	}
 
 	int GetSearchFileBottomGroupRank(const CSearchFile* item)
@@ -270,7 +483,7 @@ namespace
 		return true;
 	}
 
-	void RebuildPreviewMenu(CMenuXP& menu, const CPartFile* file, bool bEnablePreview, bool bEnablePauseOnPreview, bool bPauseOnPreviewChecked, bool bEnablePreviewParts, bool bPreviewPartsChecked)
+	void RebuildPreviewMenu(CMenuXP& menu, const CPartFile* file, bool bEnablePreview, bool bEnablePauseOnPreview, bool bPauseOnPreviewChecked, bool bEnablePreviewParts, bool bPreviewPartsChecked, LPCTSTR pszCompleteFilePath)
 	{
 		while (menu.GetMenuItemCount() > 0)
 			menu.RemoveMenu(0, MF_BYPOSITION);
@@ -283,8 +496,11 @@ namespace
 		}
 
 		const CString strPrimaryLabel = thePreviewApps.GetPreviewAppDisplayNameByCommand(strPrimaryCommand);
-		menu.AppendODMenu(MF_STRING | (bEnablePreview ? MF_ENABLED : MF_GRAYED), MP_PREVIEW, new CMenuXPText(MP_PREVIEW, strPrimaryLabel.IsEmpty() ? GetResString(_T("DL_PREVIEW")) : strPrimaryLabel, thePreviewApps.GetPreviewCommandIcon(strPrimaryCommand)));
-		thePreviewApps.GetAllMenuEntries(menu, file, strPrimaryCommand);
+		menu.AppendODMenu(MF_STRING | (bEnablePreview ? MF_ENABLED : MF_GRAYED), MP_PREVIEW, new CMenuXPText(MP_PREVIEW, strPrimaryLabel.IsEmpty() ? GetResStringWithAccel(_T("PREVIEW_AVAILABLE"), _T('v')) : strPrimaryLabel, thePreviewApps.GetPreviewCommandIcon(strPrimaryCommand)));
+		if (file != NULL || pszCompleteFilePath == NULL || *pszCompleteFilePath == _T('\0'))
+			thePreviewApps.GetAllMenuEntries(menu, file, strPrimaryCommand);
+		else
+			thePreviewApps.GetAllMenuEntriesForFilePath(menu, pszCompleteFilePath, strPrimaryCommand);
 		menu.AppendMenu(MF_SEPARATOR);
 		if (!thePrefs.GetPreviewPrio()) {
 			menu.AppendMenu(MF_STRING | (bEnablePreviewParts ? MF_ENABLED : MF_GRAYED), MP_TRY_TO_GET_PREVIEW_PARTS, GetResString(_T("DL_TRY_TO_GET_PREVIEW_PARTS")));
@@ -337,7 +553,7 @@ void CSearchResultFileDetailSheet::Localize()
 	m_wndMetaData.Localize();
 	SetTabTitle(_T("META_DATA"), &m_wndMetaData, this);
 	m_wndComments.Localize();
-	SetTabTitle(_T("CMT_READALL"), &m_wndComments, this);
+	SetTabTitle(_T("COMMENT"), &m_wndComments, this);
 }
 
 CSearchResultFileDetailSheet::CSearchResultFileDetailSheet(CTypedPtrList<CPtrList, CSearchFile*> &paFiles, UINT uInvokePage, CListCtrlItemWalk *pListCtrl)
@@ -427,10 +643,31 @@ namespace
 {
 	const UINT_PTR kTimerChunkedSearchRemove = 0x5E71;
 	const UINT_PTR kTimerDeferredSearchReload = 0x5E72;
+	const UINT_PTR kTimerPossibleKnownAvailability = 0x5E73;
 	const UINT kDeferredSearchReloadDelayMs = 250;
+	const UINT kPossibleKnownAvailabilityDelayMs = 10;
+	const UINT kPossibleKnownAvailabilityWaitForRemoveMs = 50;
+	const DWORD kPossibleKnownAvailabilitySliceMs = 5;
+	const UINT kPossibleKnownAvailabilityItemsPerSlice = 16;
 	const size_t kClientSharedFilesAutoSortThreshold = 1000;
 }
 
+
+SSearchListRow::SSearchListRow()
+	: eType(SearchListRowSearchFile)
+	, pSearchFile(NULL)
+	, pParentSearchFile(NULL)
+	, nSearchID(0)
+	, uSize(static_cast<uint64>(0))
+	, uMediaLengthSec(0)
+	, uMediaBitrateKbps(0)
+	, uSimilarityScore(0)
+	, uFileType(static_cast<uint8>(ED2KFT_ANY))
+	, uSourceFlags(CDownloadValidator::FuzzyFileSourceUnknown)
+	, uBottomGroupStatusFlags(0)
+{
+	md4clr(ucHash);
+}
 
 BEGIN_MESSAGE_MAP(CSearchListCtrl, CMuleListCtrl)
 	ON_NOTIFY_REFLECT(LVN_COLUMNCLICK, OnLvnColumnClick)
@@ -457,6 +694,7 @@ CSearchListCtrl::CSearchListCtrl()
 	, m_crSearchResultKnown()
 	, m_crSearchResultSharing()
 	, m_crSearchResultCancelled()
+	, m_crPossibleKnownHeader()
 	, m_crShades()
 	, m_nResultsID()
 	, m_iDataSize(-1)
@@ -469,8 +707,11 @@ CSearchListCtrl::CSearchListCtrl()
 	, m_bChunkedSearchRemoveActive(false)
 	, m_bDeferredSearchReloadPending(false)
 	, m_bDeferredSearchReloadSort(false)
+	, m_bDeferredSearchReloadKeepPendingWhileInactive(false)
 	, m_eDeferredSearchReloadState(kSearchListViewState)
 	, m_lListedItemsModelSequence(0)
+	, m_uPossibleKnownRevision(0)
+	, m_uPossibleKnownCandidateDataRevision(0)
 {
 	SetGeneralPurposeFind(true);
 	m_eFileSizeFormat = (EFileSizeFormat)theApp.GetProfileInt(_T("eMule"), _T("SearchResultsFileSizeFormat"), fsizeDefault);
@@ -480,8 +721,10 @@ CSearchListCtrl::CSearchListCtrl()
 void CSearchListCtrl::OnDestroy()
 {
 	ClearChunkedSearchRemoveItems(false);
+	ClearPossibleKnownAvailabilityQueue();
 	KillTimer(kTimerDeferredSearchReload);
 	m_bDeferredSearchReloadPending = false;
+	m_bDeferredSearchReloadKeepPendingWhileInactive = false;
 	theApp.WriteProfileInt(_T("eMule"), _T("SearchResultsFileSizeFormat"), m_eFileSizeFormat);
 	__super::OnDestroy();
 }
@@ -501,19 +744,29 @@ void CSearchListCtrl::OnTimer(UINT_PTR nIDEvent)
 				return;
 			}
 			if (theApp.emuledlg != NULL && theApp.emuledlg->activewnd != theApp.emuledlg->searchwnd) {
+				if (m_bDeferredSearchReloadKeepPendingWhileInactive && SetTimer(kTimerDeferredSearchReload, 500, NULL) != 0)
+					return;
 				m_bDeferredSearchReloadPending = false;
 				m_bDeferredSearchReloadSort = false;
+				m_bDeferredSearchReloadKeepPendingWhileInactive = false;
 				return;
 			}
 			const bool bSortCurrentList = m_bDeferredSearchReloadSort;
 			const EListStateField eState = m_eDeferredSearchReloadState;
 			m_bDeferredSearchReloadPending = false;
 			m_bDeferredSearchReloadSort = false;
+			m_bDeferredSearchReloadKeepPendingWhileInactive = false;
 			ReloadList(bSortCurrentList, eState);
 		}
 		return;
 	}
 
+
+	if (nIDEvent == kTimerPossibleKnownAvailability) {
+		KillTimer(kTimerPossibleKnownAvailability);
+		ProcessPossibleKnownAvailability();
+		return;
+	}
 
 	if (nIDEvent == kTimerChunkedSearchRemove) {
 		ProcessChunkedSearchRemoveItems();
@@ -578,22 +831,23 @@ void CSearchListCtrl::Init(CSearchList *in_searchlist)
 	searchlist = in_searchlist;
 
 	// Alignment rule: left for text, dates, and status labels; right for sizes, rates, counts, durations, and percentages.
-	InsertColumn(0,		EMPTY,	LVCFMT_LEFT,	DFLT_FILENAME_COL_WIDTH);			//DL_FILENAME
-	InsertColumn(1,		EMPTY,	LVCFMT_RIGHT,	DFLT_SIZE_COL_WIDTH);				//DL_SIZE
-	InsertColumn(2,		EMPTY,	LVCFMT_RIGHT,	60);								//SEARCHAVAIL
-	InsertColumn(3,		EMPTY,	LVCFMT_RIGHT,	70);								//COMPLSOURCES
-	InsertColumn(4,		EMPTY,	LVCFMT_LEFT,	DFLT_FILETYPE_COL_WIDTH);			//TYPE
-	InsertColumn(5,		EMPTY,	LVCFMT_LEFT,	DFLT_HASH_COL_WIDTH, -1, true);		//FILEID
-	InsertColumn(6,		EMPTY,	LVCFMT_LEFT,	DFLT_ARTIST_COL_WIDTH);				//ARTIST
-	InsertColumn(7,		EMPTY,	LVCFMT_LEFT,	DFLT_ALBUM_COL_WIDTH);				//ALBUM
-	InsertColumn(8,		EMPTY,	LVCFMT_LEFT,	DFLT_TITLE_COL_WIDTH);				//TITLE
-	InsertColumn(9,		EMPTY,	LVCFMT_RIGHT,	DFLT_LENGTH_COL_WIDTH);				//LENGTH
-	InsertColumn(10,	EMPTY,	LVCFMT_RIGHT,	DFLT_BITRATE_COL_WIDTH);			//BITRATE
-	InsertColumn(11,	EMPTY,	LVCFMT_LEFT,	DFLT_CODEC_COL_WIDTH);				//CODEC
-	InsertColumn(12,	EMPTY,	LVCFMT_LEFT,	DFLT_FOLDER_COL_WIDTH, -1, true);	//FOLDER
-	InsertColumn(13,	EMPTY,	LVCFMT_LEFT,	50);								//KNOWN
-	InsertColumn(14,	EMPTY,	LVCFMT_LEFT,	DFLT_HASH_COL_WIDTH, -1, true);		//AICHHASH
-	InsertColumn(15,	EMPTY,	LVCFMT_RIGHT,	65, -1, true);						//SPAM_RATING
+	InsertColumn(colSearchFileName,			EMPTY,	LVCFMT_LEFT,	DFLT_FILENAME_COL_WIDTH);			//DL_FILENAME
+	InsertColumn(colSearchSize,				EMPTY,	LVCFMT_RIGHT,	DFLT_SIZE_COL_WIDTH);				//DL_SIZE
+	InsertColumn(colSearchType,				EMPTY,	LVCFMT_LEFT,	DFLT_FILETYPE_COL_WIDTH);			//TYPE
+	InsertColumn(colSearchLength,			EMPTY,	LVCFMT_RIGHT,	DFLT_LENGTH_COL_WIDTH);				//LENGTH
+	InsertColumn(colSearchAvailability,		EMPTY,	LVCFMT_RIGHT,	60);								//SEARCHAVAIL
+	InsertColumn(colSearchCompleteSources,	EMPTY,	LVCFMT_RIGHT,	70);								//COMPLSOURCES
+	InsertColumn(colSearchSimilarity,		EMPTY,	LVCFMT_RIGHT,	75);								//SIMILARITY
+	InsertColumn(colSearchKnown,				EMPTY,	LVCFMT_LEFT,	50);								//KNOWN
+	InsertColumn(colSearchBitrate,			EMPTY,	LVCFMT_RIGHT,	DFLT_BITRATE_COL_WIDTH);			//BITRATE
+	InsertColumn(colSearchCodec,				EMPTY,	LVCFMT_LEFT,	DFLT_CODEC_COL_WIDTH);				//CODEC
+	InsertColumn(colSearchFileId,			EMPTY,	LVCFMT_LEFT,	DFLT_HASH_COL_WIDTH, -1, true);		//FILEID
+	InsertColumn(colSearchFolder,			EMPTY,	LVCFMT_LEFT,	DFLT_FOLDER_COL_WIDTH, -1, true);	//FOLDER
+	InsertColumn(colSearchAlbum,				EMPTY,	LVCFMT_LEFT,	DFLT_ALBUM_COL_WIDTH);				//ALBUM
+	InsertColumn(colSearchTitle,				EMPTY,	LVCFMT_LEFT,	DFLT_TITLE_COL_WIDTH);				//TITLE
+	InsertColumn(colSearchArtist,			EMPTY,	LVCFMT_LEFT,	DFLT_ARTIST_COL_WIDTH);				//ARTIST
+	InsertColumn(colSearchAichHash,			EMPTY,	LVCFMT_LEFT,	DFLT_HASH_COL_WIDTH, -1, true);		//AICHHASH
+	InsertColumn(colSearchSpamRating,		EMPTY,	LVCFMT_RIGHT,	65, -1, true);						//SPAM_RATING
 
 	SetAllIcons();
 
@@ -614,6 +868,7 @@ void CSearchListCtrl::Init(CSearchList *in_searchlist)
 
 	CreateMenus();
 
+	MigrateSearchListColumnSettings();
 	LoadSettings();
 	SetHighlightColors();
 
@@ -626,6 +881,7 @@ void CSearchListCtrl::Init(CSearchList *in_searchlist)
 
 CSearchListCtrl::~CSearchListCtrl()
 {
+	ClearListedItems(true);
 }
 CSearchListCtrl::SChunkedSearchRemoveItem::SChunkedSearchRemoveItem()
 	: nSearchID(0)
@@ -701,10 +957,12 @@ void CSearchListCtrl::StartChunkedRemoveSelectedSearchResults(CTypedPtrList<CPtr
 
 	SaveListState(m_nResultsID, kSearchListViewState);
 	SetRedraw(false);
-	std::vector<CSearchFile*> keptItems;
+	ClearPossibleKnownRows();
+	std::vector<SSearchListRow*> keptItems;
 	keptItems.reserve(m_ListedItemsVector.size());
 	for (size_t i = 0; i < m_ListedItemsVector.size(); ++i) {
-		CSearchFile *pListedFile = m_ListedItemsVector[i];
+		SSearchListRow* pRow = m_ListedItemsVector[i];
+		CSearchFile* pListedFile = pRow != NULL && pRow->eType == SearchListRowSearchFile ? pRow->pSearchFile : NULL;
 		if (pListedFile == NULL)
 			continue;
 		void *pDummy = NULL;
@@ -713,7 +971,7 @@ void CSearchListCtrl::StartChunkedRemoveSelectedSearchResults(CTypedPtrList<CPtr
 		const CString strListedHashKey(BuildSearchRemoveHashKey(pListedFile->GetSearchID(), pListedFile->GetFileHash()));
 		if (!strListedHashKey.IsEmpty() && mapSelectedParentHashes.Lookup(strListedHashKey, pDummy))
 			continue;
-		keptItems.push_back(pListedFile);
+		keptItems.push_back(pRow);
 	}
 	m_ListedItemsVector.swap(keptItems);
 	RebuildListedItemsMap();
@@ -754,6 +1012,7 @@ void CSearchListCtrl::ProcessChunkedSearchRemoveItems()
 		SSearchResultId id;
 		CSearchFile *pFile = NULL;
 		if (ResolveChunkedSearchRemoveItem(item, id, pFile)) {
+			RemoveCachedSearchRowsForFile(pFile);
 			searchlist->RemoveResult(pFile);
 			++m_uChunkedSearchRemoveProcessed;
 		} else
@@ -798,13 +1057,9 @@ void CSearchListCtrl::FinishChunkedSearchRemoveItems(bool bAborted)
 	if (theApp.emuledlg != NULL)
 		theApp.emuledlg->RefreshActiveBulkOperationOverlays();
 	if (!theApp.IsClosing() && ::IsWindow(m_hWnd)) {
-		if (bAborted)
-			ReloadList(false, kSearchListViewState);
-		else {
-			UpdateTabHeader(m_nResultsID, EMPTY, false);
+		ReloadList(false, kSearchListViewState);
+		if (!bAborted)
 			AutoSelectItem();
-			Invalidate(FALSE);
-		}
 	}
 }
 
@@ -826,12 +1081,12 @@ void CSearchListCtrl::OnOperationOverlayCancel()
 
 void CSearchListCtrl::Localize()
 {
-	static const LPCTSTR uids[16] =
+	static const LPCTSTR uids[colSearchCount] =
 	{
-		_T("DL_FILENAME"), _T("DL_SIZE"), 0/*SEARCHAVAIL*/, _T("COMPLSOURCES"), _T("TYPE")
-		, _T("FILEID"), _T("ARTIST"), _T("ALBUM"), _T("TITLE"), _T("LENGTH")
-		, _T("BITRATE"), _T("CODEC"), _T("FOLDER"), _T("KNOWN"), _T("AICHHASH")
-		, _T("SPAM_RATING")
+		_T("DL_FILENAME"), _T("DL_SIZE"), _T("TYPE"), _T("LENGTH"), 0/*SEARCHAVAIL*/
+		, _T("COMPLSOURCES"), _T("DOWNLOAD_VALIDATOR_SIMILARITY"), _T("KNOWN"), _T("BITRATE")
+		, _T("CODEC"), _T("FILEID"), _T("FOLDER"), _T("ALBUM"), _T("TITLE"), _T("ARTIST")
+		, _T("AICHHASH"), _T("SPAM_RATING")
 	};
 
 	LocaliseHeaderCtrl(uids, _countof(uids));
@@ -842,7 +1097,7 @@ void CSearchListCtrl::Localize()
 	if (thePrefs.IsExtControlsEnabled())
 		strRes.AppendFormat(_T(" (%s)"), (LPCTSTR)GetResString(_T("DL_SOURCES"))); //modify "availability" header
 	hdi.pszText = (LPTSTR)(LPCTSTR)strRes;
-	GetHeaderCtrl()->SetItem(2, &hdi);
+	GetHeaderCtrl()->SetItem(colSearchAvailability, &hdi);
 
 	CreateMenus();
 }
@@ -853,7 +1108,8 @@ void CSearchListCtrl::AddResult(CSearchFile* toshow)
 		return;
 	int m_iIndex = -1;
 	// Ignore hidden children of collapsed parents
-	if (theApp.IsClosing() || theApp.emuledlg->activewnd != theApp.emuledlg->searchwnd || !IsWindowVisible() || toshow == NULL || toshow->GetSearchID() != m_nResultsID || !ShouldShowSearchItemInList(toshow) || (m_ListedItemsMap.Lookup(toshow, m_iIndex) && m_iIndex >= 0))
+	if (theApp.IsClosing() || theApp.emuledlg->activewnd != theApp.emuledlg->searchwnd || !IsWindowVisible() || toshow == NULL
+		|| toshow->GetSearchID() != m_nResultsID || !ShouldShowSearchItemInList(toshow) || (m_SearchItemsMap.Lookup(toshow, m_iIndex) && m_iIndex >= 0))
 		return;
 
 	SaveListState(m_nResultsID, kSearchListViewState); // Save selections and scroll state
@@ -866,10 +1122,12 @@ void CSearchListCtrl::AddResult(CSearchFile* toshow)
 	int insertPos = (int)m_ListedItemsVector.size();
 	if (toshow->GetListParent()) {
 		int parentIdx;
-		if (m_ListedItemsMap.Lookup(toshow->GetListParent(), parentIdx))
+		if (m_SearchItemsMap.Lookup(toshow->GetListParent(), parentIdx))
 			insertPos = parentIdx + 1;
 	}
-	m_ListedItemsVector.insert(m_ListedItemsVector.begin() + insertPos, toshow);
+	m_ListedItemsVector.insert(m_ListedItemsVector.begin() + insertPos, GetOrCreateSearchRow(toshow));
+	if (toshow->GetListParent() == NULL && IsPossibleKnownFeatureEnabled())
+		QueuePossibleKnownAvailability(toshow);
 
 	SortListedItemsRaw();
 	GroupListedItemsByBottomCandidates();
@@ -887,15 +1145,14 @@ void CSearchListCtrl::RemoveResult(CSearchFile* toremove, bool bUpdateTabCount)
 	int m_iIndex = -1;
 	if (theApp.IsClosing() || theApp.emuledlg->activewnd != theApp.emuledlg->searchwnd || !IsWindowVisible() || toremove == NULL)
 		return;
-		if (toremove->GetSearchID() != m_nResultsID || !m_ListedItemsMap.Lookup(toremove, m_iIndex) || m_iIndex < 0)
+	if (toremove->GetSearchID() != m_nResultsID || !m_SearchItemsMap.Lookup(toremove, m_iIndex) || m_iIndex < 0)
 		return;
 
 	SaveListState(m_nResultsID, kSearchListViewState); // Save selections and scroll state
 	SetRedraw(false); // Suspend painting
 
-	// remove_if will move items to delete (parent + its children) at the end of the vector.
-	auto itFirst = std::remove_if(m_ListedItemsVector.begin(), m_ListedItemsVector.end(), [toremove](CSearchFile* f) { return f == toremove || f->GetListParent() == toremove; });
-	m_ListedItemsVector.erase(itFirst, m_ListedItemsVector.end()); // Erase the moved items from the vector.
+	RemoveCachedSearchRowsForFile(toremove);
+	GroupListedItemsByBottomCandidates();
 	RebuildListedItemsMap();
 
 	UpdateSearchListItemCount(*this, m_ListedItemsVector.size()); // Set current count for the virtual list before restoring state.
@@ -913,8 +1170,22 @@ void CSearchListCtrl::UpdateSources(CSearchFile* toupdate, const bool bSort)
 		return;
 	int m_iIndex = -1;
 	// Ignore hidden children of collapsed parents
-	if (theApp.IsClosing() || theApp.emuledlg->activewnd != theApp.emuledlg->searchwnd || !IsWindowVisible() || toupdate == NULL || toupdate->GetSearchID() != m_nResultsID || (toupdate->GetListParent() && !toupdate->GetListParent()->IsListExpanded()) || !m_ListedItemsMap.Lookup(toupdate, m_iIndex) || m_iIndex < 0)
+	if (theApp.IsClosing() || theApp.emuledlg->activewnd != theApp.emuledlg->searchwnd || !IsWindowVisible() || toupdate == NULL
+		|| toupdate->GetSearchID() != m_nResultsID || (toupdate->GetListParent() && !toupdate->GetListParent()->IsListExpanded())
+		|| !m_SearchItemsMap.Lookup(toupdate, m_iIndex) || m_iIndex < 0)
 		return;
+
+	if (toupdate->GetListParent() == NULL && IsPossibleKnownFeatureEnabled() && searchlist != NULL) {
+		std::vector<CString> astrFileNames;
+		uint32 uCurrentAliasFingerprint = 0;
+		if (searchlist->BuildPossibleKnownAliasNames(toupdate, astrFileNames, uCurrentAliasFingerprint)) {
+			std::map<CSearchFile*, SPossibleKnownCacheEntry>::const_iterator itCache = m_PossibleKnownCache.find(toupdate);
+			if (itCache != m_PossibleKnownCache.end() && itCache->second.uAliasFingerprint != uCurrentAliasFingerprint) {
+				const bool bLoadRows = itCache->second.bRowsLoaded || !itCache->second.rows.empty() || toupdate->IsListExpanded();
+				QueuePossibleKnownAvailability(toupdate, bLoadRows, true);
+			}
+		}
+	}
 
 	int iRedrawFirst = m_iIndex;
 	int iRedrawLast = m_iIndex;
@@ -926,7 +1197,7 @@ void CSearchListCtrl::UpdateSources(CSearchFile* toupdate, const bool bSort)
 			for (POSITION pos = pChildren->GetHeadPosition(); pos != NULL;) {
 				CSearchFile* cur = pChildren->GetNext(pos);
 				int childIdx;
-				if (cur != NULL && m_ListedItemsMap.Lookup(cur, childIdx)) {
+				if (cur != NULL && m_SearchItemsMap.Lookup(cur, childIdx)) {
 					iRedrawFirst = min(iRedrawFirst, childIdx);
 					iRedrawLast = max(iRedrawLast, childIdx);
 				}
@@ -966,7 +1237,7 @@ void CSearchListCtrl::UpdateSearch(CSearchFile* toupdate)
 		return;
 	int m_iIndex = -1;
 	// Ignore hidden children of collapsed parents
-	if (theApp.IsClosing() || theApp.emuledlg->activewnd != theApp.emuledlg->searchwnd || !IsWindowVisible() || toupdate == NULL || toupdate->GetSearchID() != m_nResultsID || !m_ListedItemsMap.Lookup(toupdate, m_iIndex) || m_iIndex < 0)
+	if (theApp.IsClosing() || theApp.emuledlg->activewnd != theApp.emuledlg->searchwnd || !IsWindowVisible() || toupdate == NULL || toupdate->GetSearchID() != m_nResultsID || !m_SearchItemsMap.Lookup(toupdate, m_iIndex) || m_iIndex < 0)
 		return;
 
 	RequestRowRedrawAsync(m_iIndex, m_iIndex);
@@ -978,14 +1249,44 @@ bool CSearchListCtrl::ShouldShowSearchItemInList(const CSearchFile *pSearchFile)
 	return pSearchFile != NULL && !IsFilteredOut(pSearchFile) && (pSearchFile->GetListParent() == NULL || pSearchFile->GetListParent()->IsListExpanded());
 }
 
-void CSearchListCtrl::BuildVisibleSearchItems(const CTypedPtrList<CPtrList, CSearchFile*> &sourceList, std::vector<CSearchFile*> &visibleItems) const
+void CSearchListCtrl::BuildVisibleSearchItems(const CTypedPtrList<CPtrList, CSearchFile*> &sourceList, std::vector<SSearchListRow*> &visibleItems)
 {
+	ClearPossibleKnownRows();
+	ClearPossibleKnownAvailabilityQueue();
 	visibleItems.clear();
 	visibleItems.reserve(static_cast<size_t>(sourceList.GetCount()));
+
+	std::map<CSearchFile*, bool> activeSearchRows;
 	for (POSITION pos = sourceList.GetHeadPosition(); pos != NULL;) {
 		CSearchFile* pCurFile = sourceList.GetNext(pos);
-		if (ShouldShowSearchItemInList(pCurFile))
-			visibleItems.push_back(pCurFile);
+		if (pCurFile != NULL)
+			activeSearchRows[pCurFile] = true;
+	}
+	std::vector<SSearchListRow*> staleRows;
+	for (std::map<CSearchFile*, SSearchListRow*>::const_iterator it = m_SearchRows.begin(); it != m_SearchRows.end(); ++it) {
+		SSearchListRow* pRow = it->second;
+		if (pRow != NULL && pRow->nSearchID == m_nResultsID && activeSearchRows.find(it->first) == activeSearchRows.end())
+			staleRows.push_back(pRow);
+	}
+	RemoveRowsFromSavedStates(staleRows);
+	for (std::map<CSearchFile*, SSearchListRow*>::iterator it = m_SearchRows.begin(); it != m_SearchRows.end();) {
+		SSearchListRow* pRow = it->second;
+		if (pRow != NULL && pRow->nSearchID == m_nResultsID && activeSearchRows.find(it->first) == activeSearchRows.end()) {
+			m_ListedItemsMap.RemoveKey(pRow);
+			m_PossibleKnownCache.erase(it->first);
+			delete pRow;
+			it = m_SearchRows.erase(it);
+		} else
+			++it;
+	}
+
+	for (POSITION pos = sourceList.GetHeadPosition(); pos != NULL;) {
+		CSearchFile* pCurFile = sourceList.GetNext(pos);
+		if (!ShouldShowSearchItemInList(pCurFile))
+			continue;
+		visibleItems.push_back(GetOrCreateSearchRow(pCurFile));
+		if (pCurFile->GetListParent() == NULL && IsPossibleKnownFeatureEnabled())
+			QueuePossibleKnownAvailability(pCurFile);
 	}
 }
 
@@ -1047,8 +1348,12 @@ void CSearchListCtrl::CollectSearchDownloadItems(uint32 nSearchID, bool bOnlyUnk
 
 CString CSearchListCtrl::GetListedItemDisplayText(int iItem, int iSubItem) const
 {
-	const CSearchFile *pSearchFile = ResolveSearchFileByRowIndex(iItem);
-	return pSearchFile != NULL ? GetItemDisplayText(pSearchFile, iSubItem) : EMPTY;
+	const SSearchListRow* pRow = ResolveRowByIndex(iItem);
+	if (pRow == NULL)
+		return EMPTY;
+	if (pRow->eType == SearchListRowSearchFile)
+		return pRow->pSearchFile != NULL ? GetItemDisplayText(pRow->pSearchFile, iSubItem) : EMPTY;
+	return GetPossibleKnownDisplayText(pRow, iSubItem);
 }
 
 bool CSearchListCtrl::BuildSearchInfoTipText(int iItem, CString& strText) const
@@ -1059,7 +1364,7 @@ bool CSearchListCtrl::BuildSearchInfoTipText(int iItem, CString& strText) const
 		return false;
 
 	CString strHead(file->GetFileName());
-	strHead.AppendFormat(_T("\n") _T("%s %s\n") _T("%s %s\n<br_head>\n"), (LPCTSTR)GetResString(_T("FD_HASH")), (LPCTSTR)md4str(file->GetFileHash()), (LPCTSTR)GetResString(_T("FD_SIZE")), (LPCTSTR)CastItoXBytes((uint64)file->GetFileSize()));
+	strHead.AppendFormat(_T("\n") _T("%s %s\n") _T("%s %s\n<br_head>\n"), (LPCTSTR)GetResStringWithColon(_T("CD_UHASH2")), (LPCTSTR)md4str(file->GetFileHash()), (LPCTSTR)GetResStringWithColon(_T("DL_SIZE")), (LPCTSTR)CastItoXBytes((uint64)file->GetFileSize()));
 	strText = strHead;
 
 	const CArray<CTag*, CTag*>& tags = file->GetTags();
@@ -1110,12 +1415,23 @@ bool CSearchListCtrl::BuildSearchInfoTipText(int iItem, CString& strText) const
 	return true;
 }
 
-CSearchFile* CSearchListCtrl::ResolveSearchFileByRowIndex(int iItem) const
+SSearchListRow* CSearchListCtrl::ResolveRowByIndex(int iItem) const
 {
 	if (iItem < 0 || static_cast<size_t>(iItem) >= m_ListedItemsVector.size())
 		return NULL;
-	CSearchFile* pSearchFile = m_ListedItemsVector[static_cast<size_t>(iItem)];
-	return pSearchFile;
+	return m_ListedItemsVector[static_cast<size_t>(iItem)];
+}
+
+CSearchFile* CSearchListCtrl::ResolveSearchFileByRowIndex(int iItem) const
+{
+	SSearchListRow* pRow = ResolveRowByIndex(iItem);
+	return pRow != NULL && pRow->eType == SearchListRowSearchFile ? pRow->pSearchFile : NULL;
+}
+
+bool CSearchListCtrl::IsPassiveRowIndex(int iItem) const
+{
+	const SSearchListRow* pRow = ResolveRowByIndex(iItem);
+	return pRow != NULL && pRow->eType != SearchListRowSearchFile;
 }
 
 
@@ -1128,13 +1444,1034 @@ void CSearchListCtrl::CollectSelectedSearchFiles(CTypedPtrList<CPtrList, CSearch
 	}
 }
 
-void CSearchListCtrl::QueueDeferredReload(const bool bSortCurrentList, const EListStateField LsfFlag, UINT uDelayMs)
+SSearchListRow* CSearchListCtrl::GetOrCreateSearchRow(CSearchFile* pSearchFile)
+{
+	if (pSearchFile == NULL)
+		return NULL;
+	std::map<CSearchFile*, SSearchListRow*>::iterator it = m_SearchRows.find(pSearchFile);
+	if (it != m_SearchRows.end())
+		return it->second;
+	SSearchListRow* pRow = new SSearchListRow;
+	pRow->eType = SearchListRowSearchFile;
+	pRow->pSearchFile = pSearchFile;
+	pRow->nSearchID = pSearchFile->GetSearchID();
+	m_SearchRows[pSearchFile] = pRow;
+	return pRow;
+}
+
+void CSearchListCtrl::RemoveRowsFromSavedStates(const std::vector<SSearchListRow*>& rows)
+{
+	if (rows.empty())
+		return;
+
+	std::map<SSearchListRow*, bool> rowsToRemove;
+	for (size_t i = 0; i < rows.size(); ++i) {
+		if (rows[i] != NULL)
+			rowsToRemove[rows[i]] = true;
+	}
+	if (rowsToRemove.empty())
+		return;
+
+	for (POSITION pos = m_mapListStates.GetStartPosition(); pos != NULL;) {
+		int nListID = 0;
+		CListState<SSearchListRow>* pState = NULL;
+		m_mapListStates.GetNextAssoc(pos, nListID, pState);
+		UNREFERENCED_PARAMETER(nListID);
+		if (pState == NULL)
+			continue;
+
+		bool bRemovedSelectedItem = false;
+		for (INT_PTR i = pState->m_aSelectedItems.GetCount(); i > 0; --i) {
+			if (rowsToRemove.find(pState->m_aSelectedItems[i - 1]) != rowsToRemove.end()) {
+				pState->m_aSelectedItems.RemoveAt(i - 1);
+				bRemovedSelectedItem = true;
+			}
+		}
+		for (INT_PTR i = pState->m_aVisibleItems.GetCount(); i > 0; --i) {
+			if (rowsToRemove.find(pState->m_aVisibleItems[i - 1]) != rowsToRemove.end())
+				pState->m_aVisibleItems.RemoveAt(i - 1);
+		}
+		if (rowsToRemove.find(pState->m_pFocusedItem) != rowsToRemove.end())
+			pState->m_pFocusedItem = NULL;
+		if (rowsToRemove.find(pState->m_pSelectionMarkItem) != rowsToRemove.end())
+			pState->m_pSelectionMarkItem = NULL;
+		if (bRemovedSelectedItem)
+			pState->m_bAllItemsSelected = false;
+	}
+}
+
+void CSearchListCtrl::RemovePossibleKnownRowsFromSavedStates()
+{
+	RemoveRowsFromSavedStates(m_PossibleKnownRows);
+}
+
+void CSearchListCtrl::ClearPossibleKnownRows()
+{
+	if (m_PossibleKnownRows.empty())
+		return;
+	RemovePossibleKnownRowsFromSavedStates();
+	for (size_t i = 0; i < m_PossibleKnownRows.size(); ++i)
+		m_ListedItemsMap.RemoveKey(m_PossibleKnownRows[i]);
+	m_ListedItemsVector.erase(std::remove_if(m_ListedItemsVector.begin(), m_ListedItemsVector.end(), [](const SSearchListRow* pRow) {
+		return pRow != NULL && pRow->eType != SearchListRowSearchFile;
+	}), m_ListedItemsVector.end());
+	for (size_t i = 0; i < m_PossibleKnownRows.size(); ++i)
+		delete m_PossibleKnownRows[i];
+	m_PossibleKnownRows.clear();
+}
+
+void CSearchListCtrl::RemoveCachedSearchRowsForFile(const CSearchFile* pFile)
+{
+	if (pFile == NULL)
+		return;
+
+	ClearPossibleKnownRows();
+	const bool bRemoveHashGroup = pFile->GetListParent() == NULL;
+	const uint32 nSearchID = pFile->GetSearchID();
+	const uchar* pucHash = pFile->GetFileHash();
+	m_ListedItemsVector.erase(std::remove_if(m_ListedItemsVector.begin(), m_ListedItemsVector.end(), [pFile, bRemoveHashGroup, nSearchID, pucHash](const SSearchListRow* pRow) {
+		if (pRow == NULL || pRow->eType != SearchListRowSearchFile || pRow->pSearchFile == NULL)
+			return false;
+		if (pRow->pSearchFile == pFile)
+			return true;
+		return bRemoveHashGroup && pRow->pSearchFile->GetSearchID() == nSearchID && md4equ(pRow->pSearchFile->GetFileHash(), pucHash);
+	}), m_ListedItemsVector.end());
+
+	std::vector<SSearchListRow*> rowsToRemove;
+	for (std::map<CSearchFile*, SSearchListRow*>::const_iterator it = m_SearchRows.begin(); it != m_SearchRows.end(); ++it) {
+		CSearchFile* pCachedFile = it->first;
+		if (pCachedFile == pFile || (bRemoveHashGroup && pCachedFile != NULL && pCachedFile->GetSearchID() == nSearchID && md4equ(pCachedFile->GetFileHash(), pucHash)))
+			rowsToRemove.push_back(it->second);
+	}
+	RemoveRowsFromSavedStates(rowsToRemove);
+	for (std::map<CSearchFile*, SSearchListRow*>::iterator it = m_SearchRows.begin(); it != m_SearchRows.end();) {
+		CSearchFile* pCachedFile = it->first;
+		const bool bRemove = pCachedFile == pFile || (bRemoveHashGroup && pCachedFile != NULL && pCachedFile->GetSearchID() == nSearchID && md4equ(pCachedFile->GetFileHash(), pucHash));
+		if (bRemove) {
+			m_ListedItemsMap.RemoveKey(it->second);
+			delete it->second;
+			m_PossibleKnownCache.erase(pCachedFile);
+			it = m_SearchRows.erase(it);
+		} else
+			++it;
+	}
+}
+
+void CSearchListCtrl::ClearListedItems(bool bClearSearchRows)
+{
+	ClearPossibleKnownRows();
+	ClearPossibleKnownAvailabilityQueue();
+	m_ListedItemsVector.clear();
+	m_ListedItemsMap.RemoveAll();
+	m_SearchItemsMap.RemoveAll();
+	if (bClearSearchRows)
+		m_PossibleKnownCache.clear();
+	if (bClearSearchRows) {
+		std::vector<SSearchListRow*> rowsToRemove;
+		rowsToRemove.reserve(m_SearchRows.size());
+		for (std::map<CSearchFile*, SSearchListRow*>::const_iterator it = m_SearchRows.begin(); it != m_SearchRows.end(); ++it)
+			rowsToRemove.push_back(it->second);
+		RemoveRowsFromSavedStates(rowsToRemove);
+		for (std::map<CSearchFile*, SSearchListRow*>::iterator it = m_SearchRows.begin(); it != m_SearchRows.end(); ++it)
+			delete it->second;
+		m_SearchRows.clear();
+	}
+}
+
+void CSearchListCtrl::RemoveCachedSearchRows(uint32 nSearchID)
+{
+	std::vector<SSearchListRow*> rowsToRemove;
+	for (std::map<CSearchFile*, SSearchListRow*>::const_iterator it = m_SearchRows.begin(); it != m_SearchRows.end(); ++it) {
+		SSearchListRow* pRow = it->second;
+		if (pRow != NULL && pRow->nSearchID == nSearchID)
+			rowsToRemove.push_back(pRow);
+	}
+	RemoveRowsFromSavedStates(rowsToRemove);
+	for (std::map<CSearchFile*, SSearchListRow*>::iterator it = m_SearchRows.begin(); it != m_SearchRows.end();) {
+		CSearchFile* pFile = it->first;
+		SSearchListRow* pRow = it->second;
+		if (pRow != NULL && pRow->nSearchID == nSearchID) {
+			m_ListedItemsMap.RemoveKey(pRow);
+			delete pRow;
+			m_PossibleKnownCache.erase(pFile);
+			it = m_SearchRows.erase(it);
+		} else
+			++it;
+	}
+}
+
+bool CSearchListCtrl::IsPossibleKnownFeatureEnabled() const
+{
+	return thePrefs.GetDownloadValidator() != 0 && theApp.DownloadValidator != NULL;
+}
+
+bool CSearchListCtrl::IsPossibleKnownFeatureActive() const
+{
+	return IsPossibleKnownFeatureEnabled() && theApp.DownloadValidator->IsPossibleKnownSearchReady();
+}
+
+bool CSearchListCtrl::ImportPossibleKnownCache(CSearchFile* pParent, SPossibleKnownCacheEntry& cacheEntry, bool bForce)
+{
+	if (pParent == NULL || pParent->GetListParent() != NULL || theApp.DownloadValidator == NULL || searchlist == NULL)
+		return false;
+
+	std::vector<CString> astrFileNames;
+	uint32 uCurrentAliasFingerprint = 0;
+	if (!searchlist->BuildPossibleKnownAliasNames(pParent, astrFileNames, uCurrentAliasFingerprint))
+		return false;
+
+	const uint32 uRevision = theApp.DownloadValidator->GetPossibleKnownRevision();
+	const uint32 uCandidateDataRevision = theApp.DownloadValidator->GetCandidateDataRevision();
+	const uint32 uSourceMediaLengthSec = pParent->GetIntTagValue(FT_MEDIA_LENGTH);
+	const SSearchFilePossibleKnownCache& modelCache = pParent->GetPossibleKnownCache();
+	const bool bCurrentModelCache = pParent->HasPossibleKnownCache(uRevision, uCandidateDataRevision, uSourceMediaLengthSec, uCurrentAliasFingerprint);
+	const bool bUsableSnapshot = bForce && modelCache.bAvailabilityKnown && modelCache.uRevision == uRevision
+		&& modelCache.uSourceMediaLengthSec == uSourceMediaLengthSec && modelCache.uAliasFingerprint == uCurrentAliasFingerprint;
+	if (!bCurrentModelCache && !bUsableSnapshot)
+		return false;
+
+	if (!bForce && cacheEntry.uRevision == uRevision && cacheEntry.uCandidateDataRevision == uCandidateDataRevision
+		&& cacheEntry.uSourceMediaLengthSec == uSourceMediaLengthSec && cacheEntry.uAliasFingerprint == uCurrentAliasFingerprint
+		&& cacheEntry.bAvailabilityKnown && (!modelCache.bRowsLoaded || cacheEntry.bRowsLoaded))
+		return true;
+
+	cacheEntry = SPossibleKnownCacheEntry();
+	cacheEntry.uRevision = modelCache.uRevision;
+	cacheEntry.uCandidateDataRevision = modelCache.uCandidateDataRevision;
+	cacheEntry.uSourceMediaLengthSec = modelCache.uSourceMediaLengthSec;
+	cacheEntry.uAliasFingerprint = modelCache.uAliasFingerprint;
+	cacheEntry.bAvailabilityKnown = modelCache.bAvailabilityKnown;
+	cacheEntry.bHasMatches = modelCache.bHasMatches;
+	cacheEntry.bRowsLoaded = modelCache.bRowsLoaded;
+	if (modelCache.bRowsLoaded) {
+		cacheEntry.rows.reserve(modelCache.rows.size() + 1);
+		for (std::vector<SSearchFilePossibleKnownRow>::const_iterator it = modelCache.rows.begin(); it != modelCache.rows.end(); ++it) {
+			SSearchListRow row;
+			row.eType = SearchListRowPossibleKnownFile;
+			row.strName = it->strName;
+			row.strFolder = it->strFolder;
+			row.strMediaArtist = it->strMediaArtist;
+			row.strMediaAlbum = it->strMediaAlbum;
+			row.strMediaTitle = it->strMediaTitle;
+			row.strMediaCodec = it->strMediaCodec;
+			row.strAICHHash = it->strAICHHash;
+			row.uSize = it->uSize;
+			row.uMediaLengthSec = it->uMediaLengthSec;
+			row.uMediaBitrateKbps = it->uMediaBitrateKbps;
+			row.uSimilarityScore = it->uSimilarityScore;
+			row.uFileType = it->uFileType;
+			row.uSourceFlags = it->uSourceFlags;
+			md4cpy(row.ucHash, it->ucHash);
+			cacheEntry.rows.push_back(row);
+		}
+	}
+	if (AppendSameHashPossibleKnownRow(pParent, cacheEntry.rows)) {
+		cacheEntry.bAvailabilityKnown = true;
+		cacheEntry.bHasMatches = true;
+		cacheEntry.bRowsLoaded = true;
+	}
+	if (cacheEntry.bRowsLoaded) {
+		std::sort(cacheEntry.rows.begin(), cacheEntry.rows.end(), [](const SSearchListRow& first, const SSearchListRow& second) {
+			if (first.uSimilarityScore != second.uSimilarityScore)
+				return first.uSimilarityScore > second.uSimilarityScore;
+			const int iNameCompare = first.strName.CompareNoCase(second.strName);
+			return iNameCompare != 0 ? iNameCompare < 0 : first.uSize > second.uSize;
+		});
+	}
+	return true;
+}
+
+void CSearchListCtrl::StorePossibleKnownCache(CSearchFile* pParent, const SPossibleKnownCacheEntry& cacheEntry)
+{
+	if (pParent == NULL || pParent->GetListParent() != NULL || !cacheEntry.bAvailabilityKnown)
+		return;
+
+	SSearchFilePossibleKnownCache modelCache;
+	modelCache.uRevision = cacheEntry.uRevision;
+	modelCache.uCandidateDataRevision = cacheEntry.uCandidateDataRevision;
+	modelCache.uSourceMediaLengthSec = pParent->GetIntTagValue(FT_MEDIA_LENGTH);
+	modelCache.uAliasFingerprint = cacheEntry.uAliasFingerprint;
+	modelCache.bAvailabilityKnown = cacheEntry.bAvailabilityKnown;
+	modelCache.bHasMatches = cacheEntry.bHasMatches;
+	modelCache.bRowsLoaded = cacheEntry.bRowsLoaded;
+	if (cacheEntry.bRowsLoaded) {
+		modelCache.rows.reserve(cacheEntry.rows.size());
+		for (std::vector<SSearchListRow>::const_iterator it = cacheEntry.rows.begin(); it != cacheEntry.rows.end(); ++it) {
+			if (it->eType != SearchListRowPossibleKnownFile)
+				continue;
+			SSearchFilePossibleKnownRow row;
+			row.strName = it->strName;
+			row.strFolder = it->strFolder;
+			row.strMediaArtist = it->strMediaArtist;
+			row.strMediaAlbum = it->strMediaAlbum;
+			row.strMediaTitle = it->strMediaTitle;
+			row.strMediaCodec = it->strMediaCodec;
+			row.strAICHHash = it->strAICHHash;
+			row.uSize = it->uSize;
+			row.uMediaLengthSec = it->uMediaLengthSec;
+			row.uMediaBitrateKbps = it->uMediaBitrateKbps;
+			row.uSimilarityScore = it->uSimilarityScore;
+			row.uFileType = it->uFileType;
+			row.uSourceFlags = it->uSourceFlags;
+			md4cpy(row.ucHash, it->ucHash);
+			modelCache.rows.push_back(row);
+		}
+	}
+	pParent->SetPossibleKnownCache(modelCache);
+}
+
+bool CSearchListCtrl::HasPossibleKnownMatches(CSearchFile* pParent)
+{
+	if (pParent == NULL || pParent->GetListParent() != NULL || !IsPossibleKnownFeatureActive() || searchlist == NULL)
+		return false;
+
+	std::vector<CString> astrFileNames;
+	uint32 uCurrentAliasFingerprint = 0;
+	if (!searchlist->BuildPossibleKnownAliasNames(pParent, astrFileNames, uCurrentAliasFingerprint))
+		return false;
+
+	const uint32 uRevision = theApp.DownloadValidator->GetPossibleKnownRevision();
+	SPossibleKnownCacheEntry& modelEntry = m_PossibleKnownCache[pParent];
+	ImportPossibleKnownCache(pParent, modelEntry);
+	std::map<CSearchFile*, SPossibleKnownCacheEntry>::iterator it = m_PossibleKnownCache.find(pParent);
+	if (it != m_PossibleKnownCache.end() && (it->second.uRevision != uRevision || it->second.uAliasFingerprint != uCurrentAliasFingerprint)) {
+		m_PossibleKnownCache.erase(it);
+		it = m_PossibleKnownCache.end();
+	}
+	if (it != m_PossibleKnownCache.end() && it->second.uCandidateDataRevision != theApp.DownloadValidator->GetCandidateDataRevision())
+		QueuePossibleKnownAvailability(pParent, it->second.bRowsLoaded || !it->second.rows.empty() || pParent->IsListExpanded(), true);
+	if (it == m_PossibleKnownCache.end() || !it->second.bAvailabilityKnown)
+		QueuePossibleKnownAvailability(pParent);
+	it = m_PossibleKnownCache.find(pParent);
+	return it != m_PossibleKnownCache.end() && it->second.bAvailabilityKnown && it->second.bHasMatches;
+}
+
+bool CSearchListCtrl::HasCachedPossibleKnownMatches(const CSearchFile* pParent) const
+{
+	std::map<CSearchFile*, SPossibleKnownCacheEntry>::const_iterator it = m_PossibleKnownCache.find(const_cast<CSearchFile*>(pParent));
+	return it != m_PossibleKnownCache.end() && it->second.bHasMatches;
+}
+
+bool CSearchListCtrl::CanExpandSearchParent(CSearchFile* pParent)
+{
+	return pParent != NULL && pParent->GetListParent() == NULL && (pParent->GetListChildCount() > 1 || HasPossibleKnownMatches(pParent));
+}
+
+void CSearchListCtrl::AppendPossibleKnownRows(CSearchFile* pParent, std::vector<SSearchListRow*>& rows)
+{
+	if (pParent == NULL || !pParent->IsListExpanded() || !HasPossibleKnownMatches(pParent))
+		return;
+
+	SPossibleKnownCacheEntry& cacheEntry = m_PossibleKnownCache[pParent];
+	if (!cacheEntry.bRowsLoaded && !cacheEntry.bRowsPending)
+		QueuePossibleKnownAvailability(pParent, true);
+	if (cacheEntry.rows.empty())
+		return;
+
+	SSearchListRow* pHeader = new SSearchListRow;
+	pHeader->eType = SearchListRowPossibleKnownHeader;
+	pHeader->pParentSearchFile = pParent;
+	pHeader->nSearchID = pParent->GetSearchID();
+	pHeader->strName = GetResString(_T("DOWNLOAD_VALIDATOR_POSSIBLE_KNOWN_MATCHES"));
+	m_PossibleKnownRows.push_back(pHeader);
+	rows.push_back(pHeader);
+
+	const bool bReverse = GetSortItem() == colSearchSimilarity && GetSortAscending();
+	for (size_t i = 0; i < cacheEntry.rows.size(); ++i) {
+		const size_t uRowIndex = bReverse ? cacheEntry.rows.size() - i - 1 : i;
+		SSearchListRow* pRow = new SSearchListRow(cacheEntry.rows[uRowIndex]);
+		pRow->pParentSearchFile = pParent;
+		pRow->nSearchID = pParent->GetSearchID();
+		m_PossibleKnownRows.push_back(pRow);
+		rows.push_back(pRow);
+	}
+}
+
+void CSearchListCtrl::RebuildPossibleKnownRows()
+{
+	ClearPossibleKnownRows();
+	if (!IsPossibleKnownFeatureActive() || m_ListedItemsVector.empty())
+		return;
+	std::vector<SSearchListRow*> rows;
+	rows.reserve(m_ListedItemsVector.size());
+	for (size_t i = 0; i < m_ListedItemsVector.size();) {
+		SSearchListRow* pRow = m_ListedItemsVector[i++];
+		rows.push_back(pRow);
+		CSearchFile* pParent = pRow != NULL && pRow->eType == SearchListRowSearchFile ? pRow->pSearchFile : NULL;
+		if (pParent == NULL || pParent->GetListParent() != NULL)
+			continue;
+		while (i < m_ListedItemsVector.size()) {
+			SSearchListRow* pChildRow = m_ListedItemsVector[i];
+			CSearchFile* pChild = pChildRow != NULL && pChildRow->eType == SearchListRowSearchFile ? pChildRow->pSearchFile : NULL;
+			if (pChild == NULL || pChild->GetListParent() != pParent)
+				break;
+			rows.push_back(pChildRow);
+			++i;
+		}
+		AppendPossibleKnownRows(pParent, rows);
+	}
+	m_ListedItemsVector.swap(rows);
+}
+
+bool CSearchListCtrl::IsRowDescendantOfParent(const SSearchListRow* pRow, const CSearchFile* pParent) const
+{
+	if (pRow == NULL || pParent == NULL)
+		return false;
+	if (pRow->eType == SearchListRowSearchFile)
+		return pRow->pSearchFile != NULL && pRow->pSearchFile->GetListParent() == pParent;
+	return pRow->pParentSearchFile == pParent;
+}
+
+bool CSearchListCtrl::HasSelectedPassiveRows() const
+{
+	for (POSITION pos = GetFirstSelectedItemPosition(); pos != NULL;) {
+		if (IsPassiveRowIndex(GetNextSelectedItem(pos)))
+			return true;
+	}
+	return false;
+}
+
+bool CSearchListCtrl::CollectSelectedPossibleKnownRows(std::vector<const SSearchListRow*>& rows) const
+{
+	rows.clear();
+	for (POSITION pos = GetFirstSelectedItemPosition(); pos != NULL;) {
+		const SSearchListRow* pRow = ResolveRowByIndex(GetNextSelectedItem(pos));
+		if (pRow == NULL || pRow->eType != SearchListRowPossibleKnownFile) {
+			rows.clear();
+			return false;
+		}
+		rows.push_back(pRow);
+	}
+	return !rows.empty();
+}
+
+bool CSearchListCtrl::ExecutePossibleKnownCancelCommand(UINT uCommand)
+{
+	if (uCommand != MP_CANCEL && uCommand != MP_CANCEL_FORGET)
+		return false;
+
+	std::vector<const SSearchListRow*> rows;
+	if (!CollectSelectedPossibleKnownRows(rows))
+		return false;
+	if (theApp.downloadqueue == NULL)
+		return true;
+
+	CTypedPtrList<CPtrList, CPartFile*> selectedDownloads;
+	for (size_t i = 0; i < rows.size(); ++i) {
+		CPartFile* pPartFile = theApp.downloadqueue->GetFileByID(rows[i]->ucHash);
+		if (pPartFile == NULL || pPartFile->GetFileSize() != rows[i]->uSize)
+			return true;
+		if (selectedDownloads.Find(pPartFile) == NULL)
+			selectedDownloads.AddTail(pPartFile);
+	}
+
+	CString fileList(GetResString(selectedDownloads.GetCount() == 1 ? _T("Q_CANCELDL2") : _T("Q_CANCELDL")));
+	CStringArray removableHashes;
+	removableHashes.SetSize(0, selectedDownloads.GetCount() > 16 ? selectedDownloads.GetCount() : 16);
+	bool bValidDelete = false;
+	int iDisplayFiles = 0;
+	const int iMaxDisplayFiles = 10;
+	for (POSITION pos = selectedDownloads.GetHeadPosition(); pos != NULL;) {
+		const CPartFile* pPartFile = selectedDownloads.GetNext(pos);
+		if (pPartFile == NULL || pPartFile->GetStatus() == PS_COMPLETING)
+			continue;
+
+		bValidDelete = true;
+		removableHashes.Add(md4str(pPartFile->GetFileHash()));
+		if (++iDisplayFiles < iMaxDisplayFiles)
+			fileList.AppendFormat(_T("\n%s"), (LPCTSTR)pPartFile->GetFileName());
+		else if (iDisplayFiles == iMaxDisplayFiles && pos != NULL)
+			fileList += _T("\n...");
+	}
+
+	if (bValidDelete && removableHashes.GetSize() > 0 && CDarkMode::MessageBox(fileList, MB_DEFBUTTON2 | MB_ICONQUESTION | MB_YESNO) == IDYES)
+		theApp.ExecuteDownloadListRemoveCommand(removableHashes, uCommand != MP_CANCEL_FORGET, true);
+	return true;
+}
+
+bool CSearchListCtrl::ExecutePossibleKnownCopyCommand(UINT uCommand, const std::vector<const SSearchListRow*>& rows)
+{
+	if (uCommand != MP_CUT && uCommand != MP_GETED2KLINK && uCommand != MP_GETHTMLED2KLINK)
+		return false;
+
+	CString strClipboard;
+	for (size_t i = 0; i < rows.size(); ++i) {
+		const SSearchListRow* pRow = rows[i];
+		if (pRow == NULL)
+			continue;
+
+		CString strValue;
+		if (uCommand == MP_CUT)
+			strValue = pRow->strName;
+		else {
+			CString strLink;
+			strLink.Format(_T("ed2k://|file|%s|%I64u|%s|"), (LPCTSTR)EncodeUrlUtf8(StripInvalidFilenameChars(pRow->strName)), static_cast<uint64>(pRow->uSize), (LPCTSTR)md4str(pRow->ucHash));
+			if (!pRow->strAICHHash.IsEmpty())
+				strLink.AppendFormat(_T("h=%s|"), (LPCTSTR)pRow->strAICHHash);
+			strLink += _T('/');
+			if (uCommand == MP_GETHTMLED2KLINK)
+				strValue.Format(_T("<a href=\"%s\">%s</a>"), (LPCTSTR)strLink, (LPCTSTR)StripInvalidFilenameChars(pRow->strName));
+			else
+				strValue = strLink;
+		}
+
+		if (strValue.IsEmpty())
+			continue;
+		if (!strClipboard.IsEmpty())
+			strClipboard += uCommand == MP_GETHTMLED2KLINK ? _T("<br>\r\n") : _T("\r\n");
+		strClipboard += strValue;
+	}
+
+	if (!strClipboard.IsEmpty()) {
+		theApp.CopyTextToClipboard(strClipboard);
+		theApp.emuledlg->statusbar->SetText(GetResString(uCommand == MP_CUT ? _T("FILE_NAME_COPIED_TO_CLIPBOARD") : _T("ED2K_LINK_COPIED_TO_CLIPBOARD")), SBarLog, 0);
+	}
+	return true;
+}
+
+bool CSearchListCtrl::ExecutePossibleKnownSearchRelatedCommand(const std::vector<const SSearchListRow*>& rows)
+{
+	if (rows.empty() || theApp.emuledlg == NULL || theApp.emuledlg->searchwnd == NULL || !theApp.emuledlg->searchwnd->CanSearchRelatedFiles())
+		return true;
+
+	std::vector<CString> hashes;
+	std::vector<CString> names;
+	for (size_t i = 0; i < rows.size(); ++i) {
+		const SSearchListRow* pRow = rows[i];
+		if (pRow == NULL || isnulmd4(pRow->ucHash))
+			continue;
+		const CString strHash(md4str(pRow->ucHash));
+		if (std::find(hashes.begin(), hashes.end(), strHash) != hashes.end())
+			continue;
+		hashes.push_back(strHash);
+		names.push_back(pRow->strName);
+	}
+	if (!hashes.empty())
+		theApp.emuledlg->searchwnd->SearchRelatedFiles(hashes, names);
+	return true;
+}
+
+bool CSearchListCtrl::ExecutePossibleKnownWebServiceCommand(UINT uCommand, const std::vector<const SSearchListRow*>& rows)
+{
+	if (uCommand < MP_WEBURL || uCommand > MP_WEBURL + 256)
+		return false;
+	for (size_t i = 0; i < rows.size(); ++i) {
+		const SSearchListRow* pRow = rows[i];
+		if (pRow != NULL)
+			theWebServices.RunURL(pRow->ucHash, static_cast<uint64>(pRow->uSize), pRow->strName, uCommand);
+	}
+	return true;
+}
+
+bool CSearchListCtrl::ResolvePossibleKnownSharedFilePath(const SSearchListRow* pRow, CString& strFilePath) const
+{
+	strFilePath.Empty();
+	if (pRow == NULL || theApp.sharedfiles == NULL || isnulmd4(pRow->ucHash))
+		return false;
+
+	CKnownFile* pSharedFile = theApp.sharedfiles->GetLiveFileByID(pRow->ucHash);
+	if (pSharedFile != NULL && !pSharedFile->IsPartFile() && pSharedFile->GetFileSize() == pRow->uSize
+		&& pSharedFile->GetFileName().CompareNoCase(pRow->strName) == 0 && !pSharedFile->GetFilePath().IsEmpty()) {
+		strFilePath = pSharedFile->GetFilePath();
+		return true;
+	}
+
+	if (theApp.knownfiles == NULL)
+		return false;
+
+	std::vector<CString> duplicateFilePaths;
+	theApp.knownfiles->CollectDuplicateFilePathsByIdentity(pRow->ucHash, pRow->strName, static_cast<uint64>(pRow->uSize), duplicateFilePaths);
+	for (std::vector<CString>::const_iterator it = duplicateFilePaths.begin(); it != duplicateFilePaths.end(); ++it) {
+		const int iSeparator = it->ReverseFind(_T('\\'));
+		const CString strDirectory = iSeparator >= 0 ? it->Left(iSeparator) : CString();
+		if (strDirectory.IsEmpty() || !theApp.sharedfiles->ShouldBeShared(strDirectory, *it, false))
+			continue;
+		strFilePath = *it;
+		return true;
+	}
+	return false;
+}
+
+bool CSearchListCtrl::ExecutePossibleKnownPreviewCommand(UINT uCommand, const std::vector<const SSearchListRow*>& rows)
+{
+	if (rows.size() != 1)
+		return true;
+	const SSearchListRow* pRow = rows[0];
+	if (pRow == NULL)
+		return true;
+
+	CPartFile* pPartFile = theApp.downloadqueue != NULL ? theApp.downloadqueue->GetFileByID(pRow->ucHash) : NULL;
+	if (pPartFile != NULL && pPartFile->GetFileSize() == pRow->uSize) {
+		if (uCommand == MP_PREVIEW)
+			pPartFile->PreviewFile();
+		else if (uCommand == MP_TRY_TO_GET_PREVIEW_PARTS)
+			pPartFile->SetPreviewPrio(!pPartFile->GetPreviewPrio());
+		else if (uCommand == MP_PAUSEONPREVIEW && pPartFile->IsPreviewableFileType() && !pPartFile->IsReadyForPreview())
+			pPartFile->SetPauseOnPreview(!pPartFile->IsPausingOnPreview());
+		else if (uCommand >= MP_PREVIEW_APP_MIN && uCommand <= MP_PREVIEW_APP_MAX)
+			thePreviewApps.RunApp(pPartFile, uCommand);
+		return true;
+	}
+
+	CString strSharedFilePath;
+	if (ResolvePossibleKnownSharedFilePath(pRow, strSharedFilePath)) {
+		if (uCommand == MP_PREVIEW)
+			thePreviewApps.RunCommandForFilePath(strSharedFilePath, thePrefs.GetVideoPlayer(), thePrefs.GetVideoPlayerArgs());
+		else if (uCommand >= MP_PREVIEW_APP_MIN && uCommand <= MP_PREVIEW_APP_MAX)
+			thePreviewApps.RunAppForFilePath(strSharedFilePath, uCommand);
+	}
+	return true;
+}
+
+void CSearchListCtrl::ClearPossibleKnownAvailabilityQueue()
+{
+	const bool bHadPending = m_uNextPossibleKnownAvailability < m_PossibleKnownAvailabilityQueue.size();
+	const uint32 nPendingSearchID = m_nResultsID;
+	if (::IsWindow(m_hWnd))
+		KillTimer(kTimerPossibleKnownAvailability);
+	for (size_t i = m_uNextPossibleKnownAvailability; i < m_PossibleKnownAvailabilityQueue.size(); ++i) {
+		const SPossibleKnownAvailabilityItem& item = m_PossibleKnownAvailabilityQueue[i];
+		std::map<CSearchFile*, SPossibleKnownCacheEntry>::iterator it = m_PossibleKnownCache.find(item.pParent);
+		if (it == m_PossibleKnownCache.end() || it->second.uRevision != item.uRevision)
+			continue;
+		if (item.bReplaceRows) {
+			if (it->second.uPendingCandidateDataRevision == item.uCandidateDataRevision) {
+				it->second.bReplaceRowsPending = false;
+				it->second.bPendingHasMatches = false;
+				it->second.pendingRows.clear();
+			}
+		} else if (item.bLoadRows)
+			it->second.bRowsPending = false;
+		else
+			it->second.bAvailabilityPending = false;
+	}
+	m_PossibleKnownAvailabilityQueue.clear();
+	m_uNextPossibleKnownAvailability = 0;
+	if (bHadPending && nPendingSearchID != 0)
+		theApp.QueueSearchActivityChangedEvent(nPendingSearchID);
+}
+
+bool CSearchListCtrl::AppendSameHashPossibleKnownRow(CSearchFile* pParent, std::vector<SSearchListRow>& rows) const
+{
+	if (pParent == NULL || !thePrefs.GetDownloadValidatorRejectSameHash() || theApp.knownfiles == NULL)
+		return false;
+
+	CKnownFile* pKnownFile = theApp.knownfiles->FindKnownFileByID(pParent->GetFileHash());
+	if (pKnownFile == NULL || pKnownFile->GetFileSize() != pParent->GetFileSize() || pKnownFile->IsPartFile())
+		return false;
+
+	const uint32 uSourceMediaLengthSec = pParent->GetIntTagValue(FT_MEDIA_LENGTH);
+	const uint32 uCandidateMediaLengthSec = pKnownFile->GetIntTagValue(FT_MEDIA_LENGTH);
+	if (thePrefs.GetDownloadValidatorMediaLengthMatching() && uSourceMediaLengthSec != 0 && uCandidateMediaLengthSec != 0) {
+		const uint32 uDifference = uSourceMediaLengthSec > uCandidateMediaLengthSec ? uSourceMediaLengthSec - uCandidateMediaLengthSec : uCandidateMediaLengthSec - uSourceMediaLengthSec;
+		if (uDifference > thePrefs.GetDownloadValidatorMediaLengthToleranceSec())
+			return false;
+	}
+
+	for (size_t i = 0; i < rows.size(); ++i) {
+		if (rows[i].uSize == pKnownFile->GetFileSize() && rows[i].strName == pKnownFile->GetFileName() && md4equ(rows[i].ucHash, pKnownFile->GetFileHash()))
+			return true;
+	}
+
+	SSearchListRow row;
+	row.eType = SearchListRowPossibleKnownFile;
+	row.strName = pKnownFile->GetFileName();
+	row.strFolder = pKnownFile->GetPath();
+	row.strMediaArtist = pKnownFile->GetStrTagValue(FT_MEDIA_ARTIST);
+	row.strMediaAlbum = pKnownFile->GetStrTagValue(FT_MEDIA_ALBUM);
+	row.strMediaTitle = pKnownFile->GetStrTagValue(FT_MEDIA_TITLE);
+	row.strMediaCodec = pKnownFile->GetStrTagValue(FT_MEDIA_CODEC);
+	row.uSize = pKnownFile->GetFileSize();
+	row.uMediaLengthSec = pKnownFile->GetIntTagValue(FT_MEDIA_LENGTH);
+	row.uMediaBitrateKbps = pKnownFile->GetIntTagValue(FT_MEDIA_BITRATE);
+	row.uSimilarityScore = 100;
+	row.uFileType = static_cast<uint8>(GetED2KFileTypeID(pKnownFile->GetFileName()));
+	row.uSourceFlags = CDownloadValidator::FuzzyFileSourceKnown;
+	md4cpy(row.ucHash, pKnownFile->GetFileHash());
+	if (pKnownFile->GetFileIdentifierC().HasAICHHash())
+		row.strAICHHash = pKnownFile->GetFileIdentifierC().GetAICHHash().GetString();
+	rows.push_back(row);
+	return true;
+}
+
+void CSearchListCtrl::QueuePossibleKnownAvailability(CSearchFile* pParent, bool bLoadRows, bool bReplaceRows)
+{
+	if (pParent == NULL || pParent->GetListParent() != NULL || !IsPossibleKnownFeatureEnabled() || searchlist == NULL)
+		return;
+	if (!theApp.DownloadValidator->IsPossibleKnownSearchReady())
+		return;
+	if (searchlist->HasPendingPossibleKnownPreparation(pParent->GetSearchID()))
+		return;
+
+	std::vector<CString> astrFileNames;
+	uint32 uAliasFingerprint = 0;
+	if (!searchlist->BuildPossibleKnownAliasNames(pParent, astrFileNames, uAliasFingerprint))
+		return;
+
+	const uint32 uRevision = theApp.DownloadValidator->GetPossibleKnownRevision();
+	const uint32 uCandidateDataRevision = theApp.DownloadValidator->GetCandidateDataRevision();
+	const uint32 uSourceMediaLengthSec = pParent->GetIntTagValue(FT_MEDIA_LENGTH);
+	SPossibleKnownCacheEntry& cacheEntry = m_PossibleKnownCache[pParent];
+	ImportPossibleKnownCache(pParent, cacheEntry);
+	if (cacheEntry.uRevision != uRevision || cacheEntry.uSourceMediaLengthSec != uSourceMediaLengthSec || cacheEntry.uAliasFingerprint != uAliasFingerprint) {
+		cacheEntry = SPossibleKnownCacheEntry();
+		cacheEntry.uRevision = uRevision;
+		cacheEntry.uSourceMediaLengthSec = uSourceMediaLengthSec;
+		cacheEntry.uAliasFingerprint = uAliasFingerprint;
+	}
+	if (cacheEntry.uCandidateDataRevision == uCandidateDataRevision && cacheEntry.bAvailabilityKnown
+		&& (!bLoadRows || cacheEntry.bRowsLoaded) && !bReplaceRows)
+		return;
+
+	if (!cacheEntry.bAvailabilityKnown && AppendSameHashPossibleKnownRow(pParent, cacheEntry.rows)) {
+		cacheEntry.bAvailabilityKnown = true;
+		cacheEntry.bHasMatches = true;
+	}
+
+	if (bReplaceRows) {
+		if (cacheEntry.bReplaceRowsPending && cacheEntry.uPendingCandidateDataRevision == uCandidateDataRevision)
+			return;
+		cacheEntry.bReplaceRowsPending = true;
+		cacheEntry.bPendingHasMatches = false;
+		cacheEntry.uPendingCandidateDataRevision = uCandidateDataRevision;
+		cacheEntry.pendingRows.clear();
+		if (bLoadRows && AppendSameHashPossibleKnownRow(pParent, cacheEntry.pendingRows))
+			cacheEntry.bPendingHasMatches = true;
+	} else if (bLoadRows) {
+		if (cacheEntry.bRowsLoaded || cacheEntry.bRowsPending)
+			return;
+		cacheEntry.bRowsPending = true;
+	} else {
+		if (cacheEntry.bAvailabilityKnown || cacheEntry.bAvailabilityPending)
+			return;
+		cacheEntry.bAvailabilityPending = true;
+	}
+
+	const bool bStartTimer = m_PossibleKnownAvailabilityQueue.empty();
+	SPossibleKnownAvailabilityItem item;
+	item.pParent = pParent;
+	item.nSearchID = pParent->GetSearchID();
+	item.strFileName = pParent->GetFileName();
+	item.astrFileNames.swap(astrFileNames);
+	item.uFileSize = pParent->GetFileSize();
+	item.uMediaLengthSec = uSourceMediaLengthSec;
+	item.uAliasFingerprint = uAliasFingerprint;
+	md4cpy(item.ucHash, pParent->GetFileHash());
+	item.bLoadRows = bLoadRows;
+	item.bReplaceRows = bReplaceRows;
+	item.uRevision = uRevision;
+	item.uCandidateDataRevision = uCandidateDataRevision;
+	m_PossibleKnownAvailabilityQueue.push_back(item);
+	theApp.QueueSearchActivityChangedEvent(item.nSearchID);
+	if (bStartTimer && ::IsWindow(m_hWnd) && SetTimer(kTimerPossibleKnownAvailability, kPossibleKnownAvailabilityDelayMs, NULL) == 0) {
+		AddDebugLogLine(DLP_HIGH, false, _T("Possible known file availability timer could not be started. Falling back to an immediate slice. pending=%u\n"), static_cast<UINT>(m_PossibleKnownAvailabilityQueue.size() - m_uNextPossibleKnownAvailability));
+		ProcessPossibleKnownAvailability();
+	}
+}
+
+void CSearchListCtrl::ProcessPossibleKnownAvailability()
+{
+	if (!IsPossibleKnownFeatureEnabled() || theApp.IsClosing() || !::IsWindow(m_hWnd) || searchlist == NULL) {
+		ClearPossibleKnownAvailabilityQueue();
+		return;
+	}
+	if (!theApp.DownloadValidator->IsPossibleKnownSearchReady()) {
+		ClearPossibleKnownAvailabilityQueue();
+		return;
+	}
+	if (m_bChunkedSearchRemoveActive) {
+		if (SetTimer(kTimerPossibleKnownAvailability, kPossibleKnownAvailabilityWaitForRemoveMs, NULL) == 0) {
+			AddDebugLogLine(DLP_HIGH, false, _T("Possible known file availability timer could not be restarted during search result removal. pending=%u\n"), static_cast<UINT>(m_PossibleKnownAvailabilityQueue.size() - m_uNextPossibleKnownAvailability));
+			ClearPossibleKnownAvailabilityQueue();
+		}
+		return;
+	}
+
+	const DWORD dwSliceStart = ::GetTickCount();
+	UINT uProcessed = 0;
+	bool bQueueBackpressure = false;
+	while (m_uNextPossibleKnownAvailability < m_PossibleKnownAvailabilityQueue.size()) {
+		const SPossibleKnownAvailabilityItem item = m_PossibleKnownAvailabilityQueue[m_uNextPossibleKnownAvailability];
+		std::map<CSearchFile*, SSearchListRow*>::const_iterator itRow = m_SearchRows.find(item.pParent);
+		CSearchFile* pCurrentParent = itRow != m_SearchRows.end() && itRow->second != NULL ? itRow->second->pSearchFile : NULL;
+		bool bQueued = false;
+		bool bAliasFingerprintChanged = false;
+		if (item.nSearchID == m_nResultsID && pCurrentParent != NULL && itRow->second->nSearchID == item.nSearchID
+			&& pCurrentParent->GetFileName() == item.strFileName && pCurrentParent->GetFileSize() == item.uFileSize
+			&& pCurrentParent->GetIntTagValue(FT_MEDIA_LENGTH) == item.uMediaLengthSec && md4equ(pCurrentParent->GetFileHash(), item.ucHash)
+			&& item.uRevision == theApp.DownloadValidator->GetPossibleKnownRevision()
+			&& item.uCandidateDataRevision == theApp.DownloadValidator->GetCandidateDataRevision()) {
+			std::vector<CString> astrCurrentFileNames;
+			uint32 uCurrentAliasFingerprint = 0;
+			if (searchlist->BuildPossibleKnownAliasNames(pCurrentParent, astrCurrentFileNames, uCurrentAliasFingerprint)) {
+				bAliasFingerprintChanged = uCurrentAliasFingerprint != item.uAliasFingerprint;
+				if (!bAliasFingerprintChanged && !searchlist->QueuePossibleKnownQuery(reinterpret_cast<UINT_PTR>(item.pParent), item.nSearchID, item.ucHash, item.strFileName, item.astrFileNames, item.uFileSize,
+					item.uMediaLengthSec, item.uAliasFingerprint, item.bLoadRows, item.uRevision, item.uCandidateDataRevision, item.bReplaceRows, &pCurrentParent->GetDownloadValidatorFuzzyQueryData())) {
+					bQueueBackpressure = true;
+					break;
+				}
+				if (!bAliasFingerprintChanged)
+					bQueued = true;
+			}
+		}
+
+		if (!bQueued) {
+			std::map<CSearchFile*, SPossibleKnownCacheEntry>::iterator itCache = m_PossibleKnownCache.find(item.pParent);
+			if (itCache != m_PossibleKnownCache.end() && itCache->second.uRevision == item.uRevision) {
+				if (item.bReplaceRows) {
+					if (itCache->second.uPendingCandidateDataRevision == item.uCandidateDataRevision) {
+						itCache->second.bReplaceRowsPending = false;
+						itCache->second.bPendingHasMatches = false;
+						itCache->second.pendingRows.clear();
+					}
+				} else if (item.bLoadRows)
+					itCache->second.bRowsPending = false;
+				else
+					itCache->second.bAvailabilityPending = false;
+			}
+			if (bAliasFingerprintChanged && pCurrentParent != NULL)
+				QueuePossibleKnownAvailability(pCurrentParent, item.bLoadRows, item.bReplaceRows);
+		}
+
+		++m_uNextPossibleKnownAvailability;
+		++uProcessed;
+		if (uProcessed >= kPossibleKnownAvailabilityItemsPerSlice || static_cast<DWORD>(::GetTickCount() - dwSliceStart) >= kPossibleKnownAvailabilitySliceMs)
+			break;
+	}
+
+	if (m_uNextPossibleKnownAvailability >= m_PossibleKnownAvailabilityQueue.size())
+		ClearPossibleKnownAvailabilityQueue();
+	else if (SetTimer(kTimerPossibleKnownAvailability, bQueueBackpressure ? 50 : kPossibleKnownAvailabilityDelayMs, NULL) == 0) {
+		AddDebugLogLine(DLP_HIGH, false, _T("Possible known file availability continuation timer could not be started. pending=%u\n"), static_cast<UINT>(m_PossibleKnownAvailabilityQueue.size() - m_uNextPossibleKnownAvailability));
+		ClearPossibleKnownAvailabilityQueue();
+	}
+}
+
+void CSearchListCtrl::ApplyPossibleKnownQueryResult(UINT_PTR uParentToken, uint32 nSearchID, const uchar* pHash, const CString& strFileName, EMFileSize uFileSize,
+	uint32 uMediaLengthSec, uint32 uAliasFingerprint, uint32 uRevision, uint32 uCandidateDataRevision, bool bReplaceRows, bool bRowsRequested, bool bHasMatches, bool bFinalResult, const SDownloadValidatorFuzzyQueryData& queryData, const std::vector<SSearchListRow>& rows)
+{
+	if (uParentToken == 0 || pHash == NULL || nSearchID == 0 || !IsPossibleKnownFeatureEnabled())
+		return;
+	if (uRevision != theApp.DownloadValidator->GetPossibleKnownRevision() || uCandidateDataRevision != theApp.DownloadValidator->GetCandidateDataRevision())
+		return;
+
+	CSearchFile* pParent = reinterpret_cast<CSearchFile*>(uParentToken);
+	std::map<CSearchFile*, SSearchListRow*>::const_iterator itRow = m_SearchRows.find(pParent);
+	if (itRow == m_SearchRows.end() || itRow->second == NULL || itRow->second->pSearchFile == NULL)
+		return;
+	CSearchFile* pCurrentParent = itRow->second->pSearchFile;
+	if (pCurrentParent->GetSearchID() != nSearchID || pCurrentParent->GetFileName() != strFileName || pCurrentParent->GetFileSize() != uFileSize || !md4equ(pCurrentParent->GetFileHash(), pHash))
+		return;
+	const uint32 uCurrentMediaLengthSec = pCurrentParent->GetIntTagValue(FT_MEDIA_LENGTH);
+	std::vector<CString> astrCurrentFileNames;
+	uint32 uCurrentAliasFingerprint = 0;
+	const bool bCurrentAliasesValid = searchlist != NULL && searchlist->BuildPossibleKnownAliasNames(pCurrentParent, astrCurrentFileNames, uCurrentAliasFingerprint);
+	if (uCurrentMediaLengthSec != uMediaLengthSec || !bCurrentAliasesValid || uCurrentAliasFingerprint != uAliasFingerprint) {
+		SPossibleKnownCacheEntry& staleCacheEntry = m_PossibleKnownCache[pParent];
+		staleCacheEntry = SPossibleKnownCacheEntry();
+		staleCacheEntry.uRevision = uRevision;
+		staleCacheEntry.uSourceMediaLengthSec = uCurrentMediaLengthSec;
+		staleCacheEntry.uAliasFingerprint = uCurrentAliasFingerprint;
+		QueuePossibleKnownAvailability(pCurrentParent, bRowsRequested, bReplaceRows);
+		return;
+	}
+
+	SPossibleKnownCacheEntry& cacheEntry = m_PossibleKnownCache[pParent];
+	if (cacheEntry.uRevision != uRevision || cacheEntry.uSourceMediaLengthSec != uMediaLengthSec || cacheEntry.uAliasFingerprint != uAliasFingerprint) {
+		cacheEntry = SPossibleKnownCacheEntry();
+		cacheEntry.uRevision = uRevision;
+		cacheEntry.uSourceMediaLengthSec = uMediaLengthSec;
+		cacheEntry.uAliasFingerprint = uAliasFingerprint;
+	}
+	if (queryData.bPrepared)
+		pCurrentParent->GetDownloadValidatorFuzzyQueryData() = queryData;
+	std::vector<SSearchListRow>& targetRows = bReplaceRows ? cacheEntry.pendingRows : cacheEntry.rows;
+	if (bReplaceRows) {
+		if (!cacheEntry.bReplaceRowsPending || cacheEntry.uPendingCandidateDataRevision != uCandidateDataRevision) {
+			cacheEntry.bReplaceRowsPending = true;
+			cacheEntry.bPendingHasMatches = false;
+			cacheEntry.uPendingCandidateDataRevision = uCandidateDataRevision;
+			cacheEntry.pendingRows.clear();
+			if (bRowsRequested && AppendSameHashPossibleKnownRow(pCurrentParent, cacheEntry.pendingRows))
+				cacheEntry.bPendingHasMatches = true;
+		}
+		cacheEntry.bPendingHasMatches = cacheEntry.bPendingHasMatches || bHasMatches;
+	} else if (bRowsRequested)
+		cacheEntry.bAvailabilityPending = false;
+
+	if (bRowsRequested) {
+		std::unordered_multimap<uint64, size_t> rowIdentities;
+		rowIdentities.reserve(targetRows.size() + rows.size());
+		for (size_t i = 0; i < targetRows.size(); ++i)
+			rowIdentities.emplace(BuildPossibleKnownRowIdentityKey(targetRows[i]), i);
+		for (size_t i = 0; i < rows.size(); ++i) {
+			const uint64 uIdentity = BuildPossibleKnownRowIdentityKey(rows[i]);
+			bool bDuplicate = false;
+			const std::pair<std::unordered_multimap<uint64, size_t>::iterator, std::unordered_multimap<uint64, size_t>::iterator> range = rowIdentities.equal_range(uIdentity);
+			for (std::unordered_multimap<uint64, size_t>::iterator it = range.first; it != range.second; ++it) {
+				if (it->second >= targetRows.size())
+					continue;
+				SSearchListRow& existing = targetRows[it->second];
+				if (existing.uSize == rows[i].uSize && existing.strName == rows[i].strName && md4equ(existing.ucHash, rows[i].ucHash)) {
+					if (IsPossibleKnownRowBetter(rows[i], existing))
+						existing = rows[i];
+					bDuplicate = true;
+					break;
+				}
+			}
+			if (!bDuplicate) {
+				rowIdentities.emplace(uIdentity, targetRows.size());
+				targetRows.push_back(rows[i]);
+			}
+		}
+	}
+
+	if (bReplaceRows && bFinalResult) {
+		if (bRowsRequested) {
+			cacheEntry.rows.swap(cacheEntry.pendingRows);
+			cacheEntry.bRowsLoaded = true;
+		}
+		cacheEntry.pendingRows.clear();
+		cacheEntry.bReplaceRowsPending = false;
+		cacheEntry.bAvailabilityKnown = true;
+		cacheEntry.bHasMatches = cacheEntry.bPendingHasMatches || !cacheEntry.rows.empty();
+		cacheEntry.bPendingHasMatches = false;
+		cacheEntry.uCandidateDataRevision = uCandidateDataRevision;
+	} else if (!bReplaceRows && bRowsRequested) {
+		if (bFinalResult) {
+			cacheEntry.bRowsPending = false;
+			cacheEntry.bRowsLoaded = true;
+		}
+		cacheEntry.bAvailabilityKnown = true;
+		cacheEntry.bHasMatches = bHasMatches || !cacheEntry.rows.empty();
+		cacheEntry.uCandidateDataRevision = uCandidateDataRevision;
+	} else if (!bReplaceRows && bFinalResult) {
+		cacheEntry.bAvailabilityPending = false;
+		cacheEntry.bAvailabilityKnown = true;
+		cacheEntry.bHasMatches = cacheEntry.bHasMatches || bHasMatches;
+		cacheEntry.uCandidateDataRevision = uCandidateDataRevision;
+	}
+
+	if ((bReplaceRows && bFinalResult) || (!bReplaceRows && bRowsRequested)) {
+		std::sort(cacheEntry.rows.begin(), cacheEntry.rows.end(), [](const SSearchListRow& first, const SSearchListRow& second) {
+			if (first.uSimilarityScore != second.uSimilarityScore)
+				return first.uSimilarityScore > second.uSimilarityScore;
+			const int iNameCompare = first.strName.CompareNoCase(second.strName);
+			return iNameCompare != 0 ? iNameCompare < 0 : first.uSize > second.uSize;
+		});
+	}
+
+	if (bFinalResult)
+		StorePossibleKnownCache(pCurrentParent, cacheEntry);
+
+	const bool bCurrentSearch = nSearchID == m_nResultsID;
+	if (bCurrentSearch && pCurrentParent->IsListExpanded() && cacheEntry.bHasMatches && !cacheEntry.bRowsLoaded && !cacheEntry.bRowsPending)
+		QueuePossibleKnownAvailability(pCurrentParent, true);
+
+	if (bCurrentSearch && pCurrentParent->IsListExpanded() && (!bReplaceRows || bFinalResult) && (cacheEntry.bRowsLoaded || !cacheEntry.rows.empty())) {
+		if (bReplaceRows)
+			QueueDeferredReload(false, kSearchListViewState, 50, true);
+		else {
+			SaveListState(m_nResultsID, kSearchListViewState);
+			SetRedraw(false);
+			RebuildPossibleKnownRows();
+			RebuildListedItemsMap();
+			UpdateSearchListItemCount(*this, m_ListedItemsVector.size());
+			RestoreListState(m_nResultsID, kSearchListViewState, false);
+			SetRedraw(true);
+			Invalidate(FALSE);
+		}
+	} else if (bCurrentSearch) {
+		int iParent = -1;
+		if (m_SearchItemsMap.Lookup(pParent, iParent) && iParent >= 0)
+			RequestRowRedrawAsync(iParent, iParent);
+	}
+}
+
+void CSearchListCtrl::CancelPendingPossibleKnownProcessing(uint32 nSearchID)
+{
+	if (nSearchID == 0 || nSearchID != m_nResultsID)
+		return;
+	ClearPossibleKnownAvailabilityQueue();
+}
+
+bool CSearchListCtrl::ApplyPreparedPossibleKnownCaches(uint32 nSearchID)
+{
+	if (nSearchID == 0 || nSearchID != m_nResultsID || !IsPossibleKnownFeatureActive() || theApp.IsClosing() || !::IsWindow(m_hWnd) || m_ListedItemsVector.empty())
+		return false;
+
+	bool bImported = false;
+	for (std::map<CSearchFile*, SSearchListRow*>::const_iterator it = m_SearchRows.begin(); it != m_SearchRows.end(); ++it) {
+		CSearchFile* pParent = it->first;
+		if (pParent == NULL || pParent->GetListParent() != NULL || pParent->GetSearchID() != nSearchID)
+			continue;
+		SPossibleKnownCacheEntry& cacheEntry = m_PossibleKnownCache[pParent];
+		if (ImportPossibleKnownCache(pParent, cacheEntry, true))
+			bImported = true;
+	}
+	if (!bImported)
+		return false;
+
+	SaveListState(m_nResultsID, kSearchListViewState);
+	SetRedraw(false);
+	RebuildPossibleKnownRows();
+	RebuildListedItemsMap();
+	UpdateSearchListItemCount(*this, m_ListedItemsVector.size());
+	RestoreListState(m_nResultsID, kSearchListViewState, false);
+	m_uPossibleKnownRevision = theApp.DownloadValidator->GetPossibleKnownRevision();
+	m_uPossibleKnownCandidateDataRevision = theApp.DownloadValidator->GetCandidateDataRevision();
+	SetRedraw(true);
+	Invalidate(FALSE);
+	return true;
+}
+
+bool CSearchListCtrl::HasPendingPossibleKnownProcessing(uint32 nSearchID) const
+{
+	return nSearchID != 0 && nSearchID == m_nResultsID
+		&& (m_uNextPossibleKnownAvailability < m_PossibleKnownAvailabilityQueue.size() || m_bDeferredSearchReloadPending);
+}
+
+void CSearchListCtrl::QueuePossibleKnownRefresh(UINT uDelayMs)
+{
+	if (theApp.IsClosing() || !::IsWindow(m_hWnd))
+		return;
+
+	ClearPossibleKnownAvailabilityQueue();
+	m_PossibleKnownCache.clear();
+	QueueDeferredReload(false, LSF_SELECTION, uDelayMs, true);
+}
+
+void CSearchListCtrl::QueuePossibleKnownSoftRefresh()
+{
+	if (theApp.IsClosing() || !::IsWindow(m_hWnd) || theApp.DownloadValidator == NULL || !IsPossibleKnownFeatureEnabled())
+		return;
+
+	const uint32 uCandidateDataRevision = theApp.DownloadValidator->GetCandidateDataRevision();
+	m_uPossibleKnownCandidateDataRevision = uCandidateDataRevision;
+	for (std::map<CSearchFile*, SPossibleKnownCacheEntry>::iterator it = m_PossibleKnownCache.begin(); it != m_PossibleKnownCache.end(); ++it) {
+		CSearchFile* pParent = it->first;
+		SPossibleKnownCacheEntry& cacheEntry = it->second;
+		if (pParent == NULL || pParent->GetListParent() != NULL || pParent->GetSearchID() != m_nResultsID || cacheEntry.uRevision != theApp.DownloadValidator->GetPossibleKnownRevision())
+			continue;
+		std::vector<CString> astrFileNames;
+		uint32 uCurrentAliasFingerprint = 0;
+		const bool bAliasCurrent = searchlist != NULL && searchlist->BuildPossibleKnownAliasNames(pParent, astrFileNames, uCurrentAliasFingerprint)
+			&& cacheEntry.uAliasFingerprint == uCurrentAliasFingerprint;
+		if (bAliasCurrent && (cacheEntry.uCandidateDataRevision == uCandidateDataRevision || (cacheEntry.bReplaceRowsPending && cacheEntry.uPendingCandidateDataRevision == uCandidateDataRevision)))
+			continue;
+		const bool bLoadRows = cacheEntry.bRowsLoaded || !cacheEntry.rows.empty() || pParent->IsListExpanded();
+		QueuePossibleKnownAvailability(pParent, bLoadRows, true);
+	}
+}
+
+void CSearchListCtrl::QueueDeferredReload(const bool bSortCurrentList, const EListStateField LsfFlag, UINT uDelayMs, bool bKeepPendingWhileInactive)
 {
 	if (theApp.IsClosing() || !::IsWindow(m_hWnd))
 		return;
 
 	m_bDeferredSearchReloadPending = true;
 	m_bDeferredSearchReloadSort = m_bDeferredSearchReloadSort || bSortCurrentList;
+	m_bDeferredSearchReloadKeepPendingWhileInactive = m_bDeferredSearchReloadKeepPendingWhileInactive || bKeepPendingWhileInactive;
 	m_eDeferredSearchReloadState = LsfFlag;
 	if (uDelayMs == 0)
 		uDelayMs = kDeferredSearchReloadDelayMs;
@@ -1143,6 +2480,7 @@ void CSearchListCtrl::QueueDeferredReload(const bool bSortCurrentList, const ELi
 		KillTimer(kTimerDeferredSearchReload);
 		m_bDeferredSearchReloadPending = false;
 		m_bDeferredSearchReloadSort = false;
+		m_bDeferredSearchReloadKeepPendingWhileInactive = false;
 		ReloadList(bSortCurrentList, LsfFlag);
 	}
 }
@@ -1162,6 +2500,7 @@ void CSearchListCtrl::ReloadList(const bool bSortCurrentList, const EListStateFi
 		m_iDataSize = 10007; // Any reasonable prime number for the initial size.
 		m_ListedItemsVector.reserve(m_iDataSize);
 		m_ListedItemsMap.InitHashTable(m_iDataSize);
+		m_SearchItemsMap.InitHashTable(m_iDataSize);
 	} else
 		SaveListState(m_nResultsID, LsfFlag); // Save selections, sort and scroll values for the previous m_nResultsID if this is not the first call.
 
@@ -1199,8 +2538,12 @@ void CSearchListCtrl::ReloadList(const bool bSortCurrentList, const EListStateFi
 			BuildVisibleSearchItems(*list, m_ListedItemsVector);
 
 		SortListedItemsRaw();
-		GroupListedItemsByBottomCandidates();
-		RebuildListedItemsMap();
+	}
+	GroupListedItemsByBottomCandidates();
+	RebuildListedItemsMap();
+	if (theApp.DownloadValidator != NULL) {
+		m_uPossibleKnownRevision = theApp.DownloadValidator->GetPossibleKnownRevision();
+		m_uPossibleKnownCandidateDataRevision = theApp.DownloadValidator->GetCandidateDataRevision();
 	}
 
 	UpdateSearchListItemCount(*this, m_ListedItemsVector.size()); // Set current count for the virtual list before restoring state.
@@ -1220,10 +2563,20 @@ void CSearchListCtrl::ReloadList(const bool bSortCurrentList, const EListStateFi
 void CSearchListCtrl::RebuildListedItemsMap()
 {
 	m_ListedItemsMap.RemoveAll();
-	if (!m_ListedItemsVector.empty())
-		m_ListedItemsMap.InitHashTable(static_cast<UINT>(m_ListedItemsVector.size() * 2 + 1));
-	for (int i = 0; i < static_cast<int>(m_ListedItemsVector.size()); ++i)
-		m_ListedItemsMap[m_ListedItemsVector[i]] = i;
+	m_SearchItemsMap.RemoveAll();
+	if (!m_ListedItemsVector.empty()) {
+		const UINT uHashSize = static_cast<UINT>(m_ListedItemsVector.size() * 2 + 1);
+		m_ListedItemsMap.InitHashTable(uHashSize);
+		m_SearchItemsMap.InitHashTable(uHashSize);
+	}
+	for (int i = 0; i < static_cast<int>(m_ListedItemsVector.size()); ++i) {
+		SSearchListRow* pRow = m_ListedItemsVector[static_cast<size_t>(i)];
+		if (pRow == NULL)
+			continue;
+		m_ListedItemsMap[pRow] = i;
+		if (pRow->eType == SearchListRowSearchFile && pRow->pSearchFile != NULL)
+			m_SearchItemsMap[pRow->pSearchFile] = i;
+	}
 	MarkListedModelCurrent();
 }
 
@@ -1395,21 +2748,75 @@ int CSearchListCtrl::CompareSearchFilesRaw(const CSearchFile *item1, const CSear
 
 void CSearchListCtrl::SortListedItemsRaw()
 {
-	if (m_ListedItemsVector.size() < 2 || theApp.searchlist == NULL)
+	ClearPossibleKnownRows();
+	if (theApp.searchlist == NULL)
 		return;
 
-	CSingleLock searchModelLock(theApp.searchlist->GetSearchModelLock(), TRUE);
-	CombinedSort(m_ListedItemsVector.begin(), m_ListedItemsVector.end(), [this](const CSearchFile* left, const CSearchFile* right) -> bool
-	{
-		return CompareSearchFilesRaw(left, right, m_pSortParam) < 0;
-	});
-
+	std::vector<CSearchFile*> searchFiles;
+	searchFiles.reserve(m_ListedItemsVector.size());
+	for (size_t i = 0; i < m_ListedItemsVector.size(); ++i) {
+		SSearchListRow* pRow = m_ListedItemsVector[i];
+		if (pRow != NULL && pRow->eType == SearchListRowSearchFile && pRow->pSearchFile != NULL)
+			searchFiles.push_back(pRow->pSearchFile);
+	}
+	if (searchFiles.size() > 1) {
+		CSingleLock searchModelLock(theApp.searchlist->GetSearchModelLock(), TRUE);
+		CombinedSort(searchFiles.begin(), searchFiles.end(), [this](const CSearchFile* left, const CSearchFile* right) -> bool
+		{
+			return CompareSearchFilesRaw(left, right, m_pSortParam) < 0;
+		});
+		GroupSearchItemsByBottomCandidates(searchFiles);
+	}
+	m_ListedItemsVector.clear();
+	m_ListedItemsVector.reserve(searchFiles.size());
+	for (size_t i = 0; i < searchFiles.size(); ++i)
+		m_ListedItemsVector.push_back(GetOrCreateSearchRow(searchFiles[i]));
 }
-
 
 bool CSearchListCtrl::GroupListedItemsByBottomCandidates()
 {
-	return searchlist != NULL && GroupSearchItemsByBottomCandidates(m_ListedItemsVector);
+	std::map<CSearchFile*, bool> collapsedParents;
+	std::vector<SSearchListRow*> hiddenRows;
+	if (theApp.searchlist != NULL) {
+		CSingleLock searchModelLock(theApp.searchlist->GetSearchModelLock(), TRUE);
+		for (size_t i = 0; i < m_ListedItemsVector.size(); ++i) {
+			SSearchListRow* pRow = m_ListedItemsVector[i];
+			CSearchFile* pFile = pRow != NULL && pRow->eType == SearchListRowSearchFile ? pRow->pSearchFile : NULL;
+			if (pFile == NULL || pFile->GetListParent() != NULL)
+				continue;
+
+			const uint8 uCurrentStatusFlags = GetSearchFileBottomGroupStatusFlags(pFile);
+			const bool bNewBottomGroupStatus = (uCurrentStatusFlags & ~pRow->uBottomGroupStatusFlags) != 0;
+			pRow->uBottomGroupStatusFlags = uCurrentStatusFlags;
+			const bool bIsBottomGroupItem = IsSearchFileSpamOrBlacklistedBottomGroup(pFile) || pFile->GetKnownType() == CSearchFile::Downloading;
+			if (thePrefs.GetGroupKnownAtTheBottom() && bNewBottomGroupStatus && bIsBottomGroupItem && pFile->IsListExpanded()) {
+				pFile->SetListExpanded(false);
+				collapsedParents[pFile] = true;
+			}
+		}
+
+		if (!collapsedParents.empty()) {
+			for (size_t i = 0; i < m_ListedItemsVector.size(); ++i) {
+				SSearchListRow* pRow = m_ListedItemsVector[i];
+				CSearchFile* pFile = pRow != NULL && pRow->eType == SearchListRowSearchFile ? pRow->pSearchFile : NULL;
+				if (pFile != NULL && pFile->GetListParent() != NULL && collapsedParents.find(pFile->GetListParent()) != collapsedParents.end())
+					hiddenRows.push_back(pRow);
+			}
+		}
+	}
+
+	if (!hiddenRows.empty()) {
+		RemoveRowsFromSavedStates(hiddenRows);
+		std::map<const SSearchListRow*, bool> hiddenRowMap;
+		for (size_t i = 0; i < hiddenRows.size(); ++i)
+			hiddenRowMap[hiddenRows[i]] = true;
+		m_ListedItemsVector.erase(std::remove_if(m_ListedItemsVector.begin(), m_ListedItemsVector.end(), [&hiddenRowMap](const SSearchListRow* pRow) {
+			return hiddenRowMap.find(pRow) != hiddenRowMap.end();
+		}), m_ListedItemsVector.end());
+	}
+
+	RebuildPossibleKnownRows();
+	return true;
 }
 
 void CSearchListCtrl::OnLvnColumnClick(LPNMHDR pNMHDR, LRESULT *pResult)
@@ -1418,8 +2825,8 @@ void CSearchListCtrl::OnLvnColumnClick(LPNMHDR pNMHDR, LRESULT *pResult)
 	bool sortAscending;
 	if (GetSortItem() != pNMLV->iSubItem)
 		switch (pNMLV->iSubItem) {
-		case 2: // Availability
-		case 3: // Complete Sources
+		case colSearchAvailability:
+		case colSearchCompleteSources:
 			sortAscending = false;
 			break;
 		default:
@@ -1497,10 +2904,10 @@ int CSearchListCtrl::CompareChild(const CSearchFile *item1, const CSearchFile *i
 {
 	int iResult;
 	switch (LOWORD(lParamSort)) {
-	case 0:	//filename
+	case colSearchFileName:
 		iResult = CompareLocaleStringNoCase(item1->GetFileName(), item2->GetFileName());
 		break;
-	case 14: // AICH Hash
+	case colSearchAichHash:
 		iResult = CompareAICHHash(item1->GetFileIdentifierC(), item2->GetFileIdentifierC(), true);
 		break;
 	default: // always sort by descending availability
@@ -1518,17 +2925,11 @@ int CSearchListCtrl::Compare(const CSearchFile *item1, const CSearchFile *item2,
 		return iBottomGroupResult;
 
 	switch (LOWORD(lParamSort)) {
-	case 0: //filename asc
+	case colSearchFileName:
 		return CompareLocaleStringNoCase(item1->GetFileName(), item2->GetFileName());
-	case 1: //size asc
+	case colSearchSize:
 		return CompareUnsigned(item1->GetFileSize(), item2->GetFileSize());
-	case 2: //sources asc
-		return CompareUnsigned(item1->GetSourceCount(), item2->GetSourceCount());
-	case 3: // complete sources asc
-		if (item1->GetSourceCount() == 0 || item2->GetSourceCount() == 0 || item1->IsKademlia() || item2->IsKademlia())
-			return 0; // should never happen, just a sanity check
-		return CompareUnsigned((item1->GetCompleteSourceCount() * 100) / item1->GetSourceCount(), (item2->GetCompleteSourceCount() * 100) / item2->GetSourceCount());
-	case 4: //type asc
+	case colSearchType:
 		{
 			int iResult = item1->GetFileTypeDisplayStr().Compare(item2->GetFileTypeDisplayStr());
 			if (iResult)
@@ -1538,38 +2939,68 @@ int CSearchListCtrl::Compare(const CSearchFile *item1, const CSearchFile *item2,
 			LPCTSTR pszExt2 = ::PathFindExtension(item2->GetFileName());
 			if (!*pszExt1 ^ !*pszExt2)
 				return *pszExt1 ? -1 : 1;
-			return  *pszExt1 ? _tcsicmp(pszExt1, pszExt2) : 0;
+			return *pszExt1 ? _tcsicmp(pszExt1, pszExt2) : 0;
 		}
-	case 5: //file hash asc
-		return memcmp(item1->GetFileHash(), item2->GetFileHash(), 16);
-	case 6:
-		return CompareOptLocaleStringNoCaseUndefinedAtBottom(item1->GetStrTagValue(FT_MEDIA_ARTIST), item2->GetStrTagValue(FT_MEDIA_ARTIST), bSortAscending);
-	case 7:
-		return CompareOptLocaleStringNoCaseUndefinedAtBottom(item1->GetStrTagValue(FT_MEDIA_ALBUM), item2->GetStrTagValue(FT_MEDIA_ALBUM), bSortAscending);
-	case 8:
-		return CompareOptLocaleStringNoCaseUndefinedAtBottom(item1->GetStrTagValue(FT_MEDIA_TITLE), item2->GetStrTagValue(FT_MEDIA_TITLE), bSortAscending);
-	case 9:
+	case colSearchLength:
 		return CompareUnsignedUndefinedAtBottom(item1->GetIntTagValue(FT_MEDIA_LENGTH), item2->GetIntTagValue(FT_MEDIA_LENGTH), bSortAscending);
-	case 10:
-		return CompareUnsignedUndefinedAtBottom(item1->GetIntTagValue(FT_MEDIA_BITRATE), item2->GetIntTagValue(FT_MEDIA_BITRATE), bSortAscending);
-	case 11:
-		return CompareOptLocaleStringNoCaseUndefinedAtBottom(GetCodecDisplayName(item1->GetStrTagValue(FT_MEDIA_CODEC)), GetCodecDisplayName(item2->GetStrTagValue(FT_MEDIA_CODEC)), bSortAscending);
-	case 12: //path asc
-		return CompareOptLocaleStringNoCaseUndefinedAtBottom(item1->GetDirectory(), item2->GetDirectory(), bSortAscending);
-	case 13:
+	case colSearchAvailability:
+		return CompareUnsigned(item1->GetSourceCount(), item2->GetSourceCount());
+	case colSearchCompleteSources:
+		if (item1->GetSourceCount() == 0 || item2->GetSourceCount() == 0 || item1->IsKademlia() || item2->IsKademlia())
+			return 0; // should never happen, just a sanity check
+		return CompareUnsigned((item1->GetCompleteSourceCount() * 100) / item1->GetSourceCount(), (item2->GetCompleteSourceCount() * 100) / item2->GetSourceCount());
+	case colSearchKnown:
 		if (thePrefs.GetGroupKnownAtTheBottom())
 			return CompareSearchFixedGroupRank(GetSearchFileKnownTieRank(pSortItem1), GetSearchFileKnownTieRank(pSortItem2), bSortAscending);
 		return CompareOptLocaleStringNoCase(GetKnownTypeStr(item1), GetKnownTypeStr(item2));
-	case 14:
+	case colSearchBitrate:
+		return CompareUnsignedUndefinedAtBottom(item1->GetIntTagValue(FT_MEDIA_BITRATE), item2->GetIntTagValue(FT_MEDIA_BITRATE), bSortAscending);
+	case colSearchCodec:
+		return CompareOptLocaleStringNoCaseUndefinedAtBottom(GetCodecDisplayName(item1->GetStrTagValue(FT_MEDIA_CODEC)), GetCodecDisplayName(item2->GetStrTagValue(FT_MEDIA_CODEC)), bSortAscending);
+	case colSearchFileId:
+		return memcmp(item1->GetFileHash(), item2->GetFileHash(), 16);
+	case colSearchFolder:
+		return CompareOptLocaleStringNoCaseUndefinedAtBottom(item1->GetDirectory(), item2->GetDirectory(), bSortAscending);
+	case colSearchAlbum:
+		return CompareOptLocaleStringNoCaseUndefinedAtBottom(item1->GetStrTagValue(FT_MEDIA_ALBUM), item2->GetStrTagValue(FT_MEDIA_ALBUM), bSortAscending);
+	case colSearchTitle:
+		return CompareOptLocaleStringNoCaseUndefinedAtBottom(item1->GetStrTagValue(FT_MEDIA_TITLE), item2->GetStrTagValue(FT_MEDIA_TITLE), bSortAscending);
+	case colSearchArtist:
+		return CompareOptLocaleStringNoCaseUndefinedAtBottom(item1->GetStrTagValue(FT_MEDIA_ARTIST), item2->GetStrTagValue(FT_MEDIA_ARTIST), bSortAscending);
+	case colSearchAichHash:
 		return CompareAICHHash(item1->GetFileIdentifierC(), item2->GetFileIdentifierC(), bSortAscending);
-	case 15:
+	case colSearchSpamRating:
 		return CompareUnsigned(item1->GetSpamRating(), item2->GetSpamRating());
-	}	
+	}
 	return 0;
 }
 
 void CSearchListCtrl::OnContextMenu(CWnd*, CPoint point)
 {
+	int iContextItem = GetNextItem(-1, LVIS_FOCUSED);
+	if (point.x != -1 && point.y != -1) {
+		CPoint clientPoint(point);
+		ScreenToClient(&clientPoint);
+		iContextItem = HitTest(clientPoint);
+	}
+
+	const SSearchListRow* pContextRow = ResolveRowByIndex(iContextItem);
+	if (pContextRow != NULL && pContextRow->eType == SearchListRowPossibleKnownHeader)
+		return;
+
+	bool bPossibleKnownContext = pContextRow != NULL && pContextRow->eType == SearchListRowPossibleKnownFile;
+	if (bPossibleKnownContext && (GetItemState(iContextItem, LVIS_SELECTED) & LVIS_SELECTED) == 0) {
+		SetItemState(-1, 0, LVIS_SELECTED | LVIS_FOCUSED);
+		SetItemState(iContextItem, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+		SetSelectionMark(iContextItem);
+	}
+
+	std::vector<const SSearchListRow*> selectedPossibleKnownRows;
+	if (bPossibleKnownContext)
+		bPossibleKnownContext = CollectSelectedPossibleKnownRows(selectedPossibleKnownRows);
+	if (!bPossibleKnownContext && (HasSelectedPassiveRows() || IsPassiveRowIndex(GetNextItem(-1, LVIS_FOCUSED))))
+		return;
+
 	int iSelected = 0;
 	int iToDownload = 0;
 	int iToPreview = 0;
@@ -1610,32 +3041,74 @@ void CSearchListCtrl::OnContextMenu(CWnd*, CPoint point)
 			bContainsNotSpamFile = true;
 	}
 
-	m_SearchFileMenu.EnableMenuItem(MP_RESUME, iToDownload > 0 ? MF_ENABLED : MF_GRAYED);
+	bool bAllPossibleKnownInDownloadList = bPossibleKnownContext && !selectedPossibleKnownRows.empty() && theApp.downloadqueue != NULL;
+	bool bHasCancelablePossibleKnownDownload = false;
+	CPartFile* pPossibleKnownPreviewPartFile = NULL;
+	CString strPossibleKnownPreviewSharedFilePath;
+	if (bAllPossibleKnownInDownloadList) {
+		for (size_t i = 0; i < selectedPossibleKnownRows.size(); ++i) {
+			CPartFile* pPartFile = theApp.downloadqueue->GetFileByID(selectedPossibleKnownRows[i]->ucHash);
+			if (pPartFile == NULL || pPartFile->GetFileSize() != selectedPossibleKnownRows[i]->uSize) {
+				bAllPossibleKnownInDownloadList = false;
+				break;
+			}
+			if (pPartFile->GetStatus() != PS_COMPLETING)
+				bHasCancelablePossibleKnownDownload = true;
+		}
+	}
+	if (bPossibleKnownContext && selectedPossibleKnownRows.size() == 1) {
+		pPossibleKnownPreviewPartFile = theApp.downloadqueue != NULL ? theApp.downloadqueue->GetFileByID(selectedPossibleKnownRows[0]->ucHash) : NULL;
+		if (pPossibleKnownPreviewPartFile != NULL && pPossibleKnownPreviewPartFile->GetFileSize() != selectedPossibleKnownRows[0]->uSize)
+			pPossibleKnownPreviewPartFile = NULL;
+		if (pPossibleKnownPreviewPartFile == NULL)
+			ResolvePossibleKnownSharedFilePath(selectedPossibleKnownRows[0], strPossibleKnownPreviewSharedFilePath);
+	}
+
+	m_SearchFileMenu.EnableMenuItem(MP_RESUME, !bPossibleKnownContext && iToDownload > 0 ? MF_ENABLED : MF_GRAYED);
 	if (thePrefs.IsExtControlsEnabled()) {
-		m_SearchFileMenu.EnableMenuItem(MP_RESUMEPAUSED, iToDownload > 0 ? MF_ENABLED : MF_GRAYED);
+		m_SearchFileMenu.EnableMenuItem(MP_RESUMEPAUSED, !bPossibleKnownContext && iToDownload > 0 ? MF_ENABLED : MF_GRAYED);
 		m_SearchFileMenu.EnableMenuItem(MP_DETAIL, iSelected == 1 ? MF_ENABLED : MF_GRAYED);
 	}
 
-	m_SearchFileMenu.EnableMenuItem(MP_BYPASSDOWNLOADVALIDATOR, iSelected > 0 && iToDownload > 0 ? MF_ENABLED : MF_GRAYED);
-	m_SearchFileMenu.EnableMenuItem(MP_BYPASSDOWNLOADVALIDATORPAUSED, iSelected > 0 && iToDownload > 0 ? MF_ENABLED : MF_GRAYED);
+	m_SearchFileMenu.EnableMenuItem(MP_BYPASSDOWNLOADVALIDATOR, !bPossibleKnownContext && iSelected > 0 && iToDownload > 0 ? MF_ENABLED : MF_GRAYED);
+	m_SearchFileMenu.EnableMenuItem(MP_BYPASSDOWNLOADVALIDATORPAUSED, !bPossibleKnownContext && iSelected > 0 && iToDownload > 0 ? MF_ENABLED : MF_GRAYED);
 
-	m_SearchFileMenu.EnableMenuItem(MP_CANCEL, iSelected > 0 && m_bAllInDownloadList ? MF_ENABLED : MF_GRAYED);
-	m_SearchFileMenu.EnableMenuItem(MP_CANCEL_FORGET, iSelected > 0 && m_bAllInDownloadList ? MF_ENABLED : MF_GRAYED);
+	const bool bEnableCancel = bPossibleKnownContext ? (bAllPossibleKnownInDownloadList && bHasCancelablePossibleKnownDownload) : (iSelected > 0 && m_bAllInDownloadList);
+	m_SearchFileMenu.EnableMenuItem(MP_CANCEL, bEnableCancel ? MF_ENABLED : MF_GRAYED);
+	m_SearchFileMenu.EnableMenuItem(MP_CANCEL_FORGET, bEnableCancel ? MF_ENABLED : MF_GRAYED);
 	const bool bEnableDownloadOnlyMenu = (iSelected > 0 && m_bAllInDownloadList && iDownloadListMatches == iSelected);
-	RebuildPreviewMenu(m_PreviewMenu, (bEnableDownloadOnlyMenu && iSelected == 1) ? pSingleDownloadFile : NULL, bEnableDownloadOnlyMenu && iSelected == 1 && iFilesToPreview == 1, bEnableDownloadOnlyMenu && iFilesCanPauseOnPreview > 0, bEnableDownloadOnlyMenu && iSelected > 0 && iFilesDoPauseOnPreview == iSelected, bEnableDownloadOnlyMenu && iSelected == 1 && iFilesPreviewType == 1 && iFilesToPreview == 0 && iDownloadListMatches == 1, bEnableDownloadOnlyMenu && iSelected == 1 && iFilesGetPreviewParts == 1);
-	m_SearchFileMenu.EnableMenuItem((UINT)m_PreviewMenu.m_hMenu, bEnableDownloadOnlyMenu && m_PreviewMenu.HasEnabledItems() ? MF_ENABLED : MF_GRAYED);
+	if (bPossibleKnownContext) {
+		if (pPossibleKnownPreviewPartFile != NULL) {
+			const bool bPreviewReady = pPossibleKnownPreviewPartFile->IsReadyForPreview();
+			const bool bPreviewType = pPossibleKnownPreviewPartFile->IsPreviewableFileType();
+			RebuildPreviewMenu(m_PreviewMenu, pPossibleKnownPreviewPartFile, bPreviewReady,
+				bPreviewType && !bPreviewReady && pPossibleKnownPreviewPartFile->CanPauseFile(), pPossibleKnownPreviewPartFile->IsPausingOnPreview(),
+				bPreviewType && !bPreviewReady, pPossibleKnownPreviewPartFile->GetPreviewPrio(), NULL);
+		} else if (!strPossibleKnownPreviewSharedFilePath.IsEmpty())
+			RebuildPreviewMenu(m_PreviewMenu, NULL, true, false, false, false, false, strPossibleKnownPreviewSharedFilePath);
+		else
+			RebuildPreviewMenu(m_PreviewMenu, NULL, false, false, false, false, false, NULL);
+	} else
+		RebuildPreviewMenu(m_PreviewMenu, (bEnableDownloadOnlyMenu && iSelected == 1) ? pSingleDownloadFile : NULL,
+			bEnableDownloadOnlyMenu && iSelected == 1 && iFilesToPreview == 1, bEnableDownloadOnlyMenu && iFilesCanPauseOnPreview > 0,
+			bEnableDownloadOnlyMenu && iSelected > 0 && iFilesDoPauseOnPreview == iSelected,
+			bEnableDownloadOnlyMenu && iSelected == 1 && iFilesPreviewType == 1 && iFilesToPreview == 0 && iDownloadListMatches == 1,
+			bEnableDownloadOnlyMenu && iSelected == 1 && iFilesGetPreviewParts == 1, NULL);
+	const bool bEnablePreviewMenu = bPossibleKnownContext ? (pPossibleKnownPreviewPartFile != NULL || !strPossibleKnownPreviewSharedFilePath.IsEmpty()) : bEnableDownloadOnlyMenu;
+	m_SearchFileMenu.EnableMenuItem((UINT)m_PreviewMenu.m_hMenu, bEnablePreviewMenu && m_PreviewMenu.HasEnabledItems() ? MF_ENABLED : MF_GRAYED);
 
 	m_SearchFileMenu.EnableMenuItem(MP_CMT, iSelected > 0 ? MF_ENABLED : MF_GRAYED);
-	m_SearchFileMenu.EnableMenuItem(MP_CUT, iSelected > 0 ? MF_ENABLED : MF_GRAYED);
-	m_SearchFileMenu.EnableMenuItem(MP_GETED2KLINK, iSelected > 0 ? MF_ENABLED : MF_GRAYED);
-	m_SearchFileMenu.EnableMenuItem(MP_GETHTMLED2KLINK, iSelected > 0 ? MF_ENABLED : MF_GRAYED);
-	m_SearchFileMenu.EnableMenuItem(MP_REMOVESELECTED, iSelected > 0 ? MF_ENABLED : MF_GRAYED);
+	const bool bEnableCopyCommands = bPossibleKnownContext ? !selectedPossibleKnownRows.empty() : iSelected > 0;
+	m_SearchFileMenu.EnableMenuItem(MP_CUT, bEnableCopyCommands ? MF_ENABLED : MF_GRAYED);
+	m_SearchFileMenu.EnableMenuItem(MP_GETED2KLINK, bEnableCopyCommands ? MF_ENABLED : MF_GRAYED);
+	m_SearchFileMenu.EnableMenuItem(MP_GETHTMLED2KLINK, bEnableCopyCommands ? MF_ENABLED : MF_GRAYED);
+	m_SearchFileMenu.EnableMenuItem(MP_REMOVESELECTED, !bPossibleKnownContext && iSelected > 0 ? MF_ENABLED : MF_GRAYED);
 	m_SearchFileMenu.EnableMenuItem(MP_REMOVE, theApp.emuledlg->searchwnd->CanDeleteSearches() ? MF_ENABLED : MF_GRAYED);
 	m_SearchFileMenu.EnableMenuItem(MP_REMOVEALL, theApp.emuledlg->searchwnd->CanDeleteSearches() ? MF_ENABLED : MF_GRAYED);
-	m_SearchFileMenu.EnableMenuItem(MP_SEARCHRELATED, iSelected > 0 && theApp.emuledlg->searchwnd->CanSearchRelatedFiles() ? MF_ENABLED : MF_GRAYED);
+	m_SearchFileMenu.EnableMenuItem(MP_SEARCHRELATED, (bPossibleKnownContext ? !selectedPossibleKnownRows.empty() : iSelected > 0) && theApp.emuledlg->searchwnd->CanSearchRelatedFiles() ? MF_ENABLED : MF_GRAYED);
 	UINT uInsertedMenuItem = 0;
 	if (iToPreview == 1 && !(iSelected == 1 && m_bAllInDownloadList)) {
-		if (m_SearchFileMenu.InsertMenu(MP_FIND, MF_STRING | MF_ENABLED, MP_PREVIEW, GetResString(_T("DL_PREVIEW")), _T("PREVIEW")))
+		if (m_SearchFileMenu.InsertMenu(MP_FIND, MF_STRING | MF_ENABLED, MP_PREVIEW, GetResStringWithAccel(_T("PREVIEW_AVAILABLE"), _T('v')), _T("PREVIEW")))
 			uInsertedMenuItem = MP_PREVIEW;
 	}
 	m_SearchFileMenu.EnableMenuItem(MP_FIND, GetItemCount() > 0 ? MF_ENABLED : MF_GRAYED);
@@ -1643,19 +3116,19 @@ void CSearchListCtrl::OnContextMenu(CWnd*, CPoint point)
 	UINT uInsertedMenuItem3 = 0;
 	if (thePrefs.GetBlacklistManual() && m_SearchFileMenu.InsertMenu(MP_REMOVESELECTED, MF_STRING | MF_ENABLED, MP_MARKASBLACKLISTED, (m_bContainsNotManualBlacklistedFile || iSelected == 0) ? GetResString(_T("MARK_AS_BLACKLISTED")) : GetResString(_T("MARK_AS_NOT_BLACKLISTED")), _T("SPAM_PURPLE"))) {
 		uInsertedMenuItem3 = MP_MARKASBLACKLISTED;
-		m_SearchFileMenu.EnableMenuItem(MP_MARKASBLACKLISTED, iSelected > 0 ? MF_ENABLED : MF_GRAYED);
+		m_SearchFileMenu.EnableMenuItem(MP_MARKASBLACKLISTED, !bPossibleKnownContext && iSelected > 0 ? MF_ENABLED : MF_GRAYED);
 	}
 
 	UINT uInsertedMenuItem2 = 0;
 	if (thePrefs.IsSearchSpamFilterEnabled() && m_SearchFileMenu.InsertMenu(MP_REMOVESELECTED, MF_STRING | MF_ENABLED, MP_MARKASSPAM, (bContainsNotSpamFile || iSelected == 0) ? GetResString(_T("MARKSPAM")) : GetResString(_T("MARKNOTSPAM")), _T("SPAM"))) {
 		uInsertedMenuItem2 = MP_MARKASSPAM;
-		m_SearchFileMenu.EnableMenuItem(MP_MARKASSPAM, iSelected > 0 ? MF_ENABLED : MF_GRAYED);
+		m_SearchFileMenu.EnableMenuItem(MP_MARKASSPAM, !bPossibleKnownContext && iSelected > 0 ? MF_ENABLED : MF_GRAYED);
 	}
 
 	CMenuXP WebMenu;
 	WebMenu.CreateMenu();
 	int iWebMenuEntries = theWebServices.GetFileMenuEntries(&WebMenu);
-	UINT flag2 = (iWebMenuEntries == 0 || iSelected == 0) ? MF_GRAYED : MF_STRING;
+	UINT flag2 = (iWebMenuEntries == 0 || (bPossibleKnownContext ? selectedPossibleKnownRows.empty() : iSelected == 0)) ? MF_GRAYED : MF_STRING;
 	m_SearchFileMenu.AppendMenu(MF_POPUP | flag2, (UINT_PTR)WebMenu.m_hMenu, GetResString(_T("WEBSERVICES")), _T("WEB"));
 
 	if (iToDownload > 0)
@@ -1684,10 +3157,39 @@ BOOL CSearchListCtrl::OnCommand(WPARAM wParam, LPARAM)
 		return TRUE;
 	}
 
+	std::vector<const SSearchListRow*> selectedPossibleKnownRows;
+	const bool bPossibleKnownSelection = CollectSelectedPossibleKnownRows(selectedPossibleKnownRows);
+	if (bPossibleKnownSelection) {
+		if (wParam == MP_CANCEL || wParam == MP_CANCEL_FORGET) {
+			ExecutePossibleKnownCancelCommand(static_cast<UINT>(wParam));
+			return TRUE;
+		}
+		if (wParam == MP_CUT || wParam == MP_GETED2KLINK || wParam == MP_GETHTMLED2KLINK) {
+			ExecutePossibleKnownCopyCommand(static_cast<UINT>(wParam), selectedPossibleKnownRows);
+			return TRUE;
+		}
+		if (wParam == MP_SEARCHRELATED) {
+			ExecutePossibleKnownSearchRelatedCommand(selectedPossibleKnownRows);
+			return TRUE;
+		}
+		if (wParam == MP_PREVIEW || wParam == MP_TRY_TO_GET_PREVIEW_PARTS || wParam == MP_PAUSEONPREVIEW || (wParam >= MP_PREVIEW_APP_MIN && wParam <= MP_PREVIEW_APP_MAX)) {
+			ExecutePossibleKnownPreviewCommand(static_cast<UINT>(wParam), selectedPossibleKnownRows);
+			return TRUE;
+		}
+		if (wParam >= MP_WEBURL && wParam <= MP_WEBURL + 256) {
+			ExecutePossibleKnownWebServiceCommand(static_cast<UINT>(wParam), selectedPossibleKnownRows);
+			return TRUE;
+		}
+		if (wParam != MP_REMOVE && wParam != MP_REMOVEALL)
+			return TRUE;
+	}
+
 	CTypedPtrList<CPtrList, CSearchFile*> selectedList;
 	CTypedPtrList<CPtrList, CPartFile*> selectedDownloadList;
 	CPartFile* pSingleDownloadFile = NULL;
 	CollectSelectedSearchFiles(selectedList);
+	if (!bPossibleKnownSelection && (HasSelectedPassiveRows() || IsPassiveRowIndex(GetNextItem(-1, LVIS_FOCUSED))))
+		return TRUE;
 	for (POSITION pos = selectedList.GetHeadPosition(); pos != NULL;) {
 		CSearchFile* pSearchFile = selectedList.GetNext(pos);
 		CPartFile* pDownloadFile = pSearchFile != NULL ? theApp.downloadqueue->GetFileByID(pSearchFile->GetFileHash()) : NULL;
@@ -2028,19 +3530,19 @@ void CSearchListCtrl::CreateMenus()
 	}
 
 	if (thePrefs.IsExtControlsEnabled())
-		m_SearchFileMenu.AppendMenu(MF_STRING, MP_DETAIL, GetResString(_T("SHOWDETAILS")), _T("FILEINFO"));
-	m_SearchFileMenu.AppendMenu(MF_STRING, MP_CMT, GetResString(_T("CMT_ADD")), _T("FILECOMMENTS"));
+		m_SearchFileMenu.AppendMenu(MF_STRING, MP_DETAIL, GetResString(_T("DL_INFO")), _T("FILEINFO"));
+	m_SearchFileMenu.AppendMenu(MF_STRING, MP_CMT, GetResStringWithAccelAndEllipsis(_T("COMMENT"), _T('e')), _T("FILECOMMENTS"));
 	m_SearchFileMenu.AppendMenu(MF_SEPARATOR);
 	m_SearchFileMenu.AppendMenu(MF_STRING, MP_CANCEL, GetResString(_T("CANCEL_DOWNLOAD")), _T("DELETE"));
 	m_SearchFileMenu.AppendMenu(MF_STRING, MP_CANCEL_FORGET, GetResString(_T("CANCEL_FORGET_DOWNLOAD")), _T("DELETE_FORGET"));
 	m_PreviewMenu.CreateMenu();
-	RebuildPreviewMenu(m_PreviewMenu, NULL, false, false, false, false, false);
+	RebuildPreviewMenu(m_PreviewMenu, NULL, false, false, false, false, false, NULL);
 	m_SearchFileMenu.AppendMenu(MF_STRING | MF_POPUP, (UINT_PTR)m_PreviewMenu.m_hMenu, GetResString(_T("PREVIEWWITH")), _T("PREVIEW"));
 	m_SearchFileMenu.AppendMenu(MF_SEPARATOR);
 	m_SearchFileMenu.AppendMenu(MF_STRING, MP_CUT, GetResString(_T("COPY_FILE_NAMES")), _T("FILERENAME"));
 	m_SearchFileMenu.AppendMenu(MF_STRING, MP_GETED2KLINK, GetResString(_T("DL_LINK1")), _T("ED2KLINK"));
 	m_SearchFileMenu.AppendMenu(MF_STRING, MP_GETHTMLED2KLINK, GetResString(_T("DL_LINK2")), _T("ED2KLINK"));
-	m_SearchFileMenu.AppendMenu(MF_STRING, MP_REMOVESELECTED, GetResString(_T("REMOVESELECTED")), _T("DELETESELECTED"));
+	m_SearchFileMenu.AppendMenu(MF_STRING, MP_REMOVESELECTED, GetResString(_T("REMOVE")), _T("DELETESELECTED"));
 	m_SearchFileMenu.AppendMenu(MF_SEPARATOR);
 	m_SearchFileMenu.AppendMenu(MF_STRING, MP_REMOVE, GetResString(_T("REMOVESEARCHSTRING")), _T("DELETE"));
 	m_SearchFileMenu.AppendMenu(MF_STRING, MP_REMOVEALL, GetResString(_T("REMOVEALLSEARCH")), _T("CLEARCOMPLETE"));
@@ -2102,82 +3604,37 @@ void CSearchListCtrl::OnLvnGetInfoTip(LPNMHDR pNMHDR, LRESULT *pResult)
 // virtual-list compliant expand / collapse
 void CSearchListCtrl::ExpandCollapseItem(int iItem, int iAction)
 {
-	if (iItem < 0 || iItem >= static_cast<int>(m_ListedItemsVector.size()))
-		return;
-
-	CSearchFile* pSel = m_ListedItemsVector[iItem];
+	CSearchFile* pSel = ResolveSearchFileByRowIndex(iItem);
 	if (pSel == NULL)
 		return;
-
-	CSearchFile* pParent = pSel->GetListParent() ? pSel->GetListParent() : pSel;
-	if (!pParent)
+	CSearchFile* pParent = pSel->GetListParent() != NULL ? pSel->GetListParent() : pSel;
+	if (pParent == NULL)
 		return;
 
-	// Expand
 	if (!pParent->IsListExpanded()) {
-		if (iAction == COLLAPSE_ONLY || pParent->GetListChildCount() < 2)
+		if (iAction == COLLAPSE_ONLY || !CanExpandSearchParent(pParent))
 			return;
-
-		const SearchList* pList = theApp.searchlist->GetSearchListForID(pParent->GetSearchID());
-		if (!pList)
+		pParent->SetListExpanded(true);
+	} else {
+		if (iAction == EXPAND_ONLY)
 			return;
-
-		SaveListState(m_nResultsID, kSearchListViewState); // Save selections and scroll state
-		SetRedraw(false); // Suspend painting
-
-		int insertPos = iItem + 1;
-		for (POSITION pos = pList->GetHeadPosition(); pos != NULL;) {
-			CSearchFile* pChild = pList->GetNext(pos);
-			if (pChild != NULL && pChild->GetListParent() == pParent) {
-				m_ListedItemsVector.insert(m_ListedItemsVector.begin() + insertPos, pChild);
-				++insertPos;
-			}
+		int iParentIndex = iItem;
+		if (m_SearchItemsMap.Lookup(pParent, iParentIndex)) {
+			SetItemState(-1, 0, LVIS_SELECTED | LVIS_FOCUSED);
+			SetItemState(iParentIndex, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+			SetSelectionMark(iParentIndex);
 		}
-
-		pParent->SetListExpanded(true); // Mark parent as expanded
-		RebuildListedItemsMap(); // Rebuild the map to update the item indices
-		UpdateSearchListItemCount(*this, m_ListedItemsVector.size()); // Update the item count in the list control
-		RestoreListState(m_nResultsID, kSearchListViewState, false); // Restore selections and scroll state
-		SetRedraw(true); // Resume painting
-		Invalidate(FALSE); //Force redraw
-		return;
+		pParent->SetListExpanded(false);
 	}
-
-	// Collapse
-	if (iAction == EXPAND_ONLY)
-		return;
-
-	int iParentIndex = iItem;
-	if (!m_ListedItemsMap.Lookup(pParent, iParentIndex))
-		return;
-	if (GetItemState(iParentIndex, LVIS_SELECTED | LVIS_FOCUSED) != (LVIS_SELECTED | LVIS_FOCUSED)) {
-		SetItemState(-1, 0, LVIS_SELECTED | LVIS_FOCUSED);
-		SetItemState(iParentIndex, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
-		SetSelectionMark(iParentIndex);
-	}
-	SaveListState(m_nResultsID, kSearchListViewState); // Save selections and scroll state
-	SetRedraw(false); // Suspend painting
-	HideSources(pParent); // internal collapse helper
-	RestoreListState(m_nResultsID, kSearchListViewState, false); // Restore selections and scroll state
-	SetRedraw(true); // Resume painting
-	Update(iParentIndex); // Redraw parent line
-	Invalidate(FALSE); // Force redraw
+	ReloadList(false, kSearchListViewState);
 }
 
-// remove child rows in virtual list
 void CSearchListCtrl::HideSources(CSearchFile* pParent)
 {
-	if (!pParent || pParent->GetSearchID() != m_nResultsID)
+	if (pParent == NULL || pParent->GetSearchID() != m_nResultsID || !pParent->IsListExpanded())
 		return;
-
-	auto it = std::remove_if(m_ListedItemsVector.begin(),	m_ListedItemsVector.end(), [pParent](CSearchFile* f) { return f->GetListParent() == pParent; });
-	if (it != m_ListedItemsVector.end()) {
-		m_ListedItemsVector.erase(it, m_ListedItemsVector.end());
-		pParent->SetListExpanded(false);
-		RebuildListedItemsMap();
-		UpdateSearchListItemCount(*this, m_ListedItemsVector.size());
-		Invalidate(FALSE);
-	}
+	pParent->SetListExpanded(false);
+	ReloadList(false, kSearchListViewState);
 }
 
 void CSearchListCtrl::OnNmClick(LPNMHDR pNMHDR, LRESULT*)
@@ -2187,12 +3644,16 @@ void CSearchListCtrl::OnNmClick(LPNMHDR pNMHDR, LRESULT*)
 	ScreenToClient(&pt);
 	if (pt.x < TREE_WIDTH) {
 		LPNMITEMACTIVATE pNMIA = reinterpret_cast<LPNMITEMACTIVATE>(pNMHDR);
-		ExpandCollapseItem(pNMIA->iItem, EXPAND_COLLAPSE);
+		if (!IsPassiveRowIndex(pNMIA->iItem))
+			ExpandCollapseItem(pNMIA->iItem, EXPAND_COLLAPSE);
 	}
 }
 
-void CSearchListCtrl::OnNmDblClk(LPNMHDR, LRESULT*)
+void CSearchListCtrl::OnNmDblClk(LPNMHDR pNMHDR, LRESULT*)
 {
+	const LPNMITEMACTIVATE pNMIA = reinterpret_cast<LPNMITEMACTIVATE>(pNMHDR);
+	if (pNMIA == NULL || IsPassiveRowIndex(pNMIA->iItem))
+		return;
 	POINT point;
 	::GetCursorPos(&point);
 	ScreenToClient(&point);
@@ -2213,11 +3674,79 @@ void CSearchListCtrl::OnNmDblClk(LPNMHDR, LRESULT*)
 	}
 }
 
+void CSearchListCtrl::DrawPossibleKnownRow(CDC& dc, LPDRAWITEMSTRUCT lpDrawItemStruct, const SSearchListRow* pRow, BOOL bCtrlFocused)
+{
+	if (pRow == NULL)
+		return;
+	const bool bSelected = (lpDrawItemStruct->itemState & ODS_SELECTED) != 0;
+	dc.SetTextColor(bSelected ? m_crHighlightText : (pRow->eType == SearchListRowPossibleKnownHeader ? m_crPossibleKnownHeader : GetPossibleKnownItemColor(pRow)));
+
+	CRect rcItem(lpDrawItemStruct->rcItem);
+	RECT rcClient;
+	GetClientRect(&rcClient);
+	const CHeaderCtrl* pHeaderCtrl = GetHeaderCtrl();
+	const int iCount = pHeaderCtrl->GetItemCount();
+	LONG itemLeft = rcItem.left;
+	for (int iCurrent = 0; iCurrent < iCount; ++iCurrent) {
+		const int iColumn = pHeaderCtrl->OrderToIndex(iCurrent);
+		if (IsColumnHidden(iColumn))
+			continue;
+		UINT uDrawTextAlignment;
+		const int iColumnWidth = GetColumnWidth(iColumn, uDrawTextAlignment);
+		CRect rcColumn(itemLeft + sm_iLabelOffset, rcItem.top, itemLeft + iColumnWidth - sm_iLabelOffset, rcItem.bottom);
+		if (iColumn == colSearchFileName) {
+			const int iTreeIndent = pRow->eType == SearchListRowPossibleKnownHeader ? TREE_WIDTH + 10 : TREE_WIDTH * 2 + 10;
+			rcColumn.left += iTreeIndent;
+			if (pRow->eType == SearchListRowPossibleKnownFile) {
+				const int iImage = theApp.GetFileTypeSystemImageIdx(pRow->strName);
+				if (iImage >= 0 && theApp.GetSystemImageList() != NULL) {
+					const int iIconY = max((rcItem.Height() - theApp.GetSmallSytemIconSize().cy - 1) / 2, 0);
+					::ImageList_Draw(theApp.GetSystemImageList(), iImage, dc, rcColumn.left, rcItem.top + iIconY, ILD_TRANSPARENT);
+					rcColumn.left += theApp.GetSmallSytemIconSize().cx + 4;
+				}
+			}
+		}
+		if (rcColumn.left < rcColumn.right && HaveIntersection(rcClient, rcColumn)) {
+			const CString strText(GetPossibleKnownDisplayText(pRow, iColumn));
+			dc.DrawText(strText, -1, &rcColumn, MLC_DT_TEXT | uDrawTextAlignment);
+		}
+		itemLeft += iColumnWidth;
+	}
+
+	const int iMiddle = (rcItem.top + rcItem.bottom + 1) / 2;
+	const int iRootX = lpDrawItemStruct->rcItem.left + 4;
+	const int iChildX = iRootX + TREE_WIDTH;
+	const int iGrandchildX = iChildX + TREE_WIDTH;
+	const SSearchListRow* pNextRow = ResolveRowByIndex(static_cast<int>(lpDrawItemStruct->itemID + 1));
+	const bool bNextSameParent = IsRowDescendantOfParent(pNextRow, pRow->pParentSearchFile);
+	const bool bNextKnownCandidate = bNextSameParent && pNextRow != NULL && pNextRow->eType == SearchListRowPossibleKnownFile;
+	const COLORREF crLine = bSelected ? m_crHighlightText : RGB(128, 128, 128);
+	CPen pen(PS_SOLID, 1, crLine);
+	CPen* pOldPen = dc.SelectObject(&pen);
+	dc.MoveTo(iRootX, rcItem.top - 1);
+	dc.LineTo(iRootX, bNextSameParent ? rcItem.bottom + 1 : iMiddle);
+	if (pRow->eType == SearchListRowPossibleKnownHeader) {
+		dc.MoveTo(iRootX, iMiddle);
+		dc.LineTo(iChildX, iMiddle);
+		if (bNextKnownCandidate) {
+			dc.MoveTo(iChildX, iMiddle);
+			dc.LineTo(iChildX, rcItem.bottom + 1);
+		}
+	} else {
+		dc.MoveTo(iChildX, rcItem.top - 1);
+		dc.LineTo(iChildX, bNextKnownCandidate ? rcItem.bottom + 1 : iMiddle);
+		dc.MoveTo(iChildX, iMiddle);
+		dc.LineTo(iGrandchildX, iMiddle);
+	}
+	dc.SelectObject(pOldPen);
+	DrawFocusRect(&dc, &lpDrawItemStruct->rcItem, (lpDrawItemStruct->itemState & ODS_FOCUS) != 0, bCtrlFocused, bSelected);
+}
+
 void CSearchListCtrl::DrawItem(LPDRAWITEMSTRUCT lpDrawItemStruct)
 {
 	int index = static_cast<int>(lpDrawItemStruct->itemID);
-	CSearchFile* content = ResolveSearchFileByRowIndex(index);
-	if (content == NULL) {
+	SSearchListRow* pRow = ResolveRowByIndex(index);
+	if (pRow == NULL) {
 		FillSearchFallbackOwnerDataRow(*this, lpDrawItemStruct);
 		return;
 	}
@@ -2235,6 +3764,13 @@ void CSearchListCtrl::DrawItem(LPDRAWITEMSTRUCT lpDrawItemStruct)
 	dc.FillSolidRect(rcPaint, clrBk);
 	dc.SetBkMode(OPAQUE);
 	dc.SetBkColor(clrBk);
+	if (pRow->eType != SearchListRowSearchFile) {
+		DrawPossibleKnownRow(dc, lpDrawItemStruct, pRow, bCtrlFocused);
+		return;
+	}
+	CSearchFile* content = pRow->pSearchFile;
+	if (content == NULL)
+		return;
 
 	RECT rcClient;
 	GetClientRect(&rcClient);
@@ -2292,7 +3828,7 @@ void CSearchListCtrl::DrawItem(LPDRAWITEMSTRUCT lpDrawItemStruct)
 		rcItem.left = itemLeft;
 		rcItem.right = itemLeft + iColumnWidth - sm_iLabelOffset;
 		switch (iColumn) {
-		case 0:
+		case colSearchFileName:
 			tree_start = rcItem.left + 1;
 			rcItem.left += min(8, iColumnWidth);
 			tree_end = rcItem.left;
@@ -2307,14 +3843,15 @@ void CSearchListCtrl::DrawItem(LPDRAWITEMSTRUCT lpDrawItemStruct)
 		itemLeft += iColumnWidth;
 	}
 
-	DrawFocusRect(dc, &lpDrawItemStruct->rcItem, (lpDrawItemStruct->itemState & ODS_FOCUS) != 0, bCtrlFocused, (lpDrawItemStruct->itemState & ODS_SELECTED) != 0);
+	DrawFocusRect(&dc, &lpDrawItemStruct->rcItem, (lpDrawItemStruct->itemState & ODS_FOCUS) != 0, bCtrlFocused, (lpDrawItemStruct->itemState & ODS_SELECTED) != 0);
 
 	if (tree_start < tree_end) {
 		RECT tree_rect = { tree_start, lpDrawItemStruct->rcItem.top, tree_end, lpDrawItemStruct->rcItem.bottom };
 		dc.SetBoundsRect(&tree_rect, DCB_DISABLE);
 
-		CSearchFile* pNext = notLast ? ResolveSearchFileByRowIndex(static_cast<int>(lpDrawItemStruct->itemID + 1)) : NULL;
-		bool hasNext = pNext != NULL && pNext->GetListParent() != NULL;
+		const SSearchListRow* pNextRow = notLast ? ResolveRowByIndex(static_cast<int>(lpDrawItemStruct->itemID + 1)) : NULL;
+		const CSearchFile* pTreeParent = isChild ? content->GetListParent() : content;
+		bool hasNext = IsRowDescendantOfParent(pNextRow, pTreeParent);
 		bool isOpenRoot = hasNext && !isChild;
 
 		int treeCenter = tree_start + 4;
@@ -2332,7 +3869,7 @@ void CSearchListCtrl::DrawItem(LPDRAWITEMSTRUCT lpDrawItemStruct)
 				dc.MoveTo(treeCenter, middle);
 				dc.LineTo(treeCenter, rcItem.bottom + 1);
 			}
-		} else if (isOpenRoot || content->GetListChildCount() > 1) {
+		} else if (isOpenRoot || content->GetListChildCount() > 1 || HasCachedPossibleKnownMatches(content)) {
 			const RECT circle_rec = { treeCenter - 4, middle - 5, treeCenter + 5, middle + 4 };
 			CBrush brush(crLine);
 			dc.FrameRect(&circle_rec, &brush);
@@ -2398,12 +3935,36 @@ COLORREF CSearchListCtrl::GetSearchItemColor(const CSearchFile* src) const
 	return { m_crShades[min(srccnt, AVBLYSHADECOUNT - 1)] };
 }
 
+COLORREF CSearchListCtrl::GetPossibleKnownItemColor(const SSearchListRow* pRow) const
+{
+	if (pRow == NULL)
+		return m_crWindowText;
+
+	uint8 uSourceFlags = pRow->uSourceFlags;
+	if (uSourceFlags == CDownloadValidator::FuzzyFileSourceUnknown && !isnulmd4(pRow->ucHash)) {
+		if (theApp.downloadqueue != NULL && theApp.downloadqueue->GetFileByID(pRow->ucHash) != NULL)
+			uSourceFlags = static_cast<uint8>(uSourceFlags | CDownloadValidator::FuzzyFileSourceDownloading);
+		if (theApp.knownfiles != NULL && theApp.knownfiles->FindKnownFileByID(pRow->ucHash) != NULL)
+			uSourceFlags = static_cast<uint8>(uSourceFlags | CDownloadValidator::FuzzyFileSourceKnown);
+	}
+
+	if ((uSourceFlags & CDownloadValidator::FuzzyFileSourceDownloading) != 0) {
+		const CKnownFile* pFile = theApp.downloadqueue != NULL ? theApp.downloadqueue->GetFileByID(pRow->ucHash) : NULL;
+		if (pFile != NULL && pFile->IsPartFile() && static_cast<const CPartFile*>(pFile)->GetStatus() == PS_PAUSED)
+			return m_crSearchResultDownloadStopped;
+		return m_crSearchResultDownloading;
+	}
+	if ((uSourceFlags & CDownloadValidator::FuzzyFileSourceKnown) != 0)
+		return m_crSearchResultKnown;
+	return m_crWindowText;
+}
+
 
 void CSearchListCtrl::DrawSourceChild(CDC *dc, int nColumn, LPRECT lpRect, UINT uDrawTextAlignment, const CSearchFile *src)
 {
 	const CString sItem(GetItemDisplayText(src, nColumn));
 	switch (nColumn) {
-	case 0:
+	case colSearchFileName:
 		lpRect->left += 8 + 8 + theApp.GetSmallSytemIconSize().cy;
 		if ((thePrefs.ShowRatingIndicator() && (src->HasComment() || src->HasRating() || src->IsKadCommentSearchRunning()))
 			|| ((thePrefs.IsSearchSpamFilterEnabled() || thePrefs.GetBlacklistAutomatic() || thePrefs.GetBlacklistManual()) && src->IsConsideredSpam())
@@ -2411,8 +3972,8 @@ void CSearchListCtrl::DrawSourceChild(CDC *dc, int nColumn, LPRECT lpRect, UINT 
 			lpRect->left += 16;
 	default:
 		dc->DrawText(sItem, -1, lpRect, MLC_DT_TEXT | uDrawTextAlignment);
-	case 4:
-	case 5:
+	case colSearchType:
+	case colSearchFileId:
 		break;
 	}
 }
@@ -2421,7 +3982,7 @@ void CSearchListCtrl::DrawSourceParent(CDC *dc, int nColumn, LPRECT lpRect, UINT
 {
 	const CString sItem(GetItemDisplayText(src, nColumn));
 	switch (nColumn) {
-	case 0:
+	case colSearchFileName:
 		lpRect->left += 8 + theApp.GetSmallSytemIconSize().cx;
 		if ((thePrefs.ShowRatingIndicator() && (src->HasComment() || src->HasRating() || src->IsKadCommentSearchRunning()))
 			|| ((thePrefs.IsSearchSpamFilterEnabled() || thePrefs.GetBlacklistAutomatic() || thePrefs.GetBlacklistManual()) && src->IsConsideredSpam())
@@ -2430,7 +3991,7 @@ void CSearchListCtrl::DrawSourceParent(CDC *dc, int nColumn, LPRECT lpRect, UINT
 	default:
 		dc->DrawText(sItem, -1, lpRect, MLC_DT_TEXT | uDrawTextAlignment);
 		break;
-	case 3:
+	case colSearchCompleteSources:
 		{
 			bool bComplete = IsComplete(src, src->GetSourceCount());
 			COLORREF crOldTextColor = (bComplete ? 0 : dc->SetTextColor(RGB(255, 0, 0)));
@@ -2467,6 +4028,7 @@ void CSearchListCtrl::SetHighlightColors()
 	m_crSearchResultSharing = GetCustomSysColor(COLOR_SEARCH_SHARING); // Dark green
 	m_crSearchResultKnown = GetCustomSysColor(COLOR_SEARCH_KNOWN); // Medium green
 	m_crSearchResultCancelled = GetCustomSysColor(COLOR_SEARCH_CANCELED); // Orange
+	m_crPossibleKnownHeader = GetCustomSysColor(COLOR_SEARCH_POSSIBLE_KNOWN_HEADER);
 
 	theApp.LoadSkinColor(GetSkinKey() + _T("Fg_Downloading"), m_crSearchResultDownloading);
 	if (!theApp.LoadSkinColor(_T("Fg_DownloadStopped"), m_crSearchResultDownloadStopped))
@@ -2474,6 +4036,7 @@ void CSearchListCtrl::SetHighlightColors()
 	theApp.LoadSkinColor(GetSkinKey() + _T("Fg_Sharing"), m_crSearchResultSharing);
 	theApp.LoadSkinColor(GetSkinKey() + _T("Fg_Known"), m_crSearchResultKnown);
 	theApp.LoadSkinColor(GetSkinKey() + _T("Fg_AvblyBase"), crSearchResultAvblyBase);
+	theApp.LoadSkinColor(GetSkinKey() + _T("Fg_PossibleKnownHeader"), m_crPossibleKnownHeader);
 
 	// precalculate sources shades
 	COLORREF normFGC = GetTextColor();
@@ -2515,8 +4078,13 @@ void CSearchListCtrl::OnSysColorChange()
 void CSearchListCtrl::OnShowWindow(BOOL bShow, UINT nStatus)
 {
 	CMuleListCtrl::OnShowWindow(bShow, nStatus);
-	if (bShow && ::IsWindow(m_hWnd))
+	if (bShow && ::IsWindow(m_hWnd)) {
 		RefreshThemeColors();
+		if (IsPossibleKnownFeatureEnabled() && theApp.DownloadValidator->GetPossibleKnownRevision() != m_uPossibleKnownRevision)
+			QueuePossibleKnownRefresh(1);
+		else if (IsPossibleKnownFeatureEnabled() && theApp.DownloadValidator->GetCandidateDataRevision() != m_uPossibleKnownCandidateDataRevision)
+			QueuePossibleKnownSoftRefresh();
+	}
 }
 
 BOOL CSearchListCtrl::OnEraseBkgnd(CDC* pDC)
@@ -2545,17 +4113,28 @@ CString CSearchListCtrl::GetItemDisplayText(const CSearchFile *src, int iSubItem
 {
 	CString sText;
 	switch (iSubItem) {
-	case 0: //file name
+	case colSearchFileName:
 		sText = src->GetFileName();
 		break;
-	case 1: //file size
+	case colSearchSize:
 		if (src->GetListParent() == NULL
 			|| (thePrefs.GetDebugSearchResultDetailLevel() >= 1 && src->GetFileSize() != src->GetListParent()->GetFileSize()))
 		{
 			sText = FormatFileSize(src->GetFileSize());
 		}
 		break;
-	case 2: //avail
+	case colSearchType:
+		if (src->GetListParent() == NULL)
+			sText = src->GetFileTypeDisplayStr();
+		break;
+	case colSearchLength:
+		{
+			uint32 nMediaLength = src->GetIntTagValue(FT_MEDIA_LENGTH);
+			if (nMediaLength)
+				sText = SecToTimeLength(nMediaLength);
+		}
+		break;
+	case colSearchAvailability:
 		if (src->GetListParent() == NULL) {
 			sText.Format(_T("%u"), src->GetSourceCount());
 			if (thePrefs.IsExtControlsEnabled()) {
@@ -2578,52 +4157,16 @@ CString CSearchListCtrl::GetItemDisplayText(const CSearchFile *src, int iSubItem
 		} else
 			sText.Format(_T("%u"), src->GetListChildCount());
 		break;
-	case 3: //complete sources
+	case colSearchCompleteSources:
 		if (src->GetListParent() == NULL
 			|| (thePrefs.IsExtControlsEnabled() && thePrefs.GetDebugSearchResultDetailLevel() >= 1))
 		{
 			sText = GetCompleteSourcesDisplayString(src, src->GetSourceCount());
 		}
 		break;
-	case 4: //file type
-		if (src->GetListParent() == NULL)
-			sText = src->GetFileTypeDisplayStr();
+	case colSearchSimilarity:
 		break;
-	case 5: //file hash
-		if (src->GetListParent() == NULL)
-			sText = md4str(src->GetFileHash());
-		break;
-	case 6:
-		sText = src->GetStrTagValue(FT_MEDIA_ARTIST);
-		break;
-	case 7:
-		sText = src->GetStrTagValue(FT_MEDIA_ALBUM);
-		break;
-	case 8:
-		sText = src->GetStrTagValue(FT_MEDIA_TITLE);
-		break;
-	case 9:
-		{
-			uint32 nMediaLength = src->GetIntTagValue(FT_MEDIA_LENGTH);
-			if (nMediaLength)
-				sText = SecToTimeLength(nMediaLength);
-		}
-		break;
-	case 10:
-		{
-			uint32 nBitrate = src->GetIntTagValue(FT_MEDIA_BITRATE);
-			if (nBitrate)
-				sText.Format(_T("%u %s"), nBitrate, (LPCTSTR)GetResString(_T("KBITSSEC")));
-		}
-		break;
-	case 11:
-		sText = GetCodecDisplayName(src->GetStrTagValue(FT_MEDIA_CODEC));
-		break;
-	case 12: // dir
-		if (src->GetDirectory())
-			sText = src->GetDirectory();
-		break;
-	case 13: //known
+	case colSearchKnown:
 		{
 			sText = GetKnownTypeStr(src);
 #ifdef _DEBUG
@@ -2631,14 +4174,117 @@ CString CSearchListCtrl::GetItemDisplayText(const CSearchFile *src, int iSubItem
 #endif
 		}
 		break;
-	case 14: //AICH hash
+	case colSearchBitrate:
+		{
+			uint32 nBitrate = src->GetIntTagValue(FT_MEDIA_BITRATE);
+			if (nBitrate)
+				sText.Format(_T("%u %s"), nBitrate, (LPCTSTR)GetResString(_T("KBITSSEC")));
+		}
+		break;
+	case colSearchCodec:
+		sText = GetCodecDisplayName(src->GetStrTagValue(FT_MEDIA_CODEC));
+		break;
+	case colSearchFileId:
+		if (src->GetListParent() == NULL)
+			sText = md4str(src->GetFileHash());
+		break;
+	case colSearchFolder:
+		if (src->GetDirectory())
+			sText = src->GetDirectory();
+		break;
+	case colSearchAlbum:
+		sText = src->GetStrTagValue(FT_MEDIA_ALBUM);
+		break;
+	case colSearchTitle:
+		sText = src->GetStrTagValue(FT_MEDIA_TITLE);
+		break;
+	case colSearchArtist:
+		sText = src->GetStrTagValue(FT_MEDIA_ARTIST);
+		break;
+	case colSearchAichHash:
 		if (src->GetFileIdentifierC().HasAICHHash())
 			sText = src->GetFileIdentifierC().GetAICHHash().GetString();
 		break;
-	case 15:
+	case colSearchSpamRating:
 		sText.Format(_T("%u"), src->GetSpamRating());
+		break;
 	}
 	return sText;
+}
+
+CString CSearchListCtrl::GetPossibleKnownDisplayText(const SSearchListRow* pRow, int iSubItem) const
+{
+	if (pRow == NULL)
+		return EMPTY;
+	if (pRow->eType == SearchListRowPossibleKnownHeader)
+		return iSubItem == colSearchFileName ? pRow->strName : EMPTY;
+
+	CString strText;
+	switch (iSubItem) {
+	case colSearchFileName:
+		strText = pRow->strName;
+		break;
+	case colSearchSize:
+		if (static_cast<uint64>(pRow->uSize) != 0)
+			strText = FormatFileSize(pRow->uSize);
+		break;
+	case colSearchType:
+		if (pRow->uFileType != static_cast<uint8>(ED2KFT_ANY)) {
+			LPCTSTR pszFileType = GetED2KFileTypeSearchTerm(static_cast<EED2KFileType>(pRow->uFileType), false);
+			if (pszFileType != NULL)
+				strText = GetFileTypeDisplayStrFromED2KFileType(pszFileType);
+		}
+		break;
+	case colSearchLength:
+		if (pRow->uMediaLengthSec != 0)
+			strText = SecToTimeLength(pRow->uMediaLengthSec);
+		break;
+	case colSearchSimilarity:
+		strText.Format(_T("%u%%"), pRow->uSimilarityScore);
+		break;
+	case colSearchKnown:
+		{
+			uint8 uSourceFlags = pRow->uSourceFlags;
+			if (uSourceFlags == CDownloadValidator::FuzzyFileSourceUnknown && !isnulmd4(pRow->ucHash)) {
+				if (theApp.downloadqueue != NULL && theApp.downloadqueue->GetFileByID(pRow->ucHash) != NULL)
+					uSourceFlags = static_cast<uint8>(uSourceFlags | CDownloadValidator::FuzzyFileSourceDownloading);
+				if (theApp.knownfiles != NULL && theApp.knownfiles->FindKnownFileByID(pRow->ucHash) != NULL)
+					uSourceFlags = static_cast<uint8>(uSourceFlags | CDownloadValidator::FuzzyFileSourceKnown);
+			}
+			if ((uSourceFlags & CDownloadValidator::FuzzyFileSourceDownloading) != 0)
+				strText = GetResString(_T("DOWNLOADING"));
+			else if ((uSourceFlags & CDownloadValidator::FuzzyFileSourceKnown) != 0)
+				strText = GetResString(_T("DOWNLOADED"));
+		}
+		break;
+	case colSearchBitrate:
+		if (pRow->uMediaBitrateKbps != 0)
+			strText.Format(_T("%u %s"), pRow->uMediaBitrateKbps, (LPCTSTR)GetResString(_T("KBITSSEC")));
+		break;
+	case colSearchCodec:
+		strText = GetCodecDisplayName(pRow->strMediaCodec);
+		break;
+	case colSearchFileId:
+		if (!isnulmd4(pRow->ucHash))
+			strText = md4str(pRow->ucHash);
+		break;
+	case colSearchFolder:
+		strText = pRow->strFolder;
+		break;
+	case colSearchAlbum:
+		strText = pRow->strMediaAlbum;
+		break;
+	case colSearchTitle:
+		strText = pRow->strMediaTitle;
+		break;
+	case colSearchArtist:
+		strText = pRow->strMediaArtist;
+		break;
+	case colSearchAichHash:
+		strText = pRow->strAICHHash;
+		break;
+	}
+	return strText;
 }
 
 void CSearchListCtrl::OnLvnGetDispInfo(LPNMHDR pNMHDR, LRESULT *pResult)

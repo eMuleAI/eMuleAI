@@ -392,6 +392,14 @@ private:
 	int GetBestDirectoryRuleDepth(const CStringList &liDirs, const CString &sDirPath, bool bIncludeSubdirectories) const;
 };
 
+inline bool CSharedFileList::QueueMetaDataUpdateForFile(const CKnownFile* pFile)
+{
+	const EMetaDataQueueResult eResult = QueueMetaDataUpdate(pFile, false, true);
+	if (eResult == MetaDataQueueQueued)
+		NotifyShowFilesCount();
+	return eResult != MetaDataQueueFailed;
+}
+
 class CAddFileThread : public CWinThread
 {
 	DECLARE_DYNCREATE(CAddFileThread)

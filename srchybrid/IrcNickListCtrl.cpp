@@ -50,7 +50,7 @@ void CIrcNickListCtrl::Init()
 	SetExtendedStyle(LVS_EX_FULLROWSELECT | LVS_EX_INFOTIP);
 
 	// Alignment rule: left for text, dates, and status labels; right for sizes, rates, counts, durations, and percentages.
-	InsertColumn(0, GetResString(_T("IRC_NICK")), LVCFMT_LEFT, 90);
+	InsertColumn(0, GetResString(_T("PW_NICK")), LVCFMT_LEFT, 90);
 
 	LoadSettings();
 	SetSortArrow();
@@ -96,7 +96,7 @@ void CIrcNickListCtrl::OnContextMenu(CWnd*, CPoint point)
 
 	CMenuXP menuNick;
 	menuNick.CreatePopupMenu();
-	CString sTitle(GetResString(_T("IRC_NICK")));
+	CString sTitle(GetResString(_T("PW_NICK")));
 	sTitle.AppendFormat(_T(" : %s"), (LPCTSTR)pNick->m_sNick);
 	menuNick.AddMenuSidebar(sTitle);
 	menuNick.AppendMenu(MF_STRING, Irc_Priv, GetResString(_T("IRC_PRIVMESSAGE")));
@@ -351,7 +351,7 @@ bool CIrcNickListCtrl::ChangeAllNick(const CString &sOldNick, const CString &sNe
 
 void CIrcNickListCtrl::UpdateNickCount()
 {
-	CString strRes(GetResString(_T("IRC_NICK")));
+	CString strRes(GetResString(_T("PW_NICK")));
 	int iItemCount = GetItemCount();
 	if (iItemCount)
 		strRes.AppendFormat(_T(" (%d)"), iItemCount);

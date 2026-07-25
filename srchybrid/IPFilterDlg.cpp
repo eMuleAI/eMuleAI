@@ -59,7 +59,7 @@ static LCX_COLUMN_INIT s_aColumns[] =
 	{ IPFILTER_COL_END,		_T("End0"),			_T("END_NOUN"),		LVCFMT_LEFT,	-1, 1, ASCENDING,  NONE, _T("255.255.255.255")},
 	{ IPFILTER_COL_LEVEL,	_T("Level"),		_T("IP_LEVEL"),	LVCFMT_RIGHT,	-1, 2, ASCENDING,  NONE, _T("999") },
 	{ IPFILTER_COL_HITS,	_T("Hits"),			_T("IP_HITS"),	LVCFMT_RIGHT,	-1, 3, DESCENDING, NONE, _T("99999") },
-	{ IPFILTER_COL_DESC,	_T("Description"),	_T("IP_DESC"),	LVCFMT_LEFT,	-1, 4, ASCENDING,  NONE, _T("long long long long long long long long text line") },
+	{ IPFILTER_COL_DESC,	_T("Description"),	_T("DESCRIPTION"),	LVCFMT_LEFT,	-1, 4, ASCENDING,  NONE, _T("long long long long long long long long text line") },
 };
 
 #define	PREF_INI_SECTION	_T("IPFilterDlg")
@@ -261,7 +261,7 @@ BOOL CIPFilterDlg::OnInitDialog()
 	SetDlgItemText(IDC_REMOVE, GetResString(_T("DELETESELECTED")));
 	SetDlgItemText(IDC_APPEND, GetResString(_T("APPEND")));
 	SetDlgItemText(IDC_SAVE, GetResString(_T("SAVE")));
-	SetDlgItemText(IDOK, GetResString(_T("FD_CLOSE")));
+	SetDlgItemText(IDOK, GetResString(_T("CW_CLOSE")));
 
 	return TRUE;  // return TRUE unless you set the focus to the control
 				  // EXCEPTION: OCX Property Pages should return FALSE
@@ -385,7 +385,7 @@ void CIPFilterDlg::OnBnClickedAppend()
 		if (szExt == _T(".zip")) {
 			CZIPFile zip;
 			if (zip.Open(strFilePath)) {
-				CZIPFile::File *zfile = zip.GetFile(_T("ipfilter.dat"));
+				CZIPFile::File *zfile = zip.GetFile(DFLT_IPFILTER_FILENAME);
 				if (zfile == NULL)
 					zfile = zip.GetFile(_T("guarding.p2p"));
 				if (zfile == NULL)
@@ -417,7 +417,7 @@ void CIPFilterDlg::OnBnClickedAppend()
 			if (rar.Open(strFilePath)) {
 				CString strFile;
 				if (rar.GetNextFile(strFile)
-					&& (strFile.CompareNoCase(_T("ipfilter.dat")) == 0
+					&& (strFile.CompareNoCase(DFLT_IPFILTER_FILENAME) == 0
 						|| strFile.CompareNoCase(_T("guarding.p2p")) == 0
 						|| strFile.CompareNoCase(_T("guardian.p2p")) == 0))
 				{

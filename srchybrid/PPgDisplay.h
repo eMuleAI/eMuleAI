@@ -15,6 +15,7 @@ public:
 	CPPgDisplay();
 
 	void Localize();
+	void ResetToDefaults();
 
 protected:
 	enum ESelectFont
@@ -23,9 +24,13 @@ protected:
 		sfLog
 	} m_eSelectFont;
 	void LoadSettings();
+	void FillOptionsWindowScaleCombo();
+	void SelectOptionsWindowScalePercent(int iPercent);
+	void LayoutOptionsWindowScaleControls();
 
 	void DrawPreview();		//Cax2 - aqua bar
 	C3DPreviewControl	m_3DPreview;
+	CComboBox			m_ctlOptionsWindowScale;
 
 	virtual void DoDataExchange(CDataExchange *pDX);    // DDX/DDV support
 	virtual BOOL OnInitDialog();
@@ -36,9 +41,11 @@ protected:
 
 	DECLARE_MESSAGE_MAP()
 	afx_msg void OnHScroll(UINT nSBCode, UINT nPos, CScrollBar *pScrollBar);
+	afx_msg void OnSize(UINT nType, int cx, int cy);
 	afx_msg void OnSettingsChange()				{ SetModified(); }
 	afx_msg void OnBnClickedSelectHypertextFont();
 	afx_msg void OnBtnClickedResetHist();
+	afx_msg void OnBnClickedShowOptionsToolTips();
 	afx_msg void OnHelp();
 	afx_msg BOOL OnHelpInfo(HELPINFO*);
 };

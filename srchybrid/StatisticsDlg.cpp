@@ -190,7 +190,7 @@ BOOL CStatisticsDlg::OnInitDialog()
 	ScreenToClient(rcDown);
 	m_DownloadOMeter.CreateWnd(WS_VISIBLE | WS_CHILD, rcDown, this, IDC_SCOPE_D);
 	SetARange(true, thePrefs.GetMaxGraphDownloadRate());
-	m_DownloadOMeter.SetYUnits(GetResString(_T("KBYTESPERSEC")));
+	m_DownloadOMeter.SetYUnits(GetResString(_T("KBYTESSEC")));
 
 	// Setup upload-scope
 	CRect rcUp;
@@ -202,7 +202,7 @@ BOOL CStatisticsDlg::OnInitDialog()
 	rcUp.bottom = rcUp.top + rcDown.Height();
 	m_UploadOMeter.CreateWnd(WS_VISIBLE | WS_CHILD, rcUp, this, IDC_SCOPE_U);
 	SetARange(false, thePrefs.GetMaxGraphUploadRate(true));
-	m_UploadOMeter.SetYUnits(GetResString(_T("KBYTESPERSEC")));
+	m_UploadOMeter.SetYUnits(GetResString(_T("KBYTESSEC")));
 
 	// Setup additional graph scope
 	CRect rcConn;
@@ -569,16 +569,16 @@ void CStatisticsDlg::RepaintMeters()
 	m_UploadOMeter.SetLegendLabel(GetResString(_T("ST_SESSION")), 0);				// Upload session
 	Buffer.Format(_T(" (%u %s)"), thePrefs.GetStatsAverageMinutes(), (LPCTSTR)GetResString(_T("MINS")));
 	m_UploadOMeter.SetLegendLabel(GetResString(_T("AVG")) + Buffer, 1);			// Upload average
-	m_UploadOMeter.SetLegendLabel(GetResString(_T("ST_ULCURRENT")), 2);			// Upload current
+	m_UploadOMeter.SetLegendLabel(GetResString(_T("ST_CURRENT")), 2);			// Upload current
 	m_UploadOMeter.SetLegendLabel(GetResString(_T("ST_ULSLOTSNOOVERHEAD")), 3);	// Upload current (excl. overhead)
 	m_UploadOMeter.SetLegendLabel(GetResString(_T("ST_ULFRIEND")), 4);			// Upload friend slots
 
 	m_Statistics.SetYUnits(GetResString(_T("CONNECTIONS")));
-	Buffer.Format(_T("%s (1:%u)"), (LPCTSTR)GetResString(_T("ST_ACTIVEC")), thePrefs.GetStatsConnectionsGraphRatio());
+	Buffer.Format(_T("%s (1:%u)"), (LPCTSTR)GetResString(_T("SP_ACTCON")), thePrefs.GetStatsConnectionsGraphRatio());
 	m_Statistics.SetLegendLabel(Buffer, 0);										// Active Connections
-	m_Statistics.SetLegendLabel(GetResString(_T("ST_ACTIVEU_ZZ")), 1);			// Active Uploads
+	m_Statistics.SetLegendLabel(GetResString(_T("SP_ACTUL")), 1);			// Active Uploads
 	m_Statistics.SetLegendLabel(GetResString(_T("SP_TOTALUL")), 2);				// Total Uploads
-	m_Statistics.SetLegendLabel(GetResString(_T("ST_ACTIVED")), 3);				// Active Downloads
+	m_Statistics.SetLegendLabel(GetResString(_T("SP_ACTDL")), 3);				// Active Downloads
 }
 
 void CStatisticsDlg::SetCurrentRate(float uploadrate, float downloadrate)
@@ -645,7 +645,7 @@ void CStatisticsDlg::ShowStatistics(bool forceUpdate)
 			else
 				sText.Format(_T("%s 1 : %.2f"), (LPCTSTR)GetResString(_T("STATS_SRATIO")), (float)theStats.sessionReceivedBytes / theStats.sessionSentBytes);
 		} else
-			sText.Format(_T("%s %s"), (LPCTSTR)GetResString(_T("STATS_SRATIO")), (LPCTSTR)GetResString(_T("FSTAT_WAITING"))); // Localize
+			sText.Format(_T("%s %s"), (LPCTSTR)GetResString(_T("STATS_SRATIO")), (LPCTSTR)GetResStringWithEllipsis(_T("WAITING"))); // Localize
 		m_stattree.SetItemText(trans[0], sText);
 
 		if (theStats.sessionReceivedBytes > 0 && theStats.sessionSentBytes > 0) {
@@ -655,7 +655,7 @@ void CStatisticsDlg::ShowStatistics(bool forceUpdate)
 			else
 				sText.Format(_T("%s 1 : %.2f"), (LPCTSTR)GetResString(_T("STATS_FRATIO")), (float)theStats.sessionReceivedBytes / (theStats.sessionSentBytes - theStats.sessionSentBytesToFriend));
 		} else
-			sText.Format(_T("%s %s"), (LPCTSTR)GetResString(_T("STATS_FRATIO")), (LPCTSTR)GetResString(_T("FSTAT_WAITING"))); // Localize
+			sText.Format(_T("%s %s"), (LPCTSTR)GetResString(_T("STATS_FRATIO")), (LPCTSTR)GetResStringWithEllipsis(_T("WAITING"))); // Localize
 		m_stattree.SetItemText(trans[1], sText);
 
 		if ((thePrefs.GetTotalDownloaded() > 0 && thePrefs.GetTotalUploaded() > 0) || (theStats.sessionReceivedBytes > 0 && theStats.sessionSentBytes > 0)) {
@@ -665,7 +665,7 @@ void CStatisticsDlg::ShowStatistics(bool forceUpdate)
 			else
 				sText.Format(_T("%s 1 : %.2f"), (LPCTSTR)GetResString(_T("STATS_CRATIO")), (float)(theStats.sessionReceivedBytes + thePrefs.GetTotalDownloaded()) / (theStats.sessionSentBytes + thePrefs.GetTotalUploaded()));
 		} else
-			sText.Format(_T("%s %s"), (LPCTSTR)GetResString(_T("STATS_CRATIO")), (LPCTSTR)GetResString(_T("FSTAT_WAITING"))); // Localize
+			sText.Format(_T("%s %s"), (LPCTSTR)GetResString(_T("STATS_CRATIO")), (LPCTSTR)GetResStringWithEllipsis(_T("WAITING"))); // Localize
 		m_stattree.SetItemText(trans[2], sText);
 
 		// TRANSFER -> DOWNLOADS SECTION
@@ -761,7 +761,7 @@ void CStatisticsDlg::ShowStatistics(bool forceUpdate)
 							percentPortTransferred = 100.0 * PortDataDefault / PortDataTotal;
 						else
 							percentPortTransferred = 0;
-						sText.Format(_T("%s: %s (%1.1f%%)"), (LPCTSTR)GetResString(_T("STATS_PRTDEF")), (LPCTSTR)CastItoXBytes(PortDataDefault), percentPortTransferred);
+						sText.Format(_T("%s: %s (%1.1f%%)"), (LPCTSTR)GetResString(_T("DEFAULT")), (LPCTSTR)CastItoXBytes(PortDataDefault), percentPortTransferred);
 						m_stattree.SetItemText(down_spb[i], sText);
 						++i;
 						if (PortDataTotal != 0 && PortDataOther != 0)
@@ -1023,7 +1023,7 @@ void CStatisticsDlg::ShowStatistics(bool forceUpdate)
 							percentPortTransferred = 100.0 * PortDataDefault / PortDataTotal;
 						else
 							percentPortTransferred = 0;
-						sText.Format(_T("%s: %s (%1.1f%%)"), (LPCTSTR)GetResString(_T("STATS_PRTDEF")), (LPCTSTR)CastItoXBytes(PortDataDefault), percentPortTransferred);
+						sText.Format(_T("%s: %s (%1.1f%%)"), (LPCTSTR)GetResString(_T("DEFAULT")), (LPCTSTR)CastItoXBytes(PortDataDefault), percentPortTransferred);
 						m_stattree.SetItemText(down_tpb[i], sText);
 						++i;
 
@@ -1173,7 +1173,7 @@ void CStatisticsDlg::ShowStatistics(bool forceUpdate)
 						uint64	PortDataDefault = thePrefs.GetUpDataPort_4662();
 						double	percentPortTransferred = !PortDataTotal ? 0 : 100.0 * PortDataDefault / PortDataTotal;
 						int i = 0;
-						sText.Format(_T("%s: %s (%1.1f%%)"), (LPCTSTR)GetResString(_T("STATS_PRTDEF")), (LPCTSTR)CastItoXBytes(PortDataDefault), percentPortTransferred);
+						sText.Format(_T("%s: %s (%1.1f%%)"), (LPCTSTR)GetResString(_T("DEFAULT")), (LPCTSTR)CastItoXBytes(PortDataDefault), percentPortTransferred);
 						m_stattree.SetItemText(up_spb[i], sText);
 						++i;
 						uint64	PortDataOther = thePrefs.GetUpDataPort_OTHER();
@@ -1222,7 +1222,7 @@ void CStatisticsDlg::ShowStatistics(bool forceUpdate)
 					else
 						percentSessions = 0;
 					sText.Format(_T("%s: %s"), (LPCTSTR)GetResString(_T("STATS_AVGDATAULSES"))
-						, (LPCTSTR)(statGoodSessions > 0 ? CastItoXBytes(theStats.sessionSentBytes / statGoodSessions) : GetResString(_T("FSTAT_WAITING"))));
+						, (LPCTSTR)(statGoodSessions > 0 ? CastItoXBytes(theStats.sessionSentBytes / statGoodSessions) : GetResStringWithEllipsis(_T("WAITING"))));
 					m_stattree.SetItemText(up_ssessions[2], sText);
 					sText.Format(GetResString(_T("STATS_SUCCUPCOUNT")), statGoodSessions, percentSessions);
 					m_stattree.SetItemText(up_ssessions[0], sText);
@@ -1327,7 +1327,7 @@ void CStatisticsDlg::ShowStatistics(bool forceUpdate)
 						uint64	PortDataTotal = thePrefs.GetUpTotalPortData();
 						uint64	PortDataDefault = thePrefs.GetCumUpDataPort_4662();
 						double	percentPortTransferred = !PortDataTotal ? 0 : 100.0 * PortDataDefault / PortDataTotal;
-						sText.Format(_T("%s: %s (%1.1f%%)"), (LPCTSTR)GetResString(_T("STATS_PRTDEF")), (LPCTSTR)CastItoXBytes(PortDataDefault), percentPortTransferred);
+						sText.Format(_T("%s: %s (%1.1f%%)"), (LPCTSTR)GetResString(_T("DEFAULT")), (LPCTSTR)CastItoXBytes(PortDataDefault), percentPortTransferred);
 						m_stattree.SetItemText(up_tpb[i], sText);
 						++i;
 						uint64	PortDataOther = thePrefs.GetCumUpDataPort_OTHER();
@@ -1362,7 +1362,7 @@ void CStatisticsDlg::ShowStatistics(bool forceUpdate)
 					else
 						percentSessions = 0;
 					sText.Format(_T("%s: %s"), (LPCTSTR)GetResString(_T("STATS_AVGDATAULSES"))
-						, (LPCTSTR)(statGoodSessions > 0 ? CastItoXBytes((theStats.sessionSentBytes + thePrefs.GetTotalUploaded()) / statGoodSessions) : GetResString(_T("FSTAT_WAITING"))));
+						, (LPCTSTR)(statGoodSessions > 0 ? CastItoXBytes((theStats.sessionSentBytes + thePrefs.GetTotalUploaded()) / statGoodSessions) : GetResStringWithEllipsis(_T("WAITING"))));
 
 					m_stattree.SetItemText(up_tsessions[2], sText);
 					sText.Format(GetResString(_T("STATS_SUCCUPCOUNT")), statGoodSessions, percentSessions);
@@ -1638,7 +1638,7 @@ void CStatisticsDlg::ShowStatistics(bool forceUpdate)
 			if (forceUpdate || m_stattree.IsExpanded(tvitime_s[i])) {
 				int x = 0;
 				// Upload Time
-				sText.Format(_T("%s: %s (%1.1f%%)"), (LPCTSTR)GetResString(_T("STATS_UPTIME")), (LPCTSTR)CastSecondsToLngHM(theStats.GetUploadTime()), (100.0 * theStats.GetUploadTime()) / sessionRunTime);
+				sText.Format(_T("%s: %s (%1.1f%%)"), (LPCTSTR)GetResString(_T("UPLOADTIME")), (LPCTSTR)CastSecondsToLngHM(theStats.GetUploadTime()), (100.0 * theStats.GetUploadTime()) / sessionRunTime);
 				m_stattree.SetItemText(tvitime_st[x], sText);
 				++x;
 				// Download Time
@@ -1670,7 +1670,7 @@ void CStatisticsDlg::ShowStatistics(bool forceUpdate)
 			if (forceUpdate || m_stattree.IsExpanded(tvitime_t[i])) {
 				int x = 0;
 				// Upload Time
-				sText.Format(_T("%s: %s (%1.1f%%)"), (LPCTSTR)GetResString(_T("STATS_UPTIME")), (LPCTSTR)CastSecondsToLngHM(theStats.GetUploadTime() + thePrefs.GetConnUploadTime()), (100.0 * (theStats.GetUploadTime() + thePrefs.GetConnUploadTime())) / totalRunTime);
+				sText.Format(_T("%s: %s (%1.1f%%)"), (LPCTSTR)GetResString(_T("UPLOADTIME")), (LPCTSTR)CastSecondsToLngHM(theStats.GetUploadTime() + thePrefs.GetConnUploadTime()), (100.0 * (theStats.GetUploadTime() + thePrefs.GetConnUploadTime())) / totalRunTime);
 				m_stattree.SetItemText(tvitime_tt[x], sText);
 				++x;
 				// Download Time
@@ -1749,7 +1749,7 @@ void CStatisticsDlg::ShowStatistics(bool forceUpdate)
 
 								if (PortDataTotal != 0 && PortDataDefault != 0)
 									percentPortTransferred = 100.0 * PortDataDefault / PortDataTotal;
-								sText.Format(_T("%s: %s (%1.1f%%)"), (LPCTSTR)GetResString(_T("STATS_PRTDEF")), (LPCTSTR)CastItoXBytes(PortDataDefault), percentPortTransferred);
+								sText.Format(_T("%s: %s (%1.1f%%)"), (LPCTSTR)GetResString(_T("DEFAULT")), (LPCTSTR)CastItoXBytes(PortDataDefault), percentPortTransferred);
 								m_stattree.SetItemText(time_aap_up_dp[mx][i], sText);
 								++i;
 								if (PortDataTotal != 0 && PortDataOther != 0)
@@ -1931,7 +1931,7 @@ void CStatisticsDlg::ShowStatistics(bool forceUpdate)
 									percentPortTransferred = 100.0 * PortDataDefault / PortDataTotal;
 								else
 									percentPortTransferred = 0;
-								sText.Format(_T("%s: %s (%1.1f%%)"), (LPCTSTR)GetResString(_T("STATS_PRTDEF")), (LPCTSTR)CastItoXBytes(PortDataDefault), percentPortTransferred);
+								sText.Format(_T("%s: %s (%1.1f%%)"), (LPCTSTR)GetResString(_T("DEFAULT")), (LPCTSTR)CastItoXBytes(PortDataDefault), percentPortTransferred);
 								m_stattree.SetItemText(time_aap_down_dp[mx][i], sText);
 								++i;
 
@@ -2438,21 +2438,21 @@ void CStatisticsDlg::InitializeClientBranch(int branchIndex)
 	if (branchRoot == NULL)
 		return;
 
-	m_clientSecureIdent[branchIndex] = m_stattree.InsertItem(GetResString(_T("FSTAT_WAITING")), branchRoot);
-	m_clientLowId[branchIndex] = m_stattree.InsertItem(GetResString(_T("FSTAT_WAITING")), branchRoot);
-	m_clientProblematic[branchIndex] = m_stattree.InsertItem(GetResString(_T("FSTAT_WAITING")), branchRoot);
+	m_clientSecureIdent[branchIndex] = m_stattree.InsertItem(GetResStringWithEllipsis(_T("WAITING")), branchRoot);
+	m_clientLowId[branchIndex] = m_stattree.InsertItem(GetResStringWithEllipsis(_T("WAITING")), branchRoot);
+	m_clientProblematic[branchIndex] = m_stattree.InsertItem(GetResStringWithEllipsis(_T("WAITING")), branchRoot);
 	m_stattree.SetItemState(branchRoot, TVIS_BOLD, TVIS_BOLD);
 
 	m_clientSoftwareRoot[branchIndex] = m_stattree.InsertItem(GetResString(_T("CD_CSOFT")), branchRoot);
 	for (int i = 0; i < 8; ++i)
-		m_clientSoftware[branchIndex][i] = m_stattree.InsertItem(GetResString(_T("FSTAT_WAITING")), m_clientSoftwareRoot[branchIndex]);
+		m_clientSoftware[branchIndex][i] = m_stattree.InsertItem(GetResStringWithEllipsis(_T("WAITING")), m_clientSoftwareRoot[branchIndex]);
 	for (int cat = 0; cat < MAX_CLIENTS_WITH_SUB_VERSION; ++cat) {
 		m_clientSoftwareOther[branchIndex][cat] = NULL;
 		m_clientSoftwareLastCount[branchIndex][cat] = 0;
 		for (int ver = 0; ver < MAX_SUB_CLIENT_VERSIONS; ++ver)
 			m_clientSoftwareVersions[branchIndex][cat][ver] = NULL;
 	}
-	m_clientAiRoot[branchIndex] = m_stattree.InsertItem(GetResString(_T("FSTAT_WAITING")), m_clientSoftware[branchIndex][0]);
+	m_clientAiRoot[branchIndex] = m_stattree.InsertItem(GetResStringWithEllipsis(_T("WAITING")), m_clientSoftware[branchIndex][0]);
 	m_clientAiOther[branchIndex] = NULL;
 	m_clientAiLastCount[branchIndex] = 0;
 	for (int ver = 0; ver < MAX_SUB_CLIENT_VERSIONS; ++ver)
@@ -2460,27 +2460,27 @@ void CStatisticsDlg::InitializeClientBranch(int branchIndex)
 
 	m_clientNetworkRoot[branchIndex] = m_stattree.InsertItem(GetResString(_T("NETWORK")), branchRoot);
 	for (int i = 0; i < 4; ++i)
-		m_clientNetwork[branchIndex][i] = m_stattree.InsertItem(GetResString(_T("FSTAT_WAITING")), m_clientNetworkRoot[branchIndex]);
+		m_clientNetwork[branchIndex][i] = m_stattree.InsertItem(GetResStringWithEllipsis(_T("WAITING")), m_clientNetworkRoot[branchIndex]);
 
 	m_clientPortRoot[branchIndex] = m_stattree.InsertItem(GetResString(_T("PORT")), branchRoot);
 	for (int i = 0; i < 2; ++i)
-		m_clientPort[branchIndex][i] = m_stattree.InsertItem(GetResString(_T("FSTAT_WAITING")), m_clientPortRoot[branchIndex]);
+		m_clientPort[branchIndex][i] = m_stattree.InsertItem(GetResStringWithEllipsis(_T("WAITING")), m_clientPortRoot[branchIndex]);
 
 	CString firewalledLabel;
 	firewalledLabel.Format(_T("%s (%s)"), (LPCTSTR)GetResString(_T("FIREWALLED")), (LPCTSTR)GetResString(_T("KADEMLIA")));
 	m_clientFirewalledRoot[branchIndex] = m_stattree.InsertItem(firewalledLabel, branchRoot);
 	for (int i = 0; i < 2; ++i)
-		m_clientFirewalled[branchIndex][i] = m_stattree.InsertItem(GetResString(_T("FSTAT_WAITING")), m_clientFirewalledRoot[branchIndex]);
+		m_clientFirewalled[branchIndex][i] = m_stattree.InsertItem(GetResStringWithEllipsis(_T("WAITING")), m_clientFirewalledRoot[branchIndex]);
 
-	m_clientModsRoot[branchIndex] = m_stattree.InsertItem(GetResString(_T("FSTAT_WAITING")), branchRoot);
-	m_clientCountriesRoot[branchIndex] = m_stattree.InsertItem(GetResString(_T("FSTAT_WAITING")), branchRoot);
+	m_clientModsRoot[branchIndex] = m_stattree.InsertItem(GetResStringWithEllipsis(_T("WAITING")), branchRoot);
+	m_clientCountriesRoot[branchIndex] = m_stattree.InsertItem(GetResStringWithEllipsis(_T("WAITING")), branchRoot);
 
 	// Add Banned, Bad, Filtered counters (Filtered shown only for All and at same level)
-	m_clientBanned[branchIndex] = m_stattree.InsertItem(GetResString(_T("FSTAT_WAITING")), branchRoot);
-	m_clientBad[branchIndex] = m_stattree.InsertItem(GetResString(_T("FSTAT_WAITING")), branchRoot);
+	m_clientBanned[branchIndex] = m_stattree.InsertItem(GetResStringWithEllipsis(_T("WAITING")), branchRoot);
+	m_clientBad[branchIndex] = m_stattree.InsertItem(GetResStringWithEllipsis(_T("WAITING")), branchRoot);
 	// Filtered is only shown for All branch (index 0) since it's not tracked per-population
 	if (branchIndex == 0)
-		m_clientFiltered[branchIndex] = m_stattree.InsertItem(GetResString(_T("FSTAT_WAITING")), branchRoot);
+		m_clientFiltered[branchIndex] = m_stattree.InsertItem(GetResStringWithEllipsis(_T("WAITING")), branchRoot);
 }
 
 void CStatisticsDlg::UpdateClientAiBreakdown(int branchIndex, uint32 aiClientTotal, const CClientVersionNameMap& versionMap, bool forceUpdate)
@@ -2538,7 +2538,7 @@ void CStatisticsDlg::UpdateClientAiBreakdown(int branchIndex, uint32 aiClientTot
 			if (idx >= static_cast<size_t>(m_clientAiLastCount[branchIndex])) {
 			if (idx == MAX_SUB_CLIENT_VERSIONS / 2) {
 				if (m_clientAiOther[branchIndex] == NULL)
-					m_clientAiOther[branchIndex] = m_stattree.InsertItem(GetResString(_T("FSTAT_WAITING")), aiRoot);
+					m_clientAiOther[branchIndex] = m_stattree.InsertItem(GetResStringWithEllipsis(_T("WAITING")), aiRoot);
 			}
 				if (idx >= MAX_SUB_CLIENT_VERSIONS / 2)
 					m_clientAiVersions[branchIndex][idx] = m_stattree.InsertItem(sText, m_clientAiOther[branchIndex]);
@@ -2642,7 +2642,7 @@ void CStatisticsDlg::UpdateClientSoftwareBreakdown(int branchIndex, int software
 
 		if (idx >= static_cast<size_t>(m_clientSoftwareLastCount[branchIndex][softwareIndex])) {
 			if (idx == MAX_SUB_CLIENT_VERSIONS / 2)
-				m_clientSoftwareOther[branchIndex][softwareIndex] = m_stattree.InsertItem(GetResString(_T("FSTAT_WAITING")), softwareItem);
+				m_clientSoftwareOther[branchIndex][softwareIndex] = m_stattree.InsertItem(GetResStringWithEllipsis(_T("WAITING")), softwareItem);
 			if (idx >= MAX_SUB_CLIENT_VERSIONS / 2)
 				m_clientSoftwareVersions[branchIndex][softwareIndex][idx] = m_stattree.InsertItem(sText, m_clientSoftwareOther[branchIndex][softwareIndex]);
 			else
@@ -2860,7 +2860,7 @@ void CStatisticsDlg::UpdateClientBranch(int branchIndex, const CClientStatsSnaps
 		uint32 totalPort = snapshot.stats[8] + snapshot.stats[9];
 		double defPerc = totalPort > 0 ? static_cast<double>(snapshot.stats[8]) * 100.0 / totalPort : 0.0;
 		double otherPerc = totalPort > 0 ? static_cast<double>(snapshot.stats[9]) * 100.0 / totalPort : 0.0;
-		sText.Format(_T("%s: %i (%1.1f%%)"), (LPCTSTR)GetResString(_T("STATS_PRTDEF")), snapshot.stats[8], defPerc);
+		sText.Format(_T("%s: %i (%1.1f%%)"), (LPCTSTR)GetResString(_T("DEFAULT")), snapshot.stats[8], defPerc);
 		m_stattree.SetItemText(m_clientPort[branchIndex][0], sText);
 		sText.Format(_T("%s: %i (%1.1f%%)"), (LPCTSTR)GetResString(_T("STATS_PRTOTHER")), snapshot.stats[9], otherPerc);
 		m_stattree.SetItemText(m_clientPort[branchIndex][1], sText);
@@ -2868,17 +2868,17 @@ void CStatisticsDlg::UpdateClientBranch(int branchIndex, const CClientStatsSnaps
 
 	if (forceUpdate || m_stattree.IsExpanded(m_clientFirewalledRoot[branchIndex])) {
 		if (!Kademlia::CKademlia::IsRunning() || Kademlia::CUDPFirewallTester::IsFirewalledUDP(true)) {
-			sText.Format(_T("UDP: %s"), (LPCTSTR)GetResString(_T("KAD_UNKNOWN")));
+			sText.Format(_T("UDP: %s"), (LPCTSTR)GetResString(_T("UNKNOWN")));
 			m_stattree.SetItemText(m_clientFirewalled[branchIndex][0], sText);
-			sText.Format(_T("TCP: %s"), (LPCTSTR)GetResString(_T("KAD_UNKNOWN")));
+			sText.Format(_T("TCP: %s"), (LPCTSTR)GetResString(_T("UNKNOWN")));
 			m_stattree.SetItemText(m_clientFirewalled[branchIndex][1], sText);
 		} else {
 			double udpRatio = Kademlia::CKademlia::GetPrefs()->StatsGetFirewalledRatio(true);
 			double tcpRatio = Kademlia::CKademlia::GetPrefs()->StatsGetFirewalledRatio(false);
 			sText.Format(_T("UDP: %1.1f%%"), udpRatio > 0 ? udpRatio * 100 : 0.0);
-			m_stattree.SetItemText(m_clientFirewalled[branchIndex][0], udpRatio > 0 ? sText : CString(_T("UDP: ")) + GetResString(_T("FSTAT_WAITING")));
+			m_stattree.SetItemText(m_clientFirewalled[branchIndex][0], udpRatio > 0 ? sText : CString(_T("UDP: ")) + GetResStringWithEllipsis(_T("WAITING")));
 			sText.Format(_T("TCP: %1.1f%%"), tcpRatio > 0 ? tcpRatio * 100 : 0.0);
-			m_stattree.SetItemText(m_clientFirewalled[branchIndex][1], tcpRatio > 0 ? sText : CString(_T("TCP: ")) + GetResString(_T("FSTAT_WAITING")));
+			m_stattree.SetItemText(m_clientFirewalled[branchIndex][1], tcpRatio > 0 ? sText : CString(_T("TCP: ")) + GetResStringWithEllipsis(_T("WAITING")));
 		}
 	}
 
@@ -2902,118 +2902,118 @@ void CStatisticsDlg::CreateMyTree()
 	m_stattree.DeleteAllItems();
 
 	// Setup Tree
-	h_transfer = m_stattree.InsertItem(GetResString(_T("FSTAT_TRANSFER")), 1, 1);				// Transfers Section
+	h_transfer = m_stattree.InsertItem(GetResString(_T("CD_TRANS")), 1, 1);				// Transfers Section
 	CString sItem;
-	sItem.Format(_T("%s %s"), (LPCTSTR)GetResString(_T("STATS_SRATIO")), (LPCTSTR)GetResString(_T("FSTAT_WAITING"))); // Make It Pretty
+	sItem.Format(_T("%s %s"), (LPCTSTR)GetResString(_T("STATS_SRATIO")), (LPCTSTR)GetResStringWithEllipsis(_T("WAITING"))); // Make It Pretty
 	trans[0] = m_stattree.InsertItem(sItem, h_transfer);									// Session Ratio
 
-	sItem.Format(_T("%s %s"), (LPCTSTR)GetResString(_T("STATS_FRATIO")), (LPCTSTR)GetResString(_T("FSTAT_WAITING"))); // Make It Pretty
+	sItem.Format(_T("%s %s"), (LPCTSTR)GetResString(_T("STATS_FRATIO")), (LPCTSTR)GetResStringWithEllipsis(_T("WAITING"))); // Make It Pretty
 	trans[1] = m_stattree.InsertItem(sItem, h_transfer);									// Friend Session Ratio
 
-	sItem.Format(_T("%s %s"), (LPCTSTR)GetResString(_T("STATS_CRATIO")), (LPCTSTR)GetResString(_T("FSTAT_WAITING"))); // Make It Pretty
+	sItem.Format(_T("%s %s"), (LPCTSTR)GetResString(_T("STATS_CRATIO")), (LPCTSTR)GetResStringWithEllipsis(_T("WAITING"))); // Make It Pretty
 	trans[2] = m_stattree.InsertItem(sItem, h_transfer);									// Cumulative Ratio
 
 	h_upload = m_stattree.InsertItem(GetResString(_T("TW_UPLOADS")), 6, 6, h_transfer);		// Uploads Section
 
 	h_up_session = m_stattree.InsertItem(GetResString(_T("STATS_SESSION")), 8, 8, h_upload);	// Session Section (Uploads)
 	for (unsigned i = 0; i < 6; ++i)
-		up_S[i] = m_stattree.InsertItem(GetResString(_T("FSTAT_WAITING")), h_up_session);		//MORPH - Added by Yun.SF3, ZZ Upload System
+		up_S[i] = m_stattree.InsertItem(GetResStringWithEllipsis(_T("WAITING")), h_up_session);		//MORPH - Added by Yun.SF3, ZZ Upload System
 	hup_scb = m_stattree.InsertItem(GetResString(_T("CLIENTS")), up_S[0]);					// Clients Section
 	for (unsigned i = 0; i < _countof(up_scb); ++i)
-		up_scb[i] = m_stattree.InsertItem(GetResString(_T("FSTAT_WAITING")), hup_scb);
+		up_scb[i] = m_stattree.InsertItem(GetResStringWithEllipsis(_T("WAITING")), hup_scb);
 	hup_spb = m_stattree.InsertItem(GetResString(_T("PORT")), up_S[0]);						// Ports Section
 	for (unsigned i = 0; i < _countof(up_spb); ++i)
-		up_spb[i] = m_stattree.InsertItem(GetResString(_T("FSTAT_WAITING")), hup_spb);
+		up_spb[i] = m_stattree.InsertItem(GetResStringWithEllipsis(_T("WAITING")), hup_spb);
 	hup_ssb = m_stattree.InsertItem(GetResString(_T("STATS_DATASOURCE")), up_S[0]);			// Data Source Section
 	for (unsigned i = 0; i < 2; ++i)
-		up_ssb[i] = m_stattree.InsertItem(GetResString(_T("FSTAT_WAITING")), hup_ssb);
+		up_ssb[i] = m_stattree.InsertItem(GetResStringWithEllipsis(_T("WAITING")), hup_ssb);
 	for (unsigned i = 0; i < 4; ++i)
-		up_ssessions[i] = m_stattree.InsertItem(GetResString(_T("FSTAT_WAITING")), up_S[5]);	//MORPH - Added by Yun.SF3, ZZ Upload System
+		up_ssessions[i] = m_stattree.InsertItem(GetResStringWithEllipsis(_T("WAITING")), up_S[5]);	//MORPH - Added by Yun.SF3, ZZ Upload System
 	hup_soh = m_stattree.InsertItem(GetResString(_T("STATS_OVRHD")), h_up_session);			// Upload Overhead (Session)
 	for (unsigned i = 0; i < _countof(up_soh); ++i)
-		up_soh[i] = m_stattree.InsertItem(GetResString(_T("FSTAT_WAITING")), hup_soh);
+		up_soh[i] = m_stattree.InsertItem(GetResStringWithEllipsis(_T("WAITING")), hup_soh);
 	h_up_total = m_stattree.InsertItem(GetResString(_T("STATS_CUMULATIVE")), 9, 9, h_upload);	// Cumulative Section (Uploads)
-	up_T[0] = m_stattree.InsertItem(GetResString(_T("FSTAT_WAITING")), h_up_total);			// Uploaded Data (Total)
+	up_T[0] = m_stattree.InsertItem(GetResStringWithEllipsis(_T("WAITING")), h_up_total);			// Uploaded Data (Total)
 	hup_tcb = m_stattree.InsertItem(GetResString(_T("CLIENTS")), up_T[0]);					// Clients Section
 	for (unsigned i = 0; i < _countof(up_tcb); ++i)
-		up_tcb[i] = m_stattree.InsertItem(GetResString(_T("FSTAT_WAITING")), hup_tcb);
+		up_tcb[i] = m_stattree.InsertItem(GetResStringWithEllipsis(_T("WAITING")), hup_tcb);
 	hup_tpb = m_stattree.InsertItem(GetResString(_T("PORT")), up_T[0]);						// Ports Section
 	for (unsigned i = 0; i < _countof(up_tpb); ++i)
-		up_tpb[i] = m_stattree.InsertItem(GetResString(_T("FSTAT_WAITING")), hup_tpb);
+		up_tpb[i] = m_stattree.InsertItem(GetResStringWithEllipsis(_T("WAITING")), hup_tpb);
 	hup_tsb = m_stattree.InsertItem(GetResString(_T("STATS_DATASOURCE")), up_T[0]);			// Data Source Section
 	for (unsigned i = 0; i < 2; ++i)
-		up_tsb[i] = m_stattree.InsertItem(GetResString(_T("FSTAT_WAITING")), hup_tsb);
-	up_T[1] = m_stattree.InsertItem(GetResString(_T("FSTAT_WAITING")), h_up_total);			// Upload Sessions (Total)
+		up_tsb[i] = m_stattree.InsertItem(GetResStringWithEllipsis(_T("WAITING")), hup_tsb);
+	up_T[1] = m_stattree.InsertItem(GetResStringWithEllipsis(_T("WAITING")), h_up_total);			// Upload Sessions (Total)
 	for (unsigned i = 0; i < 4; ++i)
-		up_tsessions[i] = m_stattree.InsertItem(GetResString(_T("FSTAT_WAITING")), up_T[1]);
+		up_tsessions[i] = m_stattree.InsertItem(GetResStringWithEllipsis(_T("WAITING")), up_T[1]);
 	hup_toh = m_stattree.InsertItem(GetResString(_T("STATS_OVRHD")), h_up_total);				// Upload Overhead (Total)
 	for (unsigned i = 0; i < _countof(up_toh); ++i)
-		up_toh[i] = m_stattree.InsertItem(GetResString(_T("FSTAT_WAITING")), hup_toh);
+		up_toh[i] = m_stattree.InsertItem(GetResStringWithEllipsis(_T("WAITING")), hup_toh);
 	h_download = m_stattree.InsertItem(GetResString(_T("TW_DOWNLOADS")), 7, 7, h_transfer);	// Downloads Section
 	h_down_session = m_stattree.InsertItem(GetResString(_T("STATS_SESSION")), 8, 8, h_download); // Session Section (Downloads)
 	for (unsigned i = 0; i < 8; ++i)
-		down_S[i] = m_stattree.InsertItem(GetResString(_T("FSTAT_WAITING")), h_down_session);
+		down_S[i] = m_stattree.InsertItem(GetResStringWithEllipsis(_T("WAITING")), h_down_session);
 	hdown_scb = m_stattree.InsertItem(GetResString(_T("CLIENTS")), down_S[0]);				// Clients Section
 	for (unsigned i = 0; i < _countof(down_scb); ++i)
-		down_scb[i] = m_stattree.InsertItem(GetResString(_T("FSTAT_WAITING")), hdown_scb);
+		down_scb[i] = m_stattree.InsertItem(GetResStringWithEllipsis(_T("WAITING")), hdown_scb);
 	hdown_spb = m_stattree.InsertItem(GetResString(_T("PORT")), down_S[0]);					// Ports Section
 	for (unsigned i = 0; i < _countof(down_spb); ++i)
-		down_spb[i] = m_stattree.InsertItem(GetResString(_T("FSTAT_WAITING")), hdown_spb);
+		down_spb[i] = m_stattree.InsertItem(GetResStringWithEllipsis(_T("WAITING")), hdown_spb);
 	for (unsigned i = 0; i < _countof(down_sources); ++i)
-		down_sources[i] = m_stattree.InsertItem(GetResString(_T("FSTAT_WAITING")), down_S[3]);
+		down_sources[i] = m_stattree.InsertItem(GetResStringWithEllipsis(_T("WAITING")), down_S[3]);
 	for (unsigned i = 0; i < 4; ++i)
-		down_ssessions[i] = m_stattree.InsertItem(GetResString(_T("FSTAT_WAITING")), down_S[4]);
+		down_ssessions[i] = m_stattree.InsertItem(GetResStringWithEllipsis(_T("WAITING")), down_S[4]);
 	hdown_soh = m_stattree.InsertItem(GetResString(_T("STATS_OVRHD")), h_down_session);		// Downline Overhead (Session)
 	for (unsigned i = 0; i < _countof(down_soh); ++i)
-		down_soh[i] = m_stattree.InsertItem(GetResString(_T("FSTAT_WAITING")), hdown_soh);
+		down_soh[i] = m_stattree.InsertItem(GetResStringWithEllipsis(_T("WAITING")), hdown_soh);
 	h_down_total = m_stattree.InsertItem(GetResString(_T("STATS_CUMULATIVE")), 9, 9, h_download);// Cumulative Section (Downloads)
 	for (unsigned i = 0; i < 6; ++i)
-		down_T[i] = m_stattree.InsertItem(GetResString(_T("FSTAT_WAITING")), h_down_total);
+		down_T[i] = m_stattree.InsertItem(GetResStringWithEllipsis(_T("WAITING")), h_down_total);
 	hdown_tcb = m_stattree.InsertItem(GetResString(_T("CLIENTS")), down_T[0]);				// Clients Section
 	for (unsigned i = 0; i < _countof(down_tcb); ++i)
-		down_tcb[i] = m_stattree.InsertItem(GetResString(_T("FSTAT_WAITING")), hdown_tcb);
+		down_tcb[i] = m_stattree.InsertItem(GetResStringWithEllipsis(_T("WAITING")), hdown_tcb);
 	hdown_tpb = m_stattree.InsertItem(GetResString(_T("PORT")), down_T[0]);					// Ports Section
 	for (unsigned i = 0; i < _countof(down_tpb); ++i)
-		down_tpb[i] = m_stattree.InsertItem(GetResString(_T("FSTAT_WAITING")), hdown_tpb);
+		down_tpb[i] = m_stattree.InsertItem(GetResStringWithEllipsis(_T("WAITING")), hdown_tpb);
 	for (unsigned i = 0; i < 4; ++i)
-		down_tsessions[i] = m_stattree.InsertItem(GetResString(_T("FSTAT_WAITING")), down_T[2]);
+		down_tsessions[i] = m_stattree.InsertItem(GetResStringWithEllipsis(_T("WAITING")), down_T[2]);
 	hdown_toh = m_stattree.InsertItem(GetResString(_T("STATS_OVRHD")), h_down_total);			// Downline Overhead (Total)
 	for (unsigned i = 0; i < _countof(down_toh); ++i)
-		down_toh[i] = m_stattree.InsertItem(GetResString(_T("FSTAT_WAITING")), hdown_toh);
+		down_toh[i] = m_stattree.InsertItem(GetResStringWithEllipsis(_T("WAITING")), hdown_toh);
 	h_connection = m_stattree.InsertItem(GetResString(_T("CONNECTIONS")), 2, 2);				// Connection Section
 	h_conn_session = m_stattree.InsertItem(GetResString(_T("STATS_SESSION")), 8, 8, h_connection); // Session Section (Connection)
-	hconn_sg = m_stattree.InsertItem(GetResString(_T("STATS_GENERAL")), 11, 11, h_conn_session);	// General Section (Session)
+	hconn_sg = m_stattree.InsertItem(GetResString(_T("CD_GENERAL")), 11, 11, h_conn_session);	// General Section (Session)
 	for (unsigned i = 0; i < 5; ++i)
-		conn_sg[i] = m_stattree.InsertItem(GetResString(_T("FSTAT_WAITING")), hconn_sg);
+		conn_sg[i] = m_stattree.InsertItem(GetResStringWithEllipsis(_T("WAITING")), hconn_sg);
 	hconn_su = m_stattree.InsertItem(GetResString(_T("PW_CON_UPLBL")), 6, 6, h_conn_session);	// Uploads Section (Session)
 	for (unsigned i = 0; i < 4; ++i)
-		conn_su[i] = m_stattree.InsertItem(GetResString(_T("FSTAT_WAITING")), hconn_su);
-	hconn_sd = m_stattree.InsertItem(GetResString(_T("PW_CON_DOWNLBL")), 7, 7, h_conn_session); // Downloads Section (Session)
+		conn_su[i] = m_stattree.InsertItem(GetResStringWithEllipsis(_T("WAITING")), hconn_su);
+	hconn_sd = m_stattree.InsertItem(GetResString(_T("DOWNLOAD")), 7, 7, h_conn_session); // Downloads Section (Session)
 	for (unsigned i = 0; i < 4; ++i)
-		conn_sd[i] = m_stattree.InsertItem(GetResString(_T("FSTAT_WAITING")), hconn_sd);
+		conn_sd[i] = m_stattree.InsertItem(GetResStringWithEllipsis(_T("WAITING")), hconn_sd);
 	h_conn_total = m_stattree.InsertItem(GetResString(_T("STATS_CUMULATIVE")), 9, 9, h_connection);// Cumulative Section (Connection)
-	hconn_tg = m_stattree.InsertItem(GetResString(_T("STATS_GENERAL")), 11, 11, h_conn_total); // General (Total)
+	hconn_tg = m_stattree.InsertItem(GetResString(_T("CD_GENERAL")), 11, 11, h_conn_total); // General (Total)
 	for (unsigned i = 0; i < 4; ++i)
-		conn_tg[i] = m_stattree.InsertItem(GetResString(_T("FSTAT_WAITING")), hconn_tg);
+		conn_tg[i] = m_stattree.InsertItem(GetResStringWithEllipsis(_T("WAITING")), hconn_tg);
 	hconn_tu = m_stattree.InsertItem(GetResString(_T("PW_CON_UPLBL")), 6, 6, h_conn_total);	// Uploads (Total)
 	for (unsigned i = 0; i < 3; ++i)
-		conn_tu[i] = m_stattree.InsertItem(GetResString(_T("FSTAT_WAITING")), hconn_tu);
-	hconn_td = m_stattree.InsertItem(GetResString(_T("PW_CON_DOWNLBL")), 7, 7, h_conn_total);	// Downloads (Total)
+		conn_tu[i] = m_stattree.InsertItem(GetResStringWithEllipsis(_T("WAITING")), hconn_tu);
+	hconn_td = m_stattree.InsertItem(GetResString(_T("DOWNLOAD")), 7, 7, h_conn_total);	// Downloads (Total)
 	for (unsigned i = 0; i < 3; ++i)
-		conn_td[i] = m_stattree.InsertItem(GetResString(_T("FSTAT_WAITING")), hconn_td);
+		conn_td[i] = m_stattree.InsertItem(GetResStringWithEllipsis(_T("WAITING")), hconn_td);
 	h_time = m_stattree.InsertItem(GetResString(_T("STATS_TIMESTATS")), 12, 12);				// Time Statistics Section
 	for (unsigned i = 0; i < 2; ++i)
-		tvitime[i] = m_stattree.InsertItem(GetResString(_T("FSTAT_WAITING")), h_time);
+		tvitime[i] = m_stattree.InsertItem(GetResStringWithEllipsis(_T("WAITING")), h_time);
 	htime_s = m_stattree.InsertItem(GetResString(_T("STATS_SESSION")), 8, 8, h_time);			// Session Section (Time)
 	for (unsigned i = 0; i < 4; ++i)
-		tvitime_s[i] = m_stattree.InsertItem(GetResString(_T("FSTAT_WAITING")), htime_s);
+		tvitime_s[i] = m_stattree.InsertItem(GetResStringWithEllipsis(_T("WAITING")), htime_s);
 	for (unsigned i = 0; i < 2; ++i)
-		tvitime_st[i] = m_stattree.InsertItem(GetResString(_T("FSTAT_WAITING")), tvitime_s[1]);
+		tvitime_st[i] = m_stattree.InsertItem(GetResStringWithEllipsis(_T("WAITING")), tvitime_s[1]);
 	htime_t = m_stattree.InsertItem(GetResString(_T("STATS_CUMULATIVE")), 9, 9, h_time);		// Cumulative Section (Time)
 	for (unsigned i = 0; i < 3; ++i)
-		tvitime_t[i] = m_stattree.InsertItem(GetResString(_T("FSTAT_WAITING")), htime_t);
+		tvitime_t[i] = m_stattree.InsertItem(GetResStringWithEllipsis(_T("WAITING")), htime_t);
 	for (unsigned i = 0; i < 2; ++i)
-		tvitime_tt[i] = m_stattree.InsertItem(GetResString(_T("FSTAT_WAITING")), tvitime_t[1]);
+		tvitime_tt[i] = m_stattree.InsertItem(GetResStringWithEllipsis(_T("WAITING")), tvitime_t[1]);
 	htime_aap = m_stattree.InsertItem(GetResString(_T("STATS_AVGANDPROJ")), 13, 13, h_time);	// Projected Averages Section
 	time_aaph[0] = m_stattree.InsertItem(GetResString(_T("DAILY")), 14, 14, htime_aap);		// Daily Section
 	time_aaph[1] = m_stattree.InsertItem(GetResString(_T("STATS_MONTHLY")), 15, 15, htime_aap); // Monthly Section
@@ -3021,33 +3021,33 @@ void CStatisticsDlg::CreateMyTree()
 	for (int x = 0; x < 3; ++x) {
 		time_aap_hup[x] = m_stattree.InsertItem(GetResString(_T("TW_UPLOADS")), 6, 6, time_aaph[x]); // Upload Section
 		for (unsigned i = 0; i < 3; ++i)
-			time_aap_up[x][i] = m_stattree.InsertItem(GetResString(_T("FSTAT_WAITING")), time_aap_hup[x]);
+			time_aap_up[x][i] = m_stattree.InsertItem(GetResStringWithEllipsis(_T("WAITING")), time_aap_hup[x]);
 		time_aap_up_hd[x][0] = m_stattree.InsertItem(GetResString(_T("CLIENTS")), time_aap_up[x][0]);							// Clients Section
 		for (unsigned i = 0; i < 7; ++i)
-			time_aap_up_dc[x][i] = m_stattree.InsertItem(GetResString(_T("FSTAT_WAITING")), time_aap_up_hd[x][0]);
+			time_aap_up_dc[x][i] = m_stattree.InsertItem(GetResStringWithEllipsis(_T("WAITING")), time_aap_up_hd[x][0]);
 		time_aap_up_hd[x][1] = m_stattree.InsertItem(GetResString(_T("PORT")), time_aap_up[x][0]);								// Ports Section
 		for (unsigned i = 0; i < _countof(time_aap_up_dp[0]); ++i)
-			time_aap_up_dp[x][i] = m_stattree.InsertItem(GetResString(_T("FSTAT_WAITING")), time_aap_up_hd[x][1]);
+			time_aap_up_dp[x][i] = m_stattree.InsertItem(GetResStringWithEllipsis(_T("WAITING")), time_aap_up_hd[x][1]);
 		time_aap_up_hd[x][2] = m_stattree.InsertItem(GetResString(_T("STATS_DATASOURCE")), time_aap_up[x][0]);					// Data Source Section
 		for (unsigned i = 0; i < 2; ++i)
-			time_aap_up_ds[x][i] = m_stattree.InsertItem(GetResString(_T("FSTAT_WAITING")), time_aap_up_hd[x][2]);
+			time_aap_up_ds[x][i] = m_stattree.InsertItem(GetResStringWithEllipsis(_T("WAITING")), time_aap_up_hd[x][2]);
 		for (unsigned i = 0; i < 2; ++i)
-			time_aap_up_s[x][i] = m_stattree.InsertItem(GetResString(_T("FSTAT_WAITING")), time_aap_up[x][1]);
+			time_aap_up_s[x][i] = m_stattree.InsertItem(GetResStringWithEllipsis(_T("WAITING")), time_aap_up[x][1]);
 		for (unsigned i = 0; i < 4; ++i)
-			time_aap_up_oh[x][i] = m_stattree.InsertItem(GetResString(_T("FSTAT_WAITING")), time_aap_up[x][2]);
+			time_aap_up_oh[x][i] = m_stattree.InsertItem(GetResStringWithEllipsis(_T("WAITING")), time_aap_up[x][2]);
 		time_aap_hdown[x] = m_stattree.InsertItem(GetResString(_T("TW_DOWNLOADS")), 7, 7, time_aaph[x]); // Download Section
 		for (unsigned i = 0; i < 7; ++i)
-		time_aap_down[x][i] = m_stattree.InsertItem(GetResString(_T("FSTAT_WAITING")), time_aap_hdown[x]);
+		time_aap_down[x][i] = m_stattree.InsertItem(GetResStringWithEllipsis(_T("WAITING")), time_aap_hdown[x]);
 	time_aap_down_hd[x][0] = m_stattree.InsertItem(GetResString(_T("CLIENTS")), time_aap_down[x][0]);							// Clients Section
 	for (unsigned i = 0; i < 8; ++i)
-		time_aap_down_dc[x][i] = m_stattree.InsertItem(GetResString(_T("FSTAT_WAITING")), time_aap_down_hd[x][0]);
+		time_aap_down_dc[x][i] = m_stattree.InsertItem(GetResStringWithEllipsis(_T("WAITING")), time_aap_down_hd[x][0]);
 		time_aap_down_hd[x][1] = m_stattree.InsertItem(GetResString(_T("PORT")), time_aap_down[x][0]);								// Ports Section
 		for (unsigned i = 0; i < _countof(time_aap_down_dp[0]); ++i)
-			time_aap_down_dp[x][i] = m_stattree.InsertItem(GetResString(_T("FSTAT_WAITING")), time_aap_down_hd[x][1]);
+			time_aap_down_dp[x][i] = m_stattree.InsertItem(GetResStringWithEllipsis(_T("WAITING")), time_aap_down_hd[x][1]);
 		for (unsigned i = 0; i < 2; ++i)
-			time_aap_down_s[x][i] = m_stattree.InsertItem(GetResString(_T("FSTAT_WAITING")), time_aap_down[x][2]);
+			time_aap_down_s[x][i] = m_stattree.InsertItem(GetResStringWithEllipsis(_T("WAITING")), time_aap_down[x][2]);
 		for (unsigned i = 0; i < 4; ++i)
-			time_aap_down_oh[x][i] = m_stattree.InsertItem(GetResString(_T("FSTAT_WAITING")), time_aap_down[x][6]);
+			time_aap_down_oh[x][i] = m_stattree.InsertItem(GetResStringWithEllipsis(_T("WAITING")), time_aap_down[x][6]);
 	}
 	h_clients = m_stattree.InsertItem(GetResString(_T("CLIENTS")), 3, 3);						// Clients Section
 	m_useClientHistoryUI = thePrefs.GetClientHistory();
@@ -3067,18 +3067,18 @@ void CStatisticsDlg::CreateMyTree()
 	}
 	h_servers = m_stattree.InsertItem(GetResString(_T("FSTAT_SERVERS")), 4, 4);				// Servers section
 	for (unsigned i = 0; i < 6; ++i)
-		srv[i] = m_stattree.InsertItem(GetResString(_T("FSTAT_WAITING")), h_servers);			// Servers Items
+		srv[i] = m_stattree.InsertItem(GetResStringWithEllipsis(_T("WAITING")), h_servers);			// Servers Items
 	for (unsigned i = 0; i < 3; ++i)
-		srv_w[i] = m_stattree.InsertItem(GetResString(_T("FSTAT_WAITING")), srv[0]);			// Working Servers Items
+		srv_w[i] = m_stattree.InsertItem(GetResStringWithEllipsis(_T("WAITING")), srv[0]);			// Working Servers Items
 	hsrv_records = m_stattree.InsertItem(GetResString(_T("STATS_RECORDS")), 10, 10, h_servers); // Servers Records Section
 	for (unsigned i = 0; i < 3; ++i)
-		srv_r[i] = m_stattree.InsertItem(GetResString(_T("FSTAT_WAITING")), hsrv_records);	// Record Items
-	h_shared = m_stattree.InsertItem(GetResString(_T("SHAREDFILES")), 5, 5);					// Shared Files Section
+		srv_r[i] = m_stattree.InsertItem(GetResStringWithEllipsis(_T("WAITING")), hsrv_records);	// Record Items
+	h_shared = m_stattree.InsertItem(GetResString(_T("SF_FILES")), 5, 5);					// Shared Files Section
 	for (unsigned i = 0; i < 4; ++i)
-		shar[i] = m_stattree.InsertItem(GetResString(_T("FSTAT_WAITING")), h_shared);
+		shar[i] = m_stattree.InsertItem(GetResStringWithEllipsis(_T("WAITING")), h_shared);
 	hshar_records = m_stattree.InsertItem(GetResString(_T("STATS_RECORDS")), 10, 10, h_shared); // Shared Records Section
 	for (unsigned i = 0; i < 4; ++i)
-		shar_r[i] = m_stattree.InsertItem(GetResString(_T("FSTAT_WAITING")), hshar_records);
+		shar_r[i] = m_stattree.InsertItem(GetResStringWithEllipsis(_T("WAITING")), hshar_records);
 	h_total_downloads = m_stattree.InsertItem(GetResString(_T("DWTOT")), 17, 17);
 	h_total_num_of_dls = m_stattree.InsertItem(GetResString(_T("DWTOT_NR")), h_total_downloads);
 	h_total_size_of_dls = m_stattree.InsertItem(GetResString(_T("DWTOT_TSD")), h_total_downloads);

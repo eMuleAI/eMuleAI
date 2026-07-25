@@ -85,7 +85,7 @@ void CIrcChannelListCtrl::Localize()
 {
 	static const LPCTSTR uids[3] =
 	{
-		_T("IRC_NAME"), _T("UUSERS"), _T("DESCRIPTION")
+		_T("SW_NAME"), _T("UUSERS"), _T("DESCRIPTION")
 	};
 	LocaliseHeaderCtrl(uids, _countof(uids));
 }

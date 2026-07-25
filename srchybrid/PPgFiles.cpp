@@ -32,6 +32,34 @@
 static char THIS_FILE[] = __FILE__;
 #endif
 
+namespace
+{
+	bool DoesExpandedVideoPlayerPathExist(LPCTSTR pszPath)
+	{
+		CString strExpanded(pszPath);
+		ExpandEnvironmentStrings(strExpanded);
+		return ::PathFileExists(strExpanded);
+	}
+
+	CString GetDefaultVideoPlayerPathForPage()
+	{
+		static LPCTSTR const s_apszVideoPlayers[] = {
+			_T("%ProgramFiles%\\QMPlay2\\QMPlay2.exe"),
+			_T("%ProgramFiles(x86)%\\QMPlay2\\QMPlay2.exe"),
+			_T("%ProgramFiles%\\VideoLAN\\VLC\\vlc.exe"),
+			_T("%ProgramFiles(x86)%\\VideoLAN\\VLC\\vlc.exe"),
+			_T("%ProgramFiles%\\DAUM\\PotPlayer\\PotPlayerMini64.exe"),
+			_T("%ProgramFiles(x86)%\\DAUM\\PotPlayer\\PotPlayerMini.exe")
+		};
+
+		for (LPCTSTR pszCandidate : s_apszVideoPlayers) {
+			if (DoesExpandedVideoPlayerPathExist(pszCandidate))
+				return pszCandidate;
+		}
+		return EMPTY;
+	}
+}
+
 
 IMPLEMENT_DYNAMIC(CPPgFiles, CPropertyPage)
 
@@ -116,6 +144,29 @@ void CPPgFiles::LoadSettings()
 	GetDlgItem(IDC_STARTNEXTFILECAT)->EnableWindow(IsDlgButtonChecked(IDC_STARTNEXTFILE));
 }
 
+void CPPgFiles::ResetToDefaults()
+{
+	CheckDlgButton(IDC_ADDNEWFILESPAUSED, BST_UNCHECKED);
+	CheckDlgButton(IDC_PF_TIMECALC, BST_UNCHECKED);
+	CheckDlgButton(IDC_PREVIEWPRIO, BST_CHECKED);
+	CheckDlgButton(IDC_DAP, BST_CHECKED);
+	CheckDlgButton(IDC_UAP, BST_CHECKED);
+	CheckDlgButton(IDC_FULLCHUNKTRANS, BST_CHECKED);
+	CheckDlgButton(IDC_STARTNEXTFILE, BST_UNCHECKED);
+	CheckDlgButton(IDC_STARTNEXTFILECAT, BST_UNCHECKED);
+	CheckDlgButton(IDC_STARTNEXTFILECAT2, BST_UNCHECKED);
+	GetDlgItem(IDC_STARTNEXTFILECAT)->EnableWindow(FALSE);
+	GetDlgItem(IDC_STARTNEXTFILECAT2)->EnableWindow(FALSE);
+	SetDlgItemText(IDC_VIDEOPLAYER, GetDefaultVideoPlayerPathForPage());
+	SetDlgItemText(IDC_VIDEOPLAYER_ARGS, _T(""));
+	CheckDlgButton(IDC_VIDEOBACKUP, BST_UNCHECKED);
+	CheckDlgButton(IDC_FNCLEANUP, BST_UNCHECKED);
+	CheckDlgButton(IDC_WATCHCB, BST_CHECKED);
+	CheckDlgButton(IDC_REMEMBERDOWNLOADED, BST_CHECKED);
+	CheckDlgButton(IDC_REMEMBERCANCELLED, BST_CHECKED);
+	SetModified(TRUE);
+}
+
 BOOL CPPgFiles::OnApply()
 {
 	bool bOldPreviewPrio = thePrefs.m_bpreviewprio;
@@ -162,7 +213,7 @@ BOOL CPPgFiles::OnApply()
 void CPPgFiles::Localize()
 {
 	if (m_hWnd) {
-		SetWindowText(GetResString(_T("PW_FILES")));
+		SetWindowText(GetResString(_T("FILES")));
 		SetDlgItemText(IDC_LBL_MISC, GetResString(_T("PW_MISC")));
 		SetDlgItemText(IDC_PF_TIMECALC, GetResString(_T("PF_ADVANCEDCALC")));
 		SetDlgItemText(IDC_UAP, GetResString(_T("PW_UAP")));

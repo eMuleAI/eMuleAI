@@ -405,7 +405,7 @@ void CChatSelector::ConnectingResult(CUpDownClient *sender, bool success)
 				AddTimeStamp(ci);
 			ci->log->AppendKeyWord(_T("*** Connected\n"), STATUS_MSG_COLOR);
 		} else {
-			ci->log->AppendKeyWord(_T(" ...") + GetResString(_T("TREEOPTIONS_OK")) + _T('\n'), STATUS_MSG_COLOR);
+			ci->log->AppendKeyWord(_T(" ...") + GetResString(_T("MB_OK")) + _T('\n'), STATUS_MSG_COLOR);
 			sender->SendChatMessage(ci->strMessagePending);
 
 			if (thePrefs.GetIRCAddTimeStamp())
@@ -729,15 +729,15 @@ void CChatSelector::OnContextMenu(CWnd*, CPoint point)
 	menu.CreatePopupMenu();
 	menu.AddMenuSidebar(GetResString(_T("CLIENT")));
 
-	menu.AppendMenu(MF_STRING, MP_DETAIL, GetResString(_T("SHOWDETAILS")), _T("CLIENTDETAILS"));
+	menu.AppendMenu(MF_STRING, MP_DETAIL, GetResString(_T("DL_INFO")), _T("CLIENTDETAILS"));
 
 	GetCurrentChatItem();
 	if (pFriend == NULL)
 		menu.AppendMenu(MF_STRING, MP_ADDFRIEND, GetResString(_T("IRC_ADDTOFRIENDLIST")), _T("ADDFRIEND"));
 	else
-		menu.AppendMenu(MF_STRING, MP_REMOVEFRIEND, GetResString(_T("REMOVEFRIEND")), _T("DELETEFRIEND"));
+		menu.AppendMenu(MF_STRING, MP_REMOVEFRIEND, GetResString(_T("REMOVE")), _T("DELETEFRIEND"));
 
-	menu.AppendMenu(MF_STRING, MP_REMOVE, GetResString(_T("FD_CLOSE")));
+	menu.AppendMenu(MF_STRING, MP_REMOVE, GetResString(_T("CW_CLOSE")));
 
 	m_ptCtxMenu = point;
 	ScreenToClient(&m_ptCtxMenu);

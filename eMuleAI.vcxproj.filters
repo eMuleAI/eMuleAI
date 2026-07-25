@@ -32,6 +32,7 @@
     <ClCompile Include="srchybrid\eMuleAI\PPgBlacklistPanel.cpp" />
     <ClCompile Include="srchybrid\eMuleAI\PPgProtectionPanel.cpp" />
     <ClCompile Include="srchybrid\eMuleAI\PPgMod.cpp" />
+    <ClCompile Include="srchybrid\eMuleAI\PPgDownloadValidator.cpp" />
     <ClCompile Include="srchybrid\eMuleAI\SafeKad.cpp" />
     <ClCompile Include="srchybrid\eMuleAI\SharedCache.cpp" />
     <ClCompile Include="srchybrid\eMuleAI\NetBind.cpp" />
@@ -301,6 +302,7 @@
     <ClInclude Include="srchybrid\eMuleAI\PPgBlacklistPanel.h" />
     <ClInclude Include="srchybrid\eMuleAI\PPgProtectionPanel.h" />
     <ClInclude Include="srchybrid\eMuleAI\PPgMod.h" />
+    <ClInclude Include="srchybrid\eMuleAI\PPgDownloadValidator.h" />
     <ClInclude Include="srchybrid\eMuleAI\SafeKad.h" />
     <ClInclude Include="srchybrid\eMuleAI\SharedCache.h" />
     <ClInclude Include="srchybrid\eMuleAI\NetBind.h" />

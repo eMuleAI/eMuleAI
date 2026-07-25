@@ -256,6 +256,7 @@ void CTransferWnd::OnInitialUpdate()
 
 	// create tooltip control for download categories
 	m_tooltipCats.Create(this, TTS_NOPREFIX);
+	m_tooltipCats.SetAutoTabHeaderIcon(true);
 	m_dlTab.SetToolTips(&m_tooltipCats);
 	UpdateCatTabTitles();
 	
@@ -1284,7 +1285,7 @@ void CTransferWnd::OnNmRClickDltab(LPNMHDR, LRESULT *pResult)
 	CatMenu.AppendMenu(MF_STRING, MP_CAT_SET0 + 14, GetResString(_T("SEARCH_DOC")));
 	CatMenu.AppendMenu(MF_STRING, MP_CAT_SET0 + 15, GetResString(_T("SEARCH_PICS")));
 	CatMenu.AppendMenu(MF_STRING, MP_CAT_SET0 + 16, GetResString(_T("SEARCH_PRG")));
-	CatMenu.AppendMenu(MF_STRING, MP_CAT_SET0 + 20, GetResString(_T("SEARCH_EMULECOLLECTION")));
+	CatMenu.AppendMenu(MF_STRING, MP_CAT_SET0 + 20, GetResString(_T("META_COLLECTION")));
 
 	if (thePrefs.IsExtControlsEnabled()) {
 		CatMenu.AppendMenu(MF_SEPARATOR);
@@ -1298,7 +1299,7 @@ void CTransferWnd::OnNmRClickDltab(LPNMHDR, LRESULT *pResult)
 	menu.AppendMenu(MF_STRING | MF_POPUP, (UINT_PTR)CatMenu.m_hMenu, GetResString(_T("CHANGECATVIEW")), _T("SEARCHPARAMS"));
 	menu.AppendMenu(MF_SEPARATOR);
 	menu.AppendMenu(MF_STRING | MF_POPUP, (UINT_PTR)PrioMenu.m_hMenu, GetResString(_T("PRIORITY")), _T("FILEPRIORITY"));
-	menu.AppendMenu(MF_STRING, MP_CANCEL, GetResString(_T("MAIN_BTN_CANCEL")), _T("DELETE"));
+	menu.AppendMenu(MF_STRING, MP_CANCEL, GetResStringWithAccel(_T("CANCEL"), _T('C')), _T("DELETE"));
 	menu.AppendMenu(MF_STRING, MP_STOP, GetResString(_T("DL_STOP")), _T("STOP"));
 	menu.AppendMenu(MF_STRING, MP_PAUSE, GetResString(_T("DL_PAUSE")), _T("PAUSE"));
 	menu.AppendMenu(MF_STRING, MP_RESUME, GetResString(_T("DL_RESUME")), _T("RESUME"));
@@ -1928,7 +1929,7 @@ CString CTransferWnd::GetTabStatistic(int tab)
 		, (LPCTSTR)GetResString(_T("ERRORLIKE")), err
 		, (LPCTSTR)GetResString(_T("DL_TRANSFCOMPL")), completed
 		, (LPCTSTR)GetResString(_T("PRIORITY")), (LPCTSTR)GetResString(uid)
-		, (LPCTSTR)GetResString(_T("DL_SPEED")), speed, (LPCTSTR)GetResString(_T("KBYTESPERSEC"))
+		, (LPCTSTR)GetResString(_T("DL_SPEED")), speed, (LPCTSTR)GetResString(_T("KBYTESSEC"))
 		, (LPCTSTR)GetResString(_T("DL_SIZE")), (LPCTSTR)CastItoXBytes(trsize), (LPCTSTR)CastItoXBytes(size)
 		, (LPCTSTR)GetResString(_T("ONDISK")), (LPCTSTR)CastItoXBytes(disksize)
 	);

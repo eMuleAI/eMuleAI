@@ -169,6 +169,26 @@ void CPPgGeneral::LoadSettings()
 
 }
 
+void CPPgGeneral::ResetToDefaults()
+{
+	for (int i = 0; i < m_langCodes.GetSize(); ++i) {
+		if (m_langCodes[i].CompareNoCase(_T("system")) == 0) {
+			m_language.SetCurSel(i);
+			break;
+		}
+	}
+	SetDlgItemText(IDC_NICK, DEFAULT_NICK);
+	CheckDlgButton(IDC_BRINGTOFOREGROUND, BST_CHECKED);
+	CheckDlgButton(IDC_EXIT, BST_CHECKED);
+	CheckDlgButton(IDC_ONLINESIG, BST_UNCHECKED);
+	CheckDlgButton(IDC_MINIMULE, BST_CHECKED);
+	CheckDlgButton(IDC_SPLASHON, BST_CHECKED);
+	CheckDlgButton(IDC_STARTMIN, BST_UNCHECKED);
+	CheckDlgButton(IDC_STARTWIN, BST_UNCHECKED);
+	CheckDlgButton(IDC_PREVENTSTANDBY, BST_UNCHECKED);
+	SetModified(TRUE);
+}
+
 BOOL CPPgGeneral::OnInitDialog()
 {
 	CPropertyPage::OnInitDialog();
@@ -330,7 +350,7 @@ void CPPgGeneral::OnBnClickedEd2kfix()
 void CPPgGeneral::Localize()
 {
 	if (m_hWnd) {
-		SetWindowText(GetResString(_T("PW_GENERAL")));
+		SetWindowText(GetResString(_T("CD_GENERAL")));
 		SetDlgItemText(IDC_NICK_FRM, GetResString(_T("QL_USERNAME")));
 		SetDlgItemText(IDC_LANG_FRM, GetResString(_T("PW_LANG")));
 		SetDlgItemText(IDC_MISC_FRM, GetResString(_T("PW_MISC")));

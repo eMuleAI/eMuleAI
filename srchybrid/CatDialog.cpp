@@ -22,6 +22,7 @@
 #include "emuledlg.h"
 #include "TransferDlg.h"
 #include "CatDialog.h"
+#include "Preferences.h"
 #include "UserMsgs.h"
 #include "eMuleAI/DarkMode.h" 
 #include "otherfunctions.h"
@@ -33,7 +34,7 @@
 static char THIS_FILE[] = __FILE__;
 #endif
 
-#define	REGULAREXPRESSIONS_STRINGS_PROFILE	_T("AC_VF_RegExpr.dat")
+#define	REGULAREXPRESSIONS_STRINGS_PROFILE	AC_VF_REGEXP_FILENAME
 
 // CCatDialog dialog
 
@@ -133,7 +134,7 @@ void CCatDialog::Localize()
 	SetDlgItemText(IDC_STATIC_PRIO, GetResString(_T("STARTPRIO")));
 	SetDlgItemText(IDC_STATIC_AUTOCAT, GetResString(_T("AUTOCAT_LABEL")));
 	SetDlgItemText(IDC_REGEXPR, GetResString(_T("ASREGEXPR")));
-	SetDlgItemText(IDOK, GetResString(_T("TREEOPTIONS_OK")));
+	SetDlgItemText(IDOK, GetResString(_T("MB_OK")));
 
 	m_ctlColor.CustomText = GetResString(_T("COL_MORECOLORS"));
 	m_ctlColor.DefaultText = GetResString(_T("DEFAULT"));

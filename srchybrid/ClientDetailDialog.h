@@ -40,6 +40,8 @@ public:
 	CClientDetailPage();   // standard constructor
 	virtual BOOL OnInitDialog();
 	void Localize();
+	int GetMinimumClientWidth() const { return m_iMinimumClientWidth; }
+	void UpdateLayout();
 
 	void SetClients(const CSimpleArray<CObject*> *paClients)
 	{
@@ -60,6 +62,17 @@ protected:
 
 private:
 	HICON countryflag;
+	int m_iLeftLabelWidth;
+	int m_iRightLabelWidth;
+	int m_iLeftMinimumValueWidth;
+	int m_iRightMinimumValueWidth;
+	int m_iColonWidth;
+	int m_iMinimumClientWidth;
+	bool m_bLayoutReady;
+
+	void UpdateLayoutMetrics();
+	void LayoutControls(int iClientWidth);
+	afx_msg void OnSize(UINT nType, int cx, int cy);
 };
 
 
@@ -82,12 +95,15 @@ protected:
 	CClientDetailPage m_wndClient;
 	CClosableTabCtrl m_tabDark;
 	CPtrArray m_aOwnedRuntimeTokens;
+	int m_iMinimumWidth;
 
 	void Construct();
 	void AddRuntimeToken(CUpDownClient *pClient);
 	void AddTrackedRuntimeToken(CUpDownClient *pClient);
 	void DestroyOwnedRuntimeTokens();
+	void UpdateMinimumWidth();
 
 	DECLARE_MESSAGE_MAP()
 	afx_msg void OnDestroy();
+	afx_msg void OnGetMinMaxInfo(MINMAXINFO* lpMMI);
 };

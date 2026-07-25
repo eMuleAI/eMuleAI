@@ -503,6 +503,7 @@ COLORREF GetCustomSysColor(int nIndex, bool bForceDarkColor)
 		case COLOR_MAN_BLACKLIST:			return RGB(186, 85, 211); // Lighter Purple
 		case COLOR_AUTO_BLACKLIST:			return RGB(255, 105, 180); // Lighter Pink
 		case COLOR_SPAM:					return RGB(255, 99, 71); // Lighter Red
+		case COLOR_SEARCH_POSSIBLE_KNOWN_HEADER: return RGB(118, 220, 255); // High-contrast cyan
 		case COLOR_SERVER_CONNECTED:		return RGB(173, 216, 255); // Light Blue
 		case COLOR_SERVER_FAILED:			return RGB(204, 204, 204); // Slightly dimmer grey reserved for failed servers
 		case COLOR_SERVER_DEAD:				return RGB(166, 166, 166); // Medium grey reserved for dead servers
@@ -534,6 +535,7 @@ COLORREF GetCustomSysColor(int nIndex, bool bForceDarkColor)
 		case COLOR_MAN_BLACKLIST:			return RGB(148, 0, 211); // Purple
 		case COLOR_AUTO_BLACKLIST:			return RGB(255, 20, 147); // Pink
 		case COLOR_SPAM:					return RGB(255, 0, 0); // Red
+		case COLOR_SEARCH_POSSIBLE_KNOWN_HEADER: return RGB(87, 52, 0); // High-contrast brown
 		case COLOR_SERVER_CONNECTED:		return RGB(32, 32, 255); // Blue
 		case COLOR_SERVER_FAILED:			return RGB(128, 128, 128); // Grey
 		case COLOR_SERVER_DEAD:				return RGB(192, 192, 192); // Light Grey

@@ -13,6 +13,7 @@ public:
 	CPPgFiles();
 
 	void Localize();
+	void ResetToDefaults();
 
 protected:
 	CListBox m_uncfolders;

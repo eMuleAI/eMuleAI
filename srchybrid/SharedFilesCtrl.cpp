@@ -384,7 +384,7 @@ namespace
 		}
 
 		const CString strPrimaryLabel = thePreviewApps.GetPreviewAppDisplayNameByCommand(strPrimaryCommand);
-		menu.AppendODMenu(MF_STRING | (bEnablePreview ? MF_ENABLED : MF_GRAYED), MP_PREVIEW, new CMenuXPText(MP_PREVIEW, strPrimaryLabel.IsEmpty() ? GetResString(_T("DL_PREVIEW")) : strPrimaryLabel, thePreviewApps.GetPreviewCommandIcon(strPrimaryCommand)));
+		menu.AppendODMenu(MF_STRING | (bEnablePreview ? MF_ENABLED : MF_GRAYED), MP_PREVIEW, new CMenuXPText(MP_PREVIEW, strPrimaryLabel.IsEmpty() ? GetResStringWithAccel(_T("PREVIEW_AVAILABLE"), _T('v')) : strPrimaryLabel, thePreviewApps.GetPreviewCommandIcon(strPrimaryCommand)));
 		thePreviewApps.GetAllMenuEntries(menu, file, strPrimaryCommand);
 		menu.AppendMenu(MF_SEPARATOR);
 		if (!thePrefs.GetPreviewPrio()) {
@@ -475,9 +475,9 @@ namespace
 	{
 		switch (iPermission) {
 		case PERM_ALL:
-			return GetResString(_T("SHARE_PERMISSION_EVERYBODY"));
+			return GetResString(_T("PW_EVER"));
 		case PERM_FRIENDS:
-			return GetResString(_T("SHARE_PERMISSION_FRIENDSONLY"));
+			return GetResString(_T("FSTATUS_FRIENDSONLY"));
 		case PERM_NOONE:
 			return GetResString(_T("SHARE_PERMISSION_HIDDEN"));
 		default:
@@ -578,11 +578,11 @@ namespace
 	{
 		switch (iMode) {
 		case 0:
-			return GetResString(_T("POWERSHARE_DISABLED"));
+			return GetResString(_T("DISABLED"));
 		case 1:
 			return GetResString(_T("POWERSHARE_ACTIVATED"));
 		case 2:
-			return GetResString(_T("POWERSHARE_AUTO"));
+			return GetResString(_T("PRIOAUTO"));
 		case 3:
 			return GetResString(_T("POWERSHARE_LIMITED"));
 		default:
@@ -1007,6 +1007,7 @@ BOOL CSharedFileDetailsSheet::OnInitDialog()
 	UpdateTitle();
 
 	m_tabDark.m_bClosable = false;
+	m_tabDark.m_bAllowTabReordering = false;
 
 	if (IsDarkModeEnabled()) {
 		HWND hTab = PropSheet_GetTabControl(m_hWnd);
@@ -1036,14 +1037,18 @@ void CSharedFileDetailsSheet::UpdateTitle()
 
 BOOL CSharedFileDetailsSheet::OnCommand(WPARAM wParam, LPARAM lParam)
 {
-	if (wParam == ID_APPLY_NOW) {
+	const UINT uCommand = LOWORD(wParam);
+	const BOOL bResult = CListViewWalkerPropertySheet::OnCommand(wParam, lParam);
+	if (uCommand == ID_APPLY_NOW || uCommand == IDOK) {
 		CSharedFilesCtrl *pSharedFilesCtrl = DYNAMIC_DOWNCAST(CSharedFilesCtrl, m_pListCtrl->GetListCtrl());
 		if (pSharedFilesCtrl)
-			for (int i = m_aItems.GetSize(); --i >= 0;)
-				// so, and why does this not(!) work while the sheet is open ??
-				pSharedFilesCtrl->UpdateFile(DYNAMIC_DOWNCAST(CKnownFile, m_aItems[i]));
+			for (int i = m_aItems.GetSize(); --i >= 0;) {
+				CKnownFile *pKnownFile = DYNAMIC_DOWNCAST(CKnownFile, m_aItems[i]);
+				if (pKnownFile != NULL)
+					pSharedFilesCtrl->UpdateFile(pKnownFile);
+			}
 	}
-	return CListViewWalkerPropertySheet::OnCommand(wParam, lParam);
+	return bResult;
 }
 
 
@@ -3424,7 +3429,7 @@ void CSharedFilesCtrl::DrawItem(LPDRAWITEMSTRUCT lpDrawItemStruct)
 						::ImageList_Draw(theApp.GetSystemImageList(), iImage, dc.GetSafeHdc(), rcItem.left, rcIconTop, ILD_TRANSPARENT);
 					}
 
-					if (file->HasComment() || file->HasRating())
+					if (!file->GetFileComment().IsEmpty() || file->GetFileRating())
 						SafeImageListDraw(&m_ImageList, dc, 0, POINT{ rcItem.left, rcIconTop }, ILD_NORMAL | INDEXTOOVERLAYMASK(1));
 
 					rcItem.left += iIconDrawWidth + sm_iLabelOffset;
@@ -5144,14 +5149,14 @@ void CSharedFilesCtrl::CreateMenus()
 	m_PermMenu.CreateMenu();
 	m_PermMenu.AppendMenu(MF_STRING, MP_PERMDEFAULT, GetResString(_T("DEFAULT")));
 	m_PermMenu.AppendMenu(MF_STRING, MP_PERMNONE, GetResString(_T("SHARE_PERMISSION_HIDDEN")));
-	m_PermMenu.AppendMenu(MF_STRING, MP_PERMFRIENDS, GetResString(_T("SHARE_PERMISSION_FRIENDSONLY")));
-	m_PermMenu.AppendMenu(MF_STRING, MP_PERMALL, GetResString(_T("SHARE_PERMISSION_EVERYBODY")));
+	m_PermMenu.AppendMenu(MF_STRING, MP_PERMFRIENDS, GetResString(_T("FSTATUS_FRIENDSONLY")));
+	m_PermMenu.AppendMenu(MF_STRING, MP_PERMALL, GetResString(_T("PW_EVER")));
 
 	m_PowershareMenu.CreateMenu();
 	m_PowershareMenu.AppendMenu(MF_STRING, MP_POWERSHARE_DEFAULT, GetResString(_T("DEFAULT")));
-	m_PowershareMenu.AppendMenu(MF_STRING, MP_POWERSHARE_OFF, GetResString(_T("POWERSHARE_DISABLED")));
+	m_PowershareMenu.AppendMenu(MF_STRING, MP_POWERSHARE_OFF, GetResString(_T("DISABLED")));
 	m_PowershareMenu.AppendMenu(MF_STRING, MP_POWERSHARE_ON, GetResString(_T("POWERSHARE_ACTIVATED")));
-	m_PowershareMenu.AppendMenu(MF_STRING, MP_POWERSHARE_AUTO, GetResString(_T("POWERSHARE_AUTO")));
+	m_PowershareMenu.AppendMenu(MF_STRING, MP_POWERSHARE_AUTO, GetResString(_T("PRIOAUTO")));
 	m_PowershareMenu.AppendMenu(MF_STRING, MP_POWERSHARE_LIMITED, GetResString(_T("POWERSHARE_LIMITED")));
 
 	m_PowerShareLimitMenu.CreateMenu();
@@ -5190,9 +5195,9 @@ void CSharedFilesCtrl::CreateMenus()
 	m_CollectionsMenu.AppendMenu(MF_STRING, MP_SEARCHAUTHOR, GetResString(_T("SEARCHAUTHORCOLLECTION")), _T("COLLECTION_SEARCH"));
 
 	m_SharedFilesMenu.CreatePopupMenu();
-	m_SharedFilesMenu.AddMenuSidebar(GetResString(_T("SHAREDFILES")));
+	m_SharedFilesMenu.AddMenuSidebar(GetResString(_T("SF_FILES")));
 
-	m_SharedFilesMenu.AppendMenu(MF_STRING, MP_OPEN, GetResString(_T("OPENFILE")), _T("OPENFILE"));
+	m_SharedFilesMenu.AppendMenu(MF_STRING, MP_OPEN, GetResString(_T("DL_OPEN")), _T("DL_OPEN"));
 	m_SharedFilesMenu.AppendMenu(MF_STRING, MP_OPENFOLDER, GetResString(_T("OPENFOLDER")), _T("OPENFOLDER"));
 	m_SharedFilesMenu.AppendMenu(MF_STRING, MP_RENAME, GetResString(_T("RENAME")) + _T("..."), _T("FILERENAME"));
 	m_SharedFilesMenu.AppendMenu(MF_STRING, MP_UPDATE_METADATA, GetResString(_T("UPDATE_METADATA")), _T("METADATA"));
@@ -5231,9 +5236,9 @@ void CSharedFilesCtrl::CreateMenus()
 	m_SharedFilesMenu.AppendMenu(MF_STRING | MF_POPUP, (UINT_PTR)m_CollectionsMenu.m_hMenu, GetResString(_T("META_COLLECTION")), _T("AABCollectionFileType"));
 	m_SharedFilesMenu.AppendMenu(MF_STRING | MF_SEPARATOR);
 
-	m_SharedFilesMenu.AppendMenu(MF_STRING, MP_DETAIL, GetResString(_T("SHOWDETAILS")), _T("FILEINFO"));
-	m_SharedFilesMenu.AppendMenu(MF_STRING, MP_CMT, GetResString(_T("CMT_ADD")), _T("FILECOMMENTS"));
-	m_SharedFilesMenu.AppendMenu(MF_STRING, MP_SHOWED2KLINK, GetResString(_T("DL_SHOWED2KLINK")), _T("ED2KLINK"));
+	m_SharedFilesMenu.AppendMenu(MF_STRING, MP_DETAIL, GetResString(_T("DL_INFO")), _T("FILEINFO"));
+	m_SharedFilesMenu.AppendMenu(MF_STRING, MP_CMT, GetResStringWithAccelAndEllipsis(_T("COMMENT"), _T('e')), _T("FILECOMMENTS"));
+	m_SharedFilesMenu.AppendMenu(MF_STRING, MP_SHOWED2KLINK, GetResStringWithEllipsis(_T("SW_LINK")), _T("ED2KLINK"));
 	m_SharedFilesMenu.AppendMenu(MF_STRING, MP_CUT, GetResString(_T("COPY_FILE_NAMES")), _T("FILERENAME"));
 	if (thePrefs.GetShowCopyEd2kLinkCmd())
 		m_SharedFilesMenu.AppendMenu(MF_STRING, MP_GETED2KLINK, GetResString(_T("DL_LINK1")), _T("ED2KLINK"));

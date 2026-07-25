@@ -632,7 +632,7 @@ void CIrcChannelTabCtrl::Localize()
 		if (GetItem(iIndex, &ti)) {
 			Channel *pChannel = reinterpret_cast<Channel*>(ti.lParam);
 			if (pChannel && (pChannel->m_eType == Channel::ctStatus || pChannel->m_eType == Channel::ctChannelList)) {
-				pChannel->m_sTitle = GetResString(pChannel->m_eType == Channel::ctStatus ? _T("STATUS") : _T("IRC_CHANNELLIST"));
+				pChannel->m_sTitle = GetResString(pChannel->m_eType == Channel::ctStatus ? _T("STATUS") : _T("CHANNELS"));
 				ti.mask = TCIF_TEXT;
 				CString strTcLabel(pChannel->m_sTitle);
 				DupAmpersand(strTcLabel);

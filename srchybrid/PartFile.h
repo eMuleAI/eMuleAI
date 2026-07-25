@@ -207,7 +207,7 @@ public:
 	// last file modification time (NT's version of UTC), to be used for stats only!
 	CTime	GetCFileDate() const						{ return CTime(m_tLastModified); }
 	time_t	GetFileDate() const { return m_tLastModified; }
-	time_t	GetLastReceptionDate() const				{ return (m_uTransferred > 0 && m_tLastModified > 0) ? m_tLastModified : (time_t)-1; }
+	time_t	GetLastReceptionDate() const				{ return (m_uTransferred > 0 && (m_tLastReception > 0 || m_tLastModified > 0)) ? (m_tLastReception > 0 ? m_tLastReception : m_tLastModified) : (time_t)-1; }
 
 	// file creation time (NT's version of UTC), to be used for stats only!
 	CTime	GetCrCFileDate() const						{ return CTime(m_tCreated); }
@@ -522,6 +522,7 @@ private:
 	time_t	m_tActivated;
 	time_t	m_nDlActiveTime;
 	time_t	m_tLastModified;	// last file modification time (NT's version of UTC), to be used for stats only!
+	time_t	m_tLastReception;	// last accepted network data time, used for stats only
 	time_t	m_tCreated;			// file creation time (NT's version of UTC), to be used for stats only!
 	volatile WPARAM m_uFileOpProgress;
 	DWORD	lastSwapForSourceExchangeTick; // ZZ:DownloadManaager

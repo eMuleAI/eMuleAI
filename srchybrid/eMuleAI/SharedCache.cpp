@@ -26,7 +26,6 @@ namespace
 	const DWORD kMaxPathChars = 32768;
 	const ULONGLONG kSerializedHeaderBytes = sizeof(DWORD) + sizeof(WORD) + sizeof(WORD) + sizeof(DWORD) + sizeof(DWORD);
 	const ULONGLONG kMinSerializedRecordBytes = sizeof(DWORD) + sizeof(__int64) + sizeof(uint64) + 16;
-	const TCHAR kSharedCacheFileName[] = _T("sharedcache.dat");
 	const size_t kAsyncCacheChunkBytes = 64 * 1024;
 
 	template<typename T>
@@ -455,7 +454,7 @@ bool CSharedCache::Load(const CString& strConfigDir, LONG lGeneration, uint64 uC
 {
 	TPathRecordMap sharedRecords;
 	TPathRecordMap duplicateRecords;
-	const bool bLoaded = LoadCombinedRecords(BuildCachePath(strConfigDir, kSharedCacheFileName), sharedRecords, duplicateRecords, lGeneration, uCancellationToken);
+	const bool bLoaded = LoadCombinedRecords(BuildCachePath(strConfigDir, SHARED_CACHE_FILENAME), sharedRecords, duplicateRecords, lGeneration, uCancellationToken);
 	if (lGeneration != 0 && uCancellationToken != 0 && theApp.IsStartupMetadataLoadCancelled(CemuleApp::StartupMetadataSharedRules, lGeneration, uCancellationToken))
 		return false;
 
@@ -475,7 +474,7 @@ void CSharedCache::Save(const CString& strConfigDir) const
 		sharedRecords = m_sharedRecords;
 		duplicateRecords = m_duplicateRecords;
 	}
-	QueueSaveCombinedRecords(BuildCachePath(strConfigDir, kSharedCacheFileName), sharedRecords, duplicateRecords, m_lSaveGeneration);
+	QueueSaveCombinedRecords(BuildCachePath(strConfigDir, SHARED_CACHE_FILENAME), sharedRecords, duplicateRecords, m_lSaveGeneration);
 }
 
 void CSharedCache::ClearSharedRecords()

@@ -62,7 +62,7 @@ BOOL PreviewDlg::OnInitDialog()
 		return FALSE;
 	}
 	InitWindowStyles(this);
-	CString title(GetResNoAmp(_T("DL_PREVIEW")));
+	CString title(GetResString(_T("PREVIEW_AVAILABLE")));
 	title.AppendFormat(_T(": %s"), (LPCTSTR)m_pFile->GetFileName());
 	SetWindowText(title);
 

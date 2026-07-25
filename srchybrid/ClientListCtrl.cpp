@@ -175,6 +175,159 @@ namespace
 		return AcquireListedClient(listCtrl.m_ListedItemsVector[iItem], GetListedClientRuntimeID(listCtrl, iItem), clientRef);
 	}
 
+	int GetPrimarySelectedClientIndex(const CClientListCtrl& listCtrl)
+	{
+		int iItem = listCtrl.GetNextItem(-1, LVIS_SELECTED | LVIS_FOCUSED);
+		if (iItem < 0)
+			iItem = listCtrl.GetNextItem(-1, LVIS_SELECTED);
+		return iItem;
+	}
+
+	void GetSelectedClientRuntimeIDs(const CClientListCtrl& listCtrl, std::vector<CClientListCtrl::ClientListItemID>& selectedRuntimeIDs)
+	{
+		selectedRuntimeIDs.clear();
+		selectedRuntimeIDs.reserve(listCtrl.GetSelectedCount());
+		for (POSITION pos = listCtrl.GetFirstSelectedItemPosition(); pos != NULL;) {
+			const int iItem = listCtrl.GetNextSelectedItem(pos);
+			selectedRuntimeIDs.push_back(GetListedClientRuntimeID(listCtrl, iItem));
+		}
+	}
+
+	void ReplaceSavedClientListStateItem(CClientListCtrl& listCtrl, CUpDownClient* pOldClient, CUpDownClient* pNewClient)
+	{
+		if (pOldClient == NULL || pNewClient == NULL || pOldClient == pNewClient)
+			return;
+
+		CListState<CUpDownClient>* pState = NULL;
+		if (!listCtrl.m_mapListStates.Lookup(0, pState) || pState == NULL)
+			return;
+
+		for (INT_PTR i = 0; i < pState->m_aSelectedItems.GetCount(); ++i) {
+			if (pState->m_aSelectedItems[i] == pOldClient)
+				pState->m_aSelectedItems[i] = pNewClient;
+		}
+		for (INT_PTR i = 0; i < pState->m_aVisibleItems.GetCount(); ++i) {
+			if (pState->m_aVisibleItems[i] == pOldClient)
+				pState->m_aVisibleItems[i] = pNewClient;
+		}
+		if (pState->m_pFocusedItem == pOldClient)
+			pState->m_pFocusedItem = pNewClient;
+		if (pState->m_pSelectionMarkItem == pOldClient)
+			pState->m_pSelectionMarkItem = pNewClient;
+	}
+
+	bool CanViewClientSharedFiles(const CUpDownClient* pClient)
+	{
+		return pClient != NULL && pClient->IsEd2kClient() && pClient->GetViewSharedFilesSupport();
+	}
+
+	bool CanAutoQueryClientSharedFiles(const CUpDownClient* pClient)
+	{
+		return CanViewClientSharedFiles(pClient) && (pClient->m_bIsArchived || pClient->socket == NULL || !pClient->socket->IsConnected());
+	}
+
+	struct SClientSelectionMenuState
+	{
+		SClientSelectionMenuState()
+			: bHasValidClients(false)
+			, bCanAddFriend(false)
+			, bCanUseFriendSlot(true)
+			, bAllFriendSlotsSet(true)
+			, bCanViewSharedFiles(true)
+			, bCanViewAndAutoQuerySharedFiles(true)
+			, bCanActivateAutoQuerySharedFiles(true)
+			, bUniformPunishment(true)
+			, uPunishment(P_NOPUNISHMENT)
+		{
+		}
+
+		bool bHasValidClients;
+		bool bCanAddFriend;
+		bool bCanUseFriendSlot;
+		bool bAllFriendSlotsSet;
+		bool bCanViewSharedFiles;
+		bool bCanViewAndAutoQuerySharedFiles;
+		bool bCanActivateAutoQuerySharedFiles;
+		bool bUniformPunishment;
+		uint8 uPunishment;
+	};
+
+	SClientSelectionMenuState GetClientSelectionMenuState(const std::vector<CClientListCtrl::ClientListItemID>& selectedRuntimeIDs)
+	{
+		SClientSelectionMenuState state;
+		bool bFirstPunishment = true;
+
+		for (std::vector<CClientListCtrl::ClientListItemID>::const_iterator it = selectedRuntimeIDs.begin(); it != selectedRuntimeIDs.end(); ++it) {
+			ClientRuntimeReference clientRef;
+			CUpDownClient* pClient = AcquireListedClient(NULL, *it, clientRef);
+			if (pClient == NULL) {
+				state.bCanUseFriendSlot = false;
+				state.bAllFriendSlotsSet = false;
+				state.bCanViewSharedFiles = false;
+				state.bCanViewAndAutoQuerySharedFiles = false;
+				state.bCanActivateAutoQuerySharedFiles = false;
+				state.bUniformPunishment = false;
+				continue;
+			}
+
+			state.bHasValidClients = true;
+			state.bCanAddFriend = state.bCanAddFriend || (pClient->IsEd2kClient() && !pClient->IsFriend());
+			const CFriend* pFriend = pClient->GetFriend();
+			state.bCanUseFriendSlot = state.bCanUseFriendSlot && pFriend != NULL;
+			state.bAllFriendSlotsSet = state.bAllFriendSlotsSet && pFriend != NULL && pFriend->GetFriendSlot();
+			state.bCanViewSharedFiles = state.bCanViewSharedFiles && CanViewClientSharedFiles(pClient);
+			state.bCanViewAndAutoQuerySharedFiles = state.bCanViewAndAutoQuerySharedFiles && CanAutoQueryClientSharedFiles(pClient);
+			state.bCanActivateAutoQuerySharedFiles = state.bCanActivateAutoQuerySharedFiles && !pClient->m_bAutoQuerySharedFiles && CanAutoQueryClientSharedFiles(pClient);
+
+			if (bFirstPunishment) {
+				state.uPunishment = pClient->m_uPunishment;
+				bFirstPunishment = false;
+			} else if (state.uPunishment != pClient->m_uPunishment)
+				state.bUniformPunishment = false;
+		}
+
+		if (!state.bHasValidClients) {
+			state.bCanUseFriendSlot = false;
+			state.bAllFriendSlotsSet = false;
+			state.bCanViewSharedFiles = false;
+			state.bCanViewAndAutoQuerySharedFiles = false;
+			state.bCanActivateAutoQuerySharedFiles = false;
+			state.bUniformPunishment = false;
+		}
+		return state;
+	}
+
+	bool GetManualPunishmentCommand(UINT uCommand, uint8& uPunishment, LPCTSTR& pszReasonKey)
+	{
+		if (uCommand < MP_PUNISMENT_IPUSERHASHBAN || uCommand > MP_PUNISMENT_NONE)
+			return false;
+
+		uPunishment = static_cast<uint8>(P_IPUSERHASHBAN + uCommand - MP_PUNISMENT_IPUSERHASHBAN);
+		if (uCommand == MP_PUNISMENT_IPUSERHASHBAN)
+			pszReasonKey = _T("PUNISHMENT_REASON_MANUAL_IP_BAN");
+		else if (uCommand == MP_PUNISMENT_USERHASHBAN)
+			pszReasonKey = _T("PUNISHMENT_REASON_MANUAL_USER_HASH_BAN");
+		else if (uCommand == MP_PUNISMENT_UPLOADBAN)
+			pszReasonKey = _T("PUNISHMENT_REASON_MANUAL_UPLOAD_BAN");
+		else if (uCommand == MP_PUNISMENT_NONE)
+			pszReasonKey = _T("PUNISHMENT_REASON_MANUAL_CANCELATION");
+		else
+			pszReasonKey = _T("PUNISHMENT_REASON_MANUAL_SCORE_REDUCING");
+		return true;
+	}
+
+	bool IsMultipleClientSelectionCommand(UINT uCommand)
+	{
+		uint8 uPunishment = P_NOPUNISHMENT;
+		LPCTSTR pszReasonKey = NULL;
+		return uCommand == MP_ADDFRIEND
+			|| uCommand == MP_FRIENDSLOT
+			|| uCommand == MP_SHOWLIST
+			|| uCommand == MP_SHOWLIST_AUTO_QUERY
+			|| uCommand == MP_ACTIVATE_AUTO_QUERY
+			|| GetManualPunishmentCommand(uCommand, uPunishment, pszReasonKey);
+	}
+
 	void UpdateClientListItemCount(CListCtrl& listCtrl, const size_t itemCount, bool bInvalidateAll = false)
 	{
 		listCtrl.SetItemCountEx(static_cast<int>(itemCount), bInvalidateAll ? LVSICF_NOSCROLL : kClientListSetItemCountFlags);
@@ -322,6 +475,7 @@ void CClientListCtrl::Init()
 {
 	SetPrefsKey(_T("ClientListCtrl"));
 	SetExtendedStyle(LVS_EX_FULLROWSELECT | LVS_EX_INFOTIP);
+	ASSERT((GetStyle() & LVS_SINGLESEL) == 0);
 
 	// Alignment rule: left for text, dates, and status labels; right for sizes, rates, counts, durations, and percentages.
 	InsertColumn(0, EMPTY,	LVCFMT_LEFT,	DFLT_CLIENTNAME_COL_WIDTH);	//QL_USERNAME
@@ -376,13 +530,13 @@ void CClientListCtrl::Localize()
 		, _T("BAD_CLIENT_TYPE")
 		, _T("PUNISHMENT")
 		, _T("FIRST_SEEN")
-		, _T("LAST_SEEN")
+		, _T("LASTSEEN")
 		, _T("CLIENT_NOTE")
 	};
 
 	LocaliseHeaderCtrl(uids, _countof(uids));
 
-	CString strRes(GetResString(_T("CD_UHASH")));
+	CString strRes(GetResStringWithColon(_T("CD_UHASH2")));
 	strRes.Remove(_T(':'));
 	HDITEM hdi;
 	hdi.mask = HDI_TEXT;
@@ -910,32 +1064,40 @@ void CClientListCtrl::OnNmDblClk(LPNMHDR, LRESULT *pResult)
 
 void CClientListCtrl::OnContextMenu(CWnd*, CPoint point)
 {
-	int iSel = GetNextItem(-1, LVIS_SELECTED | LVIS_FOCUSED);
+	std::vector<ClientListItemID> selectedRuntimeIDs;
+	GetSelectedClientRuntimeIDs(*this, selectedRuntimeIDs);
+	const bool bMultipleSelection = selectedRuntimeIDs.size() > 1;
+	const SClientSelectionMenuState selectionState = GetClientSelectionMenuState(selectedRuntimeIDs);
+
+	const int iSel = GetPrimarySelectedClientIndex(*this);
 	ClientRuntimeReference clientRef;
-	const CUpDownClient *client = AcquireItemTrackedClient(*this, iSel, clientRef);
-	const bool is_ed2k = client && client->IsEd2kClient();
-	const CFriend *pFriend = client != NULL ? client->GetFriend() : NULL;
+	const CUpDownClient* client = AcquireItemTrackedClient(*this, iSel, clientRef);
+	const bool is_ed2k = client != NULL && client->IsEd2kClient();
+	const CFriend* pFriend = client != NULL ? client->GetFriend() : NULL;
 
 	CMenuXP ClientMenu;
 	ClientMenu.CreatePopupMenu();
 	ClientMenu.AddMenuSidebar(GetResString(_T("CLIENTS")));
-	ClientMenu.AppendMenu(MF_STRING | (client ? MF_ENABLED : MF_GRAYED), MP_DETAIL, GetResString(_T("SHOWDETAILS")), _T("CLIENTDETAILS"));
-	ClientMenu.SetDefaultItem(MP_DETAIL);
-	ClientMenu.AppendMenu(MF_STRING | ((is_ed2k && !client->IsFriend()) ? MF_ENABLED : MF_GRAYED), MP_ADDFRIEND, GetResString(_T("ADDFRIEND")), _T("ADDFRIEND"));
-	ClientMenu.AppendMenu(MF_STRING | (pFriend != NULL ? MF_ENABLED : MF_GRAYED), MP_FRIENDSLOT, GetResString(_T("FRIENDSLOT")), _T("FRIENDSLOT"));
-	ClientMenu.CheckMenuItem(MP_FRIENDSLOT, (pFriend != NULL && pFriend->GetFriendSlot()) ? MF_CHECKED : MF_UNCHECKED);
-	ClientMenu.AppendMenu(MF_STRING | (is_ed2k ? MF_ENABLED : MF_GRAYED), MP_MESSAGE, GetResString(_T("SEND_MSG")), _T("SENDMESSAGE"));
-	ClientMenu.AppendMenu(MF_STRING | ((is_ed2k && client->GetViewSharedFilesSupport()) ? MF_ENABLED : MF_GRAYED), MP_SHOWLIST, GetResString(_T("VIEWFILES")), _T("VIEWFILES"));
-	ClientMenu.AppendMenu(MF_STRING | ((is_ed2k && client->GetViewSharedFilesSupport() && (client->m_bIsArchived || !client->socket || !client->socket->IsConnected())) ? MF_ENABLED : MF_GRAYED), MP_SHOWLIST_AUTO_QUERY, GetResString(_T("VIEW_FILES_ACTIVATE_AUTO_QUERY")), _T("CLOCKGREEN"));
-	if (client == NULL)
+	ClientMenu.AppendMenu(MF_STRING | (client != NULL && !bMultipleSelection ? MF_ENABLED : MF_GRAYED), MP_DETAIL, GetResString(_T("DL_INFO")), _T("CLIENTDETAILS"));
+	if (!bMultipleSelection)
+		ClientMenu.SetDefaultItem(MP_DETAIL);
+	ClientMenu.AppendMenu(MF_STRING | ((bMultipleSelection ? selectionState.bCanAddFriend : (is_ed2k && !client->IsFriend())) ? MF_ENABLED : MF_GRAYED), MP_ADDFRIEND, GetResString(_T("ADDFRIEND")), _T("ADDFRIEND"));
+	ClientMenu.AppendMenu(MF_STRING | ((bMultipleSelection ? selectionState.bCanUseFriendSlot : pFriend != NULL) ? MF_ENABLED : MF_GRAYED), MP_FRIENDSLOT, GetResString(_T("FRIENDSLOT")), _T("FRIENDSLOT"));
+	ClientMenu.CheckMenuItem(MP_FRIENDSLOT, (bMultipleSelection ? selectionState.bAllFriendSlotsSet : (pFriend != NULL && pFriend->GetFriendSlot())) ? MF_CHECKED : MF_UNCHECKED);
+	ClientMenu.AppendMenu(MF_STRING | (!bMultipleSelection && is_ed2k ? MF_ENABLED : MF_GRAYED), MP_MESSAGE, GetResString(_T("SEND_MSG")), _T("SENDMESSAGE"));
+	ClientMenu.AppendMenu(MF_STRING | ((bMultipleSelection ? selectionState.bCanViewSharedFiles : CanViewClientSharedFiles(client)) ? MF_ENABLED : MF_GRAYED), MP_SHOWLIST, GetResString(_T("VIEWFILES")), _T("VIEWFILES"));
+	ClientMenu.AppendMenu(MF_STRING | ((bMultipleSelection ? selectionState.bCanViewAndAutoQuerySharedFiles : CanAutoQueryClientSharedFiles(client)) ? MF_ENABLED : MF_GRAYED), MP_SHOWLIST_AUTO_QUERY, GetResString(_T("VIEW_FILES_ACTIVATE_AUTO_QUERY")), _T("CLOCKGREEN"));
+	if (bMultipleSelection)
+		ClientMenu.AppendMenu(MF_STRING | (selectionState.bCanActivateAutoQuerySharedFiles ? MF_ENABLED : MF_GRAYED), MP_ACTIVATE_AUTO_QUERY, GetResString(_T("ACTIVATE_AUTO_QUERY")), _T("CLOCKBLUE"));
+	else if (client == NULL)
 		ClientMenu.AppendMenu(MF_STRING | MF_GRAYED, MP_ACTIVATE_AUTO_QUERY, GetResString(_T("ACTIVATE_AUTO_QUERY")), _T("CLOCKBLUE"));
 	else if (client->m_bAutoQuerySharedFiles)
 		ClientMenu.AppendMenu(MF_STRING | MF_ENABLED, MP_DEACTIVATE_AUTO_QUERY, GetResString(_T("DEACTIVATE_AUTO_QUERY")), _T("CLOCKRED"));
 	else
-		ClientMenu.AppendMenu(MF_STRING | ((is_ed2k && client->GetViewSharedFilesSupport() && (client->m_bIsArchived || !client->socket || !client->socket->IsConnected())) ? MF_ENABLED : MF_GRAYED), MP_ACTIVATE_AUTO_QUERY, GetResString(_T("ACTIVATE_AUTO_QUERY")), _T("CLOCKBLUE"));
-	ClientMenu.AppendMenu(MF_STRING | (client ? MF_ENABLED : MF_GRAYED), MP_EDIT_NOTE, GetResString(_T("EDIT_CLIENT_NOTE")), _T("RENAME"));
+		ClientMenu.AppendMenu(MF_STRING | (CanAutoQueryClientSharedFiles(client) ? MF_ENABLED : MF_GRAYED), MP_ACTIVATE_AUTO_QUERY, GetResString(_T("ACTIVATE_AUTO_QUERY")), _T("CLOCKBLUE"));
+	ClientMenu.AppendMenu(MF_STRING | (client != NULL && !bMultipleSelection ? MF_ENABLED : MF_GRAYED), MP_EDIT_NOTE, GetResString(_T("EDIT_CLIENT_NOTE")), _T("RENAME"));
 	if (Kademlia::CKademlia::IsRunning() && !Kademlia::CKademlia::IsConnected())
-		ClientMenu.AppendMenu(MF_STRING | ((is_ed2k && client->GetKadPort() && client->GetKadVersion() >= KADEMLIA_VERSION2_47a) ? MF_ENABLED : MF_GRAYED), MP_BOOT, GetResString(_T("BOOTSTRAP")), _T("KADBOOTSTRAP"));
+		ClientMenu.AppendMenu(MF_STRING | (!bMultipleSelection && is_ed2k && client->GetKadPort() && client->GetKadVersion() >= KADEMLIA_VERSION2_47a ? MF_ENABLED : MF_GRAYED), MP_BOOT, GetResString(_T("BOOTSTRAP")), _T("KADBOOTSTRAP"));
 
 	ClientMenu.AppendMenu(MF_STRING | MF_SEPARATOR);
 	CMenuXP m_PunishmentMenu;
@@ -954,9 +1116,11 @@ void CClientListCtrl::OnContextMenu(CWnd*, CPoint point)
 	m_PunishmentMenu.AppendMenu(MF_STRING, MP_PUNISMENT_SCOREX09, GetResString(_T("SCORE_09")));
 	m_PunishmentMenu.AppendMenu(MF_STRING, MP_PUNISMENT_NONE, GetResString(_T("NO_PUNISHMENT")));
 	ClientMenu.EnableMenuItem((UINT)m_PunishmentMenu.m_hMenu, MF_ENABLED);
-	int m_PunishmentMenuItem = client ? MP_PUNISMENT_IPUSERHASHBAN + client->m_uPunishment : 0;
+	const int m_PunishmentMenuItem = bMultipleSelection
+		? (selectionState.bUniformPunishment ? MP_PUNISMENT_IPUSERHASHBAN + selectionState.uPunishment : 0)
+		: (client != NULL ? MP_PUNISMENT_IPUSERHASHBAN + client->m_uPunishment : 0);
 	m_PunishmentMenu.CheckMenuRadioItem(MP_PUNISMENT_IPUSERHASHBAN, MP_PUNISMENT_NONE, m_PunishmentMenuItem, 0);
-	ClientMenu.AppendMenu(MF_STRING | MF_POPUP | (client ? MF_ENABLED : MF_GRAYED), (UINT_PTR)m_PunishmentMenu.m_hMenu, GetResString(_T("PUNISHMENT")), _T("PUNISHMENT"));
+	ClientMenu.AppendMenu(MF_STRING | MF_POPUP | (selectionState.bHasValidClients ? MF_ENABLED : MF_GRAYED), (UINT_PTR)m_PunishmentMenu.m_hMenu, GetResString(_T("PUNISHMENT")), _T("PUNISHMENT"));
 	ClientMenu.AppendMenu(MF_STRING | MF_SEPARATOR);
 
 	ClientMenu.AppendMenu(MF_STRING | (GetItemCount() > 0 ? MF_ENABLED : MF_GRAYED), MP_FIND, GetResString(_T("FIND")), _T("Search"));
@@ -972,17 +1136,120 @@ BOOL CClientListCtrl::OnCommand(WPARAM wParam, LPARAM)
 		OnFindStart();
 		return TRUE;
 	}
-	int iSel = GetNextItem(-1, LVIS_SELECTED | LVIS_FOCUSED);
+
+	auto RefreshQueueCountAfterManualPunishment = []() {
+		if (theApp.emuledlg != NULL && theApp.emuledlg->transferwnd != NULL)
+			theApp.emuledlg->transferwnd->InvalidateQueueCount(true);
+	};
+
+	std::vector<ClientListItemID> selectedRuntimeIDs;
+	GetSelectedClientRuntimeIDs(*this, selectedRuntimeIDs);
+	if (selectedRuntimeIDs.size() > 1) {
+		if (!IsMultipleClientSelectionCommand(static_cast<UINT>(wParam)))
+			return TRUE;
+
+		if (wParam == MP_ADDFRIEND) {
+			bool bChanged = false;
+			for (std::vector<ClientListItemID>::const_iterator it = selectedRuntimeIDs.begin(); it != selectedRuntimeIDs.end(); ++it) {
+				ClientRuntimeReference clientRef;
+				CUpDownClient* client = AcquireListedClient(NULL, *it, clientRef);
+				if (client != NULL && client->IsEd2kClient() && !client->IsFriend() && theApp.friendlist->AddFriend(client))
+					bChanged = true;
+			}
+			if (bChanged)
+				ReloadList(false, kClientListViewState);
+			return TRUE;
+		}
+
+		if (wParam == MP_FRIENDSLOT) {
+			bool bAllFriendSlotsSet = true;
+			for (std::vector<ClientListItemID>::const_iterator it = selectedRuntimeIDs.begin(); it != selectedRuntimeIDs.end(); ++it) {
+				ClientRuntimeReference clientRef;
+				CUpDownClient* client = AcquireListedClient(NULL, *it, clientRef);
+				CFriend* pFriend = client != NULL ? client->GetFriend() : NULL;
+				if (pFriend == NULL)
+					return TRUE;
+				bAllFriendSlotsSet = bAllFriendSlotsSet && pFriend->GetFriendSlot();
+			}
+
+			const bool bEnableFriendSlot = !bAllFriendSlotsSet;
+			for (std::vector<ClientListItemID>::const_iterator it = selectedRuntimeIDs.begin(); it != selectedRuntimeIDs.end(); ++it) {
+				ClientRuntimeReference clientRef;
+				CUpDownClient* client = AcquireListedClient(NULL, *it, clientRef);
+				CFriend* pFriend = client != NULL ? client->GetFriend() : NULL;
+				if (pFriend != NULL)
+					pFriend->SetFriendSlot(bEnableFriendSlot);
+			}
+			theApp.friendlist->SaveList();
+			ReloadList(false, kClientListViewState);
+			return TRUE;
+		}
+
+		if (wParam == MP_SHOWLIST || wParam == MP_SHOWLIST_AUTO_QUERY || wParam == MP_ACTIVATE_AUTO_QUERY) {
+			for (std::vector<ClientListItemID>::const_iterator it = selectedRuntimeIDs.begin(); it != selectedRuntimeIDs.end(); ++it) {
+				ClientRuntimeReference clientRef;
+				CUpDownClient* client = AcquireListedClient(NULL, *it, clientRef);
+				const bool bEligible = wParam == MP_SHOWLIST ? CanViewClientSharedFiles(client) : CanAutoQueryClientSharedFiles(client);
+				if (!bEligible || (wParam == MP_ACTIVATE_AUTO_QUERY && client->m_bAutoQuerySharedFiles))
+					return TRUE;
+			}
+
+			bool bChanged = false;
+			for (std::vector<ClientListItemID>::const_iterator it = selectedRuntimeIDs.begin(); it != selectedRuntimeIDs.end(); ++it) {
+				ClientRuntimeReference clientRef;
+				CUpDownClient* client = AcquireListedClient(NULL, *it, clientRef);
+				if (client == NULL)
+					continue;
+
+				if (wParam == MP_SHOWLIST_AUTO_QUERY || wParam == MP_ACTIVATE_AUTO_QUERY) {
+					client->SetAutoQuerySharedFiles(true);
+					if (!client->m_bAutoQuerySharedFiles)
+						break;
+					bChanged = true;
+				}
+
+				if (wParam == MP_SHOWLIST || wParam == MP_SHOWLIST_AUTO_QUERY) {
+					CUpDownClient* pActiveClient = ArchivedToActive(client);
+					if (pActiveClient != NULL && (client == pActiveClient || theApp.clientlist->IsValidClient(pActiveClient))) {
+						pActiveClient->RequestSharedFileList();
+						bChanged = true;
+					}
+				}
+			}
+			if (bChanged)
+				ReloadList(false, kClientListViewState);
+			return TRUE;
+		}
+
+		uint8 uPunishment = P_NOPUNISHMENT;
+		LPCTSTR pszReasonKey = NULL;
+		if (GetManualPunishmentCommand(static_cast<UINT>(wParam), uPunishment, pszReasonKey)) {
+			const CString strReason = GetResString(pszReasonKey);
+			bool bChanged = false;
+			for (std::vector<ClientListItemID>::const_iterator it = selectedRuntimeIDs.begin(); it != selectedRuntimeIDs.end(); ++it) {
+				ClientRuntimeReference clientRef;
+				CUpDownClient* client = AcquireListedClient(NULL, *it, clientRef);
+				if (client != NULL) {
+					theApp.shield->SetPunishment(client, strReason, PR_MANUAL, uPunishment);
+					bChanged = true;
+				}
+			}
+			if (bChanged) {
+				ReloadList(false, kClientListViewState);
+				RefreshQueueCountAfterManualPunishment();
+			}
+			return TRUE;
+		}
+
+		return TRUE;
+	}
+
+	int iSel = GetPrimarySelectedClientIndex(*this);
 		if (iSel >= 0) {
 			ClientRuntimeReference clientRef;
 			CUpDownClient *client = AcquireItemTrackedClient(*this, iSel, clientRef);
 			if (client == NULL)
 				return TRUE;
-
-			auto RefreshQueueCountAfterManualPunishment = []() {
-				if (theApp.emuledlg != NULL && theApp.emuledlg->transferwnd != NULL)
-					theApp.emuledlg->transferwnd->InvalidateQueueCount(true);
-			};
 
 			switch (wParam) {
 		case MP_SHOWLIST:
@@ -1181,21 +1448,14 @@ void CClientListCtrl::AddClientInternal(CUpDownClient* client)
 		pArchivedClient != NULL // and if we found it's archived version
 		&& LookupListedClientIndex(*this, pArchivedClient, pArchivedClient->GetRuntimeID(), m_iIndex, &bArchivedPointerReuseConflict) && m_iIndex >= 0) { // and archived client is already listed
 		SetRedraw(false); // Suspend painting
-		const int iSelectedClientIndex = GetNextItem(-1, LVIS_SELECTED | LVIS_FOCUSED);
-		const DWORD uSelectedClientRuntimeID = GetListedClientRuntimeID(*this, iSelectedClientIndex);
 		m_ListedItemsVector[m_iIndex] = client; // Replace archived client with active client at archived client's position of vector.
 		if (static_cast<size_t>(m_iIndex) < m_ListedItemRuntimeIDs.size())
 			m_ListedItemRuntimeIDs[m_iIndex] = client->GetRuntimeID();
 		m_ListedItemsMap[client] = m_iIndex; // Add active client to map.
 		m_ListedItemsMap.RemoveKey(pArchivedClient); // Remove archived client from map.
 		RebuildListedItemsMap();
-		const bool bTransferSelection = uSelectedClientRuntimeID != 0 && uSelectedClientRuntimeID == pArchivedClient->GetRuntimeID();
+		ReplaceSavedClientListStateItem(*this, pArchivedClient, client);
 		RestoreListState(0, kClientListViewState, false); // Restore selections and scroll state
-		if (bTransferSelection) {
-			SetItemState(-1, 0, LVIS_SELECTED | LVIS_FOCUSED);
-			SetItemState(m_iIndex, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
-			SetSelectionMark(m_iIndex);
-		}
 		SetRedraw(true); // Resume painting
 		if (!RepositionUpdatedClient(m_iIndex))
 			RequestClientListRedrawForRange(m_iIndex, m_iIndex);
@@ -1270,21 +1530,14 @@ void CClientListCtrl::RemoveClientInternal(CUpDownClient* client)
 	if (thePrefs.GetClientHistory() && !client->m_bIsArchived && // If this is an active client
 		pArchivedClient != NULL // and if we found it's archived version
 		&& !bArchivedAlreadyListed && !IsFilteredOut(pArchivedClient)) { // and archived client is not already listed, also it will not be filtered if we add it.
-		int iSelectedClientIndex = GetNextItem(-1, LVIS_SELECTED | LVIS_FOCUSED);
-		const DWORD uSelectedClientRuntimeID = GetListedClientRuntimeID(*this, iSelectedClientIndex);
 		m_ListedItemsVector[m_iIndex] = pArchivedClient; // Replace active client with archived client at active client's position of vector.
 		if (static_cast<size_t>(m_iIndex) < m_ListedItemRuntimeIDs.size())
 			m_ListedItemRuntimeIDs[m_iIndex] = pArchivedClient->GetRuntimeID();
 		m_ListedItemsMap[pArchivedClient] = m_iIndex; // Add archived client to map.
 		m_ListedItemsMap.RemoveKey(client); // Remove active client from map.
 		RebuildListedItemsMap();
-		const bool bTransferSelection = uSelectedClientRuntimeID != 0 && uSelectedClientRuntimeID == client->GetRuntimeID();
+		ReplaceSavedClientListStateItem(*this, client, pArchivedClient);
 		RestoreListState(0, kClientListViewState, false); // Restore selections and scroll state
-		if (bTransferSelection) { // This is the same logical client represented by its archived object.
-			SetItemState(-1, 0, LVIS_SELECTED | LVIS_FOCUSED);
-			SetItemState(m_iIndex, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED); // Select archived client.
-			SetSelectionMark(m_iIndex);
-		}
 		SetRedraw(true); // Resume painting
 		if (!RepositionUpdatedClient(m_iIndex))
 			RequestClientListRedrawForRange(m_iIndex, m_iIndex);
@@ -1560,8 +1813,6 @@ void CClientListCtrl::RemoveClientByRuntimeID(ClientListItemID uClientRuntimeID,
 
 	if (pArchivedClient != NULL && uArchivedResolvedRuntimeID != uClientRuntimeID && pArchivedClient->m_bIsArchived
 		&& !bArchivedAlreadyListed && !IsFilteredOut(pArchivedClient)) {
-		const int iSelectedClientIndex = GetNextItem(-1, LVIS_SELECTED | LVIS_FOCUSED);
-		const DWORD uSelectedClientRuntimeID = GetListedClientRuntimeID(*this, iSelectedClientIndex);
 		m_ListedItemsVector[m_iIndex] = pArchivedClient;
 		if (static_cast<size_t>(m_iIndex) < m_ListedItemRuntimeIDs.size())
 			m_ListedItemRuntimeIDs[m_iIndex] = uArchivedResolvedRuntimeID;
@@ -1571,13 +1822,8 @@ void CClientListCtrl::RemoveClientByRuntimeID(ClientListItemID uClientRuntimeID,
 		if (pOldClient != NULL && pOldClient != client)
 			m_ListedItemsMap.RemoveKey(pOldClient);
 		RebuildListedItemsMap();
-		const bool bTransferSelection = uSelectedClientRuntimeID != 0 && uSelectedClientRuntimeID == uClientRuntimeID;
+		ReplaceSavedClientListStateItem(*this, pOldClient, pArchivedClient);
 		RestoreListState(0, kClientListViewState, false);
-		if (bTransferSelection) {
-			SetItemState(-1, 0, LVIS_SELECTED | LVIS_FOCUSED);
-			SetItemState(m_iIndex, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
-			SetSelectionMark(m_iIndex);
-		}
 		SetRedraw(true);
 		if (!RepositionUpdatedClient(m_iIndex))
 			RequestClientListRedrawForRange(m_iIndex, m_iIndex);
@@ -1605,8 +1851,6 @@ void CClientListCtrl::RemoveClientsByRuntimeIDBatch(const std::map<ClientListIte
 	if (theApp.IsClosing() || theApp.emuledlg->activewnd != theApp.emuledlg->transferwnd || !IsWindowVisible())
 		return;
 
-	const int iSelectedClientIndex = GetNextItem(-1, LVIS_SELECTED | LVIS_FOCUSED);
-	const DWORD uSelectedClientRuntimeID = GetListedClientRuntimeID(*this, iSelectedClientIndex);
 	SaveListState(0, kClientListViewState);
 	SetRedraw(false);
 
@@ -1622,7 +1866,6 @@ void CClientListCtrl::RemoveClientsByRuntimeIDBatch(const std::map<ClientListIte
 	std::vector<DWORD> vecNewRuntimeIDs;
 	vecNewItems.reserve(m_ListedItemsVector.size());
 	vecNewRuntimeIDs.reserve(m_ListedItemRuntimeIDs.size());
-	ClientListItemID uReplacementSelectionRuntimeID = 0;
 	bool bChanged = false;
 
 	for (size_t i = 0; i < m_ListedItemsVector.size(); ++i) {
@@ -1648,8 +1891,7 @@ void CClientListCtrl::RemoveClientsByRuntimeIDBatch(const std::map<ClientListIte
 			vecNewItems.push_back(pArchivedClient);
 			vecNewRuntimeIDs.push_back(uArchivedRuntimeID);
 			usedRuntimeIDs.insert(uArchivedRuntimeID);
-			if (uSelectedClientRuntimeID == uRuntimeID)
-				uReplacementSelectionRuntimeID = uArchivedRuntimeID;
+			ReplaceSavedClientListStateItem(*this, pOldClient, pArchivedClient);
 		}
 	}
 
@@ -1686,12 +1928,6 @@ void CClientListCtrl::RemoveClientsByRuntimeIDBatch(const std::map<ClientListIte
 	RebuildListedItemsMap();
 	UpdateClientListItemCount(*this, m_ListedItemsVector.size(), true);
 	RestoreClientListStateAfterStructureChange(*this);
-	const int iReplacementSelection = FindListedClientIndexByRuntimeID(uReplacementSelectionRuntimeID);
-	if (iReplacementSelection >= 0 && iReplacementSelection < GetItemCount()) {
-		SetItemState(-1, 0, LVIS_SELECTED | LVIS_FOCUSED);
-		SetItemState(iReplacementSelection, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
-		SetSelectionMark(iReplacementSelection);
-	}
 	RefreshClientListAfterStructureChange(*this);
 	RequestClientListRedraw();
 	if (theApp.emuledlg != NULL && theApp.emuledlg->transferwnd != NULL && theApp.emuledlg->transferwnd->m_pwndTransfer != NULL)
@@ -1847,6 +2083,7 @@ void CClientListCtrl::ReloadList(const bool bSortCurrentList, const EListStateFi
 				if (thePrefs.GetClientHistory() && pArchivedClient != NULL) {
 					if (!bHadArchivedLink) // Move history data to the current client if it is not done yet.
 						LoadArchive(cur_client, _T("ReloadList"));
+					ReplaceSavedClientListStateItem(*this, pArchivedClient, cur_client);
 					// Remove client history object from the vector.
 					if (!m_ListedItemsVector.empty()) {
 						for (size_t i = 0; i < m_ListedItemsVector.size(); ++i) {
@@ -1944,11 +2181,15 @@ void CClientListCtrl::SaveArchive(CUpDownClient* client)
 		pArchivedClient->SetUserHash(client->GetUserHash(), false);
 		pArchivedClient->tLastSeen = client->tLastSeen > pArchivedClient->tLastSeen ? client->tLastSeen : pArchivedClient->tLastSeen;
 		pArchivedClient->SetUserName(client->GetUserName());
+		const CAddress archivedGeolocationIP(!pArchivedClient->m_UserIP.IsNull() ? pArchivedClient->m_UserIP : pArchivedClient->m_ConnectIP);
 		// If current IP's are null then we should keed old IP's. This way we'll have country, city data and country flag in Geolocation columns.
 		if (!client->m_ConnectIP.IsNull()) // If not, keep last valid data
 			pArchivedClient->m_ConnectIP = client->m_ConnectIP;
 		if (!client->m_UserIP.IsNull()) // If not, keep last valid data
 			pArchivedClient->m_UserIP = client->m_UserIP;
+		const CAddress currentGeolocationIP(!pArchivedClient->m_UserIP.IsNull() ? pArchivedClient->m_UserIP : pArchivedClient->m_ConnectIP);
+		if (!currentGeolocationIP.IsNull() && (bNewArchivedClient || archivedGeolocationIP != currentGeolocationIP))
+			pArchivedClient->ResetIPGeolocation(currentGeolocationIP);
 		if(client->GetServerIP()) // If not, keep last valid data
 			pArchivedClient->SetServerIP(client->GetServerIP());
 		if (client->GetUserIDHybrid()) // If not, keep last valid data

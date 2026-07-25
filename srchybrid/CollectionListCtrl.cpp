@@ -117,6 +117,7 @@ BOOL CCollectionFileDetailsSheet::OnInitDialog()
 	UpdateTitle();
 
 	m_tabDark.m_bClosable = false;
+	m_tabDark.m_bAllowTabReordering = false;
 
 	if (IsDarkModeEnabled()) {
 		HWND hTab = PropSheet_GetTabControl(m_hWnd);

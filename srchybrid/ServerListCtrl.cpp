@@ -428,7 +428,7 @@ void CServerListCtrl::Localize()
 	static const LPCTSTR uids[16] =
 	{
 		_T("SL_SERVERNAME"), _T("IP"), _T("DESCRIPTION"), _T("PING"), _T("UUSERS")
-		, _T("MAXCLIENT"), _T("PW_FILES"), _T("PREFERENCE"), _T("UFAILED"), _T("STATICSERVER")
+		, _T("MAXCLIENT"), _T("FILES"), _T("PREFERENCE"), _T("UFAILED"), _T("STATICSERVER")
 		, _T("SOFTFILES"), _T("HARDFILES"), _T("VERSION"), _T("IDLOW"), _T("OBFUSCATION")
 		, _T("GEOLOCATION")
 	};
@@ -536,7 +536,7 @@ void CServerListCtrl::OnContextMenu(CWnd*, CPoint point)
 
 	CMenuXP ServerMenu;
 	ServerMenu.CreatePopupMenu();
-	ServerMenu.AddMenuSidebar(GetResString(_T("EM_SERVER")));
+	ServerMenu.AddMenuSidebar(GetResStringWithAccel(_T("FSTAT_SERVERS"), _T('v')));
 	ServerMenu.AppendMenu(MF_STRING | (iSelectedItems > 0 ? MF_ENABLED : MF_GRAYED), MP_CONNECTTO, GetResString(_T("CONNECTTHIS")), _T("CONNECT"));
 	ServerMenu.SetDefaultItem(iSelectedItems > 0 ? MP_CONNECTTO : -1);
 
@@ -557,7 +557,7 @@ void CServerListCtrl::OnContextMenu(CWnd*, CPoint point)
 
 	ServerMenu.AppendMenu(MF_STRING | (iSelectedItems > 0 ? MF_ENABLED : MF_GRAYED), MP_GETED2KLINK, GetResString(_T("DL_LINK1")), _T("ED2KLINK"));
 	ServerMenu.AppendMenu(MF_STRING | (theApp.IsEd2kServerLinkInClipboard() ? MF_ENABLED : MF_GRAYED), MP_PASTE, GetResString(_T("SW_DIRECTDOWNLOAD")), _T("PASTELINK"));
-	ServerMenu.AppendMenu(MF_STRING | (iSelectedItems > 0 ? MF_ENABLED : MF_GRAYED), MP_REMOVE, GetResString(_T("REMOVETHIS")), _T("DELETESELECTED"));
+	ServerMenu.AppendMenu(MF_STRING | (iSelectedItems > 0 ? MF_ENABLED : MF_GRAYED), MP_REMOVE, GetResString(_T("REMOVE")), _T("DELETESELECTED"));
 	ServerMenu.AppendMenu(MF_STRING | (GetItemCount() > 0 ? MF_ENABLED : MF_GRAYED), MP_REMOVEALL, GetResString(_T("REMOVEALL")), _T("DELETE"));
 
 	ServerMenu.AppendMenu(MF_SEPARATOR);
@@ -924,7 +924,7 @@ bool CServerListCtrl::StaticServerFileRemove(CServer *pServer)
 
 void CServerListCtrl::ShowServerCount()
 {
-	CString sCount(GetResString(_T("SV_SERVERLIST")));
+	CString sCount(GetResString(_T("FSTAT_SERVERS")));
 	sCount.AppendFormat(_T(" (%i)"), GetItemCount());
 	theApp.emuledlg->serverwnd->SetDlgItemText(IDC_SERVLIST_TEXT, sCount);
 }
@@ -974,7 +974,7 @@ bool CServerListCtrl::GetPersistentInfoTipText(const SPersistentInfoTipContext& 
 		, iSelected
 		, (LPCTSTR)GetResString(_T("UUSERS")), (LPCTSTR)CastItoIShort(ulTotalUsers)
 		, (LPCTSTR)GetResString(_T("IDLOW")), (LPCTSTR)CastItoIShort(ulTotalLowIdUsers)
-		, (LPCTSTR)GetResString(_T("PW_FILES")), (LPCTSTR)CastItoIShort(ulTotalFiles));
+		, (LPCTSTR)GetResString(_T("FILES")), (LPCTSTR)CastItoIShort(ulTotalFiles));
 	return true;
 }
 

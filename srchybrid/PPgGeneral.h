@@ -14,6 +14,7 @@ public:
 	CPPgGeneral();
 
 	void Localize();
+	void ResetToDefaults();
 
 protected:
 	CComboBox m_language;

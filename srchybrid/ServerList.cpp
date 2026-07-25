@@ -44,7 +44,6 @@ static char THIS_FILE[] = __FILE__;
 #endif
 
 
-#define	SERVER_MET_FILENAME	_T("server.met")
 
 CServerList::CServerList()
 	: serverpos()
@@ -97,7 +96,7 @@ bool CServerList::Init()
 	}
 
 	// insert static servers from text file
-	AddServersFromTextFile(sConfDir + _T("staticservers.dat"));
+	AddServersFromTextFile(sConfDir + STATIC_SERVERS_FILENAME);
 
 	theApp.serverlist->GiveServersForTraceRoute();
 
@@ -828,7 +827,7 @@ void CServerList::AddServersFromTextFile(const CString &strFilename) const
 
 bool CServerList::SaveStaticServers()
 {
-	const CString strFinalPath = thePrefs.GetMuleDirectory(EMULE_CONFIGDIR) + _T("staticservers.dat");
+	const CString strFinalPath = thePrefs.GetMuleDirectory(EMULE_CONFIGDIR) + STATIC_SERVERS_FILENAME;
 	const CString strTempPath = strFinalPath + _T(".tmp");
 	const LONG lGeneration = NextStaticServersSaveGeneration();
 
@@ -851,7 +850,7 @@ bool CServerList::SaveStaticServers()
 		pData->plGeneration = &m_lStaticServersSaveGeneration;
 		pData->strTempPath = strTempPath;
 		pData->strFinalPath = strFinalPath;
-		pData->strLogName = _T("staticservers.dat");
+		pData->strLogName = STATIC_SERVERS_FILENAME;
 		pData->strPayloadName = _T("static-servers");
 		pData->eConflictPolicy = AsyncDiskWriteConflictLastSnapshotWins;
 		CopyMemFileToServerAsyncDiskData(file, *pData);

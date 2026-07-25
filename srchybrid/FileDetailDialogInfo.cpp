@@ -68,7 +68,7 @@ CFileDetailDialogInfo::CFileDetailDialogInfo()
 	, m_bDataChanged()
 	, m_bShowFileTypeWarning()
 {
-	m_strCaption = GetResString(_T("FD_GENERAL"));
+	m_strCaption = GetResString(_T("CD_GENERAL"));
 	m_psp.pszTitle = m_strCaption;
 	m_psp.dwFlags |= PSP_USETITLE;
 }
@@ -176,23 +176,20 @@ void CFileDetailDialogInfo::RefreshData()
 		SetDlgItemText(IDC_LASTSEENCOMPL, str);
 
 		// last receive
-		if (file->GetFileDate() != 0 && file->GetRealFileSize() > 0ull) {
-			// 'Last Modified' sometimes is up to 2 seconds greater than the current time ???
-			// If it's related to the FAT32 seconds time resolution the max. failure should still be only 1 sec.
-			// Happens at least on FAT32 with very high download speed.
-			time_t tLastModified = file->GetFileDate();
+		const time_t tLastReception = file->GetLastReceptionDate();
+		if (tLastReception != time_t(-1)) {
 			time_t tNow = time(NULL);
 			time_t tAgo;
-			if (tNow >= tLastModified)
-				tAgo = tNow - tLastModified;
+			if (tNow >= tLastReception)
+				tAgo = tNow - tLastReception;
 			else {
 				TRACE("tNow = %s\n", (LPCTSTR)CTime(tNow).Format("%X"));
-				TRACE("tLMd = %s, +%u\n", (LPCTSTR)CTime(tLastModified).Format("%X"), tLastModified - tNow);
+				TRACE("tLastReception = %s, +%u\n", (LPCTSTR)CTime(tLastReception).Format("%X"), tLastReception - tNow);
 				TRACE("\n");
 				tAgo = 0;
 			}
 			str.Format(_T("%s   ") + GetResString(_T("TIMEBEFORE"))
-				, (LPCTSTR)file->GetCFileDate().Format(thePrefs.GetDateTimeFormat())
+				, (LPCTSTR)CTime(tLastReception).Format(thePrefs.GetDateTimeFormat())
 				, (LPCTSTR)CastSecondsToLngHM(tAgo));
 		} else
 			str = GetResString(_T("NEVER"));
@@ -353,24 +350,24 @@ void CFileDetailDialogInfo::Localize()
 {
 	if (!m_hWnd)
 		return;
-	SetTabTitle(_T("FD_GENERAL"), this);
+	SetTabTitle(_T("CD_GENERAL"), this);
 
-	SetDlgItemText(IDC_FD_X0, GetResString(_T("FD_GENERAL")));
+	SetDlgItemText(IDC_FD_X0, GetResString(_T("CD_GENERAL")));
 	SetDlgItemText(IDC_FD_X1, GetResString(_T("SW_NAME")) + _T(':'));
 	SetDlgItemText(IDC_FD_X2, GetResString(_T("FD_MET")));
-	SetDlgItemText(IDC_FD_X3, GetResString(_T("FD_HASH")));
+	SetDlgItemText(IDC_FD_X3, GetResStringWithColon(_T("CD_UHASH2")));
 	SetDlgItemText(IDC_FD_X4, GetResString(_T("DL_SIZE")) + _T(':'));
 	SetDlgItemText(IDC_FD_X9, GetResString(_T("FD_PARTS")) + _T(':'));
 	SetDlgItemText(IDC_FD_X5, GetResString(_T("STATUS")) + _T(':'));
-	SetDlgItemText(IDC_FD_X6, GetResString(_T("FD_TRANSFER")));
+	SetDlgItemText(IDC_FD_X6, GetResString(_T("CD_TRANS")));
 	SetDlgItemText(IDC_FD_X7, GetResString(_T("DL_SOURCES")) + _T(':'));
-	SetDlgItemText(IDC_FD_X14, GetResString(_T("FD_TRANS")));
-	SetDlgItemText(IDC_FD_X12, GetResString(_T("FD_COMPSIZE")));
+	SetDlgItemText(IDC_FD_X14, GetResStringWithColon(_T("DL_TRANSF")));
+	SetDlgItemText(IDC_FD_X12, GetResStringWithColon(_T("DL_TRANSFCOMPL")));
 	SetDlgItemText(IDC_FD_X13, GetResString(_T("FD_DATARATE")));
 	SetDlgItemText(IDC_FD_X15, GetResString(_T("LASTSEENCOMPL")));
 	SetDlgItemText(IDC_FD_LASTCHANGE, GetResString(_T("FD_LASTCHANGE")));
 	SetDlgItemText(IDC_FD_X8, GetResString(_T("FD_TIMEDATE")));
-	SetDlgItemText(IDC_FD_X16, GetResString(_T("FD_DOWNLOADSTARTED")));
+	SetDlgItemText(IDC_FD_X16, GetResStringWithColon(_T("TBN_ONNEWDOWNLOAD")));
 	SetDlgItemText(IDC_DL_ACTIVE_TIME_LBL, GetResString(_T("DL_ACTIVE_TIME")) + _T(':'));
 	SetDlgItemText(IDC_HSAV, GetResString(_T("HSAV")) + _T(':'));
 	SetDlgItemText(IDC_FD_CORR, GetResString(_T("FD_CORR")) + _T(':'));

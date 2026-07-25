@@ -203,7 +203,7 @@ BOOL CLanguageSelectDlg::OnInitDialog()
 
 	SetWindowText(GetResString(_T("PW_LANG")));
 	SetDlgItemText(IDC_LANGUAGE_PROMPT, GetResString(_T("PW_LANG_CHOOSE")));
-	SetDlgItemText(IDOK, GetResString(_T("TREEOPTIONS_OK")));
+	SetDlgItemText(IDOK, GetResString(_T("MB_OK")));
 	SetDlgItemText(IDCANCEL, GetResString(_T("CANCEL")));
 
 	int idx = m_language.AddString(GetResString(_T("PW_LANG_SYSTEM_DEFAULT")));
